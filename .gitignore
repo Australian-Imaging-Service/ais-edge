@@ -1,0 +1,16 @@
+# Secrets — never commit
+config/management.env
+config/edge-nodes.env
+*.key
+*.pem
+*.token
+secrets/
+
+# Generated during install
+kubeconfig-*
+join-token-*
+
+# OS files
+.DS_Store
+*.swp
+*~
