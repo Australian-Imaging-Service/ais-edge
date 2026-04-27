@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Uninstall everything — management cluster, edge workers, MinIO, k0smotron
+# Uninstall everything — management cluster, edge workers, SeaweedFS, k0smotron
 # =============================================================================
 set -euo pipefail
 
@@ -11,7 +11,7 @@ source "${SCRIPT_DIR}/config/edge-nodes.env"
 echo "============================================"
 echo "WARNING: This will destroy EVERYTHING:"
 echo "  - All edge workers and their data"
-echo "  - MinIO and all stored files"
+echo "  - SeaweedFS and all stored files (/data/seaweedfs)"
 echo "  - k0smotron and all hosted clusters"
 echo "  - k0s controller (if fresh install)"
 echo "============================================"
@@ -39,10 +39,10 @@ done
 
 # --- Remove management workloads ---
 echo ""
-echo "=== Removing MinIO and XNAT upload ==="
+echo "=== Removing SeaweedFS and XNAT upload ==="
 kubectl delete namespace xnat-upload --ignore-not-found 2>/dev/null || true
-kubectl delete namespace minio --ignore-not-found 2>/dev/null || true
-sudo rm -rf /data/minio
+kubectl delete namespace seaweedfs --ignore-not-found 2>/dev/null || true
+sudo rm -rf /data/seaweedfs
 
 echo ""
 echo "=== Removing k0smotron ==="

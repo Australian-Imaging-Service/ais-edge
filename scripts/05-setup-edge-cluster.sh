@@ -72,19 +72,9 @@ echo "$TOKEN" > "${REPO_DIR}/join-token-${CLUSTER_NAME}"
 chmod 600 "${REPO_DIR}/join-token-${CLUSTER_NAME}"
 echo "Join token saved"
 
-# Create MinIO write-only user
-echo "Creating MinIO edge credentials..."
-cat <<POLICY | mc admin policy create myminio "writeonly-${CLUSTER_NAME}" /dev/stdin 2>/dev/null || true
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Effect":"Allow","Action":["s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::${MINIO_BUCKET}/*"]},
-    {"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::${MINIO_BUCKET}"]}
-  ]
-}
-POLICY
-mc admin user add myminio "${EDGE_ACCESS_KEY}" "${EDGE_SECRET_KEY}" 2>/dev/null || true
-mc admin policy attach myminio "writeonly-${CLUSTER_NAME}" --user "${EDGE_ACCESS_KEY}" 2>/dev/null || true
-echo "MinIO user '${EDGE_ACCESS_KEY}' ready (write-only)"
+# Note: SeaweedFS S3 identities for edge users are provisioned by step 03
+# (the s3.json ConfigMap is built from edge-nodes.env at install time).
+# No per-edge step here — credentials defined in edge-nodes.env are already
+# active in SeaweedFS by the time we reach this step.
 
 echo "=== 05: Complete for ${CLUSTER_NAME} ==="

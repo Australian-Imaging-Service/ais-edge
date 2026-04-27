@@ -1,7 +1,13 @@
-# k0s + k0smotron + MinIO — Edge Medical Imaging Ingest
+# k0s + k0smotron + SeaweedFS — Edge Medical Imaging Ingest
 
 A centrally-managed edge computing system for medical imaging data capture and upload to XNAT.
 Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
+
+> **Branch note: this is the `AB_dev` branch using SeaweedFS for S3 storage.**
+> The `main` branch uses MinIO. SeaweedFS was adopted on this branch after MinIO's
+> open-source repository was archived (Feb 2026). SeaweedFS is Apache 2.0, S3-compatible,
+> and lighter on resources than MinIO. The S3 client side (`mc`, `boto3`) is unchanged —
+> the storage backend is a swap-in replacement.
 
 ## Architecture
 
@@ -14,18 +20,18 @@ Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
           │  ├─ hosted control plane │◄────────────┤  └─ watches /incoming    │
           │  │  (API + etcd + konect)│ konnectivity│     stages DICOMs        │
           │  │                       │  (outbound  │                          │
-          │  MinIO (S3 storage)      │   from edge)│  s3-uploader pod         │
-          │  ├─ receives staged files│◄────────────┤  └─ mc mirror to MinIO   │
-          │  │  s3://ingest-bucket/  │  write-only │     (write-only S3 key)  │
+          │  SeaweedFS (S3 storage)  │   from edge)│  s3-uploader pod         │
+          │  ├─ receives staged files│◄────────────┤  └─ mc mirror → SeaweedFS│
+          │  │  s3://ingest-bucket/  │  write-only │     (scoped S3 key)      │
           │  │                       │  S3 upload  │                          │
           │  xnat-ingest-upload pod  │             │  Credentials on edge:    │
-          │  ├─ reads from MinIO     │             │  └─ MinIO write-only key │
+          │  ├─ reads from SeaweedFS │             │  └─ S3 write-only key    │
           │  └─ uploads to XNAT      │             │                          │
           │     (has XNAT creds)     │             │  Inbound ports: ZERO     │
           │                          │             │  All connections outbound│
           │  Credentials here:       │             │                          │
           │  ├─ XNAT admin creds     │             └──────────────────────────┘
-          │  └─ MinIO admin creds    │
+          │  └─ S3 admin creds       │
           └─────────┬────────────────┘
                     │ HTTPS REST API
                     ▼
@@ -50,12 +56,12 @@ Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
          ▼
 3. s3-uploader (on edge, using `mc mirror`)
    - Reads staged sessions from /data/staging/
-   - Mirrors to MinIO at s3://ingest-bucket/staged/ (write-only key)
+   - Mirrors to SeaweedFS at s3://ingest-bucket/staged/ (write-only key)
    - Deletes local copy only after successful upload
-   - MinIO handles multipart upload, checksums, resume on failure
+   - SeaweedFS (via S3 API) handles multipart upload, checksums, resume on failure
          │
          ▼
-4. MinIO (on management node)
+4. SeaweedFS (on management node)
    - Stores files under s3://ingest-bucket/staged/<session>/
    - Write-only from edge, full access from management
          │
@@ -80,7 +86,7 @@ mc alias set edge "http://<MGMT_IP>:31090" "<access-key>" "<secret-key>"
 # Loop forever, checking every 30 seconds
 while true; do
     for session_dir in /data/staging/*/; do
-        # Upload entire session directory to MinIO, preserving structure
+        # Upload entire session directory to SeaweedFS, preserving structure
         mc mirror --overwrite "$session_dir" "edge/ingest-bucket/staged/$session_name/"
 
         # Delete local copy only after successful upload
@@ -98,26 +104,26 @@ done
 - Only transfers **new/changed files** if re-run (delta sync)
 
 The actual protocol is standard HTTP PUT to the S3 API — the same protocol AWS S3 uses.
-If MinIO is swapped for AWS S3, the uploader works without changes (just a different endpoint URL).
+If SeaweedFS is swapped for AWS S3, the uploader works without changes (just a different endpoint URL).
 
 ## Security Model
 
 ```
 Edge Worker                           Management Node             XNAT
-├─ MinIO write-only key               ├─ MinIO admin key          ├─ User data
-│  (can only PUT to one bucket)       ├─ XNAT admin credentials   │
-│  (cannot read, cannot delete)       │                           │
+├─ S3 write-only key                  ├─ S3 admin key             ├─ User data
+│  (write+list on one bucket only)    ├─ XNAT admin credentials   │
+│  (cannot read other sites' data)    │                           │
 ├─ NO XNAT credentials                │                           │
 ├─ NO inbound ports                   │                           │
 ├─ Outbound only:                     │                           │
 │  → konnectivity tunnel (:30443)     │                           │
-│  → MinIO S3 upload (:31090)         │                           │
+│  → SeaweedFS S3 upload (:31090)     │                           │
 ```
 
 | If compromised... | Impact |
 |--------------------|--------|
-| Edge worker | Attacker sees local DICOMs + MinIO write-only key. Cannot read MinIO. Cannot access XNAT. |
-| MinIO write-only key | Can write junk to bucket. Cannot read data. Cannot access XNAT. |
+| Edge worker | Attacker sees local DICOMs + scoped S3 key. Key can only write to ingest bucket. Cannot read other sites' data. Cannot access XNAT. |
+| Edge S3 key | Can write junk to one bucket. Cannot read data. Cannot access XNAT. Cannot impersonate other sites. |
 | Management node | Full access — this is your crown jewel. Harden accordingly. |
 
 ## Repository Structure
@@ -133,10 +139,10 @@ k0s-k0smotron-mvp/
 ├── manifests/
 │   ├── 01-management/                     ← Runs on management cluster
 │   │   ├── edge-cluster.yaml.tpl          ← Hosted k0s control plane per edge site
-│   │   ├── minio.yaml.tpl                 ← MinIO S3 storage
-│   │   └── xnat-upload.yaml.tpl           ← Reads MinIO → uploads to XNAT
+│   │   ├── seaweedfs.yaml.tpl             ← SeaweedFS S3 storage
+│   │   └── xnat-upload.yaml.tpl           ← Reads SeaweedFS → uploads to XNAT
 │   └── 02-edge/                           ← Runs on edge workers (child cluster)
-│       └── xnat-ingest.yaml.tpl           ← Sort + upload-to-MinIO pods
+│       └── xnat-ingest.yaml.tpl           ← Sort + s3-uploader pods
 ├── scripts/
 │   └── uninstall.sh                       ← Tears down everything
 └── .gitignore
@@ -161,7 +167,7 @@ git clone <repo-url> && cd k0s-k0smotron-mvp
 
 # 2. Configure management node
 cp config/management.env.template config/management.env
-vim config/management.env   # set MGMT_NODE_IP, XNAT credentials, MinIO passwords
+vim config/management.env   # set MGMT_NODE_IP, XNAT credentials, S3 admin keys
 
 # 3. Configure edge nodes
 cp config/edge-nodes.env.template config/edge-nodes.env
@@ -185,7 +191,7 @@ If you already have a Kubernetes cluster running (k3s, kubeadm, MicroK8s, etc.):
 3. Ensure a default StorageClass exists (check with `kubectl get sc`)
 4. Run `./install.sh` — it will skip k0s installation and use your existing cluster
 
-The installer will deploy k0smotron, MinIO, and the upload pod as regular workloads
+The installer will deploy k0smotron, SeaweedFS, and the upload pod as regular workloads
 on your existing cluster. Everything else works the same.
 
 ## Adding More Edge Nodes
@@ -202,7 +208,7 @@ EDGE_NODES=(
 
 Each edge node gets:
 - Its own hosted k0s control plane (separate namespace on management cluster)
-- Its own MinIO write-only credentials (isolated per site)
+- Its own scoped S3 credentials (write+list to ingest bucket only — isolated per site)
 - Its own kubeconfig file (`kubeconfig-edge-uqcai`, etc.)
 - Its own xnat-ingest pods
 
@@ -222,8 +228,9 @@ ssh ubuntu@<edge-ip> "sudo k0s stop && sudo k0s reset"
 # 3. Delete the hosted cluster from management
 kubectl delete namespace edge-uqcai
 
-# 4. Remove MinIO user
-mc admin user remove myminio edge-uqcai-key
+# 4. Remove the S3 identity (regenerate s3.json without this edge user)
+#    Just remove the entry from edge-nodes.env, then re-run scripts/03-deploy-seaweedfs.sh
+#    (it regenerates the SeaweedFS s3.json ConfigMap and rolls the pod)
 
 # 5. Clean up generated files
 rm kubeconfig-edge-uqcai join-token-edge-uqcai
@@ -239,29 +246,29 @@ rm kubeconfig-edge-uqcai join-token-edge-uqcai
 | k0s | v1.35.2+k0s.0 | Both management cluster and edge workers |
 | k0smotron | v1.10.4 (stable) | Installed via `kubectl apply` (not Helm) |
 | cert-manager | latest | Required by k0smotron for webhook TLS |
-| MinIO | latest | `minio/minio:latest` image |
-| MinIO Client (mc) | latest | `minio/mc:latest` for edge s3-uploader |
+| SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035) |
+| MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader |
 | xnat-ingest | latest | `ghcr.io/australian-imaging-service/xnat-ingest:latest` |
 | local-path-provisioner | v0.0.30 | Default StorageClass for etcd PVCs |
 
-To pin specific versions in production, replace `:latest` tags in the `.tpl` manifests
-with explicit versions (e.g. `minio/minio:RELEASE.2025-04-01T00-00-00Z`).
+To pin specific versions in production, replace `:latest` / `:3.99` tags in the `.tpl`
+manifests with explicit versions (e.g. `chrislusf/seaweedfs:3.99-rc1`).
 
 ## How the Template System Works
 
-Manifest files ending in `.tpl` contain placeholders like `{{MINIO_BUCKET}}`.
+Manifest files ending in `.tpl` contain placeholders like `{{S3_BUCKET}}`.
 The `render()` function in `scripts/00-common.sh` performs simple string replacement
 at install time — no Helm, no Jinja, no external tools required.
 
 ```bash
-# Example: what happens when install.sh processes minio.yaml.tpl
-Input:   nodePort: {{MINIO_NODEPORT}}
+# Example: what happens when install.sh processes seaweedfs.yaml.tpl
+Input:   nodePort: {{S3_NODEPORT}}
 Output:  nodePort: 31090
 ```
 
 Values come from `config/management.env` and `config/edge-nodes.env`. You never edit `.tpl` files.
 
-## S3 Path Structure in MinIO
+## S3 Path Structure in SeaweedFS
 
 ```
 s3://ingest-bucket/
@@ -293,7 +300,7 @@ On each edge worker at `/data/xnat-ingest/`:
 │   └── PROJECT.SUBJECT.VISIT/  ← Valid sessions waiting for S3 upload
 ```
 
-Files flow: `incoming/` → `staging/` → MinIO → deleted from edge.
+Files flow: `incoming/` → `staging/` → SeaweedFS → eventually deleted from edge after successful S3 upload.
 
 ## Health Checks
 
@@ -306,15 +313,16 @@ kubectl get nodes                                # management node should be Rea
 kubectl --kubeconfig kubeconfig-<name> get nodes  # edge worker should be Ready
 kubectl --kubeconfig kubeconfig-<name> get pods -n xnat-ingest  # sort + s3-uploader Running
 
-# MinIO health
-curl -s http://<MGMT_IP>:31090/minio/health/ready  # should return 200
-curl -s http://<MGMT_IP>:31090/minio/health/live    # should return 200
+# SeaweedFS health
+curl -s http://<MGMT_IP>:31090/                  # S3 endpoint — should return XML/empty 200
+curl -s http://<MGMT_IP>:31091/cluster/status    # master endpoint — should return JSON
+curl -s http://<MGMT_IP>:31092/                  # filer endpoint — should return HTML
 
-# MinIO from edge (test connectivity)
-ssh ubuntu@<EDGE_IP> "curl -s http://<MGMT_IP>:31090/minio/health/ready"
+# SeaweedFS from edge (test connectivity)
+ssh ubuntu@<EDGE_IP> "curl -s http://<MGMT_IP>:31090/"
 
-# MinIO bucket contents
-mc ls myminio/ingest-bucket/staged/              # list sessions in bucket
+# SeaweedFS bucket contents
+mc ls seaweed/ingest-bucket/staged/              # list sessions in bucket
 
 # XNAT connectivity
 curl -sk <XNAT_URL>                              # should return HTML
@@ -325,21 +333,27 @@ kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=sort --t
 kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=s3-uploader --tail=5
 ```
 
-## MinIO Web Console
+## SeaweedFS Master & Filer UIs
 
-MinIO includes a web UI for browsing buckets, managing users, and viewing metrics:
+SeaweedFS exposes two built-in web UIs for inspecting cluster state. They're read-only;
+admin actions go through the S3 API or `weed shell`.
 
 ```
-URL:      http://<MGMT_IP>:31091
-Login:    minioadmin (or whatever you set in management.env)
-Password: minioadmin123 (or whatever you set)
+Master UI: http://<MGMT_IP>:31091
+   Shows cluster topology, volume servers, free capacity, leader election
+
+Filer UI:  http://<MGMT_IP>:31092
+   Browse the filesystem layer (objects appear under /buckets/<bucket>/...)
 ```
 
-From here you can:
-- Browse uploaded sessions in the `ingest-bucket`
-- Create/delete buckets
-- Manage users and access policies
-- View storage metrics
+For a more familiar S3-style admin experience, use `mc`:
+
+```bash
+mc alias set seaweed http://<MGMT_IP>:31090 <admin-key> <admin-secret>
+mc ls seaweed/                                    # list buckets
+mc ls --recursive seaweed/ingest-bucket/staged/   # list sessions
+mc admin info seaweed                             # cluster info
+```
 
 ## Updating Components
 
@@ -353,9 +367,9 @@ kubectl --kubeconfig kubeconfig-<name> rollout restart deployment/s3-uploader -n
 kubectl rollout restart deployment/xnat-ingest-upload -n xnat-upload
 ```
 
-**Update MinIO:**
+**Update SeaweedFS:**
 ```bash
-kubectl rollout restart deployment/minio -n minio
+kubectl rollout restart deployment/seaweedfs -n seaweedfs
 ```
 
 **Update k0s on edge workers:**
@@ -376,7 +390,7 @@ kubectl apply --server-side=true -f https://docs.k0smotron.io/stable/install.yam
 
 **What to back up:**
 - `config/management.env` and `config/edge-nodes.env` — your configuration
-- MinIO data (`/data/minio/` on management node) — staged files in transit
+- SeaweedFS data (`/data/seaweedfs/` on management node) — staged files in transit
 - XNAT — your actual data destination (backed up separately)
 
 **What does NOT need backup:**
@@ -391,19 +405,37 @@ kubectl apply --server-side=true -f https://docs.k0smotron.io/stable/install.yam
 
 ## Known Limitations
 
-- **No TLS on MinIO** — data between edge and MinIO is unencrypted. For production,
-  configure TLS on MinIO or use a reverse proxy with TLS termination.
-- **No monitoring/alerting** — MinIO disk usage, pod health, and upload failures
-  are not automatically monitored. Add Prometheus + Grafana for production.
-- **Single management node** — no HA for k0smotron or MinIO. For production,
-  consider a multi-node management cluster.
+- **No TLS on SeaweedFS** — data between edge and SeaweedFS is unencrypted. For production,
+  put SeaweedFS behind a reverse proxy with TLS or use SeaweedFS's built-in TLS.
+- **No monitoring/alerting** — SeaweedFS disk usage, pod health, and upload failures
+  are not automatically monitored. Add Prometheus + Grafana for production
+  (SeaweedFS exposes Prometheus metrics on the master and filer).
+- **Single management node** — no HA for k0smotron or SeaweedFS. For production,
+  split SeaweedFS into separate master/volume/filer/s3 deployments and run 3 masters
+  with an external etcd or Consul; see "Scaling SeaweedFS" below.
 - **DICOM files with missing AccessionNumber** go to `__invalid__/` — requires manual
   rename. This is an xnat-ingest limitation, not a system issue. Real clinical DICOMs
   will have this field populated.
 - **emptyDir persistence for hosted control planes** — etcd data is lost if the
   management node restarts. For production, use a proper StorageClass with persistent volumes.
-- **No automatic cleanup of MinIO** — successfully uploaded sessions remain in MinIO
-  until manually deleted. Add a lifecycle policy or cleanup job for production.
+- **No automatic cleanup of SeaweedFS** — successfully uploaded sessions remain in
+  SeaweedFS until manually deleted. Add an S3 lifecycle rule or a cleanup job for
+  production.
+
+## Scaling SeaweedFS
+
+The single-pod all-in-one deployment is for the MVP. For production scale-out, split
+the SeaweedFS components into separate Deployments/StatefulSets:
+
+| Component | What it does | HA recommendation |
+|---|---|---|
+| Master | Cluster metadata, leader election | 3 replicas (Raft consensus) |
+| Volume server | Stores chunked data | N replicas across nodes; each backed by its own disk |
+| Filer | Filesystem layer (required for S3) | 2+ replicas; backed by an external metadata store (Redis/ScyllaDB/Postgres) |
+| S3 gateway | S3 API endpoint | 2+ replicas behind a Service / load balancer |
+
+Edge clients (`mc mirror`) don't change — they still talk to the S3 endpoint. The
+internal architecture changes; the external API does not.
 
 ## XNAT Configuration
 
@@ -432,8 +464,9 @@ kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=sort
 kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=s3-uploader -f
 kubectl logs -n xnat-upload -l component=upload -f   # management upload to XNAT
 
-# MinIO console (web UI)
-# Open in browser: http://<MGMT_NODE_IP>:31091
+# SeaweedFS UIs
+# Master:  http://<MGMT_NODE_IP>:31091
+# Filer:   http://<MGMT_NODE_IP>:31092
 ```
 
 ## Testing
@@ -451,7 +484,7 @@ ssh ubuntu@<EDGE_IP>
 cd /data/xnat-ingest/staging
 sudo mv __invalid__/<session-dir> ./test-project.subject01.visit01
 
-# Watch upload to MinIO
+# Watch s3-uploader push to SeaweedFS
 kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=s3-uploader -f
 
 # Watch upload to XNAT
@@ -462,12 +495,12 @@ kubectl logs -n xnat-upload -l component=upload -f
 
 | Scenario | What happens | Recovery |
 |----------|-------------|---------|
-| Network drops mid-upload | MinIO multipart — completed chunks saved | Retries on next loop cycle |
+| Network drops mid-upload | SeaweedFS S3 multipart — completed chunks saved | mc retries on next loop cycle |
 | Edge VM crashes | Files safe in /data/staging/ | k0s auto-starts, pods resume |
-| MinIO crashes | Edge uploads fail, files safe on edge | Pod auto-restarts, edge retries |
+| SeaweedFS crashes | Edge uploads fail, files safe on edge | Pod auto-restarts, edge retries |
 | Management node crashes | Edge files accumulate locally | Management restarts, edge reconnects |
-| XNAT is down | MinIO fills up | XNAT returns, upload pod clears backlog |
-| MinIO disk full | Edge uploads fail, files safe on edge | Expand disk or clear XNAT backlog |
+| XNAT is down | SeaweedFS fills up | XNAT returns, upload pod clears backlog |
+| SeaweedFS disk full | Edge uploads fail, files safe on edge | Expand `/data/seaweedfs/` or clear XNAT backlog |
 
 ## FAQ
 
@@ -479,13 +512,13 @@ operator — it runs on any conformant cluster with cert manager. Edge workers s
 Not natively. Options: WSL2, Hyper-V VM, or Docker Desktop.
 
 **Q: What credentials are stored on the edge?**
-Only a MinIO write-only S3 key. It can only PUT objects to one bucket. It cannot read data,
-access XNAT, or do anything else. XNAT credentials never leave the management node.
+Only a scoped SeaweedFS S3 key. It can only PUT/LIST on one bucket. It cannot read other
+sites' data, access XNAT, or do anything else. XNAT credentials never leave the management node.
 
 **Q: How does the edge communicate without inbound ports?**
 All connections are outbound from the edge:
 - Konnectivity tunnel to management node (port 30443) — for cluster management
-- S3 upload to MinIO on management node (port 31090) — for data transfer
+- S3 upload to SeaweedFS on management node (port 31090) — for data transfer
 The management node sends commands back through the konnectivity tunnel (edge-initiated).
 
 **Q: What is konnectivity?**
@@ -493,15 +526,16 @@ A reverse tunnel built into Kubernetes. The edge opens an outbound connection to
 management node and keeps it open. kubectl commands flow back through this same connection.
 No inbound ports needed on the edge.
 
-**Q: What happens if the MinIO write-only key is stolen?**
-An attacker can only write junk files to the ingest bucket. They cannot read any data,
-cannot access XNAT, and cannot access patient information. The key is easily rotated.
+**Q: What happens if the SeaweedFS edge key is stolen?**
+An attacker can only write junk files to the ingest bucket. They cannot read other sites'
+data, cannot access XNAT, and cannot access patient information. The key is easily rotated.
 
-**Q: How do I rotate the MinIO edge credentials?**
-1. Generate new credentials in `config/edge-nodes.env`
-2. Run `mc admin user add myminio <new-key> <new-secret>`
-3. Update the Kubernetes secret on the edge cluster
-4. Restart the s3-uploader pod
+**Q: How do I rotate the SeaweedFS edge credentials?**
+1. Generate new credentials in `config/edge-nodes.env` for that edge entry.
+2. Re-run `scripts/03-deploy-seaweedfs.sh` — it regenerates `s3.json` from env and
+   rolls the SeaweedFS pod via the config-hash annotation. Old credentials become invalid.
+3. Re-run `scripts/07-deploy-edge-ingest.sh <entry>` for the affected edge — the K8s
+   Secret on the edge cluster is updated and the s3-uploader pod restarts.
 
 **Q: What is a "child cluster" vs "management cluster"?**
 The management cluster runs k0smotron and hosts control planes for edge sites.
@@ -531,30 +565,31 @@ Pin specific pods to specific workers using `nodeSelector` in the manifest.
 - This is normal for sample files. Rename and move manually for testing.
 - With real clinical DICOMs, this won't happen.
 
-**Upload pod can't reach MinIO:**
-- Test from edge: `curl -s http://<MGMT_IP>:31090/minio/health/ready`
+**Upload pod can't reach SeaweedFS:**
+- Test from edge: `curl -s http://<MGMT_IP>:31090/`
 - Check firewall rules on management node
-- Check MinIO pod: `kubectl logs -n minio -l app=minio`
+- Check SeaweedFS pod: `kubectl logs -n seaweedfs -l app=seaweedfs`
 
 **Upload pod can't reach XNAT:**
 - Test: `curl -sk <XNAT_URL>`
 - Check XNAT credentials in management cluster secret
 - XNAT project must exist before upload (create in XNAT web UI)
 
-## Using AWS S3 Instead of MinIO
+## Using AWS S3 Instead of SeaweedFS
 
-This setup uses self-hosted MinIO by default, but you can swap it for AWS S3 (or any
-S3-compatible service like Google Cloud Storage, Backblaze B2, etc.) with minimal changes.
+This setup uses self-hosted SeaweedFS by default, but you can swap it for AWS S3 (or any
+S3-compatible service like Google Cloud Storage, Backblaze B2, MinIO, Garage, Ceph RGW)
+with minimal changes — `mc` and `boto3` speak vanilla S3.
 
 ### What Changes
 
-| Component | MinIO (default) | AWS S3 |
-|-----------|----------------|--------|
-| Storage server | MinIO pod on management node | AWS managed service |
-| Management manifests | `manifests/01-management/minio.yaml.tpl` deployed | **Not deployed** — skip step 03 |
-| Upload pod S3 endpoint | `http://minio.minio.svc.cluster.local:9000` | `https://s3.amazonaws.com` (default) |
+| Component | SeaweedFS (default) | AWS S3 |
+|-----------|--------------------|--------|
+| Storage server | SeaweedFS pod on management node | AWS managed service |
+| Management manifests | `manifests/01-management/seaweedfs.yaml.tpl` deployed | **Not deployed** — skip step 03 |
+| Upload pod S3 endpoint | `http://seaweedfs.seaweedfs.svc.cluster.local:8333` | `https://s3.amazonaws.com` (default) |
 | Edge S3 endpoint | `http://<MGMT_IP>:31090` | `https://s3.<region>.amazonaws.com` |
-| Credentials | Self-managed MinIO keys | AWS IAM access keys |
+| Credentials | SeaweedFS s3.json identities | AWS IAM access keys |
 
 ### Step-by-Step
 
@@ -590,10 +625,10 @@ aws iam create-access-key --user-name mgmt-reader
 
 `config/management.env`:
 ```bash
-export MINIO_BUCKET="my-ingest-bucket"
+export S3_BUCKET="my-ingest-bucket"
 # These become the management upload pod's AWS credentials:
-export MINIO_ROOT_USER="<mgmt-reader-access-key>"
-export MINIO_ROOT_PASSWORD="<mgmt-reader-secret-key>"
+export S3_ADMIN_ACCESS_KEY="<mgmt-reader-access-key>"
+export S3_ADMIN_SECRET_KEY="<mgmt-reader-secret-key>"
 ```
 
 `config/edge-nodes.env`:
@@ -610,30 +645,29 @@ EDGE_NODES=(
 ```yaml
 # DELETE this line:
 #   - name: AWS_ENDPOINT_URL
-#     value: "http://minio.minio.svc.cluster.local:9000"
+#     value: "http://seaweedfs.seaweedfs.svc.cluster.local:8333"
 ```
 
-`manifests/02-edge/xnat-ingest.yaml.tpl` — change the `mc alias` endpoint in the
-s3-uploader to AWS S3:
+`manifests/02-edge/xnat-ingest.yaml.tpl` — change the s3-uploader endpoint env to AWS S3:
 ```yaml
-# Change the MINIO_ENDPOINT value to:
+# Change the S3_ENDPOINT value to:
 value: "https://s3.ap-southeast-2.amazonaws.com"
 ```
 
-**4. Install — skip step 03 (MinIO):**
+**4. Install — skip step 03 (SeaweedFS):**
 
-When running `./install.sh`, press `s` at step 03 to skip MinIO deployment.
+When running `./install.sh`, press `s` at step 03 to skip SeaweedFS deployment.
 Everything else remains the same.
 
 ### Advantages of AWS S3
 
-- No MinIO to manage, monitor, or back up
+- No SeaweedFS to manage, monitor, or back up
 - Automatic redundancy and durability (11 nines)
 - Cross-region replication available
 - Pay-per-use (no disk provisioning)
-- IAM policies are more granular than MinIO's
+- IAM policies are more granular than SeaweedFS's
 
-### Advantages of MinIO (self-hosted)
+### Advantages of SeaweedFS (self-hosted)
 
 - Data never leaves your infrastructure (important for patient data pre-de-identification)
 - No cloud costs
@@ -646,7 +680,7 @@ Everything else remains the same.
 ./scripts/uninstall.sh
 ```
 
-This removes everything: edge workers, MinIO data, hosted clusters, k0smotron, and
+This removes everything: edge workers, SeaweedFS data, hosted clusters, k0smotron, and
 optionally k0s itself (if installed fresh).
 
 ## Network Ports
@@ -655,7 +689,9 @@ optionally k0s itself (if installed fresh).
 |------|-----|------|---------|
 | Edge | Management | 30443 | k0s API + konnectivity tunnel |
 | Edge | Management | 30132 | Konnectivity (additional) |
-| Edge | Management | 31090 | MinIO S3 uploads |
+| Edge | Management | 31090 | SeaweedFS S3 uploads |
+| Edge | Management | 31091 | SeaweedFS master UI (admin only) |
+| Edge | Management | 31092 | SeaweedFS filer UI (admin only) |
 | Management | XNAT | 443 | XNAT REST API uploads |
 | Management | Edge | 22 | SSH (initial setup only) |
 

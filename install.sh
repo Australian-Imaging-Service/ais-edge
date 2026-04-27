@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# k0s + k0smotron + MinIO Edge Setup — Interactive Installer
+# k0s + k0smotron + SeaweedFS Edge Setup — Interactive Installer
 # =============================================================================
 # Calls each script in order. Only edit config files — never edit scripts.
 #
 # Config files:
-#   config/management.env   — Management node, MinIO, XNAT settings
+#   config/management.env   — Management node, SeaweedFS, XNAT settings
 #   config/edge-nodes.env   — Edge node list (supports multiple sites)
 #
 # Usage:
@@ -20,7 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/00-common.sh"
 
 # --- Validate required config ---
-for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS MINIO_ROOT_USER MINIO_ROOT_PASSWORD; do
+for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS \
+           S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY S3_BUCKET S3_NODEPORT; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: ${var} is not set in config/management.env"
         exit 1
@@ -34,14 +35,15 @@ fi
 # --- Show plan ---
 echo ""
 echo "============================================"
-echo " k0s + k0smotron + MinIO Edge Setup"
+echo " k0s + k0smotron + SeaweedFS Edge Setup"
 echo "============================================"
 echo ""
-echo " Management node:   ${MGMT_NODE_IP}"
-echo " Install mode:      ${INSTALL_MODE}"
-echo " MinIO S3 port:     ${MINIO_NODEPORT}"
-echo " MinIO console:     ${MINIO_CONSOLE_NODEPORT}"
-echo " XNAT target:       ${XNAT_URL}"
+echo " Management node:    ${MGMT_NODE_IP}"
+echo " Install mode:       ${INSTALL_MODE}"
+echo " SeaweedFS S3 port:  ${S3_NODEPORT}"
+echo " SeaweedFS master:   ${MASTER_NODEPORT}"
+echo " SeaweedFS filer:    ${FILER_NODEPORT}"
+echo " XNAT target:        ${XNAT_URL}"
 echo ""
 echo " Edge nodes (${#EDGE_NODES[@]}):"
 for entry in "${EDGE_NODES[@]}"; do
@@ -52,12 +54,12 @@ echo ""
 echo " Steps:"
 echo "   01. Install k0s management cluster (or use existing)"
 echo "   02. Install cert-manager + k0smotron operator"
-echo "   03. Deploy MinIO (S3 storage)"
-echo "   04. Deploy XNAT upload pod (MinIO → XNAT)"
+echo "   03. Deploy SeaweedFS (S3 storage)"
+echo "   04. Deploy XNAT upload pod (SeaweedFS → XNAT)"
 echo "   For each edge node:"
 echo "     05. Create hosted k0s control plane"
 echo "     06. Install k0s worker on edge VM"
-echo "     07. Deploy xnat-ingest (sort + upload to MinIO)"
+echo "     07. Deploy xnat-ingest (sort + s3-uploader)"
 echo ""
 echo "============================================"
 read -p "Proceed with installation? (y/N) " -r
@@ -80,9 +82,9 @@ read -p "Run step 02? (y/s to skip) " -r
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02-install-k0smotron.sh"
 
 echo ""
-echo "--- Step 03: MinIO ---"
+echo "--- Step 03: SeaweedFS ---"
 read -p "Run step 03? (y/s to skip) " -r
-[[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/03-deploy-minio.sh"
+[[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/03-deploy-seaweedfs.sh"
 
 echo ""
 echo "--- Step 04: XNAT upload pod ---"
@@ -124,9 +126,11 @@ echo "============================================"
 echo " Installation Complete!"
 echo "============================================"
 echo ""
-echo " Management cluster:  kubectl get pods -A"
-echo " MinIO console:       http://${MGMT_NODE_IP}:${MINIO_CONSOLE_NODEPORT}"
-echo "                      Login: ${MINIO_ROOT_USER}"
+echo " Management cluster:    kubectl get pods -A"
+echo " SeaweedFS S3 API:      http://${MGMT_NODE_IP}:${S3_NODEPORT}"
+echo " SeaweedFS master UI:   http://${MGMT_NODE_IP}:${MASTER_NODEPORT}"
+echo " SeaweedFS filer UI:    http://${MGMT_NODE_IP}:${FILER_NODEPORT}"
+echo "                        (admin key: ${S3_ADMIN_ACCESS_KEY})"
 echo ""
 for entry in "${EDGE_NODES[@]}"; do
     IFS='|' read -r name ip _ _ _ _ _ <<< "$entry"
