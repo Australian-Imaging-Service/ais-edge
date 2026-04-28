@@ -74,15 +74,17 @@ spec:
             - name: s3-config
               mountPath: /etc/seaweedfs
           readinessProbe:
-            httpGet:
-              path: /
-              port: 8333
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          livenessProbe:
+            # Master /cluster/status returns 200 + JSON when the cluster is up
             httpGet:
               path: /cluster/status
               port: 9333
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            # TCP probe on S3 port — checks the gateway is accepting connections
+            # (HTTP probes against / return 403 without auth, which would fail)
+            tcpSocket:
+              port: 8333
             initialDelaySeconds: 60
             periodSeconds: 30
           resources:

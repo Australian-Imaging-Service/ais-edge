@@ -88,7 +88,17 @@ render "${REPO_DIR}/manifests/01-management/seaweedfs.yaml.tpl" \
     S3_CONFIG_HASH "$S3_CONFIG_HASH" \
     | kubectl apply -f -
 
-echo "Waiting for SeaweedFS pod to be ready..."
+echo "Waiting for SeaweedFS pod to start..."
+# Wait for the pod to exist first (avoids "no matching resources found" race)
+RETRIES=24
+for i in $(seq 1 $RETRIES); do
+    kubectl get pod -n seaweedfs -l app=seaweedfs --no-headers 2>/dev/null | grep -q . && break
+    [ $i -eq $RETRIES ] && { echo "ERROR: SeaweedFS pod never appeared"; kubectl get all -n seaweedfs; exit 1; }
+    echo "  Pod not yet scheduled... ($i/$RETRIES)"
+    sleep 5
+done
+
+echo "Waiting for SeaweedFS pod to be Ready..."
 kubectl wait --for=condition=Ready pods -l app=seaweedfs -n seaweedfs --timeout=300s
 echo "SeaweedFS ready: S3 API at http://${MGMT_NODE_IP}:${S3_NODEPORT}"
 
