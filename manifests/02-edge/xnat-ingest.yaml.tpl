@@ -51,10 +51,10 @@ spec:
             - "{{GRAFANA_HOSTNAME}}"
       containers:
         - name: sort
-          # Locally-built fork with AIS_LOG_FORMAT=json support.
-          # Image distributed via `ctr image import`; never pull.
-          image: docker.io/library/xnat-ingest:logging-v1
-          imagePullPolicy: Never
+          # Default points at our fork on ghcr.io with the JSON-logging
+          # patch. Override XNAT_INGEST_IMAGE in config/management.env to
+          # switch (e.g. to upstream once merged).
+          image: {{XNAT_INGEST_IMAGE}}
           command: ["xnat-ingest", "sort"]
           args:
             - "/data/incoming"

@@ -46,11 +46,11 @@ spec:
     spec:
       containers:
         - name: upload
-          # Locally-built fork that adds AIS_LOG_FORMAT=json output (see
-          # docs/xnat-ingest-changes.md). Image was distributed via
-          # `ctr image import`; never pull from a registry.
-          image: docker.io/library/xnat-ingest:logging-v1
-          imagePullPolicy: Never
+          # Default points at our fork on ghcr.io with the AIS_LOG_FORMAT=json
+          # patch (see docs/xnat-ingest-changes.md). Override XNAT_INGEST_IMAGE
+          # in config/management.env when upstream merges to switch back to
+          # ghcr.io/australian-imaging-service/xnat-ingest:latest.
+          image: {{XNAT_INGEST_IMAGE}}
           command: ["xnat-ingest", "upload"]
           args:
             - "s3://{{S3_BUCKET}}/staged"

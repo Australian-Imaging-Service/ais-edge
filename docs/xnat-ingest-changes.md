@@ -159,42 +159,45 @@ Existing tests pass because the default code path is unchanged.
 
 ## How to use the fork in a deployment
 
-In our k0s + k0smotron deployment:
+The image is published to **`ghcr.io/akshitbeniwal/xnat-ingest:logging-v1`**
+and the package is public, so kubelet pulls it like any other image
+(no auth, no `ctr` import dance).
 
-1. Build the fork's image:
-   ```bash
-   git clone https://github.com/akshitbeniwal/xnat-ingest.git
-   cd xnat-ingest
-   git checkout feat/json-logging
-   docker build -t xnat-ingest:logging-v1 .
-   ```
+The deployment manifests reference it via the `XNAT_INGEST_IMAGE`
+config variable in `config/management.env`:
 
-2. Distribute via `ctr image import` to k0s containerd on every host
-   that runs the pod (mgmt + each edge worker):
-   ```bash
-   docker save xnat-ingest:logging-v1 -o /tmp/xnat-ingest-logging-v1.tar
-   sudo /usr/bin/ctr -a /run/k0s/containerd.sock -n k8s.io image import \
-     /tmp/xnat-ingest-logging-v1.tar
-   sudo /usr/bin/ctr -a /run/k0s/containerd.sock -n k8s.io image label \
-     docker.io/library/xnat-ingest:logging-v1 io.cri-containerd.image=managed
-   ```
+```bash
+# Default (fork with JSON logging)
+export XNAT_INGEST_IMAGE="ghcr.io/akshitbeniwal/xnat-ingest:logging-v1"
 
-3. Update Deployment manifests:
-   ```yaml
-   spec:
-     template:
-       spec:
-         containers:
-           - name: sort   # or "upload"
-             image: docker.io/library/xnat-ingest:logging-v1
-             imagePullPolicy: Never
-             env:
-               - name: AIS_LOG_FORMAT
-                 value: "json"
-   ```
+# Once upstream merges the JsonFormatter patch, switch the line to:
+# export XNAT_INGEST_IMAGE="ghcr.io/australian-imaging-service/xnat-ingest:latest"
+```
 
-The `imagePullPolicy: Never` avoids accidental registry pulls in
-air-gapped deployments. Drop it if you push to a registry instead.
+Re-run `./install.sh -y` (or `bash scripts/04-deploy-xnat-upload.sh` +
+`bash scripts/07-deploy-edge-ingest.sh <edge-entry>`) and every pod
+rolls onto the new image. **No other code changes**.
+
+### Rebuilding + pushing the fork image (for fork maintainer only)
+
+When iterating on the fork:
+
+```bash
+cd ~/tmp/xnat-ingest-fork
+git checkout feat/json-logging
+# ... edits ...
+docker build -t ghcr.io/akshitbeniwal/xnat-ingest:logging-v1 .
+
+# Login once with a PAT that has write:packages scope
+echo "$GHCR_PAT" | docker login ghcr.io -u akshitbeniwal --password-stdin
+
+docker push ghcr.io/akshitbeniwal/xnat-ingest:logging-v1
+```
+
+Then make the package public (one-time, on first push) at
+https://github.com/akshitbeniwal?tab=packages → click the package →
+Package settings → Change visibility → Public. Once public, kubelet
+on every cluster pulls it anonymously.
 
 ## Suggested upstream PR shape
 

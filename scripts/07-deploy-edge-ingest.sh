@@ -55,6 +55,7 @@ render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     LOKI_HOSTNAME "${LOKI_HOSTNAME:-loki.aisedge.local}" \
     GRAFANA_HOSTNAME "${GRAFANA_HOSTNAME:-grafana.aisedge.local}" \
     INGRESS_PORT "$INGRESS_PORT" \
+    XNAT_INGEST_IMAGE "${XNAT_INGEST_IMAGE:-ghcr.io/australian-imaging-service/xnat-ingest:latest}" \
     | KUBECONFIG="$EDGE_KC" kubectl apply -f -
 
 echo "Waiting for pods..."

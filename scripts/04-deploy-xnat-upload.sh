@@ -15,6 +15,7 @@ render "${REPO_DIR}/manifests/01-management/xnat-upload.yaml.tpl" \
     S3_ADMIN_ACCESS_KEY "$S3_ADMIN_ACCESS_KEY" \
     S3_ADMIN_SECRET_KEY "$S3_ADMIN_SECRET_KEY" \
     S3_BUCKET "$S3_BUCKET" \
+    XNAT_INGEST_IMAGE "${XNAT_INGEST_IMAGE:-ghcr.io/australian-imaging-service/xnat-ingest:latest}" \
     | kubectl apply -f -
 
 kubectl wait --for=condition=Available deployment/xnat-ingest-upload -n xnat-upload --timeout=180s 2>/dev/null || true
