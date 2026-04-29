@@ -109,19 +109,21 @@ metadata:
   name: seaweedfs
   namespace: seaweedfs
 spec:
-  type: NodePort
+  # Phase 2: ClusterIP only. External access goes through nginx-ingress on
+  # https://{{SEAWEEDFS_HOSTNAME}}:443 (TLS-terminated, signed by ais-edge-ca).
+  # Master/filer admin UIs are reachable via:
+  #   kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333  # master
+  #   kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888  # filer
+  type: ClusterIP
   selector:
     app: seaweedfs
   ports:
     - port: 8333
       targetPort: 8333
-      nodePort: {{S3_NODEPORT}}
       name: s3
     - port: 9333
       targetPort: 9333
-      nodePort: {{MASTER_NODEPORT}}
       name: master
     - port: 8888
       targetPort: 8888
-      nodePort: {{FILER_NODEPORT}}
       name: filer

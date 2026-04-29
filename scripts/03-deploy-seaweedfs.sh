@@ -82,11 +82,35 @@ kubectl create configmap s3-config \
 
 # 5. Apply Deployment + Service
 render "${REPO_DIR}/manifests/01-management/seaweedfs.yaml.tpl" \
-    S3_NODEPORT "$S3_NODEPORT" \
-    MASTER_NODEPORT "$MASTER_NODEPORT" \
-    FILER_NODEPORT "$FILER_NODEPORT" \
+    SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
     S3_CONFIG_HASH "$S3_CONFIG_HASH" \
     | kubectl apply -f -
+
+# 5b. Phase 2: issue the TLS server cert (cert-manager) + Ingress (nginx)
+# Skipped if cert-manager / ais-edge-ca-issuer / ingress-nginx aren't ready;
+# falls through with a warning so the legacy HTTP NodePort path still works.
+if kubectl get clusterissuer ais-edge-ca-issuer &>/dev/null \
+   && kubectl get -n ingress-nginx deployment ingress-nginx-controller &>/dev/null; then
+    echo "Phase 2 prereqs found — applying SeaweedFS TLS cert + Ingress"
+
+    render "${REPO_DIR}/manifests/01-management/seaweedfs-tls-cert.yaml.tpl" \
+        SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
+        MGMT_NODE_IP "$MGMT_NODE_IP" \
+        | kubectl apply -f -
+
+    echo "Waiting for seaweedfs-tls Certificate to be Ready..."
+    kubectl wait --for=condition=Ready certificate/seaweedfs-tls \
+        -n seaweedfs --timeout=120s
+
+    render "${REPO_DIR}/manifests/01-management/seaweedfs-ingress.yaml.tpl" \
+        SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
+        | kubectl apply -f -
+
+    echo "SeaweedFS TLS path ready: https://${SEAWEEDFS_HOSTNAME}:${INGRESS_PORT}"
+else
+    echo "Phase 2 prereqs missing — skipping SeaweedFS TLS cert + Ingress"
+    echo "  (run 02b-bootstrap-ca.sh and 02c-install-nginx-ingress.sh first)"
+fi
 
 echo "Waiting for SeaweedFS pod to start..."
 # Wait for the pod to exist first (avoids "no matching resources found" race)
@@ -100,7 +124,6 @@ done
 
 echo "Waiting for SeaweedFS pod to be Ready..."
 kubectl wait --for=condition=Ready pods -l app=seaweedfs -n seaweedfs --timeout=300s
-echo "SeaweedFS ready: S3 API at http://${MGMT_NODE_IP}:${S3_NODEPORT}"
 
 # 6. Install mc (also speaks vanilla S3 — works against SeaweedFS)
 if ! command -v mc &>/dev/null; then
@@ -108,16 +131,26 @@ if ! command -v mc &>/dev/null; then
     sudo install -o root -g root -m 0755 /tmp/mc /usr/local/bin/mc && rm -f /tmp/mc
 fi
 
-# 7. Wait until S3 endpoint is actually serving, then create bucket
+# 7. Create bucket via in-cluster ClusterIP — start a background port-forward
+# from the management host to the seaweedfs Service. Phase 2 keeps SeaweedFS
+# Service as ClusterIP only (external access is via nginx-ingress :443).
+PF_PORT=18333
+kubectl port-forward -n seaweedfs svc/seaweedfs ${PF_PORT}:8333 \
+    > /tmp/seaweedfs-pf.log 2>&1 &
+PF_PID=$!
+trap "rm -f $TMP_S3; kill ${PF_PID} 2>/dev/null || true" EXIT
+
+# Wait until port-forward is serving
 RETRIES=24
 for i in $(seq 1 $RETRIES); do
-    if mc alias set seaweed "http://localhost:${S3_NODEPORT}" \
+    if mc alias set seaweed "http://localhost:${PF_PORT}" \
         "${S3_ADMIN_ACCESS_KEY}" "${S3_ADMIN_SECRET_KEY}" 2>/dev/null \
        && mc ls seaweed/ &>/dev/null; then
         break
     fi
     [ $i -eq $RETRIES ] && {
-        echo "ERROR: S3 endpoint not responding after ${RETRIES} attempts"
+        echo "ERROR: S3 endpoint not responding via port-forward after ${RETRIES} attempts"
+        cat /tmp/seaweedfs-pf.log 2>/dev/null | tail -10
         kubectl logs -n seaweedfs -l app=seaweedfs --tail=30
         exit 1
     }
@@ -128,7 +161,14 @@ done
 mc mb "seaweed/${S3_BUCKET}" --ignore-existing 2>/dev/null
 echo "Bucket '${S3_BUCKET}' ready"
 
+# Persist a localhost mc alias for admin convenience: subsequent admin runs
+# can `kubectl port-forward -n seaweedfs svc/seaweedfs 8333:8333 &` and then
+# `mc ls seaweed-admin/`. We don't keep the port-forward running.
+mc alias set seaweed-admin "http://localhost:8333" \
+    "${S3_ADMIN_ACCESS_KEY}" "${S3_ADMIN_SECRET_KEY}" 2>/dev/null || true
+
 echo "=== 03: Complete ==="
-echo "SeaweedFS S3 API:    http://${MGMT_NODE_IP}:${S3_NODEPORT}"
-echo "SeaweedFS master UI: http://${MGMT_NODE_IP}:${MASTER_NODEPORT}"
-echo "SeaweedFS filer UI:  http://${MGMT_NODE_IP}:${FILER_NODEPORT}"
+echo "SeaweedFS S3 API (TLS, edge):  https://${SEAWEEDFS_HOSTNAME}  (via nginx-ingress :${INGRESS_PORT})"
+echo "SeaweedFS S3 API (in-cluster): http://seaweedfs.seaweedfs.svc.cluster.local:8333"
+echo "SeaweedFS master UI (admin):   kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333"
+echo "SeaweedFS filer UI (admin):    kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888"

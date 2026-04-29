@@ -9,6 +9,8 @@ secrets/
 # Generated during install
 kubeconfig-*
 join-token-*
+ais-edge-ca.crt
+ca-bundle.crt
 
 # OS files
 .DS_Store

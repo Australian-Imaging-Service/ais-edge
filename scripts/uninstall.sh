@@ -11,8 +11,12 @@ source "${SCRIPT_DIR}/config/edge-nodes.env"
 echo "============================================"
 echo "WARNING: This will destroy EVERYTHING:"
 echo "  - All edge workers and their data"
+echo "  - /etc/hosts entries on edge VMs (Phase 2 hostnames)"
 echo "  - SeaweedFS and all stored files (/data/seaweedfs)"
 echo "  - k0smotron and all hosted clusters"
+echo "  - nginx-ingress (Phase 2 :443 listener)"
+echo "  - cert-manager Issuers + the self-signed CA"
+echo "  - ais-edge-ca.crt (the public CA cert for edges)"
 echo "  - k0s controller (if fresh install)"
 echo "============================================"
 read -p "Are you sure? (y/N) " -r
@@ -31,6 +35,12 @@ for entry in "${EDGE_NODES[@]}"; do
 sudo k0s stop 2>/dev/null || true
 sudo k0s reset 2>/dev/null || true
 sudo rm -rf /data/xnat-ingest 2>/dev/null || true
+sudo rm -f /etc/k0s/join-token 2>/dev/null || true
+# Phase 2: drop the /etc/hosts block we added in 06
+sudo sed -i '/# ais-edge phase2 tls hostnames/,+1d' /etc/hosts 2>/dev/null || true
+# Phase 2: remove the haproxy certs we staged in 06
+sudo rm -rf /etc/haproxy/certs 2>/dev/null || true
+sudo rmdir /etc/haproxy 2>/dev/null || true
 EOF
 
     kubectl delete namespace "${CLUSTER_NAME}" --ignore-not-found 2>/dev/null || true
@@ -43,6 +53,22 @@ echo "=== Removing SeaweedFS and XNAT upload ==="
 kubectl delete namespace xnat-upload --ignore-not-found 2>/dev/null || true
 kubectl delete namespace seaweedfs --ignore-not-found 2>/dev/null || true
 sudo rm -rf /data/seaweedfs
+
+echo ""
+echo "=== Removing nginx-ingress (Phase 2 :443 listener) ==="
+helm uninstall ingress-nginx -n ingress-nginx 2>/dev/null || true
+kubectl delete namespace ingress-nginx --ignore-not-found 2>/dev/null || true
+
+echo ""
+echo "=== Removing Phase 2 /etc/hosts entry on management node ==="
+sudo sed -i '/# ais-edge phase2 tls hostnames/,+1d' /etc/hosts 2>/dev/null || true
+
+echo ""
+echo "=== Removing CA Issuers + bundled CA cert ==="
+kubectl delete clusterissuer ais-edge-ca-issuer selfsigned-bootstrap --ignore-not-found 2>/dev/null || true
+kubectl delete certificate ais-edge-ca ais-edge-ca-2 -n cert-manager --ignore-not-found 2>/dev/null || true
+kubectl delete secret ais-edge-ca-secret ais-edge-ca-2-secret -n cert-manager --ignore-not-found 2>/dev/null || true
+rm -f "${SCRIPT_DIR}/ais-edge-ca.crt" "${SCRIPT_DIR}/ca-bundle.crt"
 
 echo ""
 echo "=== Removing k0smotron ==="

@@ -11,35 +11,42 @@ Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
 
 ## Architecture
 
+Edge nodes connect to the management cluster over a single TLS port (443).
+nginx-ingress on the management host reads the SNI from the TLS handshake and
+routes to the right backend. Edge has zero inbound ports.
+
 ```
-                Management Node                           Edge Worker(s)
-          ┌──────────────────────────┐             ┌──────────────────────────┐
-          │  k0s (or existing k8s)   │             │  k0s worker              │
-          │                          │             │                          │
-          │  k0smotron operator      │             │  xnat-ingest-sort pod    │
-          │  ├─ hosted control plane │◄────────────┤  └─ watches /incoming    │
-          │  │  (API + etcd + konect)│ konnectivity│     stages DICOMs        │
-          │  │                       │  (outbound  │                          │
-          │  SeaweedFS (S3 storage)  │   from edge)│  s3-uploader pod         │
-          │  ├─ receives staged files│◄────────────┤  └─ mc mirror → SeaweedFS│
-          │  │  s3://ingest-bucket/  │  write-only │     (scoped S3 key)      │
-          │  │                       │  S3 upload  │                          │
-          │  xnat-ingest-upload pod  │             │  Credentials on edge:    │
-          │  ├─ reads from SeaweedFS │             │  └─ S3 write-only key    │
-          │  └─ uploads to XNAT      │             │                          │
-          │     (has XNAT creds)     │             │  Inbound ports: ZERO     │
-          │                          │             │  All connections outbound│
-          │  Credentials here:       │             │                          │
-          │  ├─ XNAT admin creds     │             └──────────────────────────┘
-          │  └─ S3 admin creds       │
-          └─────────┬────────────────┘
-                    │ HTTPS REST API
-                    ▼
-          ┌──────────────────────────┐
-          │  XNAT Server             │
-          │ (separate infrastructure)│
-          │  xnat.example.com        │
-          └──────────────────────────┘
+              Management Node                              Edge Worker(s)
+       ┌──────────────────────────────────┐         ┌──────────────────────────┐
+       │  nginx-ingress (hostNet :443)    │         │  k0s worker              │
+       │  ├─ TLS terminate / SNI-route    │         │   /etc/hosts:            │
+       │  │   - seaweedfs.aisedge.local   │◄────────┤    203.x.x.x  *.aisedge..│
+       │  │   - k0s.aisedge.local         │  TLS    │                          │
+       │  │   - konnect.aisedge.local     │  :443   │  xnat-ingest-sort pod    │
+       │  │  (all certs signed by         │         │   └─ watches /incoming   │
+       │  │   ais-edge-ca via cert-mgr)   │         │      stages DICOMs       │
+       │  │                               │         │                          │
+       │  k0smotron operator              │         │  s3-uploader pod         │
+       │  ├─ hosted control plane (CIP)   │         │   ├─ mc trusts ais-edge- │
+       │  │   ↳ Ingress for API+konect    │         │   │  ca via mounted     │
+       │  │                               │         │   │  ca-bundle Secret    │
+       │  SeaweedFS (ClusterIP only)      │         │   └─ mc mirror →         │
+       │  ├─ S3 :8333 (HTTP, in-cluster)  │         │      https://seaweedfs.. │
+       │  │  edges hit via Ingress :443   │         │                          │
+       │  │                               │         │  Credentials on edge:    │
+       │  xnat-ingest-upload pod          │         │   ├─ S3 write-only key   │
+       │  └─ in-cluster DNS to seaweedfs  │         │   └─ ais-edge-ca.crt     │
+       │                                  │         │                          │
+       │  cert-manager: ais-edge-ca       │         │  Inbound ports: ZERO     │
+       │  ├─ self-signed root (10 yr)     │         │  All edge → mgmt :443    │
+       │  └─ issues server certs (1 yr)   │         └──────────────────────────┘
+       └─────────┬────────────────────────┘
+                 │ HTTPS REST API
+                 ▼
+       ┌──────────────────────────┐
+       │  XNAT Server             │
+       │ (separate infrastructure)│
+       └──────────────────────────┘
 ```
 
 ## Data Flow
@@ -80,8 +87,10 @@ The `s3-uploader` pod runs on the edge worker using the `minio/mc` (MinIO Client
 It's a simple shell loop — no custom code:
 
 ```bash
-# Configure mc with the write-only credentials
-mc alias set edge "http://<MGMT_IP>:31090" "<access-key>" "<secret-key>"
+# Configure mc with the write-only credentials.
+# mc reads PEM files in /root/.mc/certs/CAs/ — we mount the ca-bundle Secret
+# there, so mc trusts our ais-edge-ca-signed seaweedfs-tls cert.
+mc alias set edge "https://seaweedfs.aisedge.local" "<access-key>" "<secret-key>"
 
 # Loop forever, checking every 30 seconds
 while true; do
@@ -109,22 +118,24 @@ If SeaweedFS is swapped for AWS S3, the uploader works without changes (just a d
 ## Security Model
 
 ```
-Edge Worker                           Management Node             XNAT
-├─ S3 write-only key                  ├─ S3 admin key             ├─ User data
-│  (write+list on one bucket only)    ├─ XNAT admin credentials   │
-│  (cannot read other sites' data)    │                           │
-├─ NO XNAT credentials                │                           │
-├─ NO inbound ports                   │                           │
-├─ Outbound only:                     │                           │
-│  → konnectivity tunnel (:30443)     │                           │
-│  → SeaweedFS S3 upload (:31090)     │                           │
+Edge Worker                                   Management Node             XNAT
+├─ S3 write-only key                          ├─ S3 admin key             ├─ User data
+│  (write+list on one bucket only)            ├─ XNAT admin credentials   │
+│  (cannot read other sites' data)            ├─ ais-edge-ca PRIVATE key  │
+├─ NO XNAT credentials                        │  (in cert-manager Secret) │
+├─ NO inbound ports                           │                           │
+├─ ais-edge-ca PUBLIC cert (mounted)          │                           │
+│  used to verify mgmt server identity        │                           │
+├─ Outbound only, single port:                │                           │
+│  → mgmt :443 (TLS, SNI-routed)              │                           │
 ```
 
 | If compromised... | Impact |
 |--------------------|--------|
-| Edge worker | Attacker sees local DICOMs + scoped S3 key. Key can only write to ingest bucket. Cannot read other sites' data. Cannot access XNAT. |
+| Edge worker | Attacker sees local DICOMs + scoped S3 key + public CA cert. Key can only write to ingest bucket. Cannot read other sites' data. Cannot access XNAT. Cannot forge new server certs (CA private key is on management). |
 | Edge S3 key | Can write junk to one bucket. Cannot read data. Cannot access XNAT. Cannot impersonate other sites. |
-| Management node | Full access — this is your crown jewel. Harden accordingly. |
+| Wire (between edge and management) | Sniffer sees TLS-encrypted bytes only. Cannot read DICOMs in transit. Cannot impersonate the management server (would need a cert signed by ais-edge-ca). |
+| Management node | Full access — this is your crown jewel. Harden accordingly. CA private key lives here; back it up offline if you can't tolerate re-rolling all edge trust on rebuild. |
 
 ## Repository Structure
 
@@ -132,18 +143,34 @@ Edge Worker                           Management Node             XNAT
 k0s-k0smotron-mvp/
 ├── README.md                              ← You are here
 ├── install.sh                             ← Main installer (run this)
+├── ais-edge-ca.crt                        ← Public CA cert (gitignored; generated at install)
 ├── config/
 │   ├── management.env.template            ← Management node config (copy to management.env)
 │   ├── edge-nodes.env.template            ← Edge nodes config (copy to edge-nodes.env)
 │   └── k0s-controller.yaml               ← k0s cluster config
 ├── manifests/
 │   ├── 01-management/                     ← Runs on management cluster
-│   │   ├── edge-cluster.yaml.tpl          ← Hosted k0s control plane per edge site
-│   │   ├── seaweedfs.yaml.tpl             ← SeaweedFS S3 storage
+│   │   ├── cert-issuers.yaml              ← cert-manager bootstrap + CA + CA Issuer
+│   │   ├── nginx-ingress-values.yaml.tpl  ← helm values for nginx-ingress
+│   │   ├── seaweedfs.yaml.tpl             ← SeaweedFS Deployment + ClusterIP Service
+│   │   ├── seaweedfs-tls-cert.yaml.tpl    ← server cert for SeaweedFS Ingress
+│   │   ├── seaweedfs-ingress.yaml.tpl     ← nginx Ingress at :443 with SNI route
+│   │   ├── edge-cluster.yaml.tpl          ← Hosted k0s control plane (with spec.ingress)
 │   │   └── xnat-upload.yaml.tpl           ← Reads SeaweedFS → uploads to XNAT
 │   └── 02-edge/                           ← Runs on edge workers (child cluster)
-│       └── xnat-ingest.yaml.tpl           ← Sort + s3-uploader pods
+│       └── xnat-ingest.yaml.tpl           ← Sort + s3-uploader (hostAliases + CA mount)
 ├── scripts/
+│   ├── 00-common.sh                       ← Shared functions
+│   ├── 01-install-k0s.sh                  ← Install k0s on mgmt
+│   ├── 02-install-k0smotron.sh            ← cert-manager + k0smotron
+│   ├── 02b-bootstrap-ca.sh                ← Bootstrap self-signed CA (ais-edge-ca)
+│   ├── 02c-install-nginx-ingress.sh       ← nginx-ingress on hostNetwork :443
+│   ├── 03-deploy-seaweedfs.sh             ← SeaweedFS + TLS cert + Ingress
+│   ├── 04-deploy-xnat-upload.sh           ← Mgmt-side XNAT upload pod
+│   ├── 05-setup-edge-cluster.sh           ← Per-edge: hosted control plane + token
+│   ├── 06-join-edge-worker.sh             ← Per-edge: install k0s worker, /etc/hosts, CoreDNS
+│   ├── 07-deploy-edge-ingest.sh           ← Per-edge: deploy sort + s3-uploader
+│   ├── rotate-ca.sh                       ← CA rotation (--phase=1 / --phase=2)
 │   └── uninstall.sh                       ← Tears down everything
 └── .gitignore
 ```
@@ -244,10 +271,11 @@ rm kubeconfig-edge-uqcai join-token-edge-uqcai
 |-----------|---------|-------|
 | Ubuntu | 22.04.5 LTS | Management and edge nodes |
 | k0s | v1.35.2+k0s.0 | Both management cluster and edge workers |
-| k0smotron | v1.10.4 (stable) | Installed via `kubectl apply` (not Helm) |
-| cert-manager | latest | Required by k0smotron for webhook TLS |
-| SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035) |
-| MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader |
+| k0smotron | v1.10.4 (stable) | Installed via `kubectl apply` (not Helm). Uses built-in `spec.ingress` for SNI routing. |
+| cert-manager | latest | Issues `ais-edge-ca` (10y root) + per-service server certs (1y, auto-renew) |
+| nginx-ingress | latest (helm) | hostNetwork :443. SSL passthrough enabled (k0s API + konnectivity); TLS termination for SeaweedFS. |
+| SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035). ClusterIP only; external access via Ingress. |
+| MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader. Trusts `ais-edge-ca` via mounted ca-bundle Secret. |
 | xnat-ingest | latest | `ghcr.io/australian-imaging-service/xnat-ingest:latest` |
 | local-path-provisioner | v0.0.30 | Default StorageClass for etcd PVCs |
 
@@ -261,9 +289,9 @@ The `render()` function in `scripts/00-common.sh` performs simple string replace
 at install time — no Helm, no Jinja, no external tools required.
 
 ```bash
-# Example: what happens when install.sh processes seaweedfs.yaml.tpl
-Input:   nodePort: {{S3_NODEPORT}}
-Output:  nodePort: 31090
+# Example: what happens when install.sh processes seaweedfs-ingress.yaml.tpl
+Input:   host: {{SEAWEEDFS_HOSTNAME}}
+Output:  host: seaweedfs.aisedge.local
 ```
 
 Values come from `config/management.env` and `config/edge-nodes.env`. You never edit `.tpl` files.
@@ -313,16 +341,22 @@ kubectl get nodes                                # management node should be Rea
 kubectl --kubeconfig kubeconfig-<name> get nodes  # edge worker should be Ready
 kubectl --kubeconfig kubeconfig-<name> get pods -n xnat-ingest  # sort + s3-uploader Running
 
-# SeaweedFS health
-curl -s http://<MGMT_IP>:31090/                  # S3 endpoint — should return XML/empty 200
-curl -s http://<MGMT_IP>:31091/cluster/status    # master endpoint — should return JSON
-curl -s http://<MGMT_IP>:31092/                  # filer endpoint — should return HTML
+# SeaweedFS health (TLS via nginx-ingress; CA bundle is ais-edge-ca.crt)
+curl --cacert ais-edge-ca.crt \
+     --resolve seaweedfs.aisedge.local:443:<MGMT_IP> \
+     https://seaweedfs.aisedge.local/   # → 403 (S3 unauth) means path works
 
-# SeaweedFS from edge (test connectivity)
-ssh ubuntu@<EDGE_IP> "curl -s http://<MGMT_IP>:31090/"
+# SeaweedFS master + filer (admin only — port-forward, no external port)
+kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master  http://localhost:9333
+kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer   http://localhost:8888
 
-# SeaweedFS bucket contents
-mc ls seaweed/ingest-bucket/staged/              # list sessions in bucket
+# SeaweedFS from edge (with CA verification)
+ssh ubuntu@<EDGE_IP> "curl --cacert /tmp/ais-edge-ca.crt https://seaweedfs.aisedge.local/"
+
+# SeaweedFS bucket contents (mgmt-side via port-forward + mc alias)
+kubectl port-forward -n seaweedfs svc/seaweedfs 8333:8333 &
+mc alias set seaweed-admin http://localhost:8333 <admin-key> <admin-secret>
+mc ls seaweed-admin/ingest-bucket/staged/        # list sessions in bucket
 
 # XNAT connectivity
 curl -sk <XNAT_URL>                              # should return HTML
@@ -335,24 +369,27 @@ kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=s3-uploa
 
 ## SeaweedFS Master & Filer UIs
 
-SeaweedFS exposes two built-in web UIs for inspecting cluster state. They're read-only;
-admin actions go through the S3 API or `weed shell`.
-
-```
-Master UI: http://<MGMT_IP>:31091
-   Shows cluster topology, volume servers, free capacity, leader election
-
-Filer UI:  http://<MGMT_IP>:31092
-   Browse the filesystem layer (objects appear under /buckets/<bucket>/...)
-```
-
-For a more familiar S3-style admin experience, use `mc`:
+The SeaweedFS Service is **ClusterIP only** — no external port. Reach
+the admin UIs via `kubectl port-forward` from the management node:
 
 ```bash
-mc alias set seaweed http://<MGMT_IP>:31090 <admin-key> <admin-secret>
-mc ls seaweed/                                    # list buckets
-mc ls --recursive seaweed/ingest-bucket/staged/   # list sessions
-mc admin info seaweed                             # cluster info
+# Master UI — cluster topology, volume servers, free capacity, leader election
+kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &
+xdg-open http://localhost:9333
+
+# Filer UI — browse the filesystem layer (objects under /buckets/<bucket>/...)
+kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &
+xdg-open http://localhost:8888
+```
+
+For an S3-style admin experience, port-forward 8333 and use `mc`:
+
+```bash
+kubectl port-forward -n seaweedfs svc/seaweedfs 8333:8333 &
+mc alias set seaweed-admin http://localhost:8333 <admin-key> <admin-secret>
+mc ls seaweed-admin/                                    # list buckets
+mc ls --recursive seaweed-admin/ingest-bucket/staged/   # list sessions
+mc admin info seaweed-admin                             # cluster info
 ```
 
 ## Updating Components
@@ -405,14 +442,21 @@ kubectl apply --server-side=true -f https://docs.k0smotron.io/stable/install.yam
 
 ## Known Limitations
 
-- **No TLS on SeaweedFS** — data between edge and SeaweedFS is unencrypted. For production,
-  put SeaweedFS behind a reverse proxy with TLS or use SeaweedFS's built-in TLS.
+- **Self-signed CA (no public trust chain)** — `ais-edge-ca` is local to this deployment.
+  Anything that doesn't load the CA bundle (browsers, third-party tools) will see
+  certificate-untrusted warnings. For a publicly-trusted chain, plug in a real CA (e.g.
+  Let's Encrypt via cert-manager's HTTP-01 / DNS-01 ACME issuer).
+- **mTLS not implemented** — edges authenticate to SeaweedFS via S3 access keys, not
+  client certificates. The wire is encrypted; identity is via key. Add a mutual-TLS
+  layer for stronger edge identity.
 - **No monitoring/alerting** — SeaweedFS disk usage, pod health, and upload failures
   are not automatically monitored. Add Prometheus + Grafana for production
   (SeaweedFS exposes Prometheus metrics on the master and filer).
-- **Single management node** — no HA for k0smotron or SeaweedFS. For production,
-  split SeaweedFS into separate master/volume/filer/s3 deployments and run 3 masters
-  with an external etcd or Consul; see "Scaling SeaweedFS" below.
+- **Single management node** — no HA for k0smotron, nginx-ingress, or SeaweedFS.
+  For production, split SeaweedFS into separate master/volume/filer/s3 deployments
+  with 3 masters, run multiple ingress replicas (drop hostNetwork, use a real load
+  balancer or VRRP), and run a multi-replica k0smotron control plane per cluster;
+  see "Scaling SeaweedFS" below.
 - **DICOM files with missing AccessionNumber** go to `__invalid__/` — requires manual
   rename. This is an xnat-ingest limitation, not a system issue. Real clinical DICOMs
   will have this field populated.
@@ -464,9 +508,9 @@ kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=sort
 kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=s3-uploader -f
 kubectl logs -n xnat-upload -l component=upload -f   # management upload to XNAT
 
-# SeaweedFS UIs
-# Master:  http://<MGMT_NODE_IP>:31091
-# Filer:   http://<MGMT_NODE_IP>:31092
+# SeaweedFS admin UIs (ClusterIP only — port-forward from mgmt)
+kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master
+kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
 ```
 
 ## Testing
@@ -502,6 +546,154 @@ kubectl logs -n xnat-upload -l component=upload -f
 | XNAT is down | SeaweedFS fills up | XNAT returns, upload pod clears backlog |
 | SeaweedFS disk full | Edge uploads fail, files safe on edge | Expand `/data/seaweedfs/` or clear XNAT backlog |
 
+## Architecture: Deeper Dive
+
+The overview above shows the major components and the single 443 outbound path.
+This section drills into the host-level state, every namespace, the trust
+relationships between certificates, and how in-cluster Service traffic actually
+reaches the API server. Useful when debugging or reviewing the design.
+
+```
+══════════════════════════════════════════════════════════════════════════════════════
+  EDGE VM   (203.101.230.171)        ZERO inbound • outbound only TCP :443
+══════════════════════════════════════════════════════════════════════════════════════
+
+  Host state
+    /etc/hosts            203.101.224.240  seaweedfs.aisedge.local
+                                           k0s.aisedge.local
+                                           konnect.aisedge.local      (added by 06)
+    /etc/haproxy/certs/
+        server.pem        cert+key, signed by the cluster's internal k0s CA
+                          (so workload pods trust haproxy via the projected
+                           serviceaccount ca.crt — without this every pod that
+                           hits the kubernetes Service gets "unknown authority")
+        ca.crt            the same cluster CA — haproxy uses it to verify the
+                          upstream API
+    k0sworker.service     systemd unit; kubelet talks to https://k0s.aisedge.local:443
+                          (URL rewritten inside the join-token by 05-setup-edge..)
+
+  ┌─ default ns ──────────────────────────────────────────────────────────────────┐
+  │   k0smotron-haproxy   DaemonSet, hostNetwork:true                             │
+  │     frontend  bind [::]:7443 ssl crt /etc/haproxy/certs/server.pem            │
+  │     backend   k0s.aisedge.local:443 ssl verify required sni=k0s.aisedge.local │
+  │   * EndpointSlice for the kubernetes Service points at <edge-IP>:7443         │
+  │     so any pod calling 10.96.0.1:443 → kube-proxy NAT → local haproxy → mgmt  │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ kube-system ns ──────────────────────────────────────────────────────────────┐
+  │   coredns          Corefile has  hosts { … aisedge.local … fallthrough }      │
+  │   konnectivity-agent  --proxy-server-host=konnect.aisedge.local --port=443    │
+  │   kube-proxy / kube-router / metrics-server                                   │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ xnat-ingest ns ──────────────────────────────────────────────────────────────┐
+  │   xnat-ingest-sort   loop 60s, --delete   /data/incoming → /data/staging      │
+  │   s3-uploader        loop 30s, runs:  mc mirror /data/staging  edge/bucket    │
+  │     env       S3_ENDPOINT=https://seaweedfs.aisedge.local                     │
+  │     mount     Secret ca-bundle (= ais-edge-ca.crt) → /root/.mc/certs/CAs/     │
+  │     hostAliases   3 aisedge.local names → MGMT_NODE_IP                        │
+  │   hostPath    /data/xnat-ingest/{incoming,staging}                            │
+  │   Secret      s3-edge-credentials   (write+list scoped to ingest-bucket)      │
+  └───────────────────────────────────────────────────────────────────────────────┘
+
+                              │
+                              │   ALL outbound traffic: TCP 443 (TLS, SNI-routed)
+                              │   firewall rule: ALLOW edge → MGMT_IP dst-port 443
+                              ▼
+
+══════════════════════════════════════════════════════════════════════════════════════
+  MGMT NODE  (203.101.224.240)        k0s controller+worker (single-node)
+══════════════════════════════════════════════════════════════════════════════════════
+
+  Host state
+    /etc/hosts            same 3 aisedge.local entries (added by 05-setup-edge..)
+    *:443                 owned by ingress-nginx-controller pod (hostNetwork:true)
+
+  ┌─ ingress-nginx ns ────────────────────────────────────────────────────────────┐
+  │   ingress-nginx-controller   helm-managed; --enable-ssl-passthrough           │
+  │     proxy-body-size=50g  proxy-read-timeout=3600  proxy-send-timeout=3600     │
+  │   ┌─ SNI router  (port 443) ─────────────────────────────────────────────┐    │
+  │   │  seaweedfs.aisedge.local → svc/seaweedfs:8333    (TLS terminate)     │    │
+  │   │  k0s.aisedge.local       → kmc-edge-dev-nodeport:30443 (passthrough) │    │
+  │   │  konnect.aisedge.local   → kmc-edge-dev-nodeport:30132 (passthrough) │    │
+  │   └──────────────────────────────────────────────────────────────────────┘    │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ cert-manager ns ─────────────────────────────────────────────────────────────┐
+  │   ClusterIssuer  selfsigned-bootstrap                                         │
+  │   Certificate    ais-edge-ca       isCA, RSA 4096, 10 yr                      │
+  │   ClusterIssuer  ais-edge-ca-issuer  ─── signs server certs ───►              │
+  │     • seaweedfs-tls   1 yr, auto-renew -30d, SANs = seaweedfs..local +MGMT_IP │
+  │   Export         ais-edge-ca.crt → REPO_DIR  (distributed to edges as Secret) │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ k0smotron ns + edge-dev ns (per-edge cluster) ───────────────────────────────┐
+  │   k0smotron-controller-manager   operator                                     │
+  │   kmc-edge-dev-0          k0s API server pod                                  │
+  │     spec.k0sConfig.spec.api.sans = [k0s.aisedge.local, konnect.., MGMT_IP]    │
+  │     cert issued by k0smotron-managed cluster CA (Secret edge-dev-ca)          │
+  │   kmc-edge-dev-etcd-0     etcd                                                │
+  │   svc/kmc-edge-dev-nodeport   NodePort 30443/30132 (in-cluster bridge only)   │
+  │   Ingress kmc-edge-dev    auto-created from spec.ingress on the Cluster CR    │
+  │     ssl-passthrough on hosts k0s.aisedge.local + konnect.aisedge.local        │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ seaweedfs ns ────────────────────────────────────────────────────────────────┐
+  │   seaweedfs   Deployment, all-in-one (master+volume+filer+s3) chrislusf:3.99  │
+  │   svc/seaweedfs   ClusterIP only — no external port (admin via port-forward)  │
+  │   ConfigMap s3-config   admin + per-edge IAM identities (config-hash rolls)   │
+  │   hostPath  /data/seaweedfs   Haystack volumes + filer leveldb                │
+  └───────────────────────────────────────────────────────────────────────────────┘
+  ┌─ xnat-upload ns ──────────────────────────────────────────────────────────────┐
+  │   xnat-ingest-upload   polls s3://ingest-bucket/staged/, pushes to XNAT       │
+  │     env   S3_ENDPOINT=http://seaweedfs.seaweedfs.svc.cluster.local:8333       │
+  │              (in-cluster path — never leaves the management node)             │
+  │   Secrets   xnat-credentials, s3-credentials                                  │
+  └───────────────────────────────────────────────────────────────────────────────┘
+
+                              │   HTTPS to XNAT's public-CA-signed endpoint
+                              ▼
+
+  ┌────────────────────────────────────────────────────────────────────────────────┐
+  │  XNAT SERVER   (xnat-test.ssdsorg.cloud.edu.au — separate k3s cluster)         │
+  │  Receives sessions via REST API; out of scope for this repo                    │
+  └────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Trust chains (who signs what)
+
+```
+  ais-edge-ca (10 yr root)  ──signs──►  seaweedfs-tls   (presented by nginx)
+                                            ▲
+                                            └─ trusted by edge mc via mounted
+                                               ca-bundle Secret (= ais-edge-ca.crt)
+
+  k0smotron cluster CA      ──signs──►  k0s API server cert (kmc-edge-dev-0)
+   (Secret edge-dev-ca)                     ▲
+                                            └─ trusted by edge kubelet via the
+                                               CA embedded in the join-token
+
+  cluster CA (same as above)──signs──►  /etc/haproxy/certs/server.pem
+                                            ▲
+                                            └─ trusted by every workload pod via
+                                               its projected serviceaccount ca.crt
+```
+
+### In-cluster Service traffic on the worker
+
+```
+   pod (in child cluster)
+        │   GET kubernetes.default.svc.cluster.local
+        │   → resolves to ClusterIP 10.96.0.1:443
+        ▼
+   kube-proxy iptables NAT
+        │   destination rewritten to <edge-IP>:7443 (per EndpointSlice)
+        ▼
+   k0smotron-haproxy DS pod   (hostNetwork on the same worker)
+        │   TLS terminate using server.pem (signed by cluster CA → pod trusts it)
+        │   open NEW outbound TLS conn:
+        ▼
+   nginx-ingress on MGMT_IP:443 (SNI = k0s.aisedge.local → ssl-passthrough)
+        │
+        ▼
+   kmc-edge-dev-nodeport:30443 → kmc-edge-dev-0 (k0s API)
+```
+
 ## FAQ
 
 **Q: Can I run k0smotron on my existing k3s/kubeadm cluster?**
@@ -516,9 +708,11 @@ Only a scoped SeaweedFS S3 key. It can only PUT/LIST on one bucket. It cannot re
 sites' data, access XNAT, or do anything else. XNAT credentials never leave the management node.
 
 **Q: How does the edge communicate without inbound ports?**
-All connections are outbound from the edge:
-- Konnectivity tunnel to management node (port 30443) — for cluster management
-- S3 upload to SeaweedFS on management node (port 31090) — for data transfer
+All connections are outbound from the edge to the management node on a single port:
+- TLS port 443 — multiplexed by SNI:
+  - `k0s.aisedge.local` → k0s API server (kubelet → API)
+  - `konnect.aisedge.local` → konnectivity tunnel (API → kubelet via reverse tunnel)
+  - `seaweedfs.aisedge.local` → SeaweedFS S3 (mc mirror data uploads)
 The management node sends commands back through the konnectivity tunnel (edge-initiated).
 
 **Q: What is konnectivity?**
@@ -551,9 +745,24 @@ Pin specific pods to specific workers using `nodeSelector` in the manifest.
 
 **k0s worker not joining:**
 - Check token: `sudo cat /etc/k0s/join-token | head -c 50` (should not be empty)
-- Check connectivity: `curl -sk https://<MGMT_IP>:30443/version` (should return JSON)
+- Verify the embedded URL: `cat /etc/k0s/join-token | base64 -d | gunzip | grep server`
+  (should show `https://k0s.aisedge.local:443`)
+- Check `/etc/hosts` has the aisedge.local entries: `grep aisedge /etc/hosts`
+- Check connectivity: `curl --cacert /tmp/ais-edge-ca.crt https://k0s.aisedge.local/version`
+  (TLS error = cert/CA mismatch; refused = nginx-ingress / network)
 - Check logs: `sudo journalctl -u k0sworker --no-pager -n 30`
 - Note: `k0s status` does NOT work on workers. Use `systemctl is-active k0sworker`.
+
+**konnectivity-agent in CrashLoop / "lookup konnect.aisedge.local: no such host":**
+- The child cluster's CoreDNS does not have the aisedge.local hosts entry.
+  Re-run `06-join-edge-worker.sh` (idempotent) or apply the Corefile manually.
+- Verify: `KUBECONFIG=kubeconfig-<edge> kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}' | grep aisedge`
+
+**s3-uploader: "x509: certificate signed by unknown authority":**
+- The `ca-bundle` Secret is missing or empty on the edge cluster. Re-run
+  `07-deploy-edge-ingest.sh <edge-entry>` — it pushes `ais-edge-ca.crt` to the
+  edge cluster's `xnat-ingest/ca-bundle` Secret and rolls the s3-uploader.
+- Verify: `KUBECONFIG=kubeconfig-<edge> kubectl get secret -n xnat-ingest ca-bundle -o jsonpath='{.data.ca\.crt}' | base64 -d | openssl x509 -noout -subject`
 
 **Pods stuck in Pending:**
 - Check events: `kubectl describe pod <name> -n <namespace>`
@@ -566,14 +775,20 @@ Pin specific pods to specific workers using `nodeSelector` in the manifest.
 - With real clinical DICOMs, this won't happen.
 
 **Upload pod can't reach SeaweedFS:**
-- Test from edge: `curl -s http://<MGMT_IP>:31090/`
-- Check firewall rules on management node
+- The mgmt upload pod uses in-cluster DNS — TLS/Ingress not involved.
+  Test: `kubectl exec -n xnat-upload deploy/xnat-ingest-upload -- curl -s http://seaweedfs.seaweedfs.svc.cluster.local:8333/`
 - Check SeaweedFS pod: `kubectl logs -n seaweedfs -l app=seaweedfs`
 
 **Upload pod can't reach XNAT:**
 - Test: `curl -sk <XNAT_URL>`
 - Check XNAT credentials in management cluster secret
 - XNAT project must exist before upload (create in XNAT web UI)
+
+**Server cert about to expire (or compromised CA):**
+- Server certs auto-renew via cert-manager (1-year duration, 30-day renewBefore).
+- Force renewal: `kubectl delete secret seaweedfs-tls -n seaweedfs` and cert-manager
+  re-issues from the CA Issuer.
+- Full CA rotation: `scripts/rotate-ca.sh --phase=1` then (after 14-30 days) `--phase=2`.
 
 ## Using AWS S3 Instead of SeaweedFS
 
@@ -588,7 +803,7 @@ with minimal changes — `mc` and `boto3` speak vanilla S3.
 | Storage server | SeaweedFS pod on management node | AWS managed service |
 | Management manifests | `manifests/01-management/seaweedfs.yaml.tpl` deployed | **Not deployed** — skip step 03 |
 | Upload pod S3 endpoint | `http://seaweedfs.seaweedfs.svc.cluster.local:8333` | `https://s3.amazonaws.com` (default) |
-| Edge S3 endpoint | `http://<MGMT_IP>:31090` | `https://s3.<region>.amazonaws.com` |
+| Edge S3 endpoint | `https://seaweedfs.aisedge.local` (TLS, ais-edge-ca) | `https://s3.<region>.amazonaws.com` (TLS, public CA) |
 | Credentials | SeaweedFS s3.json identities | AWS IAM access keys |
 
 ### Step-by-Step
@@ -674,6 +889,67 @@ Everything else remains the same.
 - No internet dependency between management and storage
 - Full control over data residency and compliance
 
+## TLS / Self-Signed CA
+
+All edge ↔ management traffic flows over a single TLS port (443) multiplexed by
+SNI. Three components make this work:
+
+**1. Self-signed root CA — `ais-edge-ca`**
+- Created by cert-manager at install time (script `02b-bootstrap-ca.sh`).
+- 10-year duration, 4096-bit RSA, stored as a Secret in the `cert-manager` namespace.
+- The PUBLIC half is exported to `ais-edge-ca.crt` (gitignored, distributed to edges).
+- The PRIVATE half NEVER leaves the management node.
+
+**2. Server certs (per service)**
+- cert-manager issues 1-year RSA certs signed by `ais-edge-ca`.
+- Auto-renewed 30 days before expiry — no operator action required.
+- Servers: `seaweedfs.aisedge.local` (and any future TLS-fronted service).
+- The k0smotron-managed k0s API + konnectivity have their own internal CA — those
+  certs include the aisedge.local hostnames as SANs (configured via `spec.k0sConfig.spec.api.sans`).
+
+**3. Edge trust**
+- Each edge cluster gets a Secret `xnat-ingest/ca-bundle` containing `ais-edge-ca.crt`.
+- The `s3-uploader` pod mounts it at `/root/.mc/certs/CAs/ca.crt` so `mc` trusts our CA.
+- Edge worker kubelet: standard k0s mTLS — kubelet uses the auto-generated kubeconfig
+  CA cert (k0smotron's CA, not `ais-edge-ca`) for API server verification.
+
+**Hostname resolution without DNS:**
+- Edge VMs get a static `/etc/hosts` entry: `<MGMT_IP> seaweedfs.aisedge.local k0s.aisedge.local konnect.aisedge.local`
+  (added by script `06-join-edge-worker.sh`).
+- Pods on the edge cluster get `hostAliases` (in the manifest) for the same hostnames.
+- The child cluster's CoreDNS gets a `hosts` plugin entry so the konnectivity-agent
+  (which uses cluster DNS, not host /etc/hosts) can also resolve them.
+
+**Trust chain at handshake time (e.g. mc upload from edge to SeaweedFS):**
+```
+edge mc client
+  ├─ resolves seaweedfs.aisedge.local → MGMT_NODE_IP (via /etc/hosts in pod)
+  ├─ opens TCP to MGMT_NODE_IP:443
+  ├─ TLS ClientHello includes SNI=seaweedfs.aisedge.local
+  ├─ mgmt nginx-ingress matches Ingress, terminates TLS using seaweedfs-tls Secret
+  ├─ presents server cert (signed by ais-edge-ca)
+  ├─ mc validates cert against /root/.mc/certs/CAs/ca.crt (= ais-edge-ca.crt)
+  └─ chain verifies → S3 PUT proceeds over TLS
+```
+
+**CA rotation:**
+
+When the CA is approaching expiry (or in a compromise scenario), use `scripts/rotate-ca.sh`:
+
+```bash
+# Phase 1: issue NEW CA + push bundle (old + new) to all edges
+./scripts/rotate-ca.sh --phase=1
+
+# Wait 14-30 days for renewal cycles to settle.
+# During this window: BOTH CAs are trusted on edges. Server certs still
+# signed by the OLD CA. Pipeline keeps working.
+
+# Phase 2: switch the Issuer to NEW, re-issue all server certs, drop OLD from bundle
+./scripts/rotate-ca.sh --phase=2
+```
+
+Use `--dry-run` first to preview. Test in staging before running in production.
+
 ## Uninstall
 
 ```bash
@@ -681,18 +957,26 @@ Everything else remains the same.
 ```
 
 This removes everything: edge workers, SeaweedFS data, hosted clusters, k0smotron, and
-optionally k0s itself (if installed fresh).
+optionally k0s itself (if installed fresh). Resources removed include:
+- ingress-nginx (helm release + namespace)
+- ais-edge-ca Issuer + Secret + exported `ais-edge-ca.crt`
+- /etc/hosts entries on management and edge VMs
+- /etc/haproxy/certs/ on each edge worker
 
 ## Network Ports
 
-| From | To | Port | Purpose |
-|------|-----|------|---------|
-| Edge | Management | 30443 | k0s API + konnectivity tunnel |
-| Edge | Management | 30132 | Konnectivity (additional) |
-| Edge | Management | 31090 | SeaweedFS S3 uploads |
-| Edge | Management | 31091 | SeaweedFS master UI (admin only) |
-| Edge | Management | 31092 | SeaweedFS filer UI (admin only) |
-| Management | XNAT | 443 | XNAT REST API uploads |
-| Management | Edge | 22 | SSH (initial setup only) |
+A single TLS port carries all edge ↔ management traffic. SNI on the
+nginx-ingress controller routes to the right backend.
 
-All edge traffic is **outbound only**.
+| From | To | Port | Purpose | Encrypted? |
+|------|-----|------|---------|---|
+| Edge | Management | **443** | All edge traffic, SNI-routed: `seaweedfs.aisedge.local`, `k0s.aisedge.local`, `konnect.aisedge.local` | TLS — server cert signed by `ais-edge-ca` |
+| Management | XNAT | 443 | XNAT REST API uploads | HTTPS |
+| Management | Edge | 22 | SSH (initial setup only) | SSH |
+
+All edge traffic is **outbound only** (zero inbound on edge VMs).
+
+**Site IT firewall rule:** ALLOW outbound TCP from edge IP to management IP, dst-port 443.
+
+Admin-only endpoints (SeaweedFS master/filer UIs, S3 admin) are now ClusterIP-only on the
+management cluster — reach them via `kubectl port-forward`. No external port required.

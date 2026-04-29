@@ -39,6 +39,14 @@ spec:
         app: xnat-ingest
         component: sort
     spec:
+      # Phase 2: pod-level /etc/hosts so any in-pod tool can resolve the
+      # management hostnames without external DNS.
+      hostAliases:
+        - ip: "{{MGMT_NODE_IP}}"
+          hostnames:
+            - "{{SEAWEEDFS_HOSTNAME}}"
+            - "{{K0S_API_HOSTNAME}}"
+            - "{{KONNECTIVITY_HOSTNAME}}"
       containers:
         - name: sort
           image: ghcr.io/australian-imaging-service/xnat-ingest:latest
@@ -66,8 +74,11 @@ spec:
 # to SeaweedFS via the S3 API using `mc mirror`. mc handles multipart upload,
 # parallel chunks, checksums, and retry — same protocol as MinIO, AWS S3.
 #
-# Credentials on edge: write+list only on one bucket. Cannot read other
-# sites' data, cannot reach XNAT.
+# Phase 2:
+#   - S3_ENDPOINT switched to https://{{SEAWEEDFS_HOSTNAME}} (port 443)
+#   - The CA bundle Secret "ca-bundle" is mounted at /root/.mc/certs/CAs/
+#     so mc trusts the seaweedfs-tls cert (issued by ais-edge-ca-issuer)
+#   - hostAliases resolves the SNI hostname to MGMT_NODE_IP
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -88,12 +99,18 @@ spec:
         app: xnat-ingest
         component: s3-uploader
     spec:
+      hostAliases:
+        - ip: "{{MGMT_NODE_IP}}"
+          hostnames:
+            - "{{SEAWEEDFS_HOSTNAME}}"
+            - "{{K0S_API_HOSTNAME}}"
+            - "{{KONNECTIVITY_HOSTNAME}}"
       containers:
         - name: uploader
           image: minio/mc:latest
           env:
             - name: S3_ENDPOINT
-              value: "http://{{MGMT_NODE_IP}}:{{S3_NODEPORT}}"
+              value: "https://{{SEAWEEDFS_HOSTNAME}}"
             - name: S3_BUCKET
               value: "{{S3_BUCKET}}"
             - name: S3_ACCESS_KEY
@@ -142,8 +159,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            # mc reads PEM files in /root/.mc/certs/CAs/ as additional trust roots
+            - name: ca-bundle
+              mountPath: /root/.mc/certs/CAs
+              readOnly: true
       volumes:
         - name: data
           hostPath:
             path: /data/xnat-ingest
             type: DirectoryOrCreate
+        - name: ca-bundle
+          secret:
+            secretName: ca-bundle
+            optional: true

@@ -21,6 +21,24 @@ ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
      sudo chmod 777 /data/xnat-ingest/incoming /data/xnat-ingest/staging"
 echo "Data directories ready on ${NODE_IP}"
 
+# Phase 2: ensure namespace exists and push the CA bundle as a Secret. The
+# s3-uploader pod mounts this so mc can verify the seaweedfs-tls server cert
+# (issued by ais-edge-ca-issuer).
+KUBECONFIG="$EDGE_KC" kubectl create namespace xnat-ingest --dry-run=client -o yaml \
+    | KUBECONFIG="$EDGE_KC" kubectl apply -f -
+
+if [ -f "${REPO_DIR}/ais-edge-ca.crt" ]; then
+    KUBECONFIG="$EDGE_KC" kubectl create secret generic ca-bundle \
+        --namespace xnat-ingest \
+        --from-file=ca.crt="${REPO_DIR}/ais-edge-ca.crt" \
+        --dry-run=client -o yaml \
+        | KUBECONFIG="$EDGE_KC" kubectl apply -f -
+    echo "CA bundle Secret pushed to edge cluster"
+else
+    echo "WARNING: ais-edge-ca.crt not found at ${REPO_DIR} — run 02b-bootstrap-ca.sh first."
+    echo "         Phase 2 TLS path will fail until the CA bundle is in place."
+fi
+
 # Deploy manifests
 render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     S3_EDGE_ACCESS_KEY "$EDGE_ACCESS_KEY" \
@@ -30,18 +48,27 @@ render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     INGEST_WAIT_PERIOD "$INGEST_WAIT_PERIOD" \
     S3_BUCKET "$S3_BUCKET" \
     MGMT_NODE_IP "$MGMT_NODE_IP" \
-    S3_NODEPORT "$S3_NODEPORT" \
+    SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
+    K0S_API_HOSTNAME "$K0S_API_HOSTNAME" \
+    KONNECTIVITY_HOSTNAME "$KONNECTIVITY_HOSTNAME" \
+    INGRESS_PORT "$INGRESS_PORT" \
     | KUBECONFIG="$EDGE_KC" kubectl apply -f -
 
 echo "Waiting for pods..."
 sleep 30
 KUBECONFIG="$EDGE_KC" kubectl get pods -n xnat-ingest -o wide
 
-# Test SeaweedFS reachability from edge
-echo "Testing SeaweedFS from edge..."
-SHTTP=$(ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
-    "curl -s -o /dev/null -w '%{http_code}' http://${MGMT_NODE_IP}:${S3_NODEPORT}/" || echo "000")
-echo "SeaweedFS S3 endpoint from edge: HTTP ${SHTTP}"
+# Verify the TLS path from the edge VM. Phase 2 has no HTTP fallback —
+# only :443 is exposed. Expect HTTP 403 (S3 unauthenticated GET on /).
+echo "Verifying TLS path from edge VM..."
+if [ -f "${REPO_DIR}/ais-edge-ca.crt" ]; then
+    scp -q ${SSH_KEY_OPT} "${REPO_DIR}/ais-edge-ca.crt" "${EDGE_SSH}:/tmp/ais-edge-ca.crt"
+    TLS_HTTP=$(ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
+        "curl -s -o /dev/null -w '%{http_code}' --cacert /tmp/ais-edge-ca.crt https://${SEAWEEDFS_HOSTNAME}/" \
+        || echo "000")
+    ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "rm -f /tmp/ais-edge-ca.crt"
+    echo "SeaweedFS HTTPS (Ingress :${INGRESS_PORT}) from edge: HTTP ${TLS_HTTP:-000}  (expect 403)"
+fi
 
 echo "=== 07: Complete for ${CLUSTER_NAME} ==="
 echo "Test: scp file.dcm ${EDGE_SSH}:/data/xnat-ingest/incoming/"
