@@ -39,7 +39,7 @@ spec:
         app: xnat-ingest
         component: sort
     spec:
-      # Phase 2: pod-level /etc/hosts so any in-pod tool can resolve the
+      # Pod-level /etc/hosts so any in-pod tool can resolve the
       # management hostnames without external DNS.
       hostAliases:
         - ip: "{{MGMT_NODE_IP}}"
@@ -47,9 +47,14 @@ spec:
             - "{{SEAWEEDFS_HOSTNAME}}"
             - "{{K0S_API_HOSTNAME}}"
             - "{{KONNECTIVITY_HOSTNAME}}"
+            - "{{LOKI_HOSTNAME}}"
+            - "{{GRAFANA_HOSTNAME}}"
       containers:
         - name: sort
-          image: ghcr.io/australian-imaging-service/xnat-ingest:latest
+          # Locally-built fork with AIS_LOG_FORMAT=json support.
+          # Image distributed via `ctr image import`; never pull.
+          image: docker.io/library/xnat-ingest:logging-v1
+          imagePullPolicy: Never
           command: ["xnat-ingest", "sort"]
           args:
             - "/data/incoming"
@@ -61,6 +66,9 @@ spec:
             - "--wait-period"
             - "{{INGEST_WAIT_PERIOD}}"
             - "--delete"
+          env:
+            - name: AIS_LOG_FORMAT
+              value: "json"
           volumeMounts:
             - name: data
               mountPath: /data
@@ -105,6 +113,8 @@ spec:
             - "{{SEAWEEDFS_HOSTNAME}}"
             - "{{K0S_API_HOSTNAME}}"
             - "{{KONNECTIVITY_HOSTNAME}}"
+            - "{{LOKI_HOSTNAME}}"
+            - "{{GRAFANA_HOSTNAME}}"
       containers:
         - name: uploader
           image: minio/mc:latest
@@ -113,6 +123,8 @@ spec:
               value: "https://{{SEAWEEDFS_HOSTNAME}}"
             - name: S3_BUCKET
               value: "{{S3_BUCKET}}"
+            - name: EDGE_NAME
+              value: "{{CLUSTER_NAME}}"
             - name: S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -126,12 +138,21 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              echo "S3 uploader starting..."
-              echo "Endpoint: ${S3_ENDPOINT}"
-              echo "Bucket:   ${S3_BUCKET}"
+              # Each meaningful pipeline event is emitted as one line of JSON
+              # so the central log collector (Vector) can parse it without
+              # regexes. Schema: {ts, component, edge, event, session?, ...}
+              jlog() {
+                # $1=event, $2=session (optional), $3=msg (optional), $4=extra-json (optional)
+                printf '{"ts":"%s","component":"s3-uploader","edge":"%s","event":"%s","session":"%s","message":"%s"%s}\n' \
+                  "$(date -Iseconds)" "${EDGE_NAME}" "$1" "${2:-}" "${3:-}" "${4:-}"
+              }
+
+              jlog startup "" "s3-uploader starting endpoint=${S3_ENDPOINT} bucket=${S3_BUCKET}"
 
               # mc speaks vanilla S3 — works against MinIO, SeaweedFS, AWS S3, etc.
-              mc alias set edge "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}"
+              mc alias set edge "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" >/dev/null \
+                && jlog alias_configured "" "mc alias set edge OK" \
+                || jlog alias_failed "" "mc alias set edge FAILED"
 
               while true; do
                 for session_dir in /data/staging/*/; do
@@ -142,15 +163,25 @@ spec:
                     __build__|__invalid__|__metadata__|"*") continue ;;
                   esac
 
-                  echo "$(date -Iseconds) Uploading session: $session_name"
+                  bytes=$(du -sb "$session_dir" 2>/dev/null | awk '{print $1}')
+                  files=$(find "$session_dir" -type f | wc -l)
+                  jlog upload_started "$session_name" "" ",\"bytes\":${bytes:-0},\"files\":${files:-0}"
+
+                  start_ts=$(date +%s)
 
                   # mc mirror: rsync-for-S3. Multipart, parallel, resumable.
-                  if mc mirror --overwrite "$session_dir" \
+                  # --json makes mc itself emit one JSON line per object
+                  # transferred, indexed by Vector alongside our own events.
+                  if mc --json mirror --overwrite "$session_dir" \
                       "edge/${S3_BUCKET}/staged/${session_name}/"; then
-                    echo "$(date -Iseconds) SUCCESS: $session_name uploaded"
+                    duration=$(( $(date +%s) - start_ts ))
+                    jlog upload_completed "$session_name" "" \
+                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"duration_s\":${duration}"
                     rm -rf "$session_dir"
                   else
-                    echo "$(date -Iseconds) FAILED: $session_name — retry next cycle"
+                    duration=$(( $(date +%s) - start_ts ))
+                    jlog upload_failed "$session_name" "mc mirror non-zero exit; will retry next cycle" \
+                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"duration_s\":${duration}"
                   fi
                 done
 

@@ -1,0 +1,56 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Bucket size — ingest-bucket",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(seaweedfs_filer_total_size{bucket=\"ingest-bucket\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "type": "stat",
+      "title": "Volume disk used",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(seaweedfs_volumeServer_total_disk_size_bytes)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" } }
+    },
+    {
+      "type": "stat",
+      "title": "S3 requests/min (last 5m)",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(rate(seaweedfs_s3_request_total[5m])) * 60", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "S3 request rate by status",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum by (status) (rate(seaweedfs_s3_request_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }]
+    },
+    {
+      "type": "logs",
+      "title": "SeaweedFS log tail",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 13 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "expr": "{namespace=\"seaweedfs\"}", "refId": "A" }],
+      "options": { "showTime": true, "sortOrder": "Descending" }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ais-edge", "seaweedfs"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "AIS Edge — SeaweedFS Health",
+  "uid": "ais-seaweedfs-health",
+  "version": 1
+}

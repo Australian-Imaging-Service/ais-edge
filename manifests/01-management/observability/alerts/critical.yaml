@@ -1,0 +1,53 @@
+# =============================================================================
+# Critical alerts  —  pages on-call. These mean the pipeline is DOWN or
+# imminently breaking.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ais-edge-critical
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ais-edge-critical
+      interval: 30s
+      rules:
+        - alert: ManagementClusterDown
+          expr: up{job="apiserver"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "Management API server unreachable"
+            description: "kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane is down or partitioned."
+
+        - alert: SeaweedFSDown
+          expr: |
+            absent(up{job=~".*seaweedfs.*"}) == 1
+            or
+            (kube_deployment_status_replicas_ready{namespace="seaweedfs",deployment="seaweedfs"} == 0)
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: "SeaweedFS pod has been NotReady for 2+ minutes"
+            description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+
+        - alert: XNATUploadFailingForAllSessions
+          expr: |
+            sum(rate(ais_pipeline_events_total{event="upload_failed"}[10m])) > 0
+            and
+            sum(rate(ais_pipeline_events_total{event="upload_completed"}[10m])) == 0
+          for: 15m
+          labels: { severity: critical }
+          annotations:
+            summary: "All upload attempts have failed for 15+ minutes"
+            description: "No completed uploads in 15 min while failures keep coming. Likely XNAT outage or auth break. Check xnat-ingest-upload pod logs."
+
+        - alert: EdgeWorkerDisconnected
+          expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: "Edge worker {{ $labels.node }} NotReady for 5+ minutes"
+            description: "kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged sessions cannot upload."

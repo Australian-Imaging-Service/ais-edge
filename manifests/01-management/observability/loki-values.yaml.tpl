@@ -1,0 +1,111 @@
+# =============================================================================
+# Loki helm-chart values  —  log store (single-binary monolithic mode)
+# =============================================================================
+# Used by: scripts/02d-install-observability.sh
+#   helm install loki grafana/loki -n observability -f <rendered-this-file>
+#
+# Sizing rationale: one mgmt + a few edges sending JSON log lines through
+# Vector. Single-binary "monolithic" deployment handles this load fine —
+# the distributed mode (read/write/backend split) only pays off above
+# ~50 GB/day. Switch later if scale grows.
+#
+# Storage: chunks (the actual log data, gzipped) go to SeaweedFS via the S3
+# API. The boltdb-shipper index stays on a small local PV (chart default).
+#
+# Auth: no Loki-side multi-tenancy. We rely on:
+#   - the bearer-token Secret on each edge that Vector uses to push, and
+#   - nginx-ingress on the management host doing TLS termination on
+#     loki.aisedge.local (cert signed by ais-edge-ca).
+#
+# Retention: 30 days (per config/management.env: OBSERVABILITY_RETENTION_DAYS).
+# =============================================================================
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false               # we gate at the ingress with a bearer
+
+  schemaConfig:
+    configs:
+      - from: 2024-04-01
+        store: tsdb
+        object_store: s3
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+  storage:
+    type: s3
+    bucketNames:
+      chunks:    "{{LOGS_BUCKET}}"
+      ruler:     "{{LOGS_BUCKET}}"
+      admin:     "{{LOGS_BUCKET}}"
+    s3:
+      endpoint: http://seaweedfs.seaweedfs.svc.cluster.local:8333
+      region: us-east-1            # SeaweedFS ignores this; required by SDK
+      s3ForcePathStyle: true       # SeaweedFS speaks path-style addressing
+      insecure: true               # in-cluster plain HTTP (does not leave node)
+      accessKeyId: "{{LOKI_S3_ACCESS_KEY}}"
+      secretAccessKey: "{{LOKI_S3_SECRET_KEY}}"
+
+  limits_config:
+    retention_period: {{LOKI_RETENTION_HOURS}}h
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+    max_global_streams_per_user: 10000
+    ingestion_rate_mb: 16
+    ingestion_burst_size_mb: 32
+
+  compactor:
+    working_directory: /var/loki/compactor
+    retention_enabled: true
+    retention_delete_delay: 2h
+    retention_delete_worker_count: 150
+    delete_request_store: s3
+
+  commonConfig:
+    replication_factor: 1
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:  { cpu: 200m, memory: 512Mi }
+    limits:    { cpu: 2,    memory: 2Gi }
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+
+# Disable distributed-mode deployments (we use SingleBinary)
+read:    { replicas: 0 }
+write:   { replicas: 0 }
+backend: { replicas: 0 }
+
+# Disable sub-charts we don't need (chunks already on S3)
+minio:
+  enabled: false
+chunksCache:
+  enabled: false
+resultsCache:
+  enabled: false
+
+gateway:
+  enabled: false                  # we expose Loki via nginx-ingress directly
+
+# Loki itself — internal Service (ClusterIP). External access is via the
+# observability-ingress.yaml.tpl with SNI = loki.aisedge.local.
+service:
+  type: ClusterIP
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack
+  selfMonitoring:
+    enabled: false
+  lokiCanary:
+    enabled: false
+
+test:
+  enabled: false

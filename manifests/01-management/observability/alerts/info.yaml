@@ -1,0 +1,42 @@
+# =============================================================================
+# Info alerts  —  routine informational events. Slack-only by default;
+# do not page or email.
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ais-edge-info
+  namespace: observability
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: ais-edge-info
+      interval: 5m
+      rules:
+        - alert: CARotationDue
+          # Hard-coded threshold: ais-edge-ca is 10y; warn at year 9.
+          expr: |
+            (certmanager_certificate_expiration_timestamp_seconds{name="ais-edge-ca"}
+              - time()) / 86400 < 365
+          for: 1h
+          labels: { severity: info }
+          annotations:
+            summary: "Root CA ais-edge-ca expires within 1 year"
+            description: "Plan a rotation cycle. Use scripts/rotate-ca.sh --phase=1 to issue a successor and distribute the bundle."
+
+        - alert: CertificateRenewed
+          expr: |
+            changes(certmanager_certificate_renewal_timestamp_seconds[1h]) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} was renewed"
+            description: "cert-manager auto-renewed the certificate. No action required."
+
+        - alert: NewEdgeJoined
+          expr: |
+            changes(kube_node_info[10m]) > 0
+          labels: { severity: info }
+          annotations:
+            summary: "A new node joined a child cluster"
+            description: "kube_node_info changed for {{ $labels.cluster }}. If this was unplanned, investigate."

@@ -957,6 +957,28 @@ When the CA is approaching expiry (or in a compromise scenario), use `scripts/ro
 
 Use `--dry-run` first to preview. Test in staging before running in production.
 
+## Observability
+
+Optional log-aggregation, metrics, dashboarding, and alerting stack:
+
+- **Loki** stores logs (chunks land in a SeaweedFS `logs-bucket`)
+- **Prometheus** scrapes per-pod `/metrics` and stores time series
+- **Grafana** queries both, hosts pre-built dashboards
+- **Alertmanager** routes alerts via email (primary) and optional Slack
+- **Vector** runs as a DaemonSet on every worker (mgmt + edge) and ships
+  pod stdout to Loki over the same single 443 outbound port — adds two
+  more SNI routes (`grafana.aisedge.local`, `loki.aisedge.local`) to the
+  existing nginx-ingress; no new firewall rules.
+
+The stack is optional. With `ALERT_EMAIL_TO` blank in `config/management.env`
+the install script skips it cleanly. Set the email + SMTP vars and re-run
+`./install.sh` (or `bash scripts/02d-install-observability.sh` and
+`bash scripts/07b-deploy-edge-observability.sh <edge-entry>` directly).
+
+For per-component detail (what each one stores, what it has access to,
+what the failure modes are, how to scale or replace it), see
+[`docs/components/`](docs/components/).
+
 ## Konnectivity and Middleboxes
 
 Konnectivity is the reverse tunnel that lets the management API server reach

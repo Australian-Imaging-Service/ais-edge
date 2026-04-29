@@ -58,6 +58,29 @@ EOF
     }
 EOF
   done
+  # Loki writer identity (only used if observability stack is installed).
+  # Scoped Read/Write/List on the dedicated logs bucket; cannot touch
+  # the DICOM ingest bucket or other edges' data.
+  if [ -n "${LOKI_S3_ACCESS_KEY:-}" ] && [ -n "${LOGS_BUCKET:-}" ]; then
+    cat <<EOF
+    ,
+    {
+      "name": "loki-writer",
+      "credentials": [
+        {
+          "accessKey": "${LOKI_S3_ACCESS_KEY}",
+          "secretKey": "${LOKI_S3_SECRET_KEY}"
+        }
+      ],
+      "actions": [
+        "Read:${LOGS_BUCKET}",
+        "List:${LOGS_BUCKET}",
+        "Write:${LOGS_BUCKET}/*",
+        "Tagging:${LOGS_BUCKET}"
+      ]
+    }
+EOF
+  fi
   echo '  ]'
   echo '}'
 } > "$TMP_S3"
@@ -160,6 +183,13 @@ done
 
 mc mb "seaweed/${S3_BUCKET}" --ignore-existing 2>/dev/null
 echo "Bucket '${S3_BUCKET}' ready"
+
+# Pre-create the observability logs bucket if configured. Loki writes its
+# chunked logs here. Skipped if the observability stack isn't enabled.
+if [ -n "${LOGS_BUCKET:-}" ]; then
+    mc mb "seaweed/${LOGS_BUCKET}" --ignore-existing 2>/dev/null
+    echo "Bucket '${LOGS_BUCKET}' ready (Loki backend)"
+fi
 
 # Persist a localhost mc alias for admin convenience: subsequent admin runs
 # can `kubectl port-forward -n seaweedfs svc/seaweedfs 8333:8333 &` and then

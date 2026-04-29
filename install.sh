@@ -133,6 +133,12 @@ echo "--- Step 04: XNAT upload pod ---"
 confirm "Run step 04? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/04-deploy-xnat-upload.sh"
 
+echo ""
+echo "--- Step 02d: Observability (Loki + Prom + Grafana + Vector) ---"
+echo "  (skipped automatically if ALERT_EMAIL_TO is empty)"
+confirm "Run step 02d? (y/s to skip) "
+[[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02d-install-observability.sh"
+
 # ============================================================================
 echo ""
 echo "========================================"
@@ -160,6 +166,12 @@ for entry in "${EDGE_NODES[@]}"; do
     echo "--- Step 07: Deploy xnat-ingest on ${name} ---"
     confirm "Run step 07 for ${name}? (y/s to skip) "
     [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/07-deploy-edge-ingest.sh" "$entry"
+
+    echo ""
+    echo "--- Step 07b: Deploy Vector log shipper on ${name} (observability) ---"
+    echo "    (skipped automatically if observability stack not installed)"
+    confirm "Run step 07b for ${name}? (y/s to skip) "
+    [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/07b-deploy-edge-observability.sh" "$entry"
 done
 
 # ============================================================================

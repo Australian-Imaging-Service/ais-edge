@@ -63,11 +63,26 @@ spec:
             - "-s3"
             - "-s3.config=/etc/seaweedfs/s3.json"
             - "-s3.port=8333"
+            # Built-in Prometheus exposition. Each subsystem exposes its own
+            # /metrics endpoint on a dedicated port — Prometheus scrapes all
+            # four via the metrics-only ClusterIP Service (defined below).
+            - "-master.metricsPort=9324"
+            - "-volume.metricsPort=9325"
+            - "-filer.metricsPort=9326"
+            - "-s3.metricsPort=9327"
+            # S3 access log to stdout — Vector indexes every request as JSON
+            # so we get a per-object audit trail (PUT/GET, bucket, key, status,
+            # bytes, IP) for free, without instrumenting the application.
+            - "-s3.allowEmptyFolder"
           ports:
             - { containerPort: 8333, name: s3 }
             - { containerPort: 9333, name: master }
             - { containerPort: 8080, name: volume }
             - { containerPort: 8888, name: filer }
+            - { containerPort: 9324, name: m-master }
+            - { containerPort: 9325, name: m-volume }
+            - { containerPort: 9326, name: m-filer }
+            - { containerPort: 9327, name: m-s3 }
           volumeMounts:
             - name: data
               mountPath: /data
@@ -109,7 +124,7 @@ metadata:
   name: seaweedfs
   namespace: seaweedfs
 spec:
-  # Phase 2: ClusterIP only. External access goes through nginx-ingress on
+  # ClusterIP only. External access goes through nginx-ingress on
   # https://{{SEAWEEDFS_HOSTNAME}}:443 (TLS-terminated, signed by ais-edge-ca).
   # Master/filer admin UIs are reachable via:
   #   kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333  # master
@@ -127,3 +142,24 @@ spec:
     - port: 8888
       targetPort: 8888
       name: filer
+---
+# Separate metrics-only Service so Prometheus discovers four independent
+# scrape targets (one per SeaweedFS subsystem). Keeping them off the main
+# Service avoids polluting it with internal-only ports.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs-metrics
+  namespace: seaweedfs
+  labels:
+    app: seaweedfs
+    release: kube-prometheus-stack    # picked up by the operator's selector
+spec:
+  type: ClusterIP
+  selector:
+    app: seaweedfs
+  ports:
+    - { port: 9324, targetPort: 9324, name: m-master }
+    - { port: 9325, targetPort: 9325, name: m-volume }
+    - { port: 9326, targetPort: 9326, name: m-filer  }
+    - { port: 9327, targetPort: 9327, name: m-s3     }

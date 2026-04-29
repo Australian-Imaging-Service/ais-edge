@@ -55,6 +55,15 @@ kubectl delete namespace seaweedfs --ignore-not-found 2>/dev/null || true
 sudo rm -rf /data/seaweedfs
 
 echo ""
+echo "=== Removing observability stack (Loki + Prom + Grafana + Vector) ==="
+helm uninstall vector-mgmt          -n observability 2>/dev/null || true
+helm uninstall loki                 -n observability 2>/dev/null || true
+helm uninstall kube-prometheus-stack -n observability 2>/dev/null || true
+kubectl delete namespace observability --ignore-not-found 2>/dev/null || true
+# /etc/hosts marker added by 02d
+sudo sed -i '/# ais-edge observability hostnames/,+1d' /etc/hosts 2>/dev/null || true
+
+echo ""
 echo "=== Removing nginx-ingress (Phase 2 :443 listener) ==="
 helm uninstall ingress-nginx -n ingress-nginx 2>/dev/null || true
 kubectl delete namespace ingress-nginx --ignore-not-found 2>/dev/null || true

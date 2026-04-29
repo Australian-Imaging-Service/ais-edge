@@ -1,0 +1,221 @@
+# =============================================================================
+# Vector DaemonSet for the edge child cluster
+# =============================================================================
+# Tails kubelet's pod-log files on every worker, parses JSON, and pushes
+# batches to Loki on the management node over HTTPS — using the existing
+# nginx-ingress on :443 with SNI=loki.aisedge.local. The Loki bearer token
+# is stored in Secret loki-push-credentials (pushed by 07b at install time).
+#
+# Why this manifest is hand-written rather than a helm install on the edge:
+# we already use the Vector helm chart on the mgmt cluster; on the edge
+# we want a minimal footprint and tighter control over hostAliases + TLS.
+# A direct DaemonSet manifest is ~200 lines and matches what helm would
+# render anyway.
+#
+# Security:
+#   * NO hostNetwork (Vector only needs outbound TLS)
+#   * hostPath /var/log/pods is read-only
+#   * runAsNonRoot, readOnlyRootFilesystem, drop ALL capabilities
+#   * mounts our ais-edge-ca CA bundle to verify the Loki server cert
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector
+  namespace: logging
+---
+# Allow Vector to read pod metadata (for log enrichment).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vector
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vector
+subjects:
+  - kind: ServiceAccount
+    name: vector
+    namespace: logging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vector
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+  namespace: logging
+data:
+  vector.yaml: |
+    data_dir: /vector-data-dir
+    api:
+      enabled: false
+
+    sources:
+      kubelet_logs:
+        type: kubernetes_logs
+        auto_partial_merge: true
+
+    transforms:
+      add_cluster_label:
+        type: remap
+        inputs: [kubelet_logs]
+        source: |
+          .cluster = "{{CLUSTER_NAME}}"
+
+      parse_json_messages:
+        type: remap
+        inputs: [add_cluster_label]
+        source: |
+          parsed, err = parse_json(.message)
+          if err == null && is_object(parsed) {
+            . = merge(., parsed)
+          }
+
+      pipeline_counter:
+        type: log_to_metric
+        inputs: [parse_json_messages]
+        metrics:
+          - type: counter
+            field: event
+            name: events_total
+            tags:
+              event:     "{{ event }}"
+              cluster:   "{{ cluster }}"
+              component: "{{ component }}"
+
+    sinks:
+      loki:
+        type: loki
+        inputs: [parse_json_messages]
+        endpoint: https://{{LOKI_HOSTNAME}}
+        auth:
+          strategy: bearer
+          token: ${LOKI_BEARER_TOKEN}
+        tls:
+          ca_file: /etc/ssl/ais-edge-ca/ca.crt
+        encoding:
+          codec: json
+        labels:
+          cluster: "{{ cluster }}"
+          namespace: "{{ kubernetes.pod_namespace }}"
+          pod: "{{ kubernetes.pod_name }}"
+          container: "{{ kubernetes.container_name }}"
+          app: "{{ kubernetes.pod_labels.app }}"
+          component: "{{ kubernetes.pod_labels.component }}"
+          level: "{{ level }}"
+        remove_label_fields: true
+        out_of_order_action: accept
+        compression: gzip
+        batch:
+          max_bytes: 1048576
+          timeout_secs: 1
+
+      pipeline_metrics:
+        type: prometheus_exporter
+        inputs: [pipeline_counter]
+        address: 0.0.0.0:9598
+        default_namespace: ais_pipeline
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: vector
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vector
+    spec:
+      serviceAccountName: vector
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
+      hostAliases:
+        - ip: "{{MGMT_NODE_IP}}"
+          hostnames:
+            - "{{LOKI_HOSTNAME}}"
+            - "{{GRAFANA_HOSTNAME}}"
+            - "{{SEAWEEDFS_HOSTNAME}}"
+            - "{{K0S_API_HOSTNAME}}"
+            - "{{KONNECTIVITY_HOSTNAME}}"
+      tolerations:
+        - operator: Exists
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vector
+          image: timberio/vector:0.49.0-distroless-libc
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/vector/vector.yaml"]
+          env:
+            - name: LOKI_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: loki-push-credentials
+                  key: token
+          ports:
+            - { name: prom-exporter, containerPort: 9598 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: config,         mountPath: /etc/vector,         readOnly: true }
+            - { name: data,           mountPath: /vector-data-dir }
+            - { name: pod-logs,       mountPath: /var/log/pods,       readOnly: true }
+            - { name: container-logs, mountPath: /var/log/containers, readOnly: true }
+            - { name: ca-bundle,      mountPath: /etc/ssl/ais-edge-ca, readOnly: true }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 1,    memory: 512Mi }
+      volumes:
+        - name: config
+          configMap: { name: vector-config }
+        - name: data
+          emptyDir: {}
+        - name: pod-logs
+          hostPath: { path: /var/log/pods }
+        - name: container-logs
+          hostPath: { path: /var/log/containers }
+        - name: ca-bundle
+          secret:
+            secretName: ca-bundle
+            items: [{ key: ca.crt, path: ca.crt }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector
+  namespace: logging
+  labels:
+    app.kubernetes.io/name: vector
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vector
+  ports:
+    - { name: prom-exporter, port: 9598, targetPort: 9598 }

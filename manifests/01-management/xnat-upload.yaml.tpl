@@ -46,7 +46,11 @@ spec:
     spec:
       containers:
         - name: upload
-          image: ghcr.io/australian-imaging-service/xnat-ingest:latest
+          # Locally-built fork that adds AIS_LOG_FORMAT=json output (see
+          # docs/xnat-ingest-changes.md). Image was distributed via
+          # `ctr image import`; never pull from a registry.
+          image: docker.io/library/xnat-ingest:logging-v1
+          imagePullPolicy: Never
           command: ["xnat-ingest", "upload"]
           args:
             - "s3://{{S3_BUCKET}}/staged"
@@ -91,3 +95,7 @@ spec:
               value: "http://seaweedfs.seaweedfs.svc.cluster.local:8333"
             - name: AWS_DEFAULT_REGION
               value: "us-east-1"
+            # Emit one JSON object per log line so Vector indexes
+            # ts/level/logger/message without regex parsing.
+            - name: AIS_LOG_FORMAT
+              value: "json"

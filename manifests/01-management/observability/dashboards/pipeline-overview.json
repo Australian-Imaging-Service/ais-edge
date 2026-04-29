@@ -1,0 +1,100 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "DICOM files received (last 1h)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"file_arrived\"}[1h]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] }, "unit": "short" } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "type": "stat",
+      "title": "Sessions uploaded (last 1h)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"upload_completed\"}[1h]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null}] }, "unit": "short" } }
+    },
+    {
+      "type": "stat",
+      "title": "Upload failures (last 1h)",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"upload_failed\"}[1h]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] } } }
+    },
+    {
+      "type": "stat",
+      "title": "Active edge sites",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "count(count by (cluster) (ais_pipeline_events_total))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] } } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pipeline events per minute (by event type)",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (event) (rate(ais_pipeline_events_total[5m])) * 60", "legendFormat": "{{event}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 15 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean","lastNotNull","max"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Per-edge upload throughput (events/min)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_completed\"}[5m])) * 60", "legendFormat": "{{cluster}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Failure rate (upload_failed / upload_started)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_failed\"}[15m])) / clamp_min(sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_started\"}[15m])), 0.001)",
+          "legendFormat": "{{cluster}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 } }
+    },
+    {
+      "type": "logs",
+      "title": "Recent pipeline events (last 30 min)",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        { "expr": "{namespace=\"xnat-ingest\"} |= \"\\\"event\\\":\\\"\" | json", "refId": "A" }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ais-edge", "pipeline"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AIS Edge — Pipeline Overview",
+  "uid": "ais-pipeline-overview",
+  "version": 1,
+  "weekStart": ""
+}
