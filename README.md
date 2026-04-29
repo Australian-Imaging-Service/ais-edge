@@ -3,11 +3,6 @@
 A centrally-managed edge computing system for medical imaging data capture and upload to XNAT.
 Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
 
-> **Branch note: this is the `AB_dev` branch using SeaweedFS for S3 storage.**
-> The `main` branch uses MinIO. SeaweedFS was adopted on this branch after MinIO's
-> open-source repository was archived (Feb 2026). SeaweedFS is Apache 2.0, S3-compatible,
-> and lighter on resources than MinIO. The S3 client side (`mc`, `boto3`) is unchanged —
-> the storage backend is a swap-in replacement.
 
 ## Architecture
 
