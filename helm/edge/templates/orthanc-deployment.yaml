@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orthanc
+  template:
+    metadata:
+      labels:
+        app: orthanc
+    spec:
+      containers:
+      - name: orthanc
+        image: {{ .Values.orthanc.image }}
+        imagePullPolicy: {{ .Values.orthanc.imagePullPolicy }}
+        ports:
+        - containerPort: {{ .Values.orthanc.dicomPort }}
+          name: dicom
+          protocol: TCP
+        - containerPort: {{ .Values.orthanc.httpPort }}
+          name: http
+          protocol: TCP
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPath: orthanc-storage
+        - name: config
+          mountPath: /etc/orthanc/orthanc.json
+          subPath: orthanc.json
+        - name: credentials
+          mountPath: /etc/orthanc/users.json
+          subPath: users.json
+        resources:
+          {{- toYaml .Values.orthanc.resources | nindent 10 }}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ include "edge.pvcName" . }}
+      - name: config
+        configMap:
+          name: orthanc-config
+      - name: credentials
+        secret:
+          secretName: orthanc-credentials

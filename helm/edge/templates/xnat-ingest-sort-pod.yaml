@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: xnat-ingest-sort
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  containers:
+  - name: xnat-ingest-sort
+    image: {{ .Values.xnatIngest.image }}
+    imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+    env:
+    - name: XINGEST_DATATYPES
+      value: {{ .Values.xnatIngest.sort.datatypes | quote }}
+    - name: XINGEST_COPY_MODE
+      value: {{ .Values.xnatIngest.sort.copyMode | quote }}
+    - name: XINGEST_LOGGERS
+      value: {{ .Values.xnatIngest.sort.loggers | quote }}
+    {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
+    {{- include "edge.dicomTagEnv" . | nindent 4 }}
+    envFrom:
+    - configMapRef:
+        name: proxy-config  # injects any proxy settings (currently empty)
+    command:
+    - bash
+    - -c
+    - |
+      set -x
+      mkdir -p /data/cima-export/test /data/staging/sorted /data/LOGS
+      sleep infinity  # pod stays running so kubectl exec can be used to run sort manually
+      # To sort manually:
+      # kubectl exec -it xnat-ingest-sort -n {{ .Values.namespace }} -- xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
+    volumeMounts:
+    - name: storage
+      mountPath: /data
+  {{- include "edge.xnatIngestVolumes" . | nindent 2 }}

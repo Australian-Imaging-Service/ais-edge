@@ -1,0 +1,6 @@
+apiVersion: v2
+name: edge
+description: Edge data pipeline — DICOM ingestion, sorting, upload, and S3 sync
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

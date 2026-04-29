@@ -1,0 +1,86 @@
+namespace: ais-edge
+
+# Name for the PV and PVC. Override if running multiple releases in the same cluster.
+pvcName: ais-edge
+
+# Storage class for the pipeline PV/PVC.
+storageClassName: hostpath-pipeline
+
+storageClass:
+  create: true  # set to false if the storage class already exists on the cluster
+
+# Shared pipeline storage (PV + PVC)
+storage:
+  hostPath: /data/ais-edge
+  capacity: 1500Gi
+
+# Orthanc DICOM server
+orthanc:
+  image: jodogne/orthanc-plugins:1.12.11
+  imagePullPolicy: IfNotPresent
+  aet: ORTHANC                          # Application Entity Title, used by scanners to address Orthanc
+  dicomPort: 4242
+  httpPort: 8042
+  nodePorts:
+    dicom: 30042                        # external port on VM for DICOM (scanner > Orthanc)
+    http: 30842                         # external port on VM for HTTP (web UI + REST API)
+  ingestTranscoding: "1.2.840.10008.1.2.1"  # decompress all incoming DICOMs to uncompressed
+  dicomScuTimeout: 60     # seconds to wait for a DICOM association response
+
+  plugins:                                # plugins for viewer etc, can be altered
+    - /usr/local/share/orthanc/plugins/libStoneWebViewer.so
+    - /usr/local/share/orthanc/plugins/libOrthancDicomWeb.so
+    - /usr/local/share/orthanc/plugins/libOrthancGdcm.so
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "200m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+
+# Samba file share. exposes pipeline storage on the local network
+samba:
+  image: dockurr/samba:4.23.5
+  shareName: edge                       # SMB share name, connect via smb://user@<node-ip>/edge
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# xnat-ingest settings. shared across sort, upload, and associate pods
+xnatIngest:
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.9.1
+  imagePullPolicy: IfNotPresent
+  delete: "0"               # do not delete source files after processing
+  deidentify: "0"           # do not deidentify data
+  spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
+
+  # DICOM tag > XNAT field mapping, shared by all three pods
+  dicomTagMapping:
+    project: StudyDescription   # DICOM StudyDescription: XNAT project ID
+    subject: PatientName        # DICOM PatientName: XNAT subject ID
+    visit: PatientID            # DICOM PatientID: XNAT visit/session label
+    session: StudyInstanceUID   # DICOM StudyInstanceUID: unique session identifier
+
+  sort:
+    datatypes: "medimage/dicom-series"
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort.log"
+
+  upload:
+    alwaysInclude: "medimage/dicom-series"
+    verifySsl: "1"
+    useCurlJsession: "0"
+    requireManifest: "1"
+    loop: "-1"
+    tempdir: /data/tmp
+    loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
+
+  associate:
+    datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
