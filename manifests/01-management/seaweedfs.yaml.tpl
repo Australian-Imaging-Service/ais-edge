@@ -66,23 +66,20 @@ spec:
             # Built-in Prometheus exposition. Each subsystem exposes its own
             # /metrics endpoint on a dedicated port — Prometheus scrapes all
             # four via the metrics-only ClusterIP Service (defined below).
-            - "-master.metricsPort=9324"
-            - "-volume.metricsPort=9325"
-            - "-filer.metricsPort=9326"
-            - "-s3.metricsPort=9327"
-            # S3 access log to stdout — Vector indexes every request as JSON
-            # so we get a per-object audit trail (PUT/GET, bucket, key, status,
-            # bytes, IP) for free, without instrumenting the application.
-            - "-s3.allowEmptyFolder"
+            # `weed server` exposes ONE Prometheus endpoint that aggregates
+            # metrics for master + volume + filer + s3 (subsystem-specific
+            # flags like -master.metricsPort don't exist in 3.x).
+            - "-metricsPort=9324"
+            # NOTE: SeaweedFS already logs S3 requests to stdout by default
+            # (one line per PUT/GET with bucket/key/status/bytes). Vector
+            # indexes those, giving us a per-object audit trail without
+            # instrumenting the application. No extra flag required.
           ports:
             - { containerPort: 8333, name: s3 }
             - { containerPort: 9333, name: master }
             - { containerPort: 8080, name: volume }
             - { containerPort: 8888, name: filer }
-            - { containerPort: 9324, name: m-master }
-            - { containerPort: 9325, name: m-volume }
-            - { containerPort: 9326, name: m-filer }
-            - { containerPort: 9327, name: m-s3 }
+            - { containerPort: 9324, name: metrics }
           volumeMounts:
             - name: data
               mountPath: /data
@@ -159,7 +156,4 @@ spec:
   selector:
     app: seaweedfs
   ports:
-    - { port: 9324, targetPort: 9324, name: m-master }
-    - { port: 9325, targetPort: 9325, name: m-volume }
-    - { port: 9326, targetPort: 9326, name: m-filer  }
-    - { port: 9327, targetPort: 9327, name: m-s3     }
+    - { port: 9324, targetPort: 9324, name: metrics }

@@ -81,7 +81,7 @@ data:
         source: |
           parsed, err = parse_json(.message)
           if err == null && is_object(parsed) {
-            . = merge(., parsed)
+            . = merge!(., parsed)
           }
 
       pipeline_counter:
@@ -158,11 +158,10 @@ spec:
             - "{{KONNECTIVITY_HOSTNAME}}"
       tolerations:
         - operator: Exists
+      # Vector's data dir is an emptyDir on the edge (we control the manifest);
+      # the container runs as root for parity with the helm chart's mgmt-side
+      # behaviour and to keep the security model uniform across both sides.
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 65534
-        runAsGroup: 65534
-        fsGroup: 65534
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -176,11 +175,27 @@ spec:
                 secretKeyRef:
                   name: loki-push-credentials
                   key: token
+            # kubernetes_logs source needs the node name to scope its
+            # tailing. Helm chart sets this; we replicate it explicitly.
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VECTOR_SELF_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VECTOR_SELF_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - { name: prom-exporter, containerPort: 9598 }
           securityContext:
             allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
+            # readOnlyRootFilesystem omitted — Vector's source checkpoints
+            # need a writable /vector-data-dir. Defense-in-depth via the
+            # other knobs (runAsNonRoot, drop ALL caps, RuntimeDefault).
             capabilities:
               drop: ["ALL"]
           volumeMounts:

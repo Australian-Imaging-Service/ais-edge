@@ -25,17 +25,17 @@ role: Agent                          # one Vector pod per node (DaemonSet)
 hostNetwork: false                   # explicit — Vector does NOT need it
 dnsPolicy: ClusterFirst
 
-# Hardened security context — Vector reads logs but never writes anywhere.
+# Vector reads logs and writes its own checkpoint state to a hostPath
+# (/var/lib/vector by default). The hostPath is owned by root, so we
+# leave the container running as root rather than fighting the chart
+# defaults. Defense-in-depth via dropping all capabilities + seccomp;
+# the only host filesystem touched is /var/lib/vector (Vector-only) and
+# /var/log/pods (read-only).
 podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 65534
-  runAsGroup: 65534
-  fsGroup: 65534
   seccompProfile:
     type: RuntimeDefault
 securityContext:
   allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
   capabilities:
     drop: ["ALL"]
 
@@ -86,10 +86,14 @@ customConfig:
       source: |
         parsed, err = parse_json(.message)
         if err == null && is_object(parsed) {
-          . = merge(., parsed)
+          . = merge!(., parsed)
         }
 
     # Counter pipeline — convert log events to Prometheus metrics.
+    # Note the {{`...`}} escape: the Vector helm chart wraps customConfig
+    # with helm's `tpl` function, so we must hide our Vector-template
+    # syntax from Helm. The backtick-escape emits literal "{{ field }}"
+    # to the rendered ConfigMap which Vector then interprets at runtime.
     pipeline_counter:
       type: log_to_metric
       inputs: [parse_json_messages]
@@ -98,9 +102,9 @@ customConfig:
           field: event
           name: events_total
           tags:
-            event:     "{{ event }}"
-            cluster:   "{{ cluster }}"
-            component: "{{ component }}"
+            event:     "{{`{{ event }}`}}"
+            cluster:   "{{`{{ cluster }}`}}"
+            component: "{{`{{ component }}`}}"
 
   sinks:
     loki:
@@ -110,13 +114,13 @@ customConfig:
       encoding:
         codec: json
       labels:
-        cluster: "{{ cluster }}"
-        namespace: "{{ kubernetes.pod_namespace }}"
-        pod: "{{ kubernetes.pod_name }}"
-        container: "{{ kubernetes.container_name }}"
-        app: "{{ kubernetes.pod_labels.app }}"
-        component: "{{ kubernetes.pod_labels.component }}"
-        level: "{{ level }}"
+        cluster: "{{`{{ cluster }}`}}"
+        namespace: "{{`{{ kubernetes.pod_namespace }}`}}"
+        pod: "{{`{{ kubernetes.pod_name }}`}}"
+        container: "{{`{{ kubernetes.container_name }}`}}"
+        app: "{{`{{ kubernetes.pod_labels.app }}`}}"
+        component: "{{`{{ kubernetes.pod_labels.component }}`}}"
+        level: "{{`{{ level }}`}}"
       remove_label_fields: true
       out_of_order_action: accept
       compression: gzip
