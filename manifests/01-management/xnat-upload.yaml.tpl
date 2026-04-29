@@ -17,12 +17,12 @@ stringData:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: minio-credentials
+  name: s3-credentials
   namespace: xnat-upload
 type: Opaque
 stringData:
-  access-key: "{{MINIO_ROOT_USER}}"
-  secret-key: "{{MINIO_ROOT_PASSWORD}}"
+  access-key: "{{S3_ADMIN_ACCESS_KEY}}"
+  secret-key: "{{S3_ADMIN_SECRET_KEY}}"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -49,7 +49,7 @@ spec:
           image: ghcr.io/australian-imaging-service/xnat-ingest:latest
           command: ["xnat-ingest", "upload"]
           args:
-            - "s3://{{MINIO_BUCKET}}/staged"
+            - "s3://{{S3_BUCKET}}/staged"
             - "$(XINGEST_HOST)"
             - "--always-include"
             - "all"
@@ -58,8 +58,8 @@ spec:
             - "--dont-require-manifest"
             - "--dont-verify-ssl"
             - "--store-credentials"
-            - "$(MINIO_ACCESS_KEY)"
-            - "$(MINIO_SECRET_KEY)"
+            - "$(S3_ACCESS_KEY)"
+            - "$(S3_SECRET_KEY)"
           env:
             - name: XINGEST_HOST
               valueFrom:
@@ -76,17 +76,18 @@ spec:
                 secretKeyRef:
                   name: xnat-credentials
                   key: password
-            - name: MINIO_ACCESS_KEY
+            - name: S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: minio-credentials
+                  name: s3-credentials
                   key: access-key
-            - name: MINIO_SECRET_KEY
+            - name: S3_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: minio-credentials
+                  name: s3-credentials
                   key: secret-key
+            # Point boto3 at the in-cluster SeaweedFS service
             - name: AWS_ENDPOINT_URL
-              value: "http://minio.minio.svc.cluster.local:9000"
+              value: "http://seaweedfs.seaweedfs.svc.cluster.local:8333"
             - name: AWS_DEFAULT_REGION
               value: "us-east-1"

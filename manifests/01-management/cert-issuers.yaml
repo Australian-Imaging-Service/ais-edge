@@ -1,0 +1,47 @@
+# =============================================================================
+# Phase 2 — Self-signed CA managed by cert-manager
+# =============================================================================
+# Three resources:
+#   1. ClusterIssuer "selfsigned-bootstrap" — bootstrap-only, signs the root CA
+#   2. Certificate "ais-edge-ca"           — the 10-year root CA (isCA: true)
+#   3. ClusterIssuer "ais-edge-ca-issuer"  — uses the CA to sign server certs
+#
+# Server certs (SeaweedFS, etc.) reference "ais-edge-ca-issuer" as their
+# issuerRef. The public part of the CA is exported to ais-edge-ca.crt
+# by scripts/02b-bootstrap-ca.sh and distributed to edge clusters as a
+# Secret named "ca-bundle" (used by mc and any in-cluster client).
+# =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ais-edge-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: AIS Edge Root CA
+  secretName: ais-edge-ca-secret
+  duration: 87600h        # 10 years
+  renewBefore: 8760h      # renew at year 9
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: ais-edge-ca-issuer
+spec:
+  ca:
+    secretName: ais-edge-ca-secret
