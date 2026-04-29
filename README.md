@@ -23,7 +23,7 @@ routes to the right backend. Edge has zero inbound ports.
        │  │                               │         │                          │
        │  k0smotron operator              │         │  s3-uploader pod         │
        │  ├─ hosted control plane (CIP)   │         │   ├─ mc trusts ais-edge- │
-       │  │   ↳ Ingress for API+konect    │         │   │  ca via mounted     │
+       │  │   ↳ Ingress for API+konect    │         │   │  ca via mounted      │
        │  │                               │         │   │  ca-bundle Secret    │
        │  SeaweedFS (ClusterIP only)      │         │   └─ mc mirror →         │
        │  ├─ S3 :8333 (HTTP, in-cluster)  │         │      https://seaweedfs.. │
@@ -460,6 +460,18 @@ kubectl apply --server-side=true -f https://docs.k0smotron.io/stable/install.yam
 - **No automatic cleanup of SeaweedFS** — successfully uploaded sessions remain in
   SeaweedFS until manually deleted. Add an S3 lifecycle rule or a cleanup job for
   production.
+- **First-time install needs internet on the edge VM.** The edge worker pulls the
+  k0s binary from `get.k0s.sh` and container images from `quay.io`, `docker.io`, and
+  `ghcr.io` (k0s, konnectivity-agent, haproxy, xnat-ingest, minio/mc). Once installed,
+  the edge needs only the single 443 connection back to management — no further
+  registry access. For air-gapped sites, pre-stage the k0s binary at
+  `/usr/local/bin/k0s` and drop a `k0s airgap`-style image bundle into
+  `/var/lib/k0s/images/` on the edge VM before running the installer (k0s auto-imports
+  on start). A "build airgap bundle" helper script is not yet included.
+- **Konnectivity is HTTP/2 + gRPC over TLS.** Stateful firewalls or IDS appliances
+  that aggressively normalise TLS or block long-lived HTTP/2 streams can disrupt the
+  reverse tunnel — see the "Konnectivity and middleboxes" section below before
+  enabling the deployment behind a deep-inspection proxy.
 
 ## Scaling SeaweedFS
 
@@ -944,6 +956,56 @@ When the CA is approaching expiry (or in a compromise scenario), use `scripts/ro
 ```
 
 Use `--dry-run` first to preview. Test in staging before running in production.
+
+## Konnectivity and Middleboxes
+
+Konnectivity is the reverse tunnel that lets the management API server reach
+back into worker components (`kubectl exec`, `kubectl logs`, `kubectl
+port-forward`, metrics scraping). On the edge it runs as
+`konnectivity-agent`, which dials out to `https://konnect.aisedge.local:443`
+and keeps a long-lived **HTTP/2 + gRPC over TLS** connection open. The
+management nginx-ingress forwards the raw TLS bytes through to the
+konnectivity-server inside the hosted control plane (SSL passthrough — nginx
+never decrypts).
+
+This protocol works through every standards-compliant firewall, but a few
+classes of network appliance can disrupt it. Worth flagging for site IT:
+
+- **Deep-packet-inspection / TLS-intercepting proxies.** Devices that
+  terminate TLS to scan traffic break the tunnel. Konnectivity uses mutual
+  cert verification; an interception proxy presents its own cert which the
+  agent will reject (`x509: certificate signed by unknown authority`). The
+  fix at the site is either to **bypass interception for the management
+  IP** or **install the proxy's CA into the agent's trust store**, but the
+  cleanest answer is bypass.
+- **Aggressive HTTP/2 stream timeouts.** Some firewalls and L7 load
+  balancers drop HTTP/2 streams that are idle for a few minutes. The
+  konnectivity tunnel uses long-lived streams (often >1h) for keepalive
+  and watch traffic. If the appliance kills the stream, kubelet briefly
+  disconnects from the control plane and the agent reconnects — usually
+  invisible, but `kubectl exec` and `kubectl logs` may stall during the
+  reconnect. Configure the appliance with **idle timeout ≥ 60 minutes**
+  on outbound 443 to the management IP.
+- **gRPC-aware filtering / QUIC enforcement.** A few enterprise proxies
+  block gRPC on port 443 by default, or rewrite responses to force
+  HTTP/1.1. Konnectivity requires HTTP/2 end to end; HTTP/1.1 downgrade
+  breaks it. Allow plain HTTPS/HTTP-2 to the management IP without
+  protocol rewriting.
+- **Stateful firewalls with short connection-tracking tables.** Same idle-
+  timeout class of issue as above. A flow that sees no packets for ~5 min
+  may get evicted from the conntrack table; keepalive on the agent should
+  prevent it but is occasionally too sparse on tightly-tuned appliances.
+
+If `kubectl logs` or `kubectl exec` against a child cluster suddenly stops
+working ("No agent available" in the API server logs), check the
+konnectivity-agent pod: `KUBECONFIG=kubeconfig-<edge> kubectl get pods -n
+kube-system -l k8s-app=konnectivity-agent`. Restarts on the agent are the
+classic symptom of a middlebox kicking the tunnel.
+
+The data path (DICOM upload via `mc mirror` to SeaweedFS) does NOT use
+konnectivity — it is plain HTTPS REST and tolerates short connection drops
+naturally. Konnectivity disruption affects only operator visibility, not
+data integrity.
 
 ## Uninstall
 
