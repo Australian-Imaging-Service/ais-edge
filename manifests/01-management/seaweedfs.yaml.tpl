@@ -143,6 +143,11 @@ spec:
 # Separate metrics-only Service so Prometheus discovers four independent
 # scrape targets (one per SeaweedFS subsystem). Keeping them off the main
 # Service avoids polluting it with internal-only ports.
+#
+# NOTE on binding: `weed server -metricsPort=9324` listens on the pod IP,
+# not 127.0.0.1. `kubectl port-forward` fails because it tries to dial
+# inside the pod's loopback, but Prometheus scrapes via the Service IP
+# (cluster routing → pod IP) so scraping works fine.
 apiVersion: v1
 kind: Service
 metadata:
@@ -150,10 +155,32 @@ metadata:
   namespace: seaweedfs
   labels:
     app: seaweedfs
-    release: kube-prometheus-stack    # picked up by the operator's selector
+    release: kube-prometheus-stack
 spec:
   type: ClusterIP
   selector:
     app: seaweedfs
   ports:
     - { port: 9324, targetPort: 9324, name: metrics }
+---
+# ServiceMonitor — without this, the chart's Prometheus operator never
+# scrapes the seaweedfs-metrics Service. The `release` label here is what
+# the operator's serviceMonitorSelector matches on (configured in
+# kube-prometheus-stack-values.yaml.tpl).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: seaweedfs-metrics
+  namespace: seaweedfs
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [seaweedfs]
+  selector:
+    matchLabels:
+      app: seaweedfs
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

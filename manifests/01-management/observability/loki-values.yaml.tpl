@@ -66,6 +66,34 @@ loki:
   commonConfig:
     replication_factor: 1
 
+  # =========================================================================
+  # Ruler — runs LogQL alert rules on a schedule and emits firing alerts
+  # to Alertmanager. This replaces a separate Prometheus path for any
+  # log-derived alerts (which a mgmt-side Prometheus could not collect from
+  # the edge child clusters across the konnectivity boundary anyway).
+  #
+  # Rule files are mounted as a ConfigMap at /etc/loki/rules/fake/ — `fake`
+  # is Loki's tenant ID when auth_enabled is false. The sidecar container
+  # in the loki Helm chart watches ConfigMaps with the configured label
+  # and writes them into that path so this stays declarative.
+  #
+  # Alertmanager URL points at the existing kube-prometheus-stack
+  # alertmanager Service; receivers (email/Slack) configured via
+  # ALERT_* env vars in config/management.env continue to handle these.
+  # =========================================================================
+  rulerConfig:
+    storage:
+      type: local
+      local:
+        directory: /etc/loki/rules
+    rule_path: /var/loki/rules-runtime
+    alertmanager_url: http://kube-prometheus-stack-alertmanager.observability.svc.cluster.local:9093
+    enable_alertmanager_v2: true
+    enable_api: true
+    ring:
+      kvstore:
+        store: inmemory
+
 singleBinary:
   replicas: 1
   resources:
@@ -75,6 +103,17 @@ singleBinary:
     enabled: true
     size: 10Gi
     storageClass: local-path
+  # Mount the loki-ruler-rules ConfigMap at /etc/loki/rules/fake/ — the
+  # ruler reads each YAML file there as a rule group. `fake` is Loki's
+  # synthetic tenant ID when auth_enabled is false.
+  extraVolumes:
+    - name: rules
+      configMap:
+        name: loki-ruler-rules
+  extraVolumeMounts:
+    - name: rules
+      mountPath: /etc/loki/rules/fake
+      readOnly: true
 
 # Disable distributed-mode deployments (we use SingleBinary)
 read:    { replicas: 0 }

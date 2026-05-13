@@ -163,9 +163,26 @@ spec:
                     __build__|__invalid__|__metadata__|"*") continue ;;
                   esac
 
-                  bytes=$(du -sb "$session_dir" 2>/dev/null | awk '{print $1}')
-                  files=$(find "$session_dir" -type f | wc -l)
-                  jlog upload_started "$session_name" "" ",\"bytes\":${bytes:-0},\"files\":${files:-0}"
+                  # The minio/mc image is distroless — only `mc`, busybox shell,
+                  # and a small set of coreutils. `awk` and `find` are NOT
+                  # included, so the previous `awk '{print $1}'` and `find ...`
+                  # both errored with "not found" and the structured event
+                  # carried bytes:0/files:0 even on successful uploads.
+                  # These shell-builtin equivalents work in the bare busybox sh:
+                  #   * du -sb prints "<bytes><tab><path>" — strip the tail with
+                  #     parameter expansion to keep just the number.
+                  #   * file count is total `du -a` lines (files+dirs) minus
+                  #     `du` lines (dirs only); both `du` and `wc -l` are
+                  #     present in the image since the original `find | wc -l`
+                  #     pipeline was failing on `find`, not `wc`.
+                  bytes_raw=$(du -sb "$session_dir" 2>/dev/null)
+                  bytes=${bytes_raw%%[[:space:]]*}
+                  bytes=${bytes:-0}
+                  total_lines=$(du -a "$session_dir" 2>/dev/null | wc -l)
+                  dir_lines=$(du "$session_dir" 2>/dev/null | wc -l)
+                  files=$((total_lines - dir_lines))
+                  [ "$files" -lt 0 ] && files=0
+                  jlog upload_started "$session_name" "" ",\"bytes\":${bytes},\"files\":${files}"
 
                   start_ts=$(date +%s)
 

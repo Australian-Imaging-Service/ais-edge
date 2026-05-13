@@ -1,6 +1,10 @@
 # =============================================================================
-# Critical alerts  —  pages on-call. These mean the pipeline is DOWN or
-# imminently breaking.
+# Critical alerts (Prometheus / kube-state-metrics) — pages on-call.
+#
+# Pipeline-event critical alerts (XNATUploadFailingForAllSessions, etc.) live
+# in loki-ruler-rules.yaml, evaluated by Loki's ruler over the JSON event
+# stream. The alerts in this file all derive from K8s/cert-manager metrics
+# scraped directly by mgmt Prometheus.
 # =============================================================================
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -24,25 +28,12 @@ spec:
 
         - alert: SeaweedFSDown
           expr: |
-            absent(up{job=~".*seaweedfs.*"}) == 1
-            or
-            (kube_deployment_status_replicas_ready{namespace="seaweedfs",deployment="seaweedfs"} == 0)
+            kube_deployment_status_replicas_ready{namespace="seaweedfs",deployment="seaweedfs"} == 0
           for: 2m
           labels: { severity: critical }
           annotations:
             summary: "SeaweedFS pod has been NotReady for 2+ minutes"
             description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
-
-        - alert: XNATUploadFailingForAllSessions
-          expr: |
-            sum(rate(ais_pipeline_events_total{event="upload_failed"}[10m])) > 0
-            and
-            sum(rate(ais_pipeline_events_total{event="upload_completed"}[10m])) == 0
-          for: 15m
-          labels: { severity: critical }
-          annotations:
-            summary: "All upload attempts have failed for 15+ minutes"
-            description: "No completed uploads in 15 min while failures keep coming. Likely XNAT outage or auth break. Check xnat-ingest-upload pod logs."
 
         - alert: EdgeWorkerDisconnected
           expr: kube_node_status_condition{condition="Ready",status="true"} == 0

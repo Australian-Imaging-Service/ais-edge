@@ -97,7 +97,11 @@ helm upgrade --install kube-prometheus-stack \
     --values "$TMP_KPS" \
     --wait --timeout 600s
 
-# 6. Loki (single-binary, S3 backend)
+# 6. Loki ruler rules (must exist BEFORE Loki starts — singleBinary mounts
+# this ConfigMap as a volume; without it, the pod fails to schedule).
+kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/loki-ruler-rules.yaml"
+
+# 7. Loki (single-binary, S3 backend, ruler enabled)
 TMP_LOKI=$(mktemp /tmp/loki-values-XXXXXX.yaml)
 trap "rm -f $TMP_AM $TMP_KPS $TMP_LOKI" EXIT
 LOKI_RETENTION_HOURS=$((OBSERVABILITY_RETENTION_DAYS * 24))
@@ -144,7 +148,9 @@ render "${REPO_DIR}/manifests/01-management/observability/observability-ingress.
     LOKI_HOSTNAME    "$LOKI_HOSTNAME" \
     | kubectl apply -f -
 
-# 10. PrometheusRule files (alert definitions)
+# 10. PrometheusRule files for K8s/cert-manager-derived alerts. Alerts
+# derived from JSON pipeline events live in loki-ruler-rules.yaml (already
+# applied above before Loki started).
 kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/alerts/"
 
 # 11. Dashboards as ConfigMaps with the grafana_dashboard label

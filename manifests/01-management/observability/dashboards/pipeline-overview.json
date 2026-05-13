@@ -11,8 +11,12 @@
       "type": "stat",
       "title": "DICOM files received (last 1h)",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"file_arrived\"}[1h]))", "refId": "A" }],
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",app=\"xnat-ingest\",component=\"sort\"} |~ \"Loading\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] }, "unit": "short" } },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "graphMode": "area", "colorMode": "value" }
     },
@@ -20,33 +24,83 @@
       "type": "stat",
       "title": "Sessions uploaded (last 1h)",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"upload_completed\"}[1h]))", "refId": "A" }],
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null}] }, "unit": "short" } }
     },
     {
       "type": "stat",
       "title": "Upload failures (last 1h)",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(ais_pipeline_events_total{event=\"upload_failed\"}[1h]))", "refId": "A" }],
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
       "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] } } }
     },
     {
       "type": "stat",
       "title": "Active edge sites",
+      "description": "Distinct cluster labels seen in Loki in the last hour, excluding the management cluster.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "count(count by (cluster) (ais_pipeline_events_total))", "refId": "A" }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] } } }
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "count(count by (cluster) (count_over_time({cluster!=\"\",cluster!=\"mgmt\"}[1h])))",
+        "queryType": "instant",
+        "refId": "A"
+      }]
+    },
+    {
+      "type": "stat",
+      "title": "Invalid sessions (last 1h)",
+      "description": "Sessions rejected by xnat-ingest sort because of missing/invalid DICOM headers (e.g. AccessionNumber). These land in /data/staging/__invalid__/ on the edge VM and require a human to rename and re-stage. Each session counts once: we anchor on the per-session error message and ignore the secondary 'Staging completed with N errors' summary line that repeats the same content.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":10}] }, "unit": "short" } }
+    },
+    {
+      "type": "stat",
+      "title": "Sort cycles with errors (last 1h)",
+      "description": "Each xnat-ingest sort cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex anchors only on the prefix because RE2's `.` does not match the newlines that follow the colon in the multi-line summary.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":10}] }, "unit": "short" } }
+    },
+    {
+      "type": "logs",
+      "title": "Recent invalid sessions (last 1h)",
+      "description": "Each line is a session that xnat-ingest sort routed to /data/staging/__invalid__/. Operator action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "{namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
+        "refId": "A"
+      }],
+      "options": { "showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }
     },
     {
       "type": "timeseries",
       "title": "Pipeline events per minute (by event type)",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "sum by (event) (rate(ais_pipeline_events_total[5m])) * 60", "legendFormat": "{{event}}", "refId": "A" }
+        { "expr": "sum by (event) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json [1m]))", "legendFormat": "{{event}}", "refId": "A" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 15 } } },
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean","lastNotNull","max"] } }
@@ -55,9 +109,9 @@
       "type": "timeseries",
       "title": "Per-edge upload throughput (events/min)",
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_completed\"}[5m])) * 60", "legendFormat": "{{cluster}}", "refId": "A" }
+        { "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1m]))", "legendFormat": "{{cluster}}", "refId": "A" }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } }
     },
@@ -65,10 +119,10 @@
       "type": "timeseries",
       "title": "Failure rate (upload_failed / upload_started)",
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_failed\"}[15m])) / clamp_min(sum by (cluster) (rate(ais_pipeline_events_total{event=\"upload_started\"}[15m])), 0.001)",
+          "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [15m])) / clamp_min(sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_started\" [15m])), 0.001)",
           "legendFormat": "{{cluster}}",
           "refId": "A"
         }
@@ -81,9 +135,20 @@
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "{namespace=\"xnat-ingest\"} |= \"\\\"event\\\":\\\"\" | json", "refId": "A" }
+        {
+          "expr": "{namespace=\"xnat-ingest\"} | json | event != \"\" | line_format \"[{{.cluster}}/{{.component}}] event={{.event}}{{if .session}} session={{.session}}{{end}}{{if .duration_s}} duration={{.duration_s}}s{{end}}{{if .files}} files={{.files}}{{end}}{{if .bytes}} bytes={{.bytes}}{{end}} — {{.message}}\"",
+          "refId": "A"
+        }
       ],
-      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
     }
   ],
   "refresh": "30s",
@@ -95,6 +160,6 @@
   "timezone": "browser",
   "title": "AIS Edge — Pipeline Overview",
   "uid": "ais-pipeline-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

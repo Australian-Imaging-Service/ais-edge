@@ -94,9 +94,42 @@ grafana:
     accessModes: ["ReadWriteOnce"]
     size: 5Gi
 
-  # Datasources — Loki and Prometheus pre-wired
+  # PVC is RWO, so a rolling update deadlocks: the new pod can't init-chown
+  # the volume while the old pod still holds it, and the old pod won't
+  # terminate until the new one is Ready. Recreate strategy avoids the
+  # deadlock — brief downtime during upgrades is fine for an internal tool.
+  deploymentStrategy:
+    type: Recreate
+
+  # Disable the init-chown-data init container. Once Grafana has run once,
+  # subdirs like pdf/csv/png are mode 700 owned by 472:472. The init
+  # container runs as root with capabilities drop:ALL, add:[CHOWN] — without
+  # CAP_DAC_OVERRIDE root can't traverse those 700 dirs, so `chown -R` errors
+  # with Permission denied. Ownership is already correct, so the chown is a
+  # no-op anyway. fsGroup on the pod handles initial ownership for new PVCs.
+  initChownData:
+    enabled: false
+
+  # Datasources — Loki and Prometheus pre-wired.
+  # Explicit uid: 'loki' so dashboards in dashboards/*.json that reference
+  # `"datasource": {"type": "loki", "uid": "loki"}` resolve correctly.
+  # (The KPS chart's built-in Prometheus datasource already has uid:
+  # prometheus, so dashboards referencing that work out of the box.)
+  #
+  # deleteDatasources — Grafana's provisioner addresses datasources by UID
+  # internally. If a previous install (or chart upgrade) created `Loki`
+  # with an auto-generated UID, the row persists in grafana.db on the PVC.
+  # Re-provisioning the same name with a new explicit UID then errors with
+  # "Datasource provisioning error: data source not found" because the
+  # provisioner can't find the new UID in the DB. Listing the name here
+  # tells Grafana to delete the existing row by name first, so the explicit
+  # UID can be applied cleanly. Safe to keep — it's a no-op on fresh DBs.
+  deleteDatasources:
+    - name: Loki
+      orgId: 1
   additionalDataSources:
     - name: Loki
+      uid: loki
       type: loki
       access: proxy
       url: http://loki.observability.svc.cluster.local:3100

@@ -75,6 +75,10 @@ data:
         source: |
           .cluster = "{{CLUSTER_NAME}}"
 
+      # Parse any JSON-formatted log lines (xnat-ingest sort and s3-uploader
+       # both emit JSON). Merging the parsed keys into the event makes
+       # `event`, `component`, `session` first-class fields for LogQL
+       # `| json` queries and Loki ruler rules over on the mgmt cluster.
       parse_json_messages:
         type: remap
         inputs: [add_cluster_label]
@@ -83,18 +87,6 @@ data:
           if err == null && is_object(parsed) {
             . = merge!(., parsed)
           }
-
-      pipeline_counter:
-        type: log_to_metric
-        inputs: [parse_json_messages]
-        metrics:
-          - type: counter
-            field: event
-            name: events_total
-            tags:
-              event:     "{{ event }}"
-              cluster:   "{{ cluster }}"
-              component: "{{ component }}"
 
     sinks:
       loki:
@@ -106,8 +98,17 @@ data:
           token: ${LOKI_BEARER_TOKEN}
         tls:
           ca_file: /etc/ssl/ais-edge-ca/ca.crt
+        # Slim the JSON body — kubernetes_logs metadata is already
+        # extracted into stream labels below, so emitting it inside the
+        # body too bloats storage and clutters the Grafana live tail.
         encoding:
           codec: json
+          except_fields:
+            - kubernetes
+            - file
+            - source_type
+            - stream
+            - tags
         labels:
           cluster: "{{ cluster }}"
           namespace: "{{ kubernetes.pod_namespace }}"
@@ -122,12 +123,6 @@ data:
         batch:
           max_bytes: 1048576
           timeout_secs: 1
-
-      pipeline_metrics:
-        type: prometheus_exporter
-        inputs: [pipeline_counter]
-        address: 0.0.0.0:9598
-        default_namespace: ais_pipeline
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -189,8 +184,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-          ports:
-            - { name: prom-exporter, containerPort: 9598 }
+          # Vector on the edge is a pure log shipper — it pushes outbound
+          # to Loki on the mgmt cluster and does not expose any in-cluster
+          # endpoint. Pipeline-event alerts live in Loki's ruler over the
+          # logs themselves; see manifests/01-management/observability/
+          # loki-ruler-rules.yaml.
           securityContext:
             allowPrivilegeEscalation: false
             # readOnlyRootFilesystem omitted — Vector's source checkpoints
@@ -220,17 +218,3 @@ spec:
           secret:
             secretName: ca-bundle
             items: [{ key: ca.crt, path: ca.crt }]
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: vector
-  namespace: logging
-  labels:
-    app.kubernetes.io/name: vector
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: vector
-  ports:
-    - { name: prom-exporter, port: 9598, targetPort: 9598 }

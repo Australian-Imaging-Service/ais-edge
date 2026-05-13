@@ -80,6 +80,8 @@ customConfig:
         .cluster = "{{CLUSTER_LABEL}}"
 
     # If the log message is JSON, parse it and merge the keys into the event.
+    # This lets fields like `event`, `component`, `session` become first-class
+    # for LogQL `| json` queries and Loki ruler rules downstream.
     parse_json_messages:
       type: remap
       inputs: [add_cluster_label]
@@ -89,30 +91,27 @@ customConfig:
           . = merge!(., parsed)
         }
 
-    # Counter pipeline — convert log events to Prometheus metrics.
-    # Note the {{`...`}} escape: the Vector helm chart wraps customConfig
-    # with helm's `tpl` function, so we must hide our Vector-template
-    # syntax from Helm. The backtick-escape emits literal "{{ field }}"
-    # to the rendered ConfigMap which Vector then interprets at runtime.
-    pipeline_counter:
-      type: log_to_metric
-      inputs: [parse_json_messages]
-      metrics:
-        - type: counter
-          field: event
-          name: events_total
-          tags:
-            event:     "{{`{{ event }}`}}"
-            cluster:   "{{`{{ cluster }}`}}"
-            component: "{{`{{ component }}`}}"
-
   sinks:
     loki:
       type: loki
       inputs: [parse_json_messages]
       endpoint: http://loki.observability.svc.cluster.local:3100
+      # Slim down the JSON body before shipping. The `kubernetes_logs`
+      # source enriches every event with a fat metadata block (file path,
+      # container_id, image, node_labels, pod_ips, pod_uid, etc.) that
+      # we already extract into Loki stream labels in `labels:` below.
+      # Re-emitting it inside each log line bloats storage and makes the
+      # Live tail panel in Grafana unreadable. except_fields drops them
+      # from the body but the sink still has the full event in scope, so
+      # the label templates below resolve correctly.
       encoding:
         codec: json
+        except_fields:
+          - kubernetes
+          - file
+          - source_type
+          - stream
+          - tags
       labels:
         cluster: "{{`{{ cluster }}`}}"
         namespace: "{{`{{ kubernetes.pod_namespace }}`}}"
@@ -128,24 +127,12 @@ customConfig:
         max_bytes: 1048576
         timeout_secs: 1
 
-    pipeline_metrics:
-      type: prometheus_exporter
-      inputs: [pipeline_counter]
-      address: 0.0.0.0:9598
-      default_namespace: ais_pipeline
-
-# Expose the Prometheus exporter as a Service for kube-prometheus-stack
-# to scrape via ServiceMonitor.
+# Vector on the management cluster only pushes logs OUT to Loki — it does
+# not expose any in-cluster endpoint. Disable the chart's default Service
+# and the (silently broken) serviceMonitor knob. Pipeline-event alerts run
+# inside Loki's ruler over the same logs; see manifests/01-management/
+# observability/loki-ruler-rules.yaml for the rule definitions.
 service:
-  enabled: true
-  type: ClusterIP
-  ports:
-    - name: prom-exporter
-      port: 9598
-      targetPort: 9598
-      protocol: TCP
-
+  enabled: false
 serviceMonitor:
-  enabled: true
-  additionalLabels:
-    release: kube-prometheus-stack
+  enabled: false

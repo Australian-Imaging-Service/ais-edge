@@ -1,6 +1,10 @@
 # =============================================================================
-# Warning alerts  —  notify but don't page. Indicate degraded behaviour
-# that needs attention but isn't an outage.
+# Warning alerts (Prometheus / kube-state-metrics) — notify, don't page.
+#
+# Pipeline-event warning alerts (SessionUploadStalled, S3UploaderRetryStorm,
+# XNATBacklogGrowing, DICOMValidationFailureSpike) live in
+# loki-ruler-rules.yaml — those are derived from JSON events in Loki, not
+# from any Prometheus metric.
 # =============================================================================
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
@@ -14,46 +18,6 @@ spec:
     - name: ais-edge-warning
       interval: 30s
       rules:
-        - alert: SessionUploadStalled
-          # A session was staged (event=session_staged) but no
-          # corresponding upload_completed event in the next 15 min.
-          # Tracked by counting completed-minus-staged per session label.
-          expr: |
-            (sum by (cluster,session) (
-              rate(ais_pipeline_events_total{event="upload_started"}[15m])
-            ) > 0)
-            unless on (cluster,session) (
-              sum by (cluster,session) (
-                rate(ais_pipeline_events_total{event="upload_completed"}[15m])
-              ) > 0
-            )
-          for: 5m
-          labels: { severity: warning }
-          annotations:
-            summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes"
-            description: "mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry."
-
-        - alert: S3UploaderRetryStorm
-          expr: increase(ais_pipeline_events_total{event="upload_failed"}[10m]) > 5
-          for: 2m
-          labels: { severity: warning }
-          annotations:
-            summary: ">5 upload failures in 10 minutes on {{ $labels.cluster }}"
-            description: "Edge s3-uploader is in a retry loop. Likely transient network or a credential issue. Check pod logs for the actual error."
-
-        - alert: XNATBacklogGrowing
-          # Loki recording rule (or direct query) for the count of pending
-          # sessions in the bucket. Falls back to the upload-completed
-          # vs xnat-upload event delta.
-          expr: |
-            (sum(rate(ais_pipeline_events_total{event="upload_completed"}[30m]))
-             - sum(rate(ais_pipeline_events_total{event="xnat_upload_completed"}[30m]))) > 0.05
-          for: 30m
-          labels: { severity: warning }
-          annotations:
-            summary: "XNAT upload backlog is growing"
-            description: "Sessions are landing in SeaweedFS faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing."
-
         - alert: SeaweedFSDiskFull
           expr: |
             (kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*seaweedfs.*"}
@@ -91,26 +55,3 @@ spec:
           annotations:
             summary: "Edge ingest pod {{ $labels.pod }} crashlooping"
             description: "{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour. New DICOMs may not be staged or uploaded."
-
-        - alert: UploadDurationDegraded
-          # Log-derived histogram from upload_completed events with duration_s
-          # would be ideal; fallback to a moving-average comparison.
-          expr: |
-            (
-              avg_over_time(ais_pipeline_events_total{event="upload_completed"}[1h])
-              /
-              avg_over_time(ais_pipeline_events_total{event="upload_completed"}[7d])
-            ) < 0.5
-          for: 30m
-          labels: { severity: warning }
-          annotations:
-            summary: "Upload throughput on {{ $labels.cluster }} is half its 7-day baseline"
-            description: "Sustained slow upload rate. Investigate network or SeaweedFS performance."
-
-        - alert: DICOMValidationFailureSpike
-          expr: increase(ais_pipeline_events_total{event="session_invalid"}[1h]) > 10
-          for: 5m
-          labels: { severity: warning }
-          annotations:
-            summary: ">10 invalid DICOM sessions on {{ $labels.cluster }} in last hour"
-            description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber — check scanner config."

@@ -15,12 +15,20 @@ echo "  - /etc/hosts entries on edge VMs (Phase 2 hostnames)"
 echo "  - SeaweedFS and all stored files (/data/seaweedfs)"
 echo "  - k0smotron and all hosted clusters"
 echo "  - nginx-ingress (Phase 2 :443 listener)"
+echo "  - observability stack (Loki / Grafana / Prometheus / Vector)"
 echo "  - cert-manager Issuers + the self-signed CA"
 echo "  - ais-edge-ca.crt (the public CA cert for edges)"
+echo "  - all local-path-provisioner PVC contents on this VM"
 echo "  - k0s controller (if fresh install)"
 echo "============================================"
-read -p "Are you sure? (y/N) " -r
-[[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+# `-y` / `--yes` skips the confirmation so install.sh -y can chain
+# uninstall+install non-interactively.
+if [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ]; then
+    echo "Confirmation skipped (-y flag)."
+else
+    read -p "Are you sure? (y/N) " -r
+    [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 0; }
+fi
 
 # --- Remove edge workers ---
 for entry in "${EDGE_NODES[@]}"; do
@@ -91,6 +99,18 @@ echo ""
 echo "=== Removing local-path-provisioner ==="
 kubectl delete -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml --ignore-not-found 2>/dev/null || true
 
+# Wipe the host directories backing every PVC that local-path-provisioner
+# created. helm uninstall and `kubectl delete namespace` remove the PVC
+# objects, but the data on disk under /opt/local-path-provisioner/ is the
+# host's responsibility. Without this, fresh installs reuse stale state
+# (e.g. an old grafana.db with auto-generated datasource UIDs) and break
+# in subtle ways.
+if [ -d /opt/local-path-provisioner ]; then
+    echo ""
+    echo "=== Wiping local-path PVC host directories ==="
+    sudo rm -rf /opt/local-path-provisioner/*
+fi
+
 if [ "${INSTALL_MODE}" = "fresh" ]; then
     echo ""
     echo "=== Stopping k0s ==="
@@ -99,5 +119,10 @@ if [ "${INSTALL_MODE}" = "fresh" ]; then
     rm -f ~/.kube/config
 fi
 
+# Helm cache (chart tarballs) — harmless but tidy.
+helm repo update >/dev/null 2>&1 || true
+
 echo ""
 echo "=== Uninstall complete ==="
+echo "All state on this VM has been wiped. Run scripts/install.sh -y for a"
+echo "completely fresh deployment."
