@@ -10,7 +10,7 @@
     {
       "type": "stat",
       "title": "DICOM files uploaded (last 1h)",
-      "description": "Sum of the `files` field across all upload_completed events from every edge in the last hour. Counts actual files written to S3 (DICOMs + manifest), not sort cycles. The previous title 'DICOM files received' counted log lines from the sort pod's 60-second poll — which fires whether or not anything arrived, so it inflated the number.",
+      "description": "Sum of `files` across upload_completed events in the last hour.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
