@@ -114,6 +114,11 @@ data:
           namespace: "{{ kubernetes.pod_namespace }}"
           pod: "{{ kubernetes.pod_name }}"
           container: "{{ kubernetes.container_name }}"
+          # node — the worker name. Lets Grafana / LogQL queries scope by
+          # individual worker within a cluster, e.g. {cluster="edge-rbwh",
+          # node="worker-2"}. Cardinality cost is one stream-set per worker;
+          # negligible at our scale.
+          node: "{{ kubernetes.pod_node_name }}"
           app: "{{ kubernetes.pod_labels.app }}"
           component: "{{ kubernetes.pod_labels.component }}"
           level: "{{ level }}"

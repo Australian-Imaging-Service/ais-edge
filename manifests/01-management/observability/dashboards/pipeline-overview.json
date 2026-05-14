@@ -9,15 +9,16 @@
   "panels": [
     {
       "type": "stat",
-      "title": "DICOM files received (last 1h)",
+      "title": "DICOM files uploaded (last 1h)",
+      "description": "Sum of the `files` field across all upload_completed events from every edge in the last hour. Counts actual files written to S3 (DICOMs + manifest), not sort cycles. The previous title 'DICOM files received' counted log lines from the sort pod's 60-second poll — which fires whether or not anything arrived, so it inflated the number.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",app=\"xnat-ingest\",component=\"sort\"} |~ \"Loading\" [1h]))",
+        "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap files [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] }, "unit": "short" } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] }, "unit": "short", "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto", "graphMode": "area", "colorMode": "value" }
     },
     {

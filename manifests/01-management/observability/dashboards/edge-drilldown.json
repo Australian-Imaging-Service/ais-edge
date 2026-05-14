@@ -6,12 +6,12 @@
   "panels": [
     {
       "type": "stat",
-      "title": "Completed uploads (last 10m, cluster=$cluster)",
-      "description": "Count of upload_completed events in the last 10 minutes for this edge cluster. 0 with active scanners likely means the pipeline is stuck — drill into the panels below.",
+      "title": "Completed uploads (last 10m, cluster=$cluster / node=$node)",
+      "description": "Count of upload_completed events in the last 10 minutes, scoped by the dashboard's cluster + node filters. 0 with active scanners likely means the pipeline is stuck — drill into the panels below.",
       "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({cluster=\"$cluster\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [10m]))",
+        "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [10m]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -19,36 +19,48 @@
     },
     {
       "type": "stat",
-      "title": "Pod restarts (xnat-ingest ns) — 1h",
+      "title": "Sort errors (last 1h, cluster=$cluster / node=$node)",
+      "description": "Count of ERROR-level log lines from the xnat-ingest sort pod in the last hour. Loki-derived because mgmt Prometheus cannot scrape edge clusters (no metrics path across the konnectivity boundary). A non-zero value typically indicates DICOM validation failures or staging errors.",
       "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"xnat-ingest\"}[1h]))", "refId": "A" }]
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":10}] }, "unit": "short", "noValue": "0" } }
     },
     {
       "type": "stat",
-      "title": "Worker NotReady?",
+      "title": "Upload failures (last 1h, cluster=$cluster / node=$node)",
+      "description": "Count of upload_failed JSON events from the s3-uploader. Loki-derived. Prolonged non-zero means the edge cannot reach SeaweedFS or the bucket credentials are wrong; see also the Loki ruler alert S3UploaderRetryStorm.",
       "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"} == 0)", "refId": "A" }]
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] }, "unit": "short", "noValue": "0" } }
     },
     {
       "type": "timeseries",
-      "title": "Upload events per minute (cluster=$cluster)",
+      "title": "Upload events per minute (cluster=$cluster / node=$node)",
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum by (event) (count_over_time({cluster=\"$cluster\",component=\"s3-uploader\"} | json | event != \"\" [1m]))",
+        "expr": "sum by (event) (count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"s3-uploader\"} | json | event != \"\" [1m]))",
         "legendFormat": "{{event}}",
         "refId": "A"
       }]
     },
     {
       "type": "logs",
-      "title": "Live log tail — xnat-ingest pods on $cluster",
+      "title": "Live log tail — xnat-ingest pods on $cluster / $node",
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 13 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "{cluster=\"$cluster\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{.message}}\"",
+        "expr": "{cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{.message}}\"",
         "refId": "A"
       }],
       "options": {
@@ -75,6 +87,17 @@
         "query": "label_values(cluster)",
         "refresh": 1,
         "current": { "value": "edge-dev" }
+      },
+      {
+        "name": "node",
+        "label": "Worker node",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({cluster=\"$cluster\"}, node)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": { "selected": true, "text": "All", "value": "$__all" }
       }
     ]
   },
