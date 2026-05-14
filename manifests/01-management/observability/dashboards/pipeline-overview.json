@@ -9,12 +9,12 @@
   "panels": [
     {
       "type": "stat",
-      "title": "DICOM files uploaded (last 1h)",
-      "description": "Sum of `files` across upload_completed events in the last hour.",
+      "title": "DICOMs uploaded (last 1h)",
+      "description": "Sum of the `dicoms` field across upload_completed events. Counts only files with .dcm/.DCM suffix. Events from sessions captured before the dicoms counter was added do not contribute (the unwrap directive skips events missing the field) — re-counts settle within 1h of deployment.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap files [1h]))",
+        "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap dicoms [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -23,39 +23,42 @@
     },
     {
       "type": "stat",
-      "title": "Sessions uploaded (last 1h)",
+      "title": "S3 objects uploaded (last 1h)",
+      "description": "Sum of the `files` field across upload_completed events. Includes every object written to S3 — DICOMs AND the per-session MANIFEST.json (and any other staged metadata). Always strictly >= DICOMs uploaded.",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap files [1h]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"blue","value":null}] }, "unit": "short", "noValue": "0" } }
+    },
+    {
+      "type": "stat",
+      "title": "Sessions uploaded (last 1h)",
+      "description": "Count of upload_completed events. One per session that finished mc mirror with exit 0. Each session contains 1 or more DICOMs plus 1 MANIFEST.json.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
         "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null}] }, "unit": "short" } }
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null}] }, "unit": "short", "noValue": "0" } }
     },
     {
       "type": "stat",
       "title": "Upload failures (last 1h)",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "description": "Count of upload_failed events (mc mirror returned non-zero). 0 = pipeline healthy.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
         "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] } } }
-    },
-    {
-      "type": "stat",
-      "title": "Active edge sites",
-      "description": "Distinct cluster labels seen in Loki in the last hour, excluding the management cluster.",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{
-        "expr": "count(count by (cluster) (count_over_time({cluster!=\"\",cluster!=\"mgmt\"}[1h])))",
-        "queryType": "instant",
-        "refId": "A"
-      }]
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] }, "unit": "short", "noValue": "0" } }
     },
     {
       "type": "stat",
@@ -73,7 +76,7 @@
     {
       "type": "stat",
       "title": "Sort cycles with errors (last 1h)",
-      "description": "Each xnat-ingest sort cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex anchors only on the prefix because RE2's `.` does not match the newlines that follow the colon in the multi-line summary.",
+      "description": "Each xnat-ingest sort cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex uses (?s) so `.` matches the newlines that follow the colon in the multi-line summary.",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
@@ -81,13 +84,26 @@
         "queryType": "instant",
         "refId": "A"
       }],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":10}] }, "unit": "short" } }
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1},{"color":"red","value":10}] }, "unit": "short", "noValue": "0" } }
+    },
+    {
+      "type": "stat",
+      "title": "Active edge sites",
+      "description": "Distinct cluster labels seen in Loki in the last hour, excluding the management cluster. Grows by 1 each time a new edge starts shipping logs.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 4 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "count(count by (cluster) (count_over_time({cluster!=\"\",cluster!=\"mgmt\"}[1h])))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null}] }, "unit": "short", "noValue": "0" } }
     },
     {
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
       "description": "Each line is a session that xnat-ingest sort routed to /data/staging/__invalid__/. Operator action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
-      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
         "expr": "{namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
@@ -98,7 +114,7 @@
     {
       "type": "timeseries",
       "title": "Pipeline events per minute (by event type)",
-      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 17 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         { "expr": "sum by (event) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json [1m]))", "legendFormat": "{{event}}", "refId": "A" }
@@ -109,7 +125,7 @@
     {
       "type": "timeseries",
       "title": "Per-edge upload throughput (events/min)",
-      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 26 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         { "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1m]))", "legendFormat": "{{cluster}}", "refId": "A" }
@@ -119,7 +135,7 @@
     {
       "type": "timeseries",
       "title": "Failure rate (upload_failed / upload_started)",
-      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 26 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
@@ -133,7 +149,7 @@
     {
       "type": "logs",
       "title": "Recent pipeline events (last 30 min)",
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 22 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 35 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
