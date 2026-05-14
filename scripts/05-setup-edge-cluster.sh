@@ -31,7 +31,13 @@ render "${REPO_DIR}/manifests/01-management/edge-cluster.yaml.tpl" \
 echo "Waiting for control plane pods (may take 2-3 min first time)..."
 RETRIES=36
 for i in $(seq 1 $RETRIES); do
-    READY=$(kubectl get pods -n "${CLUSTER_NAME}" --no-headers 2>/dev/null | grep "1/1" | wc -l)
+    # IMPORTANT: with `set -o pipefail` the `grep ... | wc -l` pattern fails
+    # the whole pipeline when grep finds nothing (returns 1) — which under
+    # `set -e` exits the script silently before the loop can even print its
+    # first "Attempt" line. Use `grep -c || true` so no-match yields 0
+    # instead of failing the pipe.
+    READY=$(kubectl get pods -n "${CLUSTER_NAME}" --no-headers 2>/dev/null \
+            | grep -c "1/1" || true)
     [ "$READY" -ge 2 ] && { echo "Control plane ready!"; break; }
     [ $i -eq $RETRIES ] && { echo "ERROR: Control plane not ready"; kubectl get pods -n "${CLUSTER_NAME}"; exit 1; }
     echo "  Attempt $i/$RETRIES..."

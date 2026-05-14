@@ -1,0 +1,127 @@
+# =============================================================================
+# Loki ruler rules — log-derived alerts.
+# =============================================================================
+# These alerts evaluate LogQL queries on a schedule inside Loki and emit to
+# the kube-prometheus-stack Alertmanager (configured in loki-values.yaml.tpl
+# rulerConfig.alertmanager_url). They cover anything that depends on the
+# pipeline events emitted by the s3-uploader and xnat-ingest-sort pods on
+# every edge child cluster.
+#
+# The mgmt cluster's Prometheus cannot scrape edge pods directly (the
+# konnectivity tunnel is one-way), and pushing Prometheus remote-write back
+# from the edge would require additional ingress + auth surface. Loki
+# already receives every log line from every edge, so running the rules
+# in Loki is the lower-coupling path. Plus the source-of-truth for these
+# alerts is the structured JSON event itself, not a derived metric.
+#
+# Rule file format is identical to Prometheus rule files. Loki's ruler
+# writes firing alerts to Alertmanager v2 with the labels and annotations
+# below, so the existing email/Slack receivers keep working unchanged.
+#
+# Companion: alerts/critical-k8s.yaml + alerts/warning-k8s.yaml + alerts/
+# info-k8s.yaml hold the K8s-metric-based alerts (worker NotReady, pod
+# restarts, certificate expiry) that genuinely live in Prometheus.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-ruler-rules
+  namespace: observability
+data:
+  ais-edge-pipeline.yaml: |
+    groups:
+      # =====================================================================
+      # CRITICAL — page on-call. Pipeline is broken.
+      # =====================================================================
+      - name: ais-edge-pipeline-critical
+        interval: 1m
+        rules:
+          - alert: XNATUploadFailingForAllSessions
+            # Failures appearing while no completed uploads in the same
+            # window — i.e. the pipeline has stopped delivering to S3.
+            expr: |
+              (sum by (cluster) (count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_failed" [15m])) > 0)
+              and ignoring (cluster)
+              (sum by (cluster) (count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_completed" [15m])) == 0)
+            for: 15m
+            labels:
+              severity: critical
+              source: loki-ruler
+            annotations:
+              summary: "All upload attempts have failed for 15+ minutes on {{ $labels.cluster }}"
+              description: "No completed uploads while failures keep coming. Likely network / SeaweedFS / credential break. Check `kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} logs -n xnat-ingest -l component=s3-uploader`."
+
+      # =====================================================================
+      # WARNING — notify but don't page.
+      # =====================================================================
+      - name: ais-edge-pipeline-warning
+        interval: 1m
+        rules:
+          - alert: S3UploaderRetryStorm
+            expr: |
+              sum by (cluster) (count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_failed" [10m])) > 5
+            for: 2m
+            labels:
+              severity: warning
+              source: loki-ruler
+            annotations:
+              summary: ">5 upload failures in 10 minutes on {{ $labels.cluster }}"
+              description: "Edge s3-uploader is retrying. Likely transient network or credentials. Inspect pod logs for the actual error."
+
+          - alert: SessionUploadStalled
+            # An upload_started for a session without a corresponding
+            # upload_completed in the same 15-min window.
+            expr: |
+              (sum by (cluster, session) (count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_started" [15m])) > 0)
+              unless on (cluster, session)
+              (sum by (cluster, session) (count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_completed" [15m])) > 0)
+            for: 5m
+            labels:
+              severity: warning
+              source: loki-ruler
+            annotations:
+              summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes"
+              description: "mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry."
+
+          - alert: XNATBacklogGrowing
+            # Sessions arriving in S3 faster than they're consumed by
+            # the mgmt-side xnat-ingest-upload pod (event=xnat_upload_completed).
+            expr: |
+              (sum(count_over_time(
+                {namespace="xnat-ingest", component="s3-uploader"}
+                | json | event="upload_completed" [30m]))
+               -
+               sum(count_over_time(
+                {namespace="xnat-upload"}
+                | json | event="xnat_upload_completed" [30m]))
+              ) > 3
+            for: 30m
+            labels:
+              severity: warning
+              source: loki-ruler
+            annotations:
+              summary: "XNAT upload backlog is growing"
+              description: "Sessions are landing in SeaweedFS faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing — check `kubectl logs -n xnat-upload -l app=xnat-ingest-upload`."
+
+          - alert: DICOMValidationFailureSpike
+            expr: |
+              sum by (cluster) (count_over_time(
+                {namespace="xnat-ingest", component="sort"}
+                |~ "(?i)invalid|validation.*fail" [1h])) > 10
+            for: 5m
+            labels:
+              severity: warning
+              source: loki-ruler
+            annotations:
+              summary: ">10 invalid DICOM sessions on {{ $labels.cluster }} in last hour"
+              description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber — check scanner config."

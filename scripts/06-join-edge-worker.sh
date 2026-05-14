@@ -139,6 +139,9 @@ for i in $(seq 1 $RETRIES); do
 done
 KUBECONFIG="$EDGE_KC" kubectl get nodes -o wide
 
+# (xnat-ingest image is now pulled from ghcr.io by kubelet directly;
+# no ctr-import dance — see config/management.env: XNAT_INGEST_IMAGE.)
+
 # Phase 2: patch CoreDNS in the child cluster so the konnectivity-agent
 # (and any other in-pod client) can resolve the management TLS hostnames.
 # Without this, konnectivity-agent fails: "lookup konnect.aisedge.local on

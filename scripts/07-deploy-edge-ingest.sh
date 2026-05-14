@@ -41,6 +41,7 @@ fi
 
 # Deploy manifests
 render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
+    CLUSTER_NAME "$CLUSTER_NAME" \
     S3_EDGE_ACCESS_KEY "$EDGE_ACCESS_KEY" \
     S3_EDGE_SECRET_KEY "$EDGE_SECRET_KEY" \
     PROJECT_ID "$PROJECT_ID" \
@@ -51,7 +52,10 @@ render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
     K0S_API_HOSTNAME "$K0S_API_HOSTNAME" \
     KONNECTIVITY_HOSTNAME "$KONNECTIVITY_HOSTNAME" \
+    LOKI_HOSTNAME "${LOKI_HOSTNAME:-loki.aisedge.local}" \
+    GRAFANA_HOSTNAME "${GRAFANA_HOSTNAME:-grafana.aisedge.local}" \
     INGRESS_PORT "$INGRESS_PORT" \
+    XNAT_INGEST_IMAGE "${XNAT_INGEST_IMAGE:-ghcr.io/australian-imaging-service/xnat-ingest:latest}" \
     | KUBECONFIG="$EDGE_KC" kubectl apply -f -
 
 echo "Waiting for pods..."

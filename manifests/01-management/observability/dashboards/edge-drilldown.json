@@ -1,0 +1,85 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Completed uploads (last 10m, cluster=$cluster)",
+      "description": "Count of upload_completed events in the last 10 minutes for this edge cluster. 0 with active scanners likely means the pipeline is stuck — drill into the panels below.",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum(count_over_time({cluster=\"$cluster\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [10m]))",
+        "queryType": "instant",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "noValue": "0", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{"color":"red","value":null},{"color":"green","value":1}] } } }
+    },
+    {
+      "type": "stat",
+      "title": "Pod restarts (xnat-ingest ns) — 1h",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=\"xnat-ingest\"}[1h]))", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Worker NotReady?",
+      "gridPos": { "h": 4, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(kube_node_status_condition{condition=\"Ready\",status=\"true\"} == 0)", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Upload events per minute (cluster=$cluster)",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "sum by (event) (count_over_time({cluster=\"$cluster\",component=\"s3-uploader\"} | json | event != \"\" [1m]))",
+        "legendFormat": "{{event}}",
+        "refId": "A"
+      }]
+    },
+    {
+      "type": "logs",
+      "title": "Live log tail — xnat-ingest pods on $cluster",
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 13 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{
+        "expr": "{cluster=\"$cluster\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{.message}}\"",
+        "refId": "A"
+      }],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["ais-edge", "edge-site"],
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values(cluster)",
+        "refresh": 1,
+        "current": { "value": "edge-dev" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "AIS Edge — Edge Site Drilldown",
+  "uid": "ais-edge-drilldown",
+  "version": 2
+}

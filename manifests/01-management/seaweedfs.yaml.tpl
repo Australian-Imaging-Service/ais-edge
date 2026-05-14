@@ -63,11 +63,23 @@ spec:
             - "-s3"
             - "-s3.config=/etc/seaweedfs/s3.json"
             - "-s3.port=8333"
+            # Built-in Prometheus exposition. Each subsystem exposes its own
+            # /metrics endpoint on a dedicated port — Prometheus scrapes all
+            # four via the metrics-only ClusterIP Service (defined below).
+            # `weed server` exposes ONE Prometheus endpoint that aggregates
+            # metrics for master + volume + filer + s3 (subsystem-specific
+            # flags like -master.metricsPort don't exist in 3.x).
+            - "-metricsPort=9324"
+            # NOTE: SeaweedFS already logs S3 requests to stdout by default
+            # (one line per PUT/GET with bucket/key/status/bytes). Vector
+            # indexes those, giving us a per-object audit trail without
+            # instrumenting the application. No extra flag required.
           ports:
             - { containerPort: 8333, name: s3 }
             - { containerPort: 9333, name: master }
             - { containerPort: 8080, name: volume }
             - { containerPort: 8888, name: filer }
+            - { containerPort: 9324, name: metrics }
           volumeMounts:
             - name: data
               mountPath: /data
@@ -109,7 +121,7 @@ metadata:
   name: seaweedfs
   namespace: seaweedfs
 spec:
-  # Phase 2: ClusterIP only. External access goes through nginx-ingress on
+  # ClusterIP only. External access goes through nginx-ingress on
   # https://{{SEAWEEDFS_HOSTNAME}}:443 (TLS-terminated, signed by ais-edge-ca).
   # Master/filer admin UIs are reachable via:
   #   kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333  # master
@@ -127,3 +139,48 @@ spec:
     - port: 8888
       targetPort: 8888
       name: filer
+---
+# Separate metrics-only Service so Prometheus discovers four independent
+# scrape targets (one per SeaweedFS subsystem). Keeping them off the main
+# Service avoids polluting it with internal-only ports.
+#
+# NOTE on binding: `weed server -metricsPort=9324` listens on the pod IP,
+# not 127.0.0.1. `kubectl port-forward` fails because it tries to dial
+# inside the pod's loopback, but Prometheus scrapes via the Service IP
+# (cluster routing → pod IP) so scraping works fine.
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs-metrics
+  namespace: seaweedfs
+  labels:
+    app: seaweedfs
+    release: kube-prometheus-stack
+spec:
+  type: ClusterIP
+  selector:
+    app: seaweedfs
+  ports:
+    - { port: 9324, targetPort: 9324, name: metrics }
+---
+# ServiceMonitor — without this, the chart's Prometheus operator never
+# scrapes the seaweedfs-metrics Service. The `release` label here is what
+# the operator's serviceMonitorSelector matches on (configured in
+# kube-prometheus-stack-values.yaml.tpl).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: seaweedfs-metrics
+  namespace: seaweedfs
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [seaweedfs]
+  selector:
+    matchLabels:
+      app: seaweedfs
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
