@@ -153,6 +153,12 @@ render "${REPO_DIR}/manifests/01-management/observability/observability-ingress.
 # applied above before Loki started).
 kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/alerts/"
 
+# 10b. Cross-namespace ServiceMonitors that depend on the kube-prometheus
+# -stack CRDs being installed (which only happens in this step). SeaweedFS
+# (deployed in step 03) ships its own /metrics on a separate Service; this
+# is the operator-facing object that wires that Service into Prometheus.
+kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/seaweedfs-servicemonitor.yaml"
+
 # 11. Dashboards as ConfigMaps with the grafana_dashboard label
 for f in "${REPO_DIR}/manifests/01-management/observability/dashboards/"*.json; do
     name="grafana-dashboard-$(basename "$f" .json)"

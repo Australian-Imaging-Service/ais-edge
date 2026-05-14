@@ -162,25 +162,8 @@ spec:
     app: seaweedfs
   ports:
     - { port: 9324, targetPort: 9324, name: metrics }
----
-# ServiceMonitor — without this, the chart's Prometheus operator never
-# scrapes the seaweedfs-metrics Service. The `release` label here is what
-# the operator's serviceMonitorSelector matches on (configured in
-# kube-prometheus-stack-values.yaml.tpl).
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: seaweedfs-metrics
-  namespace: seaweedfs
-  labels:
-    release: kube-prometheus-stack
-spec:
-  namespaceSelector:
-    matchNames: [seaweedfs]
-  selector:
-    matchLabels:
-      app: seaweedfs
-  endpoints:
-    - port: metrics
-      interval: 30s
-      path: /metrics
+# The ServiceMonitor that tells Prometheus to scrape this Service lives
+# in manifests/01-management/observability/seaweedfs-servicemonitor.yaml
+# and is applied by scripts/02d-install-observability.sh. Keeping it
+# out of this file means SeaweedFS (step 03) can install before the
+# kube-prometheus-stack CRDs exist — those only land in step 02d.
