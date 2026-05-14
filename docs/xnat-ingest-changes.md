@@ -266,6 +266,163 @@ logger.info(
 )
 ```
 
+## TODO — upstream bug found during operation (NOT yet patched in our fork)
+
+### `upload` leaks ~6 MiB per `--loop` iteration → eventual host-level OOM
+
+**Severity:** high (cascades restarts across an entire cluster, not just the
+xnat-ingest pod).
+**Discovered:** 2026-05-13, after 13 days of running our fork on the mgmt
+cluster. **Not introduced by our fork** — present in upstream `main`.
+
+#### Symptom
+
+`xnat-ingest upload --loop 60 ...` grows memory perfectly linearly at
+~335 MiB/hour with **no plateau** and **regardless of workload** (the
+leak occurs even when every loop iteration finds zero new sessions to
+upload — i.e. the pod is logically idle, just polling S3 and the XNAT
+REST API). After ~30 hours the pod reaches ~10 GiB; on a 16 GiB host it
+triggers a global host-OOM (`constraint=CONSTRAINT_NONE`) that the kernel
+resolves by killing `xnat-ingest` and that simultaneously evicts every
+other pod on the node via kubelet's memory-pressure threshold. Observed
+4 such cascades in 13 days; cluster-wide pod restart counts in the
+hundreds-to-thousands.
+
+The `xnat-ingest sort` pod, which uses the same fork code and the same
+`AIS_LOG_FORMAT=json` formatter, sits at 120 MiB stable for the same
+14-hour window. So the leak is **specific to `upload`**, not shared
+xnat-ingest code, and not our `JsonFormatter`.
+
+#### Root cause (suspected, located in upstream `xnat_ingest/api/upload_.py`)
+
+The `--loop` flag is implemented by `cli/upload.py:244` as a
+`while True:` wrapper that re-enters the entire `upload()` function
+every iteration. Inside `api/upload_.py` (referencing the upstream code
+paths, line numbers from upstream `main` @ a18842f):
+
+```python
+def upload(...):
+    xnat_repo = XnatRepo(
+        ...
+        cache_dir=Path(tempfile.mkdtemp()),                    # L93
+        ...
+    )
+    if use_curl_jsession:
+        ...
+        xnat_repo.connection.session = xnat.connect(           # L109
+            server, user=user, jsession=jsession, ...
+        )
+    with xnat_repo.connection:                                 # L116
+        if input_dir.startswith("s3://"):
+            if s3_cache_dir is None:
+                s3_cache_dir = Path(tempfile.mkdtemp())        # L119
+                ...
+```
+
+Three leaks per loop iteration:
+
+1. `tempfile.mkdtemp()` at L93 creates `/tmp/tmp<random>` and never
+   cleans it up. Same again at L119. We observed **1688 entries in
+   `/tmp/`** after 14 hours = roughly `14 h × 60 iterations/h × 2 dirs`,
+   confirming the rate.
+2. `xnat.connect(...)` at L109 instantiates a new
+   `xnat.session.XNATSession`, which on construction walks the XNAT REST
+   schema and caches every project / subject / experiment object
+   representation, plus a urllib3 connection pool. The old session from
+   the previous iteration is never explicitly `.disconnect()`ed; the
+   `with xnat_repo.connection:` context manager at L116 only closes
+   `xnat_repo.connection`, not the `.session` attribute that was
+   reassigned at L109. Python's GC cannot reclaim the old session
+   because xnatpy holds module-level references to live sessions.
+3. The `s3_cache_dir` at L119 is created inside the `if` branch but the
+   caller never resets `s3_cache_dir = None` between iterations, so on
+   iteration 2 the existing path is reused — yet new files keep
+   accumulating inside it because the upstream `iterate_s3_sessions`
+   helper does not prune.
+
+Memory math: 5028 MiB / (14 h × 60 iterations/h) = **~6 MiB per
+iteration**, which matches the expected size of one cached `XNATSession`
+plus a fresh tempdir entry plus the per-iteration objects retained in
+xnatpy's internal `_object_cache`.
+
+#### Suggested upstream patch
+
+`api/upload_.py` should manage per-iteration resources with `try/finally`
+or `contextlib.ExitStack`:
+
+```python
+import contextlib, shutil, tempfile
+
+def upload(...):
+    with contextlib.ExitStack() as stack:
+        cache_dir = Path(stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="xnat-ingest-cache-")
+        ))
+        s3_cache_dir = Path(stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="xnat-ingest-s3-")
+        )) if input_dir.startswith("s3://") else None
+
+        xnat_repo = XnatRepo(..., cache_dir=cache_dir, ...)
+
+        if use_curl_jsession:
+            jsession = sp.check_output([...]).decode("utf-8")
+            xnat_repo.connection.session = xnat.connect(
+                server, user=user, jsession=jsession, logger=logging.getLogger("xnat")
+            )
+            stack.callback(xnat_repo.connection.session.disconnect)
+
+        with xnat_repo.connection:
+            ...
+```
+
+The key changes:
+1. `tempfile.TemporaryDirectory()` (context-managed) instead of
+   `tempfile.mkdtemp()` — auto-removed when the `ExitStack` unwinds.
+2. `stack.callback(...session.disconnect)` — explicit cleanup of the
+   xnatpy session.
+3. Either delete or null-out `s3_cache_dir` in the `cli/upload.py`
+   `while True:` wrapper before re-entering `upload()`, OR pass a fresh
+   one each iteration.
+
+Expected impact: per-iteration memory delta drops from ~6 MiB to ~0;
+xnat-ingest-upload stabilises at its startup footprint (~250 MiB).
+
+#### Reproduction
+
+```bash
+# Minimum repro (no real XNAT or S3 needed for the leak rate to be visible):
+xnat-ingest upload \
+  s3://fake-bucket/staged \
+  http://localhost:8080 \
+  --loop 5 \
+  --dont-require-manifest \
+  --dont-verify-ssl
+# RSS climbs linearly even though `iterate_s3_sessions` returns zero hits
+# every iteration. ~30 MiB/min at --loop 5; scales with iteration frequency.
+```
+
+#### Workaround in our deployment until the patch lands
+
+We're applying the **defensive** mitigation in our own manifests (not in
+the fork): a `resources.limits.memory` on the upload pod so the kernel
+kills the cgroup *before* it can exhaust host memory, plus
+`--loop 1800` (30 minutes) to slow the leak rate 30×. The pod restarts
+~once a day instead of taking the whole host down via cascade. See
+`manifests/01-management/xnat-upload.yaml.tpl` for the limit values.
+
+This is a band-aid; the upstream `try/finally` patch is the real fix.
+
+#### Suggested upstream PR shape
+
+- **Title:** "fix(upload): leak XNATSession + tempdirs every --loop iteration"
+- **One commit, one file** — `xnat_ingest/api/upload_.py`
+- **Tests:** add a regression test in `tests/test_loop_memory.py` that
+  runs `upload()` 20 times with a mocked XNAT server and asserts RSS
+  growth is bounded (e.g. <50 MiB).
+
+We're happy to submit this PR ourselves once we've confirmed the patch
+fully eliminates the growth in a multi-hour soak.
+
 ## Maintenance / sync with upstream
 
 When upstream `main` advances, we rebase the fork:
