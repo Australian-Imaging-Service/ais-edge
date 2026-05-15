@@ -45,6 +45,16 @@ Operations → Risks → Replacements / Future).
 - [`kube-state-metrics.md`](components/kube-state-metrics.md) — K8s
   object state metrics
 
+### System-level references
+
+- [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event
+  alerts live in Loki ruler (LogQL) while K8s-level alerts stay in
+  Prometheus, and the tradeoff against an edge-Prometheus remote-write
+  topology.
+- [`dashboards.md`](dashboards.md) — every Grafana panel, its query,
+  what it measures, and the s3-uploader event schema that backs the
+  pipeline panels. Read this before changing any dashboard panel.
+
 ## Change logs
 
 - [`xnat-ingest-changes.md`](xnat-ingest-changes.md) — full inventory of

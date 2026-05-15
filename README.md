@@ -975,8 +975,24 @@ the install script skips it cleanly. Set the email + SMTP vars and re-run
 `./install.sh` (or `bash scripts/02d-install-observability.sh` and
 `bash scripts/07b-deploy-edge-observability.sh <edge-entry>` directly).
 
-For per-component detail (what each one stores, what it has access to,
-what the failure modes are, how to scale or replace it), see
+Four dashboards land in Grafana under the `AIS Edge` folder:
+
+- **Pipeline Overview** — cross-cluster counters and timeseries for the
+  whole ingest pipeline (DICOMs vs S3 objects vs sessions, failures,
+  invalid sessions, per-edge throughput, recent events log).
+- **Edge Site Drilldown** — single-cluster + per-worker-node view with
+  dropdowns for `cluster` and `node`.
+- **Session Timeline** — single-session trace across edges and mgmt by
+  session name.
+- **SeaweedFS Health** — storage-layer metrics from Prometheus.
+
+For exactly what every panel measures, including the s3-uploader event
+schema and the difference between the `dicoms` and `files` fields, see
+[`docs/dashboards.md`](docs/dashboards.md). For the architectural reason
+edge-side alerts live in Loki ruler instead of mgmt Prometheus, see
+[`docs/alerting-architecture.md`](docs/alerting-architecture.md). For
+per-component detail (what each one stores, what it has access to, what
+the failure modes are, how to scale or replace it), see
 [`docs/components/`](docs/components/).
 
 ## Konnectivity and Middleboxes

@@ -178,11 +178,31 @@ spec:
                   bytes_raw=$(du -sb "$session_dir" 2>/dev/null)
                   bytes=${bytes_raw%%[[:space:]]*}
                   bytes=${bytes:-0}
+                  # `files` is the total count of S3 objects uploaded for this
+                  # session (DICOMs + the auto-generated MANIFEST.json + any
+                  # other per-session metadata). `dicoms` is the subset that
+                  # are DICOM image files (.dcm / .DCM). Both fields are
+                  # exposed in the event so dashboard / alert authors can
+                  # pick the right one — "DICOMs received" should query
+                  # dicoms; "S3 objects written" should query files.
+                  #
+                  # The minio/mc image is distroless: only `mc`, bash, and
+                  # coreutils (du, wc, cut, etc.). awk/find/grep/sed are NOT
+                  # present, so the DICOM-extension filter is implemented as
+                  # a POSIX shell `case` pattern fed by a while-read pipe
+                  # rather than `grep`.
                   total_lines=$(du -a "$session_dir" 2>/dev/null | wc -l)
                   dir_lines=$(du "$session_dir" 2>/dev/null | wc -l)
                   files=$((total_lines - dir_lines))
                   [ "$files" -lt 0 ] && files=0
-                  jlog upload_started "$session_name" "" ",\"bytes\":${bytes},\"files\":${files}"
+                  dicoms=$(du -a "$session_dir" 2>/dev/null \
+                    | while IFS= read -r line; do
+                        case "$line" in
+                          *.dcm|*.DCM) echo 1 ;;
+                        esac
+                      done | wc -l)
+                  dicoms=${dicoms:-0}
+                  jlog upload_started "$session_name" "" ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms}"
 
                   start_ts=$(date +%s)
 
@@ -193,12 +213,12 @@ spec:
                       "edge/${S3_BUCKET}/staged/${session_name}/"; then
                     duration=$(( $(date +%s) - start_ts ))
                     jlog upload_completed "$session_name" "" \
-                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"duration_s\":${duration}"
+                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"dicoms\":${dicoms:-0},\"duration_s\":${duration}"
                     rm -rf "$session_dir"
                   else
                     duration=$(( $(date +%s) - start_ts ))
                     jlog upload_failed "$session_name" "mc mirror non-zero exit; will retry next cycle" \
-                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"duration_s\":${duration}"
+                      ",\"bytes\":${bytes:-0},\"files\":${files:-0},\"dicoms\":${dicoms:-0},\"duration_s\":${duration}"
                   fi
                 done
 

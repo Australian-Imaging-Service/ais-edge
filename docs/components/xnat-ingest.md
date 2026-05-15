@@ -69,6 +69,35 @@ Important env vars on each pod:
 - `AWS_ENDPOINT_URL` (upload pod only) — points boto3 at SeaweedFS
 - `XINGEST_HOST/USER/PASS` — XNAT REST credentials
 
+### s3-uploader event schema
+
+Every state change in the upload loop emits one JSON line via the
+`jlog()` shell helper in `manifests/02-edge/xnat-ingest.yaml.tpl`. The
+shape is fixed and is what every Grafana panel + Loki ruler alert reads:
+
+```jsonc
+{
+  "ts":         "2026-05-14T07:16:50+00:00",
+  "component":  "s3-uploader",
+  "edge":       "edge-dev",            // CLUSTER_NAME — used as Vector's `cluster` label
+  "event":      "upload_completed",    // upload_started | upload_completed | upload_failed | startup | alias_configured
+  "session":    "test-project.subject01.visit01",  // PROJECT.SUBJECT.VISIT
+  "message":    "",                    // free-form; empty for the routine events
+  "bytes":       538740,               // total session size on disk (du -sb)
+  "files":       2,                    // count of staged files: DICOMs + manifest + any other per-session metadata
+  "dicoms":      1,                    // subset of `files` matching *.dcm / *.DCM
+  "duration_s":  0                     // mc-mirror wall time, present on upload_completed and upload_failed
+}
+```
+
+The `dicoms` vs `files` split exists because xnat-ingest sort
+auto-generates a `MANIFEST.json` per session and the s3-uploader writes
+it to S3 alongside the DICOMs. Dashboards / alerts that want a true
+DICOM count must read `dicoms`; ones that want "S3 PUT count" or
+"objects written" use `files`. Both fields are computed in busybox-only
+bash (no `awk`/`find`/`grep`/`sed` in the minio/mc image): see the
+inline comments in the manifest for the `du -a | case`-pattern trick.
+
 ## Operations
 
 ```bash

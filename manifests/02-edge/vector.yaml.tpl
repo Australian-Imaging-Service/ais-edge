@@ -114,6 +114,11 @@ data:
           namespace: "{{ kubernetes.pod_namespace }}"
           pod: "{{ kubernetes.pod_name }}"
           container: "{{ kubernetes.container_name }}"
+          # node — the worker name. Lets Grafana / LogQL queries scope by
+          # individual worker within a cluster, e.g. {cluster="edge-rbwh",
+          # node="worker-2"}. Cardinality cost is one stream-set per worker;
+          # negligible at our scale.
+          node: "{{ kubernetes.pod_node_name }}"
           app: "{{ kubernetes.pod_labels.app }}"
           component: "{{ kubernetes.pod_labels.component }}"
           level: "{{ level }}"
@@ -153,9 +158,16 @@ spec:
             - "{{KONNECTIVITY_HOSTNAME}}"
       tolerations:
         - operator: Exists
-      # Vector's data dir is an emptyDir on the edge (we control the manifest);
-      # the container runs as root for parity with the helm chart's mgmt-side
-      # behaviour and to keep the security model uniform across both sides.
+      # Vector's data dir is a hostPath on the edge worker so its
+      # file-position checkpoints survive pod restarts. With emptyDir,
+      # rolling the DaemonSet (e.g. to apply a ConfigMap change) wiped the
+      # checkpoint, Vector re-tailed every /var/log/pods/*/0.log from
+      # offset 0, and Loki ingested duplicate copies of older events —
+      # showing up as inflated counts on the dashboards. /var/lib/vector
+      # is the same path the upstream Vector helm chart uses on the mgmt
+      # side, so behaviour is now uniform across both sides.
+      # The container runs as root for parity with the helm chart's
+      # mgmt-side behaviour.
       securityContext:
         seccompProfile:
           type: RuntimeDefault
@@ -209,7 +221,9 @@ spec:
         - name: config
           configMap: { name: vector-config }
         - name: data
-          emptyDir: {}
+          hostPath:
+            path: /var/lib/vector
+            type: DirectoryOrCreate
         - name: pod-logs
           hostPath: { path: /var/log/pods }
         - name: container-logs
