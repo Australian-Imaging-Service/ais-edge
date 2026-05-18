@@ -15,6 +15,8 @@ Operations → Risks → Replacements / Future).
 
 ### Data plane
 
+- [`orthanc.md`](components/orthanc.md) — DICOM SCP at the edge; runs
+  the deid Lua hook before xnat-ingest sees the data
 - [`seaweedfs.md`](components/seaweedfs.md) — S3-compatible storage for
   staged DICOM files
 - [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
@@ -54,12 +56,6 @@ Operations → Risks → Replacements / Future).
 - [`dashboards.md`](dashboards.md) — every Grafana panel, its query,
   what it measures, and the s3-uploader event schema that backs the
   pipeline panels. Read this before changing any dashboard panel.
-
-## Change logs
-
-- [`xnat-ingest-changes.md`](xnat-ingest-changes.md) — full inventory of
-  patches we applied to our `xnat-ingest` fork, with rationale, env-var
-  contract, behaviour matrix, and a suggested upstream-PR shape.
 
 ## How to add a new component doc
 
