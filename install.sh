@@ -34,6 +34,10 @@ for arg in "$@"; do
 done
 [ -t 0 ] || INTERACTIVE=false
 
+# Forwarded to child scripts (e.g. 07c's deid-policy review prompt). When
+# install.sh is non-interactive, child scripts should auto-confirm too.
+if ! $INTERACTIVE; then export AIS_AUTO_CONFIRM="yes"; fi
+
 confirm() {
     local prompt="$1"
     if ! $INTERACTIVE; then
@@ -49,12 +53,33 @@ confirm() {
 for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS \
            S3_ADMIN_ACCESS_KEY S3_ADMIN_SECRET_KEY S3_BUCKET \
            INTERNAL_DOMAIN SEAWEEDFS_HOSTNAME K0S_API_HOSTNAME \
-           KONNECTIVITY_HOSTNAME INGRESS_PORT; do
+           KONNECTIVITY_HOSTNAME INGRESS_PORT AIS_DEID_HMAC_SALT; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: ${var} is not set in config/management.env"
+        [ "$var" = "AIS_DEID_HMAC_SALT" ] && echo "       Generate one with: openssl rand -hex 32"
         exit 1
     fi
 done
+
+# Orthanc per-site config is edited by hand. Fail fast here rather than
+# 10 minutes into mgmt setup at step 07c.
+if [ ! -f "${SCRIPT_DIR}/config/orthanc/routing.json" ]; then
+    echo "ERROR: config/orthanc/routing.json not found"
+    echo "       Copy from the template and fill in AETMap:"
+    echo "         cp config/orthanc/routing.json.template config/orthanc/routing.json"
+    echo "         vim config/orthanc/routing.json"
+    exit 1
+fi
+# Deidentification profile must be filled in. Ships as a .template; the
+# Site admin copies it from the template and customises to the site's deid policy.
+if [ ! -f "${SCRIPT_DIR}/config/orthanc/deidentification-profile.json" ]; then
+    echo "ERROR: config/orthanc/deidentification-profile.json not found"
+    echo "       Copy the template and customise to your site's deid policy:"
+    echo "         cp config/orthanc/deidentification-profile.json.template \\"
+    echo "            config/orthanc/deidentification-profile.json"
+    echo "         vim config/orthanc/deidentification-profile.json"
+    exit 1
+fi
 if [ ${#EDGE_NODES[@]} -eq 0 ]; then
     echo "ERROR: No edge nodes defined in config/edge-nodes.env"
     exit 1
@@ -91,7 +116,9 @@ echo "   04.  Deploy XNAT upload pod (in-cluster: SeaweedFS → XNAT)"
 echo "   For each edge node:"
 echo "     05. Create hosted k0s control plane (with built-in Ingress)"
 echo "     06. Install k0s worker (sets /etc/hosts + patches CoreDNS)"
-echo "     07. Deploy xnat-ingest (sort + s3-uploader, mc trusts ais-edge-ca)"
+echo "     07. Deploy xnat-ingest (sort in REST-pull mode + s3-uploader)"
+echo "     07b. Deploy Vector log shipper (skipped if observability disabled)"
+echo "     07c. Deploy Orthanc DICOM receiver + deid hook"
 echo ""
 echo "============================================"
 confirm "Proceed with installation? (y/N) "
@@ -172,6 +199,11 @@ for entry in "${EDGE_NODES[@]}"; do
     echo "    (skipped automatically if observability stack not installed)"
     confirm "Run step 07b for ${name}? (y/s to skip) "
     [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/07b-deploy-edge-observability.sh" "$entry"
+
+    echo ""
+    echo "--- Step 07c: Deploy Orthanc DICOM receiver + deid hook on ${name} ---"
+    confirm "Run step 07c for ${name}? (y/s to skip) "
+    [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/07c-deploy-edge-orthanc.sh" "$entry"
 done
 
 # ============================================================================
