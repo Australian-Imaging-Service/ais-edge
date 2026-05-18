@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: xnat-ingest-sort
+  name: sort
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
   containers:
-  - name: xnat-ingest-sort
+  - name: sort
     image: {{ .Values.xnatIngest.image }}
     imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
     env:
@@ -27,10 +27,10 @@ spec:
     - -c
     - |
       set -x
-      mkdir -p /data/cima-export/test /data/staging/sorted /data/LOGS
+      mkdir -p /data/sorted /data/LOGS
       sleep infinity  # pod stays running so kubectl exec can be used to run sort manually
       # To sort manually:
-      # kubectl exec -it xnat-ingest-sort -n {{ .Values.namespace }} -- xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
+      # kubectl exec -it sort -n {{ .Values.namespace }} -- xnat-ingest sort /data/sorted --orthanc-url http://orthanc:8042
     volumeMounts:
     - name: storage
       mountPath: /data

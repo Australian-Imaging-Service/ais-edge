@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: xnat-ingest-upload
+  name: upload
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
   containers:
-  - name: xnat-ingest-upload
+  - name: upload
     image: {{ .Values.xnatIngest.image }}
     imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
     env:
@@ -52,9 +52,10 @@ spec:
     - -c
     - |
       set -x
+      mkdir -p /data/tmp /data/LOGS
       sleep infinity  # pod stays running so kubectl exec can be used to run upload manually
       # To upload manually:
-      # kubectl exec -it xnat-ingest-upload -n {{ .Values.namespace }} -- xnat-ingest upload /data/staging/sorted $XINGEST_SERVER
+      # kubectl exec -it upload -n {{ .Values.namespace }} -- xnat-ingest upload /data/sorted $XINGEST_SERVER
     volumeMounts:
     - name: storage
       mountPath: /data

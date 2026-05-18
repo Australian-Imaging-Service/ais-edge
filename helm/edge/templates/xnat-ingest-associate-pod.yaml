@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: xnat-ingest-associate
+  name: associate
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
   containers:
-  - name: xnat-ingest-associate
+  - name: associate
     image: {{ .Values.xnatIngest.image }}
     imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
     env:
@@ -29,7 +29,7 @@ spec:
       set -x
       sleep infinity  # pod stays running so kubectl exec can be used to run associate manually
       # To associate manually (example for RDA files):
-      # kubectl exec -it xnat-ingest-associate -n {{ .Values.namespace }} -- \
+      # kubectl exec -it associate -n {{ .Values.namespace }} -- \
       #   xnat-ingest associate /data/cima-export /data/staging/sorted \
       #   --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
       #     '{PatientName}/**/*.rda' \

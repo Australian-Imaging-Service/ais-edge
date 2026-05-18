@@ -1,5 +1,5 @@
-# Pass to setup.sh: bash helm/setup.sh helm/my-values.yaml
-# Or directly:      helm install edge helm/edge -f helm/my-values.yaml
+# Pass to setup.sh: bash helm/setup.sh helm/values-example.yaml
+# Or directly:      helm install edge helm/edge -f helm/values-example.yaml
 
 # ── Required ──────────────────────────────────────────────────────────────────
 
@@ -16,6 +16,8 @@ storage:
 orthanc:
   # AET must match what scanners are configured to send to
   aet: ORTHANC
+
+  authenticationEnabled: false
 
   # External ports on the VM
   nodePorts:

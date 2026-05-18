@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# CIMA-X pipeline setup script.
+# Edge pipeline setup script.
 # Creates all required secrets and installs the Helm chart.
-# Run from the repo root: bash helm/setup.sh
+# Run from the repo root: bash helm/setup.sh [values-file]
 
 set -euo pipefail
 
@@ -68,7 +68,6 @@ prompt        XNAT_SERVER "XNAT server URL"
 prompt        XNAT_USER   "XNAT username"
 prompt_secret XNAT_PASS   "XNAT password"
 
-
 # ── namespace ─────────────────────────────────────────────────────────────────
 
 echo
@@ -90,6 +89,8 @@ info "Creating orthanc-credentials secret..."
 USERS_JSON="{\"RegisteredUsers\": {\"${ORTHANC_USER}\": \"${ORTHANC_PASS}\"}}"
 kubectl create secret generic orthanc-credentials \
     --from-literal="users.json=${USERS_JSON}" \
+    --from-literal="orthanc-user=${ORTHANC_USER}" \
+    --from-literal="orthanc-password=${ORTHANC_PASS}" \
     -n "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f -
 
@@ -107,7 +108,6 @@ kubectl create secret generic xnat-credentials \
     --from-literal="password=${XNAT_PASS}" \
     -n "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f -
-
 
 # ── helm install ──────────────────────────────────────────────────────────────
 
@@ -127,7 +127,7 @@ helm upgrade --install edge "$CHART_DIR" \
     --set samba.shareName="$SHARE_NAME" \
     --set orthanc.nodePorts.dicom="$DICOM_PORT" \
     --set orthanc.nodePorts.http="$HTTP_PORT" \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
 
 # ── done ──────────────────────────────────────────────────────────────────────
 
