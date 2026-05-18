@@ -3,78 +3,167 @@
 A centrally-managed edge computing system for medical imaging data capture and upload to XNAT.
 Part of [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
 
+## Prerequisites
+
+- **Management node**: Ubuntu 22.04+, 8GB+ RAM, 100GB+ disk
+- **Edge worker(s)**: Ubuntu 22.04+, 4GB+ RAM, 50GB+ disk
+- **SSH access**: Key-based SSH from management node to each edge worker
+- **XNAT instance**: Accessible via HTTPS with a local service account
+- **DICOM source**: One or more modalities that can C-STORE to the edge node on port 4242 (AET=`AISEDGE`). Their Called-AETs must be listed in `config/orthanc/routing.json`.
+- **`AIS_DEID_HMAC_SALT`**: A per-deployment secret. Generate one with `openssl rand -hex 32` and set it in `config/management.env` before running `07c`.
+- **Outbound internet**: Both management and edge nodes need it (for pulling container images)
+
+## Quick Start
+
+### Files a site admin must edit before install
+
+**Four** files — every one has a `.template` next to it. Copy and fill in.
+All four are gitignored once copied, so secrets never end up in version control.
+
+| File (after copy) | What to set | Source |
+|---|---|---|
+| `config/management.env` | `MGMT_NODE_IP`, XNAT URL/user/pass, S3 admin keys, `AIS_DEID_HMAC_SALT`, observability vars | `management.env.template` |
+| `config/edge-nodes.env` | `EDGE_NODES` array — one line per edge site (IP, SSH user/key, XNAT project, scoped S3 key/secret) | `edge-nodes.env.template` |
+| `config/orthanc/routing.json` | `AETMap` — each modality's Called-AET → XNAT project | `routing.json.template` |
+| `config/orthanc/deidentification-profile.json` | Replace / Keep blocks per Orthanc `/modify` API — the deid contract for this site. Applied to every accepted study | `deidentification-profile.json.template` |
+
+Anything else under `config/` (`k0s-controller.yaml`, the Lua hook, `orthanc.json`) ships with sane defaults and rarely needs editing. Inside each template, look for `# REQUIRED` markers (env files) or `REPLACE_*` placeholders (JSON files) to identify the fields you must fill in.
+
+### Steps
+
+```bash
+# 1. Clone this repo on the management node
+git clone <repo-url> && cd k0s-k0smotron-mvp
+
+# 2. Copy templates + edit the four files above
+cp config/management.env.template                          config/management.env
+cp config/edge-nodes.env.template                          config/edge-nodes.env
+cp config/orthanc/routing.json.template                    config/orthanc/routing.json
+cp config/orthanc/deidentification-profile.json.template   config/orthanc/deidentification-profile.json
+$EDITOR config/management.env \
+        config/edge-nodes.env \
+        config/orthanc/routing.json \
+        config/orthanc/deidentification-profile.json
+
+# 3. Generate the deid HMAC salt and paste it into management.env
+openssl rand -hex 32   # set AIS_DEID_HMAC_SALT="<paste>" in config/management.env
+
+# 4. Ensure SSH access to edge nodes
+ssh-keygen -t ed25519       # if you don't have a key
+ssh-copy-id ubuntu@<edge-ip>
+
+# 5. Install — step 07c will show the AETMap + profile list and ask for explicit
+#    confirmation before deploying the deid policy
+chmod +x install.sh scripts/*.sh
+./install.sh
+```
+
+Architecture, data flow, security model, and component-by-component reference are all below.
+
+---
 
 ## Architecture
 
 Edge nodes connect to the management cluster over a single TLS port (443).
 nginx-ingress on the management host reads the SNI from the TLS handshake and
-routes to the right backend. Edge has zero inbound ports.
+routes to the right backend. The only inbound port at the edge is DICOM
+port 4242 on the local facility LAN (for modality C-STOREs); there are no
+inbound ports from the internet or management network.
 
 ```
               Management Node                              Edge Worker(s)
        ┌──────────────────────────────────┐         ┌──────────────────────────┐
        │  nginx-ingress (hostNet :443)    │         │  k0s worker              │
-       │  ├─ TLS terminate / SNI-route    │         │   /etc/hosts:            │
-       │  │   - seaweedfs.aisedge.local   │◄────────┤    203.x.x.x  *.aisedge..│
+       │  ├─ TLS terminate / SNI-route    │         │                          │
+       │  │   - seaweedfs.aisedge.local   │◄────────┤  Outbound :443 to mgmt   │
        │  │   - k0s.aisedge.local         │  TLS    │                          │
-       │  │   - konnect.aisedge.local     │  :443   │  xnat-ingest-sort pod    │
-       │  │  (all certs signed by         │         │   └─ watches /incoming   │
-       │  │   ais-edge-ca via cert-mgr)   │         │      stages DICOMs       │
-       │  │                               │         │                          │
-       │  k0smotron operator              │         │  s3-uploader pod         │
-       │  ├─ hosted control plane (CIP)   │         │   ├─ mc trusts ais-edge- │
-       │  │   ↳ Ingress for API+konect    │         │   │  ca via mounted      │
-       │  │                               │         │   │  ca-bundle Secret    │
-       │  SeaweedFS (ClusterIP only)      │         │   └─ mc mirror →         │
-       │  ├─ S3 :8333 (HTTP, in-cluster)  │         │      https://seaweedfs.. │
-       │  │  edges hit via Ingress :443   │         │                          │
-       │  │                               │         │  Credentials on edge:    │
-       │  xnat-ingest-upload pod          │         │   ├─ S3 write-only key   │
-       │  └─ in-cluster DNS to seaweedfs  │         │   └─ ais-edge-ca.crt     │
+       │  │   - konnect.aisedge.local     │  :443   │  Orthanc pod             │
+       │  │  (all certs signed by         │         │   ├─ DICOM SCP :4242 on  │
+       │  │   ais-edge-ca via cert-mgr)   │         │   │  local facility LAN  │
+       │  │                               │         │   ├─ Lua hook: deid +   │
+       │  k0smotron operator              │         │   │  /facility-backup   │
+       │  ├─ hosted control plane (CIP)   │         │   └─ Storage on hostPath│
+       │  │   ↳ Ingress for API+konect    │         │      /data/orthanc-     │
+       │  │                               │         │       storage/          │
+       │  SeaweedFS (ClusterIP only)      │         │                          │
+       │  ├─ S3 :8333 (HTTP, in-cluster)  │         │  xnat-ingest-sort pod    │
+       │  │  edges hit via Ingress :443   │         │   ├─ REST-polls Orthanc │
+       │  │                               │         │   └─ hardlinks deid'd   │
+       │  xnat-ingest-upload pod          │         │      instances into     │
+       │  └─ in-cluster DNS to seaweedfs  │         │      /data/staging/     │
        │                                  │         │                          │
-       │  cert-manager: ais-edge-ca       │         │  Inbound ports: ZERO     │
-       │  ├─ self-signed root (10 yr)     │         │  All edge → mgmt :443    │
-       │  └─ issues server certs (1 yr)   │         └──────────────────────────┘
-       └─────────┬────────────────────────┘
-                 │ HTTPS REST API
+       │  cert-manager: ais-edge-ca       │         │  s3-uploader pod         │
+       │  ├─ self-signed root (10 yr)     │         │   ├─ mc trusts ais-edge-│
+       │  └─ issues server certs (1 yr)   │         │   │  ca via ca-bundle   │
+       │                                  │         │   └─ mc mirror →        │
+       │                                  │         │      https://seaweedfs..│
+       │                                  │         │                          │
+       │                                  │         │  Credentials on edge:   │
+       │                                  │         │   ├─ S3 write-only key  │
+       │                                  │         │   ├─ AIS_DEID_HMAC_SALT │
+       │                                  │         │   └─ ais-edge-ca.crt    │
+       │                                  │         │                          │
+       │                                  │         │  Mgmt-net inbound: ZERO │
+       └─────────┬────────────────────────┘         │  LAN inbound: :4242 only │
+                 │ HTTPS REST API                   └──────────────────────────┘
                  ▼
-       ┌──────────────────────────┐
-       │  XNAT Server             │
-       │ (separate infrastructure)│
+       ┌──────────────────────────┐                  ◄────────  Modalities
+       │  XNAT Server             │                          C-STORE to AET=
+       │ (separate infrastructure)│                          AISEDGE :4242
        └──────────────────────────┘
 ```
 
 ## Data Flow
 
 ```
-1. DICOM files arrive in /data/xnat-ingest/incoming/ on edge worker
+1. Modality C-STOREs to Orthanc on edge worker
+   - Orthanc receives on port 4242 with AET=AISEDGE
+   - Per-AET routing in routing.json selects recipe + XNAT project
          │
          ▼
-2. xnat-ingest sort (on edge)
-   - Parses DICOM metadata (project, subject, visit, scan)
-   - Stages to /data/staging/PROJECT.SUBJECT.VISIT/
-   - Deletes from incoming after staging
+2. Orthanc Lua hook (on edge, deidentify-and-forward.lua)
+   - OnStoredInstance:
+     a. Writes ORIGINAL to /facility-backup/ (site-controlled retention)
+     b. /modify with deid recipe; UIDs are kept so the deid'd instance
+        lands in the same Study
+     c. Deletes ORIGINAL from Orthanc (keeps the deid'd instance in storage)
+   - OnStableStudy (after StableAge=30s silence):
+     d. PUTs label "xnat-ingest-ready" on the study
          │
          ▼
-3. s3-uploader (on edge, using `mc mirror`)
+3. xnat-ingest sort (on edge, REST-pull mode)
+   - Polls Orthanc REST every INGEST_LOOP_SECONDS
+   - Filters: has label "xnat-ingest-ready", lacks label "xnat-ingest-skip"
+   - Hardlinks instances from /data/orthanc-storage/ into
+     /data/staging/PROJECT.SUBJECT.VISIT/<scan>/DICOM/
+     (same filesystem — hardlink, not copy)
+   - PUTs label "xnat-ingest-skip" on the study
+         │
+         ▼
+4. s3-uploader (on edge, using `mc mirror`)
    - Reads staged sessions from /data/staging/
    - Mirrors to SeaweedFS at s3://ingest-bucket/staged/ (write-only key)
-   - Deletes local copy only after successful upload
+   - Deletes local /data/staging/ copy only after successful upload
    - SeaweedFS (via S3 API) handles multipart upload, checksums, resume on failure
          │
          ▼
-4. SeaweedFS (on management node)
+5. SeaweedFS (on management node)
    - Stores files under s3://ingest-bucket/staged/<session>/
    - Write-only from edge, full access from management
          │
          ▼
-5. xnat-ingest upload (on management node)
+6. xnat-ingest upload (on management node)
    - Reads from s3://ingest-bucket/staged
    - Uploads to XNAT via REST API (XNAT credentials only here)
    - Creates project/subject/session/scan hierarchy in XNAT
    - Verifies checksums after upload
    - Skips sessions already in XNAT (idempotent)
 ```
+
+The deid happens at step 2 inside Orthanc; everything downstream of
+`OnStoredInstance` works with deid'd identifiers. The original DICOM
+exists in `/facility-backup` (real identifiers, site-retained) and
+nowhere else — never leaves the edge worker.
 
 ## How the S3 Uploader Works
 
@@ -142,7 +231,12 @@ k0s-k0smotron-mvp/
 ├── config/
 │   ├── management.env.template            ← Management node config (copy to management.env)
 │   ├── edge-nodes.env.template            ← Edge nodes config (copy to edge-nodes.env)
-│   └── k0s-controller.yaml               ← k0s cluster config
+│   ├── k0s-controller.yaml               ← k0s cluster config
+│   └── orthanc/                           ← Edge-side Orthanc config (mounted as ConfigMaps)
+│       ├── orthanc.json                   ← Daemon config (AET, ports, storage paths)
+│       ├── deidentify-and-forward.lua     ← Generic deid + label Lua hook
+│       ├── routing.json                   ← Per-site AET → recipe + project mapping
+│       └── recipe-*.json                  ← Deid recipes (research-default is the MVP one)
 ├── manifests/
 │   ├── 01-management/                     ← Runs on management cluster
 │   │   ├── cert-issuers.yaml              ← cert-manager bootstrap + CA + CA Issuer
@@ -153,18 +247,22 @@ k0s-k0smotron-mvp/
 │   │   ├── edge-cluster.yaml.tpl          ← Hosted k0s control plane (with spec.ingress)
 │   │   └── xnat-upload.yaml.tpl           ← Reads SeaweedFS → uploads to XNAT
 │   └── 02-edge/                           ← Runs on edge workers (child cluster)
-│       └── xnat-ingest.yaml.tpl           ← Sort + s3-uploader (hostAliases + CA mount)
+│       ├── xnat-ingest.yaml.tpl           ← Sort (Orthanc REST-pull mode) + s3-uploader
+│       └── orthanc.yaml.tpl               ← Orthanc Deployment + Service + Secret
 ├── scripts/
 │   ├── 00-common.sh                       ← Shared functions
 │   ├── 01-install-k0s.sh                  ← Install k0s on mgmt
 │   ├── 02-install-k0smotron.sh            ← cert-manager + k0smotron
 │   ├── 02b-bootstrap-ca.sh                ← Bootstrap self-signed CA (ais-edge-ca)
 │   ├── 02c-install-nginx-ingress.sh       ← nginx-ingress on hostNetwork :443
+│   ├── 02d-install-observability.sh       ← Loki + Prom + Grafana + Vector (optional)
 │   ├── 03-deploy-seaweedfs.sh             ← SeaweedFS + TLS cert + Ingress
 │   ├── 04-deploy-xnat-upload.sh           ← Mgmt-side XNAT upload pod
 │   ├── 05-setup-edge-cluster.sh           ← Per-edge: hosted control plane + token
 │   ├── 06-join-edge-worker.sh             ← Per-edge: install k0s worker, /etc/hosts, CoreDNS
-│   ├── 07-deploy-edge-ingest.sh           ← Per-edge: deploy sort + s3-uploader
+│   ├── 07-deploy-edge-ingest.sh           ← Per-edge: deploy sort (REST-pull) + s3-uploader
+│   ├── 07b-deploy-edge-observability.sh   ← Per-edge: Vector log shipper (optional)
+│   ├── 07c-deploy-edge-orthanc.sh         ← Per-edge: deploy Orthanc + deid Lua hook
 │   ├── rotate-ca.sh                       ← CA rotation (--phase=1 / --phase=2)
 │   └── uninstall.sh                       ← Tears down everything
 └── .gitignore
@@ -172,37 +270,6 @@ k0s-k0smotron-mvp/
 
 `.tpl` files are manifest templates — placeholders like `{{CLUSTER_NAME}}` are replaced with
 values from your config files during installation.
-
-## Prerequisites
-
-- **Management node**: Ubuntu 22.04+, 8GB+ RAM, 100GB+ disk
-- **Edge worker(s)**: Ubuntu 22.04+, 4GB+ RAM, 50GB+ disk
-- **SSH access**: Key-based SSH from management node to each edge worker
-- **XNAT instance**: Accessible via HTTPS with a local service account
-- **Outbound internet**: Both management and edge nodes need it (for pulling container images)
-
-## Quick Start
-
-```bash
-# 1. Clone this repo on the management node
-git clone <repo-url> && cd k0s-k0smotron-mvp
-
-# 2. Configure management node
-cp config/management.env.template config/management.env
-vim config/management.env   # set MGMT_NODE_IP, XNAT credentials, S3 admin keys
-
-# 3. Configure edge nodes
-cp config/edge-nodes.env.template config/edge-nodes.env
-vim config/edge-nodes.env   # add your edge nodes to the EDGE_NODES array
-
-# 4. Ensure SSH access to edge nodes
-ssh-keygen -t ed25519       # if you don't have a key
-ssh-copy-id ubuntu@<edge-ip>
-
-# 5. Install
-chmod +x install.sh scripts/*.sh
-./install.sh
-```
 
 ## Installing on an Existing Kubernetes Cluster
 
@@ -271,7 +338,8 @@ rm kubeconfig-edge-uqcai join-token-edge-uqcai
 | nginx-ingress | latest (helm) | hostNetwork :443. SSL passthrough enabled (k0s API + konnectivity); TLS termination for SeaweedFS. |
 | SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035). ClusterIP only; external access via Ingress. |
 | MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader. Trusts `ais-edge-ca` via mounted ca-bundle Secret. |
-| xnat-ingest | latest | `ghcr.io/australian-imaging-service/xnat-ingest:latest` |
+| Orthanc | 1.12.6 (plugins) | `jodogne/orthanc-plugins:1.12.6` — DICOM SCP on edge port 4242. Needs ≥ 1.12.0 for study-level labels. |
+| xnat-ingest | v0.1.0 | `ghcr.io/aswinnarayanan/xnat-ingest:v0.1.0` — logging-v3 + Orthanc REST-pull mode. |
 | local-path-provisioner | v0.0.30 | Default StorageClass for etcd PVCs |
 
 To pin specific versions in production, replace `:latest` / `:3.99` tags in the `.tpl`
@@ -312,18 +380,21 @@ Session directory names follow the format `PROJECT.SUBJECT.VISIT`.
 
 ## Edge Data Directory Structure
 
-On each edge worker at `/data/xnat-ingest/`:
+On each edge worker:
 
 ```
 /data/xnat-ingest/
-├── incoming/            ← Drop DICOM files here (from scanner, manual copy, etc.)
-├── staging/
-│   ├── __build__/       ← Sessions being assembled (don't touch)
-│   ├── __invalid__/     ← Sessions with missing/bad metadata (review manually)
-│   └── PROJECT.SUBJECT.VISIT/  ← Valid sessions waiting for S3 upload
+├── orthanc-storage/     ← Orthanc DICOM storage tree (deid'd instances live here)
+└── staging/
+    └── PROJECT.SUBJECT.VISIT/  ← xnat-ingest sort's hardlinked output, awaiting S3 upload
+
+/data/facility-backup/   ← ORIGINAL DICOMs (real identifiers) — site-controlled retention.
+                           Written by the Orthanc deid Lua hook; never leaves the edge.
 ```
 
-Files flow: `incoming/` → `staging/` → SeaweedFS → eventually deleted from edge after successful S3 upload.
+Files flow: Modality C-STORE → Orthanc (deid + delete original, keep deid'd) → sort hardlinks → `staging/` → SeaweedFS → eventually deleted from edge after successful S3 upload.
+
+`/data/orthanc-storage` and `/data/xnat-ingest/staging` **must be on the same physical filesystem** so hardlinks resolve (cross-fs hardlinks fail with EXDEV).
 
 ## Health Checks
 
@@ -523,17 +594,17 @@ kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
 ## Testing
 
 ```bash
-# Copy a DICOM file to the edge node
-scp test.dcm ubuntu@<EDGE_IP>:/data/xnat-ingest/incoming/
+# C-STORE a DICOM to Orthanc at the edge. The Called-AET must be listed in
+# config/orthanc/routing.json on the edge — that's how the deid hook knows
+# which recipe + XNAT project to route to.
+storescu -aec <AET-from-routing.json> -aet TEST_MOD <EDGE_IP> 4242 test.dcm
 
-# Watch sort pod pick it up
+# Watch the Orthanc Lua deid + label events
+kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest deploy/orthanc -f \
+  | grep -E 'instance_deidentified|study_labeled_ready|REJECT|ERROR'
+
+# Watch sort pod REST-pull from Orthanc and hardlink into staging
 kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=sort -f
-
-# If the DICOM has missing metadata (e.g. no AccessionNumber), it goes to __invalid__
-# Rename and move it manually:
-ssh ubuntu@<EDGE_IP>
-cd /data/xnat-ingest/staging
-sudo mv __invalid__/<session-dir> ./test-project.subject01.visit01
 
 # Watch s3-uploader push to SeaweedFS
 kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=s3-uploader -f
@@ -592,12 +663,18 @@ reaches the API server. Useful when debugging or reviewing the design.
   │   kube-proxy / kube-router / metrics-server                                   │
   └───────────────────────────────────────────────────────────────────────────────┘
   ┌─ xnat-ingest ns ──────────────────────────────────────────────────────────────┐
-  │   xnat-ingest-sort   loop 60s, --delete   /data/incoming → /data/staging      │
+  │   orthanc            DICOM SCP :4242 (hostPort), Lua deid + label,            │
+  │                      storage at /data/orthanc-storage                         │
+  │     env       AIS_DEID_HMAC_SALT (Secret)                                     │
+  │     mounts    ConfigMaps orthanc-config/-scripts/-routing/-recipes            │
+  │   xnat-ingest-sort   loop 60s, REST-pull from orthanc.xnat-ingest.svc:8042    │
+  │                      hardlinks /data/orthanc-storage → /data/staging          │
   │   s3-uploader        loop 30s, runs:  mc mirror /data/staging  edge/bucket    │
   │     env       S3_ENDPOINT=https://seaweedfs.aisedge.local                     │
   │     mount     Secret ca-bundle (= ais-edge-ca.crt) → /root/.mc/certs/CAs/     │
   │     hostAliases   3 aisedge.local names → MGMT_NODE_IP                        │
-  │   hostPath    /data/xnat-ingest/{incoming,staging}                            │
+  │   hostPath    /data/xnat-ingest/{orthanc-storage,staging}                     │
+  │   hostPath    /data/facility-backup    (Orthanc-only, original DICOMs)        │
   │   Secret      s3-edge-credentials   (write+list scoped to ingest-bucket)      │
   └───────────────────────────────────────────────────────────────────────────────┘
 
@@ -909,7 +986,7 @@ SNI. Three components make this work:
 
 **2. Server certs (per service)**
 - cert-manager issues 1-year RSA certs signed by `ais-edge-ca`.
-- Auto-renewed 30 days before expiry — no operator action required.
+- Auto-renewed 30 days before expiry — no site action required.
 - Servers: `seaweedfs.aisedge.local` (and any future TLS-fronted service).
 - The k0smotron-managed k0s API + konnectivity have their own internal CA — those
   certs include the aisedge.local hostnames as SANs (configured via `spec.k0sConfig.spec.api.sans`).
@@ -1042,7 +1119,7 @@ classic symptom of a middlebox kicking the tunnel.
 
 The data path (DICOM upload via `mc mirror` to SeaweedFS) does NOT use
 konnectivity — it is plain HTTPS REST and tolerates short connection drops
-naturally. Konnectivity disruption affects only operator visibility, not
+naturally. Konnectivity disruption affects only central-admin visibility, not
 data integrity.
 
 ## Uninstall
