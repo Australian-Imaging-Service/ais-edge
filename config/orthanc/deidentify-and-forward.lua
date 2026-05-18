@@ -2,7 +2,7 @@
 --
 -- OnStoredInstance: facility-backup the original, /modify against the
 --   deidentification profile, delete the original (keep the deid'd one).
--- OnStableStudy:    PUT `ais-deid-done` label on the study.
+-- OnStableStudy:    PUT `xnat-ingest-ready` label on the study.
 --
 -- Inputs (mounted at /etc/orthanc/):
 --   routing.json                     AET -> { project } map + default paths
@@ -164,14 +164,14 @@ function OnStableStudy(studyId, tags, metadata)
   -- Fires StableAge seconds after the last instance arrives. By now
   -- OnStoredInstance has run for every instance; the study contains only
   -- deid'd copies. Label idempotently so sort picks it up (filters
-  -- --orthanc-label ais-deid-done and --orthanc-skip-label xnat-sorted).
-  RestApiPut("/studies/" .. studyId .. "/labels/ais-deid-done", "")
+  -- --orthanc-label xnat-ingest-ready and --orthanc-skip-label xnat-ingest-skip).
+  RestApiPut("/studies/" .. studyId .. "/labels/xnat-ingest-ready", "")
 
   print(DumpJson({
     ts        = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     component = "orthanc-deid",
     event     = "study_labeled_ready",
     studyId   = studyId,
-    label     = "ais-deid-done"
+    label     = "xnat-ingest-ready"
   }, false))
 end

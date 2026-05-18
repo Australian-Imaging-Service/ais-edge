@@ -6,7 +6,7 @@
 #      routing.json, writes the ORIGINAL to /facility-backup, deletes the
 #      original from Orthanc, keeps the deid'd instance in Orthanc storage.
 #   3. Lua OnStableStudy (after StableAge=30s silence) PUTs the
-#      `ais-deid-done` label on the study.
+#      `xnat-ingest-ready` label on the study.
 #   4. xnat-ingest sort REST-pulls labelled studies and hardlinks instances
 #      from /data/orthanc-storage into /data/staging.
 #

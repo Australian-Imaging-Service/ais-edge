@@ -21,12 +21,12 @@ Three jobs at each edge:
    `/facility-backup` (site-controlled retention) and runs
    `/instances/{id}/modify` to produce a deidentified copy. The
    original is deleted from Orthanc; the deid'd instance is kept.
-3. **Lua `OnStableStudy` hook** PUTs the `ais-deid-done` label on each
+3. **Lua `OnStableStudy` hook** PUTs the `xnat-ingest-ready` label on each
    study once it's been quiescent for `StableAge` seconds. This is the
    signal for `xnat-ingest sort` to REST-pull the study.
 
 After sort hardlinks the instances into `/data/staging/`, it PUTs the
-`xnat-sorted` label on the study so subsequent sort cycles skip it.
+`xnat-ingest-skip` label on the study so subsequent sort cycles skip it.
 
 ```
 Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
@@ -37,11 +37,11 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
                           │   3. delete ORIGINAL
                           │
                           └─ OnStableStudy (after StableAge=30s silence):
-                              PUT /studies/{id}/labels/ais-deid-done
+                              PUT /studies/{id}/labels/xnat-ingest-ready
                                                       │
                                                       ▼
                                 xnat-ingest sort REST-pulls, hardlinks,
-                                PUTs label xnat-sorted
+                                PUTs label xnat-ingest-skip
 ```
 
 ## What Orthanc has access to
@@ -102,7 +102,7 @@ storescu -aec AISEDGE -aet TEST_MOD <edge-ip> 4242 /path/to/study/*.dcm
 
 ## Known limitations
 
-- **No automatic cleanup** of deid'd instances in Orthanc storage after upload to XNAT. Manual or scripted cleanup needed for production (e.g. delete studies labelled `xnat-sorted` once confirmed in XNAT).
+- **No automatic cleanup** of deid'd instances in Orthanc storage after upload to XNAT. Manual or scripted cleanup needed for production (e.g. delete studies labelled `xnat-ingest-skip` once confirmed in XNAT).
 - **Pure-Lua salted hash instead of true HMAC** for SubjectHash / SessionHash, because `jodogne/orthanc-plugins` doesn't expose `Compute*` crypto in Lua. Adequate for research deid; switch to `jodogne/orthanc-python` for HMAC-grade.
 - **Profile authoring is by hand** — no validation that referenced DICOM tags exist in Orthanc's dictionary before deployment. `07c` prompts the site admin for explicit confirmation of the AETMap + profile before applying.
 - **Hardlinks require shared filesystem** — `/data/xnat-ingest/orthanc-storage` and `/data/xnat-ingest/staging` must live on the same physical mount, or sort fails with EXDEV.
