@@ -49,7 +49,7 @@ The `:logging-v1` tag is our **local fork** with one minimal patch
 the fork at `/home/ubuntu/tmp/xnat-ingest-fork`, exported to a tar via
 `docker save`, and imported into k0s containerd via `ctr image import`
 on both the management host and each edge worker. See
-[`xnat-ingest-changes.md`](../xnat-ingest-changes.md) for the full
+the upstream PR (in progress) for the full
 diff and rebuild instructions.
 
 ## Configuration
@@ -136,7 +136,7 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 | XNAT down | uploads queue in SeaweedFS; backlog grows | `XNATBacklogGrowing` alert fires after 30 min |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | Sort pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
-| Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install; documented in `xnat-ingest-changes.md` |
+| Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
 
 ## Replacements / future
 
