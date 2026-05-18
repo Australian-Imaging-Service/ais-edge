@@ -16,3 +16,10 @@ ca-bundle.crt
 .DS_Store
 *.swp
 *~
+
+# Orthanc routing file
+config/orthanc/routing.json
+
+# Operator-edited per-site Orthanc deidentification profiles (copy from .template)
+config/orthanc/deidentification-profile*.json
+!config/orthanc/deidentification-profile*.json.template
