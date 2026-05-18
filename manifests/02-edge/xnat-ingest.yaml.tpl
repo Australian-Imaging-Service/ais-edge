@@ -17,8 +17,16 @@ stringData:
   access-key: "{{S3_EDGE_ACCESS_KEY}}"
   secret-key: "{{S3_EDGE_SECRET_KEY}}"
 ---
-# Sort pod: watches /data/incoming for new DICOM files, parses metadata,
-# stages them under /data/staging/PROJECT.SUBJECT.VISIT/, deletes from incoming.
+# Sort pod: REST-pulls deid'd instances from Orthanc, hardlinks the DICOM
+# files from Orthanc's storage tree (/data/orthanc-storage) into staging
+# (/data/staging/PROJECT.SUBJECT.VISIT/). Hardlink requires same filesystem,
+# which is why the Orthanc pod and this pod share the same /data hostPath.
+#
+# Label contract with Orthanc:
+#   --orthanc-label xnat-ingest-ready   only consider instances with this label
+#                                   (added by the Lua deid hook on success)
+#   --orthanc-skip-label xnat-ingest-skip   skip instances already staged
+#                                   (sort adds this label after hardlink)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,15 +65,21 @@ spec:
           image: {{XNAT_INGEST_IMAGE}}
           command: ["xnat-ingest", "sort"]
           args:
-            - "/data/incoming"
             - "/data/staging"
+            - "--orthanc-url"
+            - "http://orthanc.xnat-ingest.svc.cluster.local:8042"
+            - "--orthanc-storage-dir"
+            - "/data/orthanc-storage"
+            - "--orthanc-label"
+            - "xnat-ingest-ready"
+            - "--orthanc-skip-label"
+            - "xnat-ingest-skip"
             - "--project-id"
             - "{{PROJECT_ID}}"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
             - "--wait-period"
             - "{{INGEST_WAIT_PERIOD}}"
-            - "--delete"
           env:
             - name: AIS_LOG_FORMAT
               value: "json"
