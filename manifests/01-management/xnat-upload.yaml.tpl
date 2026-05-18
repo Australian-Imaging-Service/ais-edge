@@ -47,7 +47,7 @@ spec:
       containers:
         - name: upload
           # Default points at our fork on ghcr.io with the AIS_LOG_FORMAT=json
-          # patch (see docs/xnat-ingest-changes.md). Override XNAT_INGEST_IMAGE
+          # patch. Override XNAT_INGEST_IMAGE
           # in config/management.env when upstream merges to switch back to
           # ghcr.io/australian-imaging-service/xnat-ingest:latest.
           image: {{XNAT_INGEST_IMAGE}}
