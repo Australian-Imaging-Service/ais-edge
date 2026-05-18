@@ -5,7 +5,7 @@
 # bound to *:443 on the management host. No new firewall ports.
 #
 # - grafana.aisedge.local  → svc/kube-prometheus-stack-grafana:80  (TLS terminate)
-#       Operator browser access to dashboards. Self-signed cert via cert-manager.
+#       Site-admin browser access to dashboards. Self-signed cert via cert-manager.
 # - loki.aisedge.local     → svc/loki-gateway:80                    (TLS terminate)
 #       Vector pods on edges push log batches here. Bearer-auth at Loki.
 # =============================================================================
