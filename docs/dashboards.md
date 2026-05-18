@@ -5,7 +5,7 @@ from ConfigMaps in `manifests/01-management/observability/dashboards/` via
 the Grafana sidecar. This document is the authoritative reference for what
 each panel means, what query backs it, and how to interpret the value.
 
-For each panel: the **title** is what the operator reads; the **query** is
+For each panel: the **title** is what the site admin reads; the **query** is
 what the panel actually computes; the **field semantics** are why those two
 match.
 
@@ -67,7 +67,7 @@ Cross-cluster view across every edge that's ever pushed logs.
 
 LogQL: `{namespace="xnat-ingest",component="sort"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
 
-Each line is a session sort placed in `__invalid__/`. Operator action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
+Each line is a session sort placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
 
 ### Time series
 

@@ -46,7 +46,7 @@ done
 
 # Extract kubeconfig — point it at the Phase 2 TLS hostname.
 # This requires /etc/hosts on the management VM to resolve K0S_API_HOSTNAME
-# to MGMT_NODE_IP. We add the line idempotently here so the operator can use
+# to MGMT_NODE_IP. We add the line idempotently here so the site admin can use
 # the kubeconfig without further setup.
 kubectl get secret "${CLUSTER_NAME}-kubeconfig" -n "${CLUSTER_NAME}" \
     -o jsonpath='{.data.value}' | base64 -d > "${EDGE_KC}"

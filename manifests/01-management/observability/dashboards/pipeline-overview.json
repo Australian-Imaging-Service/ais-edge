@@ -102,7 +102,7 @@
     {
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
-      "description": "Each line is a session that xnat-ingest sort routed to /data/staging/__invalid__/. Operator action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
+      "description": "Each line is a session that xnat-ingest sort routed to /data/staging/__invalid__/. Site-admin action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{

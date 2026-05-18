@@ -156,7 +156,7 @@ kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/alerts/"
 # 10b. Cross-namespace ServiceMonitors that depend on the kube-prometheus
 # -stack CRDs being installed (which only happens in this step). SeaweedFS
 # (deployed in step 03) ships its own /metrics on a separate Service; this
-# is the operator-facing object that wires that Service into Prometheus.
+# is the config object the site admin authors to wire that Service into Prometheus.
 kubectl apply -f "${REPO_DIR}/manifests/01-management/observability/seaweedfs-servicemonitor.yaml"
 
 # 11. Dashboards as ConfigMaps with the grafana_dashboard label
@@ -172,7 +172,7 @@ for f in "${REPO_DIR}/manifests/01-management/observability/dashboards/"*.json; 
 done
 
 # 12. Add /etc/hosts entries on the mgmt node for the new hostnames so the
-# operator can reach Grafana via curl/browser without a DNS server.
+# site admin can reach Grafana via curl/browser without a DNS server.
 HOSTS_MARKER="# ais-edge observability hostnames"
 HOSTS_LINE="${MGMT_NODE_IP} ${GRAFANA_HOSTNAME} ${LOKI_HOSTNAME}"
 if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then

@@ -90,7 +90,7 @@ See also the **"Konnectivity and Middleboxes"** section in the main
 | `konnect.aisedge.local` not resolvable in pod | Agent CrashLoop with "no such host" | CoreDNS hosts plugin patched at install (script 06) |
 | API server down | Agents remain connected to whichever k0smotron pod replaces it; brief gap | Auto-recovery |
 
-**Crucially**: konnectivity is for **operator visibility** only. The
+**Crucially**: konnectivity is for **central-admin visibility** only. The
 DICOM data path (mc → SeaweedFS) does NOT go through konnectivity; it
 uses ordinary HTTPS over the same nginx-ingress on 443. So a
 konnectivity outage means `kubectl logs` stops working but data

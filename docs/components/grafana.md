@@ -78,7 +78,7 @@ kubectl -n observability rollout restart deployment/kube-prometheus-stack-grafan
 
 ## Benefits
 
-- **The standard** — every operator already knows Grafana; no training cost
+- **The standard** — every site admin already knows Grafana; no training cost
 - **Rich dashboard ecosystem** — community dashboards for Kubernetes,
   cert-manager, nginx-ingress already exist
 - **Single UI for logs + metrics + traces** — one place for the whole
