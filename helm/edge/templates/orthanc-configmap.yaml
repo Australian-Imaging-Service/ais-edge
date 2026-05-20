@@ -16,5 +16,11 @@ data:
       "AuthenticationEnabled": true,
       "Plugins": {{ .Values.orthanc.plugins | toJson }},
       "IngestTranscoding": {{ .Values.orthanc.ingestTranscoding | quote }},
-      "DicomScuTimeout": {{ .Values.orthanc.dicomScuTimeout }}
+      "DicomScuTimeout": {{ .Values.orthanc.dicomScuTimeout }},
+      "OrthancExplorer2": {
+        "UiOptions": {
+          "EnableViewerQuickButton": true,
+          "ViewersOrdering": ["stone-webviewer"]
+        }
+      }
     }

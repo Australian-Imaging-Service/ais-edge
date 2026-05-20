@@ -28,9 +28,20 @@ orthanc:
   dicomScuTimeout: 60     # seconds to wait for a DICOM association response
 
   plugins:                                # plugins for viewer etc, can be altered
+    - /usr/local/share/orthanc/plugins/libOrthancExplorer2.so
     - /usr/local/share/orthanc/plugins/libStoneWebViewer.so
     - /usr/local/share/orthanc/plugins/libOrthancDicomWeb.so
     - /usr/local/share/orthanc/plugins/libOrthancGdcm.so
+  podSecurityContext:
+    fsGroup: 10001
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+  securityContext:
+    capabilities:
+      drop:
+      - ALL
+    allowPrivilegeEscalation: false
   resources:
     requests:
       memory: "512Mi"
