@@ -64,6 +64,26 @@ Architecture, data flow, security model, and component-by-component reference ar
 
 ## Architecture
 
+### Two-edge model
+
+AIS-Edge has two "edge" components, both running the same ingest stack but at different points in the pipeline:
+
+- **Facility edge** — sits on the facility's network alongside the modalities. Receives DICOMs locally (C-STORE on port 4242 or file drop), stages, and pushes over the internet to the server side.
+- **Server edge** — sits on or alongside the AIS-Server / XNAT cluster. Receives staged data from the facility edge and uploads it into XNAT via REST.
+
+Internet transfer happens **only between the two edges** — never directly from a facility to XNAT.
+
+### Why this split
+
+| Reason | Effect |
+|---|---|
+| **Centralised k8s management** | The Kubernetes management cluster runs on the server side and manages both the server-edge and facility-edge worker nodes via k0smotron + konnectivity. AIS operators `kubectl` from the server side to manage the facility edge — no per-site kubeconfig juggling |
+| **Outbound-only from the facility** | The facility edge only opens outbound TCP/443 to the server side. No inbound ports needed from the internet or management network. Works behind aggressive hospital firewalls |
+| **XNAT credentials stay server-side** | The XNAT REST credentials live only on the server edge. A compromised facility edge cannot reach XNAT directly |
+| **Low resource floor at facility** | Facility edge runs a k0s *worker* only (the control plane is hosted on the server side via k0smotron). 4GB RAM is enough |
+
+### Network shape
+
 Edge nodes connect to the management cluster over a single TLS port (443).
 nginx-ingress on the management host reads the SNI from the TLS handshake and
 routes to the right backend. The only inbound port at the edge is DICOM
