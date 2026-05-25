@@ -12,6 +12,16 @@ join-token-*
 ais-edge-ca.crt
 ca-bundle.crt
 
+# Cloud-provider credentials — anything matching these names is a shell
+# script of `export KEY=...` lines and must never be committed. Operators
+# point CLOUD_CREDENTIALS_FILE at one of these (or any path outside the
+# repo).
+openrc*.sh
+*-openrc.sh
+aws-creds*.sh
+gcp-creds*.sh
+azure-creds*.sh
+
 # OS files
 .DS_Store
 *.swp

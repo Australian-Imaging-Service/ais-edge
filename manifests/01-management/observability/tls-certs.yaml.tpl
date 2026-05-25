@@ -12,8 +12,9 @@
 # verify the cert by IP. In cloud topology the cert is purely DNS-named —
 # the load balancer fronts the IP and clients dial by hostname.
 # Let's Encrypt does not issue IP SANs at all, so when CERT_ISSUER is
-# letsencrypt-*, the {{#ONPREM_ONLY}} block is stripped by
-# render_with_topology even though we're technically running in cloud mode.
+# letsencrypt-*, the IP-SAN block (gated on onprem topology below) is
+# stripped by render_with_topology even though we're technically running
+# in cloud mode.
 # =============================================================================
 ---
 apiVersion: cert-manager.io/v1

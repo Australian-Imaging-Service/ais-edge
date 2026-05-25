@@ -20,10 +20,38 @@ same dashboards, same alerts.
 `config/management.env`:
 ```bash
 export INSTALL_TOPOLOGY="cloud"               # vs "onprem"
+export CLOUD_PROVIDER="openstack"             # openstack | aws | gcp | azure | none
+export CLOUD_CREDENTIALS_FILE="/path/to/openrc.sh"   # auto-sourced by install.sh
 export LB_PUBLIC_IP="203.101.227.222"         # pre-allocated floating IP
 export INTERNAL_DOMAIN="dev-nectar-test.203-101-227-222.nip.io"   # or your real zone
 export CERT_ISSUER="ais-edge-ca-issuer"       # nip.io must use self-signed CA
 ```
+
+## Cloud credentials — one knob, any provider
+
+Cloud installs need a few `export OS_…` / `export AWS_…` / similar lines in
+the environment before step 01b runs. Rather than remembering
+`source openrc.sh` every time, point `CLOUD_CREDENTIALS_FILE` at any shell
+script with the right `export` lines — install.sh sources it for you,
+then runs a per-provider guard that fails fast with a fix-up hint if
+anything is still missing.
+
+| Provider | What the file should `export` |
+|---|---|
+| `openstack` | Whatever the Keystone openrc.sh from your dashboard already exports (OS_AUTH_URL, OS_REGION_NAME, plus application-credential OR username/password vars). |
+| `aws` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_REGION`, OR leave blank and let install.sh use `~/.aws/credentials` (the SDK chain). |
+| `gcp` | `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`. Or run `gcloud auth application-default login` and leave the file unset. |
+| `azure` | Usually unnecessary — `az login` keeps state in `~/.azure`. For non-interactive: `AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET`. |
+| `none` | No credentials — you're running with a BYO LB controller (e.g. MetalLB) you installed separately. |
+
+If `CLOUD_CREDENTIALS_FILE` is blank and the guard sees nothing in your
+shell, install.sh:
+* in interactive mode — prompts you for a path right then.
+* in `-y` mode — exits with the exact env vars that are missing.
+
+To add a new provider to the install, add one `provider_guard_<name>`
+function in `install.sh` and one branch in `01b-install-cloud-controller.sh`.
+No other files need to change.
 
 The install scripts read those vars and:
 * skip `/etc/hosts` writes on edge VMs (step 06)

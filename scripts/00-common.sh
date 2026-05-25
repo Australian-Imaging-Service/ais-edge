@@ -41,24 +41,28 @@ render_with_topology() {
     local file="$1"; shift
     local rendered
     rendered=$(render "$file" "$@")
+    # Anchored regexes — the marker MUST be the only non-whitespace content
+    # on its line. This way a template doc-comment that mentions the marker
+    # token (e.g. "the {{#ONPREM_ONLY}} block is stripped...") doesn't get
+    # mistaken for a real marker and silently eat the following lines.
     if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ]; then
         # Strip onprem-only blocks; strip cloud-only markers (keep content).
         echo "$rendered" | awk '
-            /\{\{#ONPREM_ONLY\}\}/ {skip=1; next}
-            /\{\{\/ONPREM_ONLY\}\}/ {skip=0; next}
+            /^[[:space:]]*\{\{#ONPREM_ONLY\}\}[[:space:]]*$/ {skip=1; next}
+            /^[[:space:]]*\{\{\/ONPREM_ONLY\}\}[[:space:]]*$/ {skip=0; next}
             skip {next}
-            /\{\{#CLOUD_ONLY\}\}/ {next}
-            /\{\{\/CLOUD_ONLY\}\}/ {next}
+            /^[[:space:]]*\{\{#CLOUD_ONLY\}\}[[:space:]]*$/ {next}
+            /^[[:space:]]*\{\{\/CLOUD_ONLY\}\}[[:space:]]*$/ {next}
             {print}
         '
     else
         # Strip cloud-only blocks; strip onprem-only markers (keep content).
         echo "$rendered" | awk '
-            /\{\{#CLOUD_ONLY\}\}/ {skip=1; next}
-            /\{\{\/CLOUD_ONLY\}\}/ {skip=0; next}
+            /^[[:space:]]*\{\{#CLOUD_ONLY\}\}[[:space:]]*$/ {skip=1; next}
+            /^[[:space:]]*\{\{\/CLOUD_ONLY\}\}[[:space:]]*$/ {skip=0; next}
             skip {next}
-            /\{\{#ONPREM_ONLY\}\}/ {next}
-            /\{\{\/ONPREM_ONLY\}\}/ {next}
+            /^[[:space:]]*\{\{#ONPREM_ONLY\}\}[[:space:]]*$/ {next}
+            /^[[:space:]]*\{\{\/ONPREM_ONLY\}\}[[:space:]]*$/ {next}
             {print}
         '
     fi

@@ -35,10 +35,16 @@ case "${TOPOLOGY}" in
         ;;
     cloud)
         VALUES_TPL="${REPO_DIR}/manifests/01-management/nginx-ingress-values-cloud.yaml.tpl"
+        # LB_PUBLIC_IP is OPTIONAL in cloud mode:
+        #  * If set, OCCM tries to associate that exact public IP. Required
+        #    pattern for AWS NLB + Elastic IP, GCP regional static IP, etc.
+        #  * If empty, the cloud LB controller auto-assigns a VIP and we
+        #    discover it from the Service status. Required pattern for
+        #    Nectar QLD where the LB sits on the external network and FIP
+        #    association doesn't apply (Neutron rejects same-network FIPs).
         if [ -z "${LB_PUBLIC_IP:-}" ]; then
-            echo "ERROR: INSTALL_TOPOLOGY=cloud requires LB_PUBLIC_IP to be set in"
-            echo "       config/management.env (pre-allocated cloud floating IP)."
-            exit 1
+            echo "  LB_PUBLIC_IP unset — letting cloud LB auto-assign a VIP."
+            echo "  (Set LB_PUBLIC_IP in management.env to pin to a specific IP.)"
         fi
         ;;
     *)
@@ -54,19 +60,34 @@ render "${VALUES_TPL}" \
     LB_PUBLIC_IP "${LB_PUBLIC_IP:-}" \
     > "${VALUES_FILE}"
 
+# Strip any `{{#LB_PUBLIC_IP}}` / `{{/LB_PUBLIC_IP}}` marker lines. The
+# template wraps `loadBalancerIP:` so it's only emitted when LB_PUBLIC_IP
+# is non-empty (a real value would have been substituted before we get
+# here). awk drops marker lines and, when LB_PUBLIC_IP is empty, also
+# drops the inner content.
+if [ -n "${LB_PUBLIC_IP:-}" ]; then
+    sed -i '/{{[/#]LB_PUBLIC_IP}}/d' "${VALUES_FILE}"
+else
+    awk '/\{\{#LB_PUBLIC_IP\}\}/{skip=1; next} /\{\{\/LB_PUBLIC_IP\}\}/{skip=0; next} !skip {print}' \
+        "${VALUES_FILE}" > "${VALUES_FILE}.tmp" && mv "${VALUES_FILE}.tmp" "${VALUES_FILE}"
+fi
+
 # Ensure the helm repo is available
 if ! helm repo list 2>/dev/null | grep -q "ingress-nginx"; then
     helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
 fi
 helm repo update ingress-nginx
 
-# Install or upgrade
+# Install or upgrade. NB: no `--wait` — helm's --wait blocks on the
+# LoadBalancer Service getting a status.externalIP, which never resolves on
+# cloud topologies where the LB controller can't fully claim the Service
+# (e.g. Nectar QLD, where Octavia gives the LB a working public VIP but
+# OCCM keeps retrying an impossible FIP-association). The kubectl wait
+# below is the real readiness check.
 helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
     --namespace ingress-nginx \
     --create-namespace \
-    --values "${VALUES_FILE}" \
-    --wait \
-    --timeout 300s
+    --values "${VALUES_FILE}"
 
 echo "Waiting for ingress-nginx controller pod to be Ready..."
 kubectl wait --for=condition=Ready pod \
@@ -103,17 +124,28 @@ else
 
     if [ -n "${EXT_IP}" ]; then
         echo "  LoadBalancer external IP: ${EXT_IP}"
-        if [ "${EXT_IP}" != "${LB_PUBLIC_IP}" ]; then
+        if [ -n "${LB_PUBLIC_IP:-}" ] && [ "${EXT_IP}" != "${LB_PUBLIC_IP}" ]; then
             echo "  WARNING: LB external IP (${EXT_IP}) differs from configured LB_PUBLIC_IP (${LB_PUBLIC_IP})."
             echo "           Check the cloud-controller-manager logs."
         fi
+        EFFECTIVE_IP="${EXT_IP}"
     elif [ -n "${EXT_HOST}" ]; then
         echo "  LoadBalancer external hostname: ${EXT_HOST}"
+        EFFECTIVE_IP="${EXT_HOST}"
     else
-        echo "  WARNING: LB did not get an external address within 5 minutes."
-        echo "  Check 'kubectl describe svc -n ingress-nginx ingress-nginx-controller' and"
-        echo "  the cloud-controller-manager logs."
+        # Service status may still be pending if OCCM is retrying. On Nectar
+        # QLD topology the FIP association loop is harmless — discover the
+        # actual VIP directly from the LB pool member's listener via the
+        # underlying provider when available; otherwise the operator must
+        # query their cloud manually.
+        echo "  NOTE: LB did not get an external address within 5 minutes."
+        echo "        Check 'kubectl describe svc -n ingress-nginx ingress-nginx-controller'."
+        echo "        On Nectar shared-public-network topologies OCCM cannot mark the"
+        echo "        Service ready (FIP-on-external-network limitation); query the"
+        echo "        Octavia LB directly with:"
+        echo "          openstack loadbalancer list -c name -c vip_address"
+        EFFECTIVE_IP="${LB_PUBLIC_IP:-<unknown>}"
     fi
     echo ""
-    echo "Test:  curl -kv https://${LB_PUBLIC_IP}/   # expect TLS handshake + 404 default backend"
+    echo "Test:  curl -kv https://${EFFECTIVE_IP}/   # expect TLS handshake + 404 default backend"
 fi

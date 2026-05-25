@@ -35,11 +35,12 @@ controller:
     default: true
   service:
     type: LoadBalancer
-    loadBalancerIP: "{{LB_PUBLIC_IP}}"           # pre-allocated floating IP
-    # OpenStack/Octavia hints — harmless on other providers but help the
+{{#LB_PUBLIC_IP}}    loadBalancerIP: "{{LB_PUBLIC_IP}}"           # pre-allocated public IP / FIP
+{{/LB_PUBLIC_IP}}    # OpenStack/Octavia hints — harmless on other providers but help the
     # OpenStack CCM associate the existing floating IP correctly.
+    # On Nectar QLD topology (where the LB is on the external network),
+    # leave LB_PUBLIC_IP blank; Octavia auto-assigns a usable public IP.
     annotations:
-      loadbalancer.openstack.org/floating-network-id: ""    # auto-detect
       # AWS NLB hint (also harmless on non-AWS):
       service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
   extraArgs:
