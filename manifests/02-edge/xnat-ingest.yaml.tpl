@@ -124,6 +124,13 @@ spec:
         app: xnat-ingest
         component: s3-uploader
     spec:
+      {{#ONPREM_ONLY}}
+      # Onprem-only: in onprem topology, edges have no DNS for the public
+      # hostnames so we pin them to MGMT_NODE_IP via hostAliases. In cloud
+      # topology this whole block is stripped — edges resolve via real
+      # public DNS (e.g. nip.io or your own zone) to the LB VIP. Leaving
+      # it in for a cloud install would pin the LB hostname to the mgmt
+      # VM IP and silently break uploads.
       hostAliases:
         - ip: "{{MGMT_NODE_IP}}"
           hostnames:
@@ -132,6 +139,7 @@ spec:
             - "{{KONNECTIVITY_HOSTNAME}}"
             - "{{LOKI_HOSTNAME}}"
             - "{{GRAFANA_HOSTNAME}}"
+      {{/ONPREM_ONLY}}
       containers:
         - name: uploader
           image: minio/mc:latest
@@ -167,9 +175,48 @@ spec:
               jlog startup "" "s3-uploader starting endpoint=${S3_ENDPOINT} bucket=${S3_BUCKET}"
 
               # mc speaks vanilla S3 — works against MinIO, SeaweedFS, AWS S3, etc.
-              mc alias set edge "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" >/dev/null \
-                && jlog alias_configured "" "mc alias set edge OK" \
-                || jlog alias_failed "" "mc alias set edge FAILED"
+              #
+              # CRITICAL: configure_alias must succeed AND the alias must
+              # actually round-trip to the S3 endpoint. If either fails we
+              # exit non-zero so Kubernetes restarts the pod — never enter
+              # the upload loop with a broken alias.
+              #
+              # Why: mc treats unaliased prefixes as LOCAL paths (an
+              # undocumented usability footgun). Without this guard, an
+              # `mc mirror /staging/SESSION/ edge/${S3_BUCKET}/...` with a
+              # missing `edge` alias silently copies into the local
+              # directory `./edge/${S3_BUCKET}/...`, reports exit 0, the
+              # script logs upload_completed, and `rm -rf $session_dir`
+              # then DELETES the staged data — all without anything
+              # reaching S3. Found the hard way on a cloud install where
+              # /etc/hosts staleness blocked the LB at startup.
+              # Retry alias setup a few times — DNS / pod startup races
+              # are not the same thing as a misconfigured pipeline, and
+              # crashlooping for 30s of DNS warm-up wastes runway. Persist
+              # mc's actual error to stderr so a real failure shows up in
+              # logs instead of being hidden behind `>/dev/null 2>&1`.
+              configure_alias() {
+                local err
+                err=$(mc alias set edge "${S3_ENDPOINT}" \
+                                        "${S3_ACCESS_KEY}" \
+                                        "${S3_SECRET_KEY}" 2>&1) \
+                  || { echo "mc alias set: $err" >&2; return 1; }
+                err=$(mc ls "edge/${S3_BUCKET}/" 2>&1) \
+                  || { echo "mc ls edge/${S3_BUCKET}/: $err" >&2; return 1; }
+              }
+
+              attempt=0
+              until configure_alias; do
+                attempt=$((attempt+1))
+                if [ "$attempt" -ge 12 ]; then
+                  jlog alias_failed "" "mc alias set / probe failed after 12 attempts (60s) — refusing to start upload loop"
+                  sleep 15
+                  exit 1
+                fi
+                jlog alias_retrying "" "attempt $attempt/12 — DNS/endpoint not ready, retrying in 5s"
+                sleep 5
+              done
+              jlog alias_configured "" "mc alias set edge + bucket probe OK"
 
               while true; do
                 for session_dir in /data/staging/*/; do
@@ -222,6 +269,15 @@ spec:
                   jlog upload_started "$session_name" "" ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms}"
 
                   start_ts=$(date +%s)
+
+                  # Defence-in-depth: re-verify the alias is still good
+                  # immediately before the mirror. If the S3 endpoint went
+                  # away mid-loop, this skips the upload (and the rm) so
+                  # the staged data is preserved for the next retry.
+                  if ! mc ls "edge/${S3_BUCKET}/" >/dev/null 2>&1; then
+                    jlog upload_skipped "$session_name" "S3 alias probe failed — preserving staged data for next retry" ""
+                    continue
+                  fi
 
                   # mc mirror: rsync-for-S3. Multipart, parallel, resumable.
                   # --json makes mc itself emit one JSON line per object
