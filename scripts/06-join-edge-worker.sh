@@ -20,16 +20,26 @@ ssh ${SSH_KEY_OPT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${E
     echo "ERROR: Cannot SSH to ${EDGE_SSH}"; exit 1;
 }
 
-# Phase 2: ensure /etc/hosts on the edge VM resolves the TLS hostnames to the
-# management node. Idempotent — the marker comment is what we grep for to
-# avoid duplicate entries on re-runs.
-HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
-HOSTS_MARKER="# ais-edge phase2 tls hostnames"
-echo "Ensuring /etc/hosts on edge has Phase 2 TLS hostnames..."
-ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
-    "grep -qF '${HOSTS_MARKER}' /etc/hosts || \
-     echo -e '${HOSTS_MARKER}\n${HOSTS_LINE}' | sudo tee -a /etc/hosts >/dev/null"
-ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "grep -A1 '${HOSTS_MARKER}' /etc/hosts | tail -2"
+# On-prem topology: ensure /etc/hosts on the edge VM resolves the TLS
+# hostnames to the management node. Idempotent — the marker comment is what
+# we grep for to avoid duplicate entries on re-runs.
+#
+# Cloud topology: skipped — edges resolve via real public DNS (nip.io for
+# dev, a registered domain for prod). The hostAliases block in pod manifests
+# is similarly stripped by render_with_topology.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
+    HOSTS_MARKER="# ais-edge phase2 tls hostnames"
+    echo "Ensuring /etc/hosts on edge has the TLS hostnames..."
+    ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
+        "grep -qF '${HOSTS_MARKER}' /etc/hosts || \
+         echo -e '${HOSTS_MARKER}\n${HOSTS_LINE}' | sudo tee -a /etc/hosts >/dev/null"
+    ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "grep -A1 '${HOSTS_MARKER}' /etc/hosts | tail -2"
+else
+    echo "Cloud topology — skipping /etc/hosts edit. Edge resolves SNI hostnames"
+    echo "  (${SEAWEEDFS_HOSTNAME} / ${K0S_API_HOSTNAME} / ${KONNECTIVITY_HOSTNAME})"
+    echo "  via real public DNS pointing at LB_PUBLIC_IP=${LB_PUBLIC_IP:-<unset>}."
+fi
 
 # Phase 2: pre-stage certs for the k0smotron-haproxy DaemonSet that runs on
 # the worker. With spec.ingress, k0smotron pushes a haproxy DS (hostNetwork)
@@ -142,14 +152,19 @@ KUBECONFIG="$EDGE_KC" kubectl get nodes -o wide
 # (xnat-ingest image is now pulled from ghcr.io by kubelet directly;
 # no ctr-import dance — see config/management.env: XNAT_INGEST_IMAGE.)
 
-# Phase 2: patch CoreDNS in the child cluster so the konnectivity-agent
-# (and any other in-pod client) can resolve the management TLS hostnames.
-# Without this, konnectivity-agent fails: "lookup konnect.aisedge.local on
-# 10.96.0.10:53: no such host" — because pods use cluster CoreDNS, which
-# does not consult the host's /etc/hosts.
-COREDNS_TMP=$(mktemp /tmp/coredns-corefile-XXXXXX)
-trap "rm -f $COREDNS_TMP" EXIT
-cat > "$COREDNS_TMP" <<EOF
+# On-prem topology: patch CoreDNS in the child cluster so the
+# konnectivity-agent (and any other in-pod client) can resolve the
+# management TLS hostnames. Without this, konnectivity-agent fails:
+# "lookup konnect.aisedge.local on 10.96.0.10:53: no such host" — because
+# pods use cluster CoreDNS, which doesn't consult the host's /etc/hosts.
+#
+# Cloud topology: skipped — every hostname resolves via real public DNS
+# (CoreDNS's default `forward . /etc/resolv.conf` block handles it through
+# the worker's normal resolver).
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    COREDNS_TMP=$(mktemp /tmp/coredns-corefile-XXXXXX)
+    trap "rm -f $COREDNS_TMP" EXIT
+    cat > "$COREDNS_TMP" <<EOF
 .:53 {
     errors
     health
@@ -171,12 +186,17 @@ cat > "$COREDNS_TMP" <<EOF
     loadbalance
 }
 EOF
-echo "Patching child cluster CoreDNS Corefile with Phase 2 hostnames..."
-KUBECONFIG="$EDGE_KC" kubectl create configmap coredns \
-    --from-file=Corefile="$COREDNS_TMP" \
-    --namespace kube-system \
-    --dry-run=client -o yaml \
-    | KUBECONFIG="$EDGE_KC" kubectl apply -f -
+    echo "Patching child cluster CoreDNS Corefile with mgmt-side hostnames..."
+    KUBECONFIG="$EDGE_KC" kubectl create configmap coredns \
+        --from-file=Corefile="$COREDNS_TMP" \
+        --namespace kube-system \
+        --dry-run=client -o yaml \
+        | KUBECONFIG="$EDGE_KC" kubectl apply -f -
+else
+    echo "Cloud topology — leaving child cluster CoreDNS at chart defaults."
+    echo "  In-pod resolution of ${SEAWEEDFS_HOSTNAME} etc. uses the standard"
+    echo "  upstream chain (CoreDNS forward → kubelet's /etc/resolv.conf → public DNS)."
+fi
 
 # Bounce coredns + konnectivity-agent so the new resolution path takes
 # effect immediately (CoreDNS reload plugin should handle it, but

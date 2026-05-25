@@ -39,8 +39,10 @@ else
     echo "         Phase 2 TLS path will fail until the CA bundle is in place."
 fi
 
-# Deploy manifests
-render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
+# Deploy manifests — render_with_topology strips the {{#ONPREM_ONLY}}
+# hostAliases block when INSTALL_TOPOLOGY=cloud, leaving the pod with
+# normal DNS resolution.
+render_with_topology "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     CLUSTER_NAME "$CLUSTER_NAME" \
     S3_EDGE_ACCESS_KEY "$EDGE_ACCESS_KEY" \
     S3_EDGE_SECRET_KEY "$EDGE_SECRET_KEY" \
@@ -48,7 +50,7 @@ render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     INGEST_LOOP_SECONDS "$INGEST_LOOP_SECONDS" \
     INGEST_WAIT_PERIOD "$INGEST_WAIT_PERIOD" \
     S3_BUCKET "$S3_BUCKET" \
-    MGMT_NODE_IP "$MGMT_NODE_IP" \
+    MGMT_NODE_IP "${MGMT_NODE_IP:-}" \
     SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
     K0S_API_HOSTNAME "$K0S_API_HOSTNAME" \
     KONNECTIVITY_HOSTNAME "$KONNECTIVITY_HOSTNAME" \

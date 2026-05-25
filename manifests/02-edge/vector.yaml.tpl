@@ -148,6 +148,7 @@ spec:
       serviceAccountName: vector
       hostNetwork: false
       dnsPolicy: ClusterFirst
+      {{#ONPREM_ONLY}}
       hostAliases:
         - ip: "{{MGMT_NODE_IP}}"
           hostnames:
@@ -156,6 +157,7 @@ spec:
             - "{{SEAWEEDFS_HOSTNAME}}"
             - "{{K0S_API_HOSTNAME}}"
             - "{{KONNECTIVITY_HOSTNAME}}"
+      {{/ONPREM_ONLY}}
       tolerations:
         - operator: Exists
       # Vector's data dir is a hostPath on the edge worker so its

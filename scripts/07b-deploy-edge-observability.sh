@@ -64,10 +64,11 @@ else
     echo "WARNING: ais-edge-ca.crt not found at ${REPO_DIR}; Vector TLS will fail"
 fi
 
-# 4. Apply the Vector DaemonSet manifest
-render "${REPO_DIR}/manifests/02-edge/vector.yaml.tpl" \
+# 4. Apply the Vector DaemonSet manifest — render_with_topology drops the
+#    {{#ONPREM_ONLY}} hostAliases block in cloud mode.
+render_with_topology "${REPO_DIR}/manifests/02-edge/vector.yaml.tpl" \
     CLUSTER_NAME           "$CLUSTER_NAME" \
-    MGMT_NODE_IP           "$MGMT_NODE_IP" \
+    MGMT_NODE_IP           "${MGMT_NODE_IP:-}" \
     SEAWEEDFS_HOSTNAME     "$SEAWEEDFS_HOSTNAME" \
     K0S_API_HOSTNAME       "$K0S_API_HOSTNAME" \
     KONNECTIVITY_HOSTNAME  "$KONNECTIVITY_HOSTNAME" \

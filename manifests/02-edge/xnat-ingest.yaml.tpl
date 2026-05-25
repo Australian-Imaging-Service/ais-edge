@@ -47,8 +47,10 @@ spec:
         app: xnat-ingest
         component: sort
     spec:
+      {{#ONPREM_ONLY}}
       # Pod-level /etc/hosts so any in-pod tool can resolve the
-      # management hostnames without external DNS.
+      # management hostnames without external DNS. On cloud topology the
+      # whole block is stripped — edges resolve via real public DNS.
       hostAliases:
         - ip: "{{MGMT_NODE_IP}}"
           hostnames:
@@ -57,6 +59,7 @@ spec:
             - "{{KONNECTIVITY_HOSTNAME}}"
             - "{{LOKI_HOSTNAME}}"
             - "{{GRAFANA_HOSTNAME}}"
+      {{/ONPREM_ONLY}}
       containers:
         - name: sort
           # Default points at our fork on ghcr.io with the JSON-logging
