@@ -62,6 +62,23 @@ Architecture, data flow, security model, and component-by-component reference ar
 
 ---
 
+## Deployment topology
+
+AIS-Edge supports two deployment shapes, selected by `INSTALL_TOPOLOGY` in
+`config/management.env`. Both run the same application stack — the
+difference is purely how the management cluster exposes itself to edges
+and how edge workers resolve management-side hostnames.
+
+| | `INSTALL_TOPOLOGY=onprem` (default) | `INSTALL_TOPOLOGY=cloud` |
+|---|---|---|
+| Inbound TLS | `nginx-ingress` binds `:443` via `hostNetwork: true` on the mgmt node | `nginx-ingress` exposed as `Service type: LoadBalancer`; cloud LB owns the public IP |
+| Hostname resolution | `/etc/hosts` writes on each edge VM + `hostAliases:` inside each pod | Real public DNS (a registered zone or `nip.io` for dev) |
+| Where it runs | k0s on a single mgmt VM you fully control | Managed K8s (EKS, GKE, AKS, OpenStack Magnum, Nectar k0s + Octavia) |
+| Cert issuer (default) | `ais-edge-ca-issuer` (self-signed root, distributed to edges) | Same `ais-edge-ca-issuer` for dev; `letsencrypt-prod` for production |
+
+For the cloud-topology specifics (LB provisioning, DNS-01 cert issuance,
+the dev-to-prod swap procedure), see **[`docs/cloud-deployment.md`](docs/cloud-deployment.md)**.
+
 ## Architecture
 
 ### Two-edge model
