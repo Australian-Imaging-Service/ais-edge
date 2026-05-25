@@ -132,10 +132,11 @@ helm upgrade --install vector-mgmt vector/vector \
     --wait --timeout 300s
 
 # 8. TLS Certificates for Grafana + Loki
-render "${REPO_DIR}/manifests/01-management/observability/tls-certs.yaml.tpl" \
+render_with_topology "${REPO_DIR}/manifests/01-management/observability/tls-certs.yaml.tpl" \
     GRAFANA_HOSTNAME "$GRAFANA_HOSTNAME" \
     LOKI_HOSTNAME    "$LOKI_HOSTNAME" \
-    MGMT_NODE_IP     "$MGMT_NODE_IP" \
+    MGMT_NODE_IP     "${MGMT_NODE_IP:-}" \
+    CERT_ISSUER      "${CERT_ISSUER:-ais-edge-ca-issuer}" \
     | kubectl apply -f -
 
 echo "Waiting for grafana-tls + loki-tls certs to be Ready..."
