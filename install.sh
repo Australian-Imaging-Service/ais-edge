@@ -108,9 +108,10 @@ done
 echo ""
 echo " Steps:"
 echo "   01.  Install k0s management cluster (or use existing)"
+echo "   01b. Cloud-controller-manager (cloud topology only; no-op otherwise)"
 echo "   02.  Install cert-manager + k0smotron operator"
-echo "   02b. Bootstrap self-signed CA (Phase 2 TLS)"
-echo "   02c. Install nginx-ingress on host :443 (Phase 2 single port)"
+echo "   02b. Bootstrap self-signed CA (single-port TLS)"
+echo "   02c. Install nginx-ingress (hostNetwork :443 or LoadBalancer Service)"
 echo "   03.  Deploy SeaweedFS (ClusterIP + TLS Ingress)"
 echo "   04.  Deploy XNAT upload pod (in-cluster: SeaweedFS → XNAT)"
 echo "   For each edge node:"
@@ -135,6 +136,15 @@ echo "--- Step 01: k0s management cluster ---"
 confirm "Run step 01? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
 
+# Step 01b: install the cloud-controller-manager so Service type LoadBalancer
+# can provision a real LB. Only runs when INSTALL_TOPOLOGY=cloud; skips
+# cleanly otherwise. Doesn't apply on EKS/AKS/GKE/Magnum where the CCM is
+# already part of the managed control plane.
+echo ""
+echo "--- Step 01b: Cloud-controller-manager (cloud topology only) ---"
+confirm "Run step 01b? (y/s to skip) "
+[[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/01b-install-cloud-controller.sh"
+
 echo ""
 echo "--- Step 02: cert-manager + k0smotron ---"
 confirm "Run step 02? (y/s to skip) "
@@ -146,7 +156,7 @@ confirm "Run step 02b? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02b-bootstrap-ca.sh"
 
 echo ""
-echo "--- Step 02c: Install nginx-ingress (hostNetwork :443) ---"
+echo "--- Step 02c: Install nginx-ingress (hostNetwork :443 OR LoadBalancer) ---"
 confirm "Run step 02c? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02c-install-nginx-ingress.sh"
 
