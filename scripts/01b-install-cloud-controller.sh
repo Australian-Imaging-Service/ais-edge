@@ -91,15 +91,32 @@ kubectl create secret generic openstack-cloud-config \
 helm repo add cpo https://kubernetes.github.io/cloud-provider-openstack >/dev/null 2>&1 || true
 helm repo update cpo >/dev/null
 
+# Use a small values file rather than --set flags; controllerExtraArgs is a
+# multi-line YAML string and helm --set can't represent it cleanly.
+OCCM_VALUES=$(mktemp /tmp/occm-values-XXXXXX.yaml)
+cat > "$OCCM_VALUES" <<EOF
+secret:
+  create: false
+  name: openstack-cloud-config
+cloudConfig:
+  useExistingSecret: true
+  existingSecret: openstack-cloud-config
+# Run only the LB-service controller. The cloud-node and cloud-node-
+# lifecycle controllers expect kubelet's --cloud-provider=external and
+# nodes to carry providerID, which we don't set up because we only need LB
+# capabilities. The route controller expects Neutron-managed pod CIDRs,
+# which we don't use (kube-router does the pod networking).
+controllerExtraArgs: |-
+  - --controllers=service
+tolerations:
+  - operator: Exists
+EOF
+
 helm upgrade --install openstack-ccm cpo/openstack-cloud-controller-manager \
     --namespace kube-system \
-    --set "secret.create=false" \
-    --set "secret.name=openstack-cloud-config" \
-    --set "cloudConfig.useExistingSecret=true" \
-    --set "cloudConfig.existingSecret=openstack-cloud-config" \
-    --set "controllerExtraArgs={--controllers=cloud-node-lifecycle\,service\,-route}" \
-    --set 'tolerations[0].operator=Exists' \
+    --values "$OCCM_VALUES" \
     --wait --timeout 300s
+rm -f "$OCCM_VALUES"
 
 echo ""
 echo "Waiting for cloud-controller-manager pod to be Ready..."
