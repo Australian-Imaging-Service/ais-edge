@@ -76,8 +76,65 @@ and how edge workers resolve management-side hostnames.
 | Where it runs | k0s on a single mgmt VM you fully control | Managed K8s (EKS, GKE, AKS, OpenStack Magnum, Nectar k0s + Octavia) |
 | Cert issuer (default) | `ais-edge-ca-issuer` (self-signed root, distributed to edges) | Same `ais-edge-ca-issuer` for dev; `letsencrypt-prod` for production |
 
-For the cloud-topology specifics (LB provisioning, DNS-01 cert issuance,
-the dev-to-prod swap procedure), see **[`docs/cloud-deployment.md`](docs/cloud-deployment.md)**.
+### Per-cloud install guides
+
+Cloud-topology details differ per provider (LB controller, credential
+format, FIP semantics, DNS-01 solver). Each provider has its own page
+under [`docs/clouds/`](docs/clouds/README.md):
+
+| Provider | Doc | Status |
+|---|---|---|
+| **OpenStack — private subnet + FIP** (recommended for production) | [`openstack-private-subnet.md`](docs/clouds/openstack-private-subnet.md) | mirrors AWS / GCP / Azure shape |
+| **OpenStack — Nectar QLD shared external network** (dev/test only) | [`openstack-nectar.md`](docs/clouds/openstack-nectar.md) | ✅ E2E tested |
+| AWS (EKS) | [`aws.md`](docs/clouds/aws.md) | design complete |
+| GCP (GKE) | [`gcp.md`](docs/clouds/gcp.md) | design complete |
+| Azure (AKS) | [`azure.md`](docs/clouds/azure.md) | design complete |
+
+Architecture overview, packet flow, dev→prod swap procedure are in
+[`docs/cloud-deployment.md`](docs/cloud-deployment.md).
+
+### Cloud-mode config knobs
+
+All set in `config/management.env`. Defaults + per-knob docstrings live in
+[`config/management.env.template`](config/management.env.template).
+
+```bash
+export INSTALL_TOPOLOGY="cloud"
+export CLOUD_PROVIDER="openstack"             # openstack | aws | gcp | azure | none
+export CLOUD_CREDENTIALS_FILE="/path/to/openrc.sh"   # any shell script of `export X=Y` lines;
+                                              # auto-sourced by install.sh before cloud steps
+export LB_PUBLIC_IP=""                        # set if you can pre-allocate a FIP, leave blank
+                                              # to let the cloud LB controller auto-assign
+export LB_SUBNET_ID=""                        # OpenStack: subnet UUID where the LB VIP lives
+export LB_AVAILABILITY_ZONE=""                # OpenStack: Octavia AZ (must match mgmt-VM AZ)
+export PRECREATE_LB=""                        # set to "1" only on Nectar's shared-network
+                                              # topology — step 00a creates the LB up front
+                                              # and writes the VIP back into this file so the
+                                              # rest of the install runs uninterrupted
+export OCCM_CLUSTER_NAME="aisedge"            # unique per project to avoid stale-LB name
+                                              # collisions in OCCM's name-based lookup
+export INTERNAL_DOMAIN="aisedge.example.com"  # your DNS zone, or .<LB-IP-dashed>.nip.io for dev
+export CERT_ISSUER="ais-edge-ca-issuer"       # or "letsencrypt-prod" once on a real domain
+export DNS_PROVIDER=""                        # only when CERT_ISSUER=letsencrypt-*
+                                              # (cloudflare | route53 | clouddns | azuredns | rfc2136)
+```
+
+### Cloud-only install step
+
+A single extra step runs ahead of `01b` when `INSTALL_TOPOLOGY=cloud` +
+`CLOUD_PROVIDER=openstack` + `PRECREATE_LB=1`:
+
+- **`00a-precreate-lb`** — pre-creates the Octavia LB on the tenant
+  subnet, captures its auto-assigned VIP, and writes
+  `LB_PUBLIC_IP` + `INTERNAL_DOMAIN` back into `management.env` before
+  any cert is minted. Skips silently for managed K8s (EKS / GKE / AKS /
+  Magnum) where the platform CCM handles this synchronously with the
+  Service creation in step 02c.
+
+Everything else (`01`, `01b`, `02`…`07c`) is identical to the onprem
+path — just with different rendering of templates (no `hostAliases:`
+blocks on edge pods, no `/etc/hosts` writes on mgmt VM or edge VMs, no
+IP SANs in server certs).
 
 ## Architecture
 
