@@ -132,10 +132,11 @@ helm upgrade --install vector-mgmt vector/vector \
     --wait --timeout 300s
 
 # 8. TLS Certificates for Grafana + Loki
-render "${REPO_DIR}/manifests/01-management/observability/tls-certs.yaml.tpl" \
+render_with_topology "${REPO_DIR}/manifests/01-management/observability/tls-certs.yaml.tpl" \
     GRAFANA_HOSTNAME "$GRAFANA_HOSTNAME" \
     LOKI_HOSTNAME    "$LOKI_HOSTNAME" \
-    MGMT_NODE_IP     "$MGMT_NODE_IP" \
+    MGMT_NODE_IP     "${MGMT_NODE_IP:-}" \
+    CERT_ISSUER      "${CERT_ISSUER:-ais-edge-ca-issuer}" \
     | kubectl apply -f -
 
 echo "Waiting for grafana-tls + loki-tls certs to be Ready..."
@@ -171,12 +172,17 @@ for f in "${REPO_DIR}/manifests/01-management/observability/dashboards/"*.json; 
         | kubectl apply -f -
 done
 
-# 12. Add /etc/hosts entries on the mgmt node for the new hostnames so the
-# site admin can reach Grafana via curl/browser without a DNS server.
-HOSTS_MARKER="# ais-edge observability hostnames"
-HOSTS_LINE="${MGMT_NODE_IP} ${GRAFANA_HOSTNAME} ${LOKI_HOSTNAME}"
-if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then
-    echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
+# 12. Onprem-only: add /etc/hosts entries on the mgmt node for the new
+# hostnames so the site admin can reach Grafana via curl/browser without
+# a DNS server. In cloud mode the LB VIP differs from MGMT_NODE_IP, so
+# this entry would misroute traffic. Real public DNS handles cloud
+# resolution.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    HOSTS_MARKER="# ais-edge observability hostnames"
+    HOSTS_LINE="${MGMT_NODE_IP} ${GRAFANA_HOSTNAME} ${LOKI_HOSTNAME}"
+    if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then
+        echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
+    fi
 fi
 
 # 13. Generate per-edge Loki bearer tokens and store as a Secret on mgmt.

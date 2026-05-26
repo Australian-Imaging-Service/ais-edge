@@ -116,9 +116,10 @@ if kubectl get clusterissuer ais-edge-ca-issuer &>/dev/null \
    && kubectl get -n ingress-nginx deployment ingress-nginx-controller &>/dev/null; then
     echo "Phase 2 prereqs found — applying SeaweedFS TLS cert + Ingress"
 
-    render "${REPO_DIR}/manifests/01-management/seaweedfs-tls-cert.yaml.tpl" \
+    render_with_topology "${REPO_DIR}/manifests/01-management/seaweedfs-tls-cert.yaml.tpl" \
         SEAWEEDFS_HOSTNAME "$SEAWEEDFS_HOSTNAME" \
-        MGMT_NODE_IP "$MGMT_NODE_IP" \
+        MGMT_NODE_IP "${MGMT_NODE_IP:-}" \
+        CERT_ISSUER "${CERT_ISSUER:-ais-edge-ca-issuer}" \
         | kubectl apply -f -
 
     echo "Waiting for seaweedfs-tls Certificate to be Ready..."

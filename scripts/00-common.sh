@@ -15,7 +15,7 @@ for cfg in "${REPO_DIR}/config/management.env" "${REPO_DIR}/config/edge-nodes.en
     source "$cfg"
 done
 
-# Template renderer: replaces {{KEY}} with value
+# Template renderer: replaces {{KEY}} with value.
 render() {
     local file="$1"; shift
     local content
@@ -25,6 +25,47 @@ render() {
         shift 2
     done
     echo "$content"
+}
+
+# Topology-aware renderer: same as render() PLUS strips lines between
+# {{#ONPREM_ONLY}} / {{/ONPREM_ONLY}} markers when INSTALL_TOPOLOGY=cloud.
+# In onprem mode the markers themselves are removed but the content is kept.
+#
+# Use this for templates that have onprem-only constructs (notably the
+# hostAliases blocks in edge pods, which point at MGMT_NODE_IP and have no
+# meaning when edges resolve hostnames via real DNS).
+#
+# Symmetrical {{#CLOUD_ONLY}} / {{/CLOUD_ONLY}} blocks behave the opposite
+# way for any cloud-specific resources.
+render_with_topology() {
+    local file="$1"; shift
+    local rendered
+    rendered=$(render "$file" "$@")
+    # Anchored regexes — the marker MUST be the only non-whitespace content
+    # on its line. This way a template doc-comment that mentions the marker
+    # token (e.g. "the {{#ONPREM_ONLY}} block is stripped...") doesn't get
+    # mistaken for a real marker and silently eat the following lines.
+    if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ]; then
+        # Strip onprem-only blocks; strip cloud-only markers (keep content).
+        echo "$rendered" | awk '
+            /^[[:space:]]*\{\{#ONPREM_ONLY\}\}[[:space:]]*$/ {skip=1; next}
+            /^[[:space:]]*\{\{\/ONPREM_ONLY\}\}[[:space:]]*$/ {skip=0; next}
+            skip {next}
+            /^[[:space:]]*\{\{#CLOUD_ONLY\}\}[[:space:]]*$/ {next}
+            /^[[:space:]]*\{\{\/CLOUD_ONLY\}\}[[:space:]]*$/ {next}
+            {print}
+        '
+    else
+        # Strip cloud-only blocks; strip onprem-only markers (keep content).
+        echo "$rendered" | awk '
+            /^[[:space:]]*\{\{#CLOUD_ONLY\}\}[[:space:]]*$/ {skip=1; next}
+            /^[[:space:]]*\{\{\/CLOUD_ONLY\}\}[[:space:]]*$/ {skip=0; next}
+            skip {next}
+            /^[[:space:]]*\{\{#ONPREM_ONLY\}\}[[:space:]]*$/ {next}
+            /^[[:space:]]*\{\{\/ONPREM_ONLY\}\}[[:space:]]*$/ {next}
+            {print}
+        '
+    fi
 }
 
 # Parse an EDGE_NODES entry into variables

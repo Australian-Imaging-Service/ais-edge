@@ -56,6 +56,14 @@ Operations → Risks → Replacements / Future).
 - [`dashboards.md`](dashboards.md) — every Grafana panel, its query,
   what it measures, and the s3-uploader event schema that backs the
   pipeline panels. Read this before changing any dashboard panel.
+- [`cloud-deployment.md`](cloud-deployment.md) — the
+  `INSTALL_TOPOLOGY=cloud` deployment shape for managed Kubernetes
+  (EKS / GKE / AKS / Magnum / Nectar). Cloud LB + real DNS, the dev
+  test on nip.io, and the dev-to-prod swap procedure.
+- [`clouds/`](clouds/README.md) — **per-cloud install guides**:
+  [openstack-nectar.md](clouds/openstack-nectar.md) (E2E tested),
+  [aws.md](clouds/aws.md), [gcp.md](clouds/gcp.md),
+  [azure.md](clouds/azure.md).
 
 ## How to add a new component doc
 

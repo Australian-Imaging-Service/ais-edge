@@ -1,11 +1,17 @@
 # =============================================================================
-# Phase 2 — SeaweedFS server certificate
+# SeaweedFS server certificate
 # =============================================================================
-# Issued by ais-edge-ca-issuer (the CA we created in step 02b).
-# Renewed automatically by cert-manager 30 days before expiry.
+# Issuer selected by CERT_ISSUER (see config/management.env). Defaults to
+# ais-edge-ca (self-signed root from 02b). Renewed automatically by
+# cert-manager 30 days before expiry.
 #
-# Used by the nginx Ingress (TLS termination). Edges verify this cert
-# against the bundled ais-edge-ca.crt — that's the trust chain.
+# Used by the nginx Ingress (TLS passthrough). Edge clients verify this
+# cert against the bundled ais-edge-ca.crt (or trust LE roots when
+# CERT_ISSUER=letsencrypt-*).
+#
+# IP SANs (ipAddresses) are emitted only in onprem topology where /etc/
+# hosts maps the hostname to MGMT_NODE_IP. In cloud topology pure DNS is
+# used and IP SANs add nothing; Let's Encrypt doesn't issue them anyway.
 # =============================================================================
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -21,9 +27,11 @@ spec:
     size: 2048
   dnsNames:
     - {{SEAWEEDFS_HOSTNAME}}
+  {{#ONPREM_ONLY}}
   ipAddresses:
     - {{MGMT_NODE_IP}}
+  {{/ONPREM_ONLY}}
   issuerRef:
-    name: ais-edge-ca-issuer
+    name: {{CERT_ISSUER}}
     kind: ClusterIssuer
     group: cert-manager.io

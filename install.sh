@@ -61,6 +61,125 @@ for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS \
     fi
 done
 
+# --- Cloud credentials: generic auto-source + per-provider guard ---
+# When INSTALL_TOPOLOGY=cloud, the install needs cloud-provider credentials
+# in the environment (OS_* for OpenStack, AWS_* for AWS, etc.). Rather than
+# making the operator remember `source openrc.sh` (or its AWS/GCP/Azure
+# equivalent) before every install, we:
+#   1. Source CLOUD_CREDENTIALS_FILE if it's set (provider-agnostic — it's
+#      just a shell script of `export X=Y` lines, same shape for any cloud).
+#   2. Run a per-provider guard (provider_guard_<name>) to confirm the
+#      variables actually arrived. The guard returns non-empty stdout when
+#      something is missing; we print the message and either prompt for a
+#      credentials file (interactive) or exit with a fix-up hint (-y).
+#
+# To add a new provider you only add ONE function below — install.sh and
+# 01b each have a single switch table that pick it up. No other file
+# touches credentials.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ]; then
+    CLOUD_PROVIDER="${CLOUD_PROVIDER:-openstack}"
+
+    # Source a credentials file if specified — works for any cloud, the
+    # file is just `export X=Y` lines.
+    _source_creds() {
+        local f="$1"
+        [ -z "$f" ] && return 0
+        if [ ! -f "$f" ]; then
+            echo "ERROR: CLOUD_CREDENTIALS_FILE='${f}' does not exist." >&2
+            return 1
+        fi
+        echo "Sourcing cloud credentials from ${f}"
+        set +u
+        # shellcheck disable=SC1090
+        source "$f"
+        set -u
+    }
+    _source_creds "${CLOUD_CREDENTIALS_FILE:-}" || exit 1
+
+    # Per-provider guard — each one echoes a human-readable error message
+    # to stdout if something is missing, or stays silent if everything's
+    # in place. Add new providers here and only here.
+    # Each guard echoes a human-readable error string when something is
+    # missing; otherwise stays silent. ALWAYS returns 0 — we never want
+    # a probe to trip `set -e` here, only an unset variable should fail.
+    provider_guard_openstack() {
+        local m=()
+        [ -z "${OS_AUTH_URL:-}" ] && m+=("OS_AUTH_URL")
+        [ -z "${OS_REGION_NAME:-}" ] && m+=("OS_REGION_NAME")
+        if [ -z "${OS_APPLICATION_CREDENTIAL_ID:-}" ] && \
+           [ -z "${OS_USERNAME:-}" ]; then
+            m+=("OS_APPLICATION_CREDENTIAL_ID (preferred) OR OS_USERNAME")
+        fi
+        if [ ${#m[@]} -gt 0 ]; then
+            echo "OpenStack credentials missing: ${m[*]}. Easiest fix is to download the Keystone openrc.sh from your dashboard (Identity → Application Credentials)."
+        fi
+        return 0
+    }
+    provider_guard_aws() {
+        # On managed EKS the AWS SDK chain finds creds in ~/.aws/credentials
+        # or in IAM-role metadata. Only flag if we see NONE of the usual
+        # signals (no static keys, no profile, no shared file).
+        if [ -z "${AWS_ACCESS_KEY_ID:-}" ] && \
+           [ -z "${AWS_PROFILE:-}" ] && \
+           [ ! -f "${HOME}/.aws/credentials" ]; then
+            echo "No AWS credentials found. Either set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY, run 'aws configure', or set AWS_PROFILE."
+        fi
+        return 0
+    }
+    provider_guard_gcp() {
+        if [ -z "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && \
+           [ ! -f "${HOME}/.config/gcloud/application_default_credentials.json" ]; then
+            echo "No GCP credentials found. Either set GOOGLE_APPLICATION_CREDENTIALS=path/to/sa.json or run 'gcloud auth application-default login'."
+        fi
+        return 0
+    }
+    provider_guard_azure() {
+        if [ ! -d "${HOME}/.azure" ] && [ -z "${AZURE_CLIENT_ID:-}" ]; then
+            echo "No Azure credentials found. Run 'az login' or set AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_CLIENT_SECRET."
+        fi
+        return 0
+    }
+    provider_guard_none() { return 0; }   # bring-your-own-LB: no creds to check
+
+    case "$CLOUD_PROVIDER" in
+        openstack|aws|gcp|azure|none) ;;
+        *)
+            echo "ERROR: unknown CLOUD_PROVIDER='${CLOUD_PROVIDER}'."
+            echo "       Valid values: openstack | aws | gcp | azure | none"
+            exit 1
+            ;;
+    esac
+
+    msg="$(provider_guard_${CLOUD_PROVIDER})"
+
+    # If something's missing AND we have a TTY, give the operator one
+    # chance to point us at a credentials file interactively. In -y mode
+    # we skip the prompt — automation has no human to ask.
+    if [ -n "$msg" ] && $INTERACTIVE; then
+        echo ""
+        echo "$msg"
+        echo ""
+        read -p "Path to a credentials file to source now (blank to abort): " -r path
+        if [ -n "$path" ]; then
+            _source_creds "$path" || exit 1
+            msg="$(provider_guard_${CLOUD_PROVIDER})"
+        fi
+    fi
+
+    if [ -n "$msg" ]; then
+        echo ""
+        echo "ERROR: $msg"
+        echo "       Set CLOUD_CREDENTIALS_FILE in config/management.env (or"
+        echo "       export the variables in your shell) and re-run install.sh."
+        exit 1
+    fi
+
+    # LB_PUBLIC_IP is optional now. If set, the cloud LB controller will
+    # try to associate that exact IP; if blank, the LB gets an auto-
+    # assigned VIP and we use it directly. The latter is the only path that
+    # works on Nectar QLD topology — see docs/cloud-deployment.md.
+fi
+
 # Orthanc per-site config is edited by hand. Fail fast here rather than
 # 10 minutes into mgmt setup at step 07c.
 if [ ! -f "${SCRIPT_DIR}/config/orthanc/routing.json" ]; then
@@ -108,9 +227,11 @@ done
 echo ""
 echo " Steps:"
 echo "   01.  Install k0s management cluster (or use existing)"
+echo "   00a. Pre-create Octavia LB (OpenStack + PRECREATE_LB=1; no-op otherwise)"
+echo "   01b. Cloud-controller-manager (cloud topology only; no-op otherwise)"
 echo "   02.  Install cert-manager + k0smotron operator"
-echo "   02b. Bootstrap self-signed CA (Phase 2 TLS)"
-echo "   02c. Install nginx-ingress on host :443 (Phase 2 single port)"
+echo "   02b. Bootstrap self-signed CA (single-port TLS)"
+echo "   02c. Install nginx-ingress (hostNetwork :443 or LoadBalancer Service)"
 echo "   03.  Deploy SeaweedFS (ClusterIP + TLS Ingress)"
 echo "   04.  Deploy XNAT upload pod (in-cluster: SeaweedFS → XNAT)"
 echo "   For each edge node:"
@@ -135,6 +256,33 @@ echo "--- Step 01: k0s management cluster ---"
 confirm "Run step 01? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
 
+# Step 00a: pre-create the Octavia LB on Nectar / OpenStack shared-public-
+# network topologies, so the rest of the install can run with a known
+# public IP. Only runs when INSTALL_TOPOLOGY=cloud, CLOUD_PROVIDER=openstack,
+# PRECREATE_LB=1, AND LB_PUBLIC_IP isn't already pinned. Skips silently
+# everywhere else (incl. AWS / GCP / Azure managed K8s). Sequenced AFTER
+# 01 (so the openstack CLI is available) but BEFORE 01b (which reads
+# LB_PUBLIC_IP into cloud.conf) and 02b (which reads INTERNAL_DOMAIN into
+# cert SANs). Writes back to config/management.env if it creates one.
+echo ""
+echo "--- Step 00a: Pre-create LB (Nectar / OpenStack opt-in) ---"
+confirm "Run step 00a? (y/s to skip) "
+if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+    bash "${SCRIPT_DIR}/scripts/00a-precreate-lb.sh"
+    # Re-source management.env in case 00a wrote new values back.
+    # shellcheck disable=SC1090,SC1091
+    source "${SCRIPT_DIR}/config/management.env"
+fi
+
+# Step 01b: install the cloud-controller-manager so Service type LoadBalancer
+# can provision a real LB. Only runs when INSTALL_TOPOLOGY=cloud; skips
+# cleanly otherwise. Doesn't apply on EKS/AKS/GKE/Magnum where the CCM is
+# already part of the managed control plane.
+echo ""
+echo "--- Step 01b: Cloud-controller-manager (cloud topology only) ---"
+confirm "Run step 01b? (y/s to skip) "
+[[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/01b-install-cloud-controller.sh"
+
 echo ""
 echo "--- Step 02: cert-manager + k0smotron ---"
 confirm "Run step 02? (y/s to skip) "
@@ -146,7 +294,7 @@ confirm "Run step 02b? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02b-bootstrap-ca.sh"
 
 echo ""
-echo "--- Step 02c: Install nginx-ingress (hostNetwork :443) ---"
+echo "--- Step 02c: Install nginx-ingress (hostNetwork :443 OR LoadBalancer) ---"
 confirm "Run step 02c? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/02c-install-nginx-ingress.sh"
 
