@@ -227,6 +227,7 @@ done
 echo ""
 echo " Steps:"
 echo "   01.  Install k0s management cluster (or use existing)"
+echo "   00a. Pre-create Octavia LB (OpenStack + PRECREATE_LB=1; no-op otherwise)"
 echo "   01b. Cloud-controller-manager (cloud topology only; no-op otherwise)"
 echo "   02.  Install cert-manager + k0smotron operator"
 echo "   02b. Bootstrap self-signed CA (single-port TLS)"
@@ -254,6 +255,24 @@ echo ""
 echo "--- Step 01: k0s management cluster ---"
 confirm "Run step 01? (y/s to skip) "
 [[ $REPLY =~ ^[Ss]$ ]] || bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
+
+# Step 00a: pre-create the Octavia LB on Nectar / OpenStack shared-public-
+# network topologies, so the rest of the install can run with a known
+# public IP. Only runs when INSTALL_TOPOLOGY=cloud, CLOUD_PROVIDER=openstack,
+# PRECREATE_LB=1, AND LB_PUBLIC_IP isn't already pinned. Skips silently
+# everywhere else (incl. AWS / GCP / Azure managed K8s). Sequenced AFTER
+# 01 (so the openstack CLI is available) but BEFORE 01b (which reads
+# LB_PUBLIC_IP into cloud.conf) and 02b (which reads INTERNAL_DOMAIN into
+# cert SANs). Writes back to config/management.env if it creates one.
+echo ""
+echo "--- Step 00a: Pre-create LB (Nectar / OpenStack opt-in) ---"
+confirm "Run step 00a? (y/s to skip) "
+if [[ ! $REPLY =~ ^[Ss]$ ]]; then
+    bash "${SCRIPT_DIR}/scripts/00a-precreate-lb.sh"
+    # Re-source management.env in case 00a wrote new values back.
+    # shellcheck disable=SC1090,SC1091
+    source "${SCRIPT_DIR}/config/management.env"
+fi
 
 # Step 01b: install the cloud-controller-manager so Service type LoadBalancer
 # can provision a real LB. Only runs when INSTALL_TOPOLOGY=cloud; skips

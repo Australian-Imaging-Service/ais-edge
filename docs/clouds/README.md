@@ -7,7 +7,8 @@ small switch table each in `install.sh` and `scripts/01b-install-cloud-controlle
 
 | Cloud | Doc | Status |
 |---|---|---|
-| OpenStack / Nectar Research Cloud | [openstack-nectar.md](openstack-nectar.md) | ✅ E2E tested (2026-05-25) |
+| OpenStack — private subnet + FIP (**recommended for production**) | [openstack-private-subnet.md](openstack-private-subnet.md) | ✅ Design complete, mirrors AWS/GCP/Azure |
+| OpenStack — Nectar QLD shared external network (dev/test only) | [openstack-nectar.md](openstack-nectar.md) | ✅ E2E tested (2026-05-26) |
 | AWS (EKS) | [aws.md](aws.md) | 📋 Design complete, untested |
 | GCP (GKE) | [gcp.md](gcp.md) | 📋 Design complete, untested |
 | Azure (AKS) | [azure.md](azure.md) | 📋 Design complete, untested |

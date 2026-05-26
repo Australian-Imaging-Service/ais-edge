@@ -54,11 +54,21 @@ chmod 600 "${EDGE_KC}"
 sed -i "s|server:.*|server: https://${K0S_API_HOSTNAME}:${INGRESS_PORT}|" "${EDGE_KC}"
 echo "Kubeconfig: kubeconfig-${CLUSTER_NAME}  (server: https://${K0S_API_HOSTNAME}:${INGRESS_PORT})"
 
-HOSTS_MARKER="# ais-edge phase2 tls hostnames"
-HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
-if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then
-    echo "Adding Phase 2 hostnames to management /etc/hosts (sudo)..."
-    echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
+# Onprem-only: pin the TLS hostnames on the mgmt VM's /etc/hosts so kubectl
+# (and anything else on this host) can reach them via MGMT_NODE_IP. In
+# cloud topology the LB sits on a different IP than MGMT_NODE_IP, so this
+# entry would misroute traffic — real public DNS handles the resolution
+# in cloud mode instead.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    HOSTS_MARKER="# ais-edge phase2 tls hostnames"
+    HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
+    if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then
+        echo "Adding Phase 2 hostnames to management /etc/hosts (sudo)..."
+        echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
+    fi
+else
+    echo "Cloud topology — skipping management /etc/hosts edit. Mgmt VM resolves"
+    echo "  SNI hostnames via the real public DNS that points at the LB VIP."
 fi
 
 # Generate join token
