@@ -17,21 +17,28 @@ spec:
       value: {{ .Values.xnatIngest.sort.copyMode | quote }}
     - name: XINGEST_LOGGERS
       value: {{ .Values.xnatIngest.sort.loggers | quote }}
+    - name: XINGEST_DELETE
+      value: {{ .Values.xnatIngest.delete | quote }}
+    - name: SORT_SETTLE_SECONDS
+      value: {{ .Values.xnatIngest.sort.settleSeconds | default 1800 | quote }}
+    - name: SORT_POLL_SECONDS
+      value: {{ .Values.xnatIngest.sort.pollSeconds | default 300 | quote }}
     {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
     {{- include "edge.dicomTagEnv" . | nindent 4 }}
     envFrom:
     - configMapRef:
         name: proxy-config  # injects any proxy settings (currently empty)
-    command:
-    - bash
-    - -c
-    - |
-      set -x
-      mkdir -p /data/sorted /data/LOGS
-      sleep infinity  # pod stays running so kubectl exec can be used to run sort manually
-      # To sort manually:
-      # kubectl exec -it sort -n {{ .Values.namespace }} -- xnat-ingest sort /data/sorted --orthanc-url http://orthanc:8042
+    command: ["bash", "/scripts/sort.sh"]
     volumeMounts:
     - name: storage
       mountPath: /data
-  {{- include "edge.xnatIngestVolumes" . | nindent 2 }}
+    - name: scripts
+      mountPath: /scripts
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: {{ include "edge.pvcName" . }}
+  - name: scripts
+    configMap:
+      name: sort-script
+      defaultMode: 0755

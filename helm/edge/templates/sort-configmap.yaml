@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sort-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  sort.sh: |
+    {{- .Files.Get "files/sort.sh" | nindent 4 }}

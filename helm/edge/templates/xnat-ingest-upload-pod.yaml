@@ -25,6 +25,10 @@ spec:
       value: {{ .Values.xnatIngest.upload.tempdir | quote }}
     - name: XINGEST_LOGGERS
       value: {{ .Values.xnatIngest.upload.loggers | quote }}
+    - name: UPLOAD_SETTLE_SECONDS
+      value: {{ .Values.xnatIngest.upload.settleSeconds | default 1800 | quote }}
+    - name: UPLOAD_POLL_SECONDS
+      value: {{ .Values.xnatIngest.upload.pollSeconds | default 300 | quote }}
     {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
     {{- include "edge.dicomTagEnv" . | nindent 4 }}
     # XNAT credentials, injected from secret
@@ -47,16 +51,17 @@ spec:
     envFrom:
     - configMapRef:
         name: proxy-config  # injects any proxy settings (currently empty)
-    command:
-    - bash
-    - -c
-    - |
-      set -x
-      mkdir -p /data/tmp /data/LOGS
-      sleep infinity  # pod stays running so kubectl exec can be used to run upload manually
-      # To upload manually:
-      # kubectl exec -it upload -n {{ .Values.namespace }} -- xnat-ingest upload /data/sorted $XINGEST_SERVER
+    command: ["bash", "/scripts/upload.sh"]
     volumeMounts:
     - name: storage
       mountPath: /data
-  {{- include "edge.xnatIngestVolumes" . | nindent 2 }}
+    - name: scripts
+      mountPath: /scripts
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: {{ include "edge.pvcName" . }}
+  - name: scripts
+    configMap:
+      name: upload-script
+      defaultMode: 0755

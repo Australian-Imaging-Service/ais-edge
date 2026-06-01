@@ -78,6 +78,8 @@ xnatIngest:
     session: StudyInstanceUID   # DICOM StudyInstanceUID: unique session identifier
 
   sort:
+    settleSeconds: 1800  # seconds of no new files in orthanc-storage before sort is triggered
+    pollSeconds: 300     # how often the sort script checks for new data
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort.log"
@@ -88,6 +90,8 @@ xnatIngest:
     useCurlJsession: "0"
     requireManifest: "1"
     loop: "-1"
+    settleSeconds: 300   # seconds of no new files in /data/sorted before uploading
+    pollSeconds: 300     # how often the upload script checks for new data
     tempdir: /data/tmp
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
 

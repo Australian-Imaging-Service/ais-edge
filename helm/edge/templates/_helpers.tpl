@@ -41,8 +41,6 @@ DICOM tag mapping env vars — included in sort, upload, and associate pods.
 Common xnat-ingest env vars shared by all three pods.
 */}}
 {{- define "edge.xnatIngestCommonEnv" -}}
-- name: XINGEST_DELETE
-  value: {{ .Values.xnatIngest.delete | quote }}
 - name: XINGEST_DEIDENTIFY
   value: {{ .Values.xnatIngest.deidentify | quote }}
 - name: XINGEST_SPACES_TO_UNDERSCORES

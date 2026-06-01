@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: upload-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  upload.sh: |
+    {{- .Files.Get "files/upload.sh" | nindent 4 }}

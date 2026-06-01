@@ -22,27 +22,28 @@ Edge pipeline deployed to namespace {{ .Values.namespace }}.
       --from-literal=password=<pass> \
       -n {{ .Values.namespace }}
 
-== xnat-ingest (sort / upload / associate) ==
-  All three pods start with `sleep infinity`. Run manually with kubectl exec:
+== xnat-ingest (sort / upload) ==
+  Sort and upload run automatically:
+    - sort:   watches /data/orthanc-storage, triggers after {{ .Values.xnatIngest.sort.settleSeconds }}s of no new files (checks every {{ .Values.xnatIngest.sort.pollSeconds }}s)
+    - upload: watches /data/sorted, triggers after {{ .Values.xnatIngest.upload.settleSeconds }}s of no new files (checks every {{ .Values.xnatIngest.upload.pollSeconds }}s)
 
-  Sort:
-    kubectl exec -it xnat-ingest-sort -n {{ .Values.namespace }} -- \
-      xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
+  Monitor:
+    kubectl logs -f sort -n {{ .Values.namespace }}
+    kubectl logs -f upload -n {{ .Values.namespace }}
 
-  Upload:
-    kubectl exec -it xnat-ingest-upload -n {{ .Values.namespace }} -- \
-      xnat-ingest upload /data/staging/sorted $XINGEST_SERVER
+  Logs are also written to /data/LOGS/ on the pipeline volume.
 
-  Associate:
-    kubectl exec -it xnat-ingest-associate -n {{ .Values.namespace }} -- \
-      xnat-ingest associate /data/cima-export /data/staging/sorted \
-        --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
-          '{PatientName}/**/*.rda' \
-          '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
-
-  If the xnat-credentials secret is not already set up, create it with:
+  The xnat-credentials secret must be created before upload will work:
     kubectl create secret generic xnat-credentials \
       --from-literal=server=https://xnat.example.org \
       --from-literal=username=<user> \
       --from-literal=password=<pass> \
       -n {{ .Values.namespace }}
+
+== associate ==
+  The associate pod runs manually via kubectl exec:
+    kubectl exec -it associate -n {{ .Values.namespace }} -- \
+      xnat-ingest associate /data/cima-export /data/sorted \
+        --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
+          '{PatientName}/**/*.rda' \
+          '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
