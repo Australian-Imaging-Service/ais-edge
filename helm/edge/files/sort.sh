@@ -21,15 +21,18 @@ while true; do
     age=$(( $(date +%s) - newest_ts ))
     if [[ $age -ge $SETTLE_SECS && $newest_ts -gt $LAST_RUN ]]; then
       log "Data settled (age=${age}s). Running sort..."
-      xnat-ingest sort \
+      if xnat-ingest sort \
         /data/orthanc-storage \
         /data/sorted \
         --collate-resources "medimage/dicom-series" siblings \
         --recursive \
-        --logger stream info stdout \
-        || true  # don't exit loop on sort failure
-      LAST_RUN=$(date +%s)
-      log "Sort complete."
+        --raise-errors \
+        --logger stream info stdout; then
+        LAST_RUN=$(date +%s)
+        log "Sort complete."
+      else
+        log "Sort failed — will retry next poll."
+      fi
     elif [[ $newest_ts -gt $LAST_RUN ]]; then
       log "Waiting for data to settle (age=${age}s / ${SETTLE_SECS}s)"
     fi

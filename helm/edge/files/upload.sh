@@ -22,15 +22,18 @@ while true; do
     age=$(( $(date +%s) - newest_ts ))
     if [[ $age -ge $SETTLE_SECS && $newest_ts -gt $LAST_RUN ]]; then
       log "Sorted data settled (age=${age}s). Running upload..."
-      xnat-ingest upload /data/sorted "$XINGEST_SERVER" \
+      if xnat-ingest upload /data/sorted "$XINGEST_SERVER" \
         --user "$XINGEST_USER" \
         --password "$XINGEST_PASSWORD" \
         --dont-require-manifest \
         --dont-check-checksums \
         --always-include "medimage/dicom-series" \
-        || true  # don't exit loop on upload failure
-      LAST_RUN=$(date +%s)
-      log "Upload complete."
+        --raise-errors; then
+        LAST_RUN=$(date +%s)
+        log "Upload complete."
+      else
+        log "Upload failed — will retry next poll."
+      fi
     elif [[ $newest_ts -gt $LAST_RUN ]]; then
       log "Waiting for sorted data to settle (age=${age}s / ${SETTLE_SECS}s)"
     fi

@@ -72,10 +72,9 @@ xnatIngest:
 
   # DICOM tag > XNAT field mapping, shared by all three pods
   dicomTagMapping:
-    project: StudyDescription   # DICOM StudyDescription: XNAT project ID
+    project: AccessionNumber    # DICOM AccessionNumber: XNAT project ID
     subject: PatientName        # DICOM PatientName: XNAT subject ID
-    visit: PatientID            # DICOM PatientID: XNAT visit/session label
-    session: StudyInstanceUID   # DICOM StudyInstanceUID: unique session identifier
+    sessionLabel: PatientID     # DICOM PatientID: XNAT session label (used directly, no concatenation)
 
   sort:
     settleSeconds: 1800  # seconds of no new files in orthanc-storage before sort is triggered

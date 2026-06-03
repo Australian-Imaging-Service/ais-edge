@@ -31,10 +31,8 @@ DICOM tag mapping env vars — included in sort, upload, and associate pods.
   value: {{ .Values.xnatIngest.dicomTagMapping.project | quote }}
 - name: XINGEST_SUBJECT
   value: {{ .Values.xnatIngest.dicomTagMapping.subject | quote }}
-- name: XINGEST_VISIT
-  value: {{ .Values.xnatIngest.dicomTagMapping.visit | quote }}
-- name: XINGEST_SESSION
-  value: {{ .Values.xnatIngest.dicomTagMapping.session | quote }}
+- name: XINGEST_SESSION_LABEL
+  value: {{ .Values.xnatIngest.dicomTagMapping.sessionLabel | quote }}
 {{- end }}
 
 {{/*
