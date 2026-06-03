@@ -53,6 +53,10 @@ Operations → Risks → Replacements / Future).
   alerts live in Loki ruler (LogQL) while K8s-level alerts stay in
   Prometheus, and the tradeoff against an edge-Prometheus remote-write
   topology.
+- [`alerting-diy.md`](alerting-diy.md) — recipe for adding your own
+  alert rules: how to discover metrics + log streams, where to put the
+  rule file, copy-paste patterns for common alert shapes, how to route
+  to a specific receiver, how to verify + silence during testing.
 - [`dashboards.md`](dashboards.md) — every Grafana panel, its query,
   what it measures, and the s3-uploader event schema that backs the
   pipeline panels. Read this before changing any dashboard panel.
