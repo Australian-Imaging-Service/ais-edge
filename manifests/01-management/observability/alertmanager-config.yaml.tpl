@@ -28,6 +28,15 @@ route:
   repeat_interval: 12h
   receiver: email-primary       # default — every alert hits the inbox
   routes:
+    # Per-alert override: XNATUploadSuccess is severity=info (so the
+    # default routing tree below would send it to Slack), but operators
+    # want an email confirmation for every successful XNAT push for
+    # audit / peace-of-mind reasons. Putting this matcher first
+    # overrides the `severity=info → slack-only` route below.
+    - matchers:
+        - alertname = "XNATUploadSuccess"
+      receiver: email-primary
+      continue: false
     - matchers:
         - severity = "info"
       receiver: slack-only
