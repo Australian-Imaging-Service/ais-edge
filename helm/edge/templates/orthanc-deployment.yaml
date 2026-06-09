@@ -21,6 +21,21 @@ spec:
     spec:
       securityContext:
         {{- toYaml .Values.orthanc.podSecurityContext | nindent 8 }}
+      initContainers:
+      # hostPath PVs ignore fsGroup, so chown the data dir for the non-root orthanc user
+      - name: init-data-perms
+        image: busybox:1.36
+        command:
+          - sh
+          - -c
+          - chown {{ .Values.orthanc.podSecurityContext.runAsUser }}:{{ .Values.orthanc.podSecurityContext.runAsGroup }} /data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPath: orthanc-storage
       containers:
       - name: orthanc
         image: {{ .Values.orthanc.image }}
