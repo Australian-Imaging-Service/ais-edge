@@ -123,7 +123,7 @@ helm upgrade edge . -f my-site.yaml -n ais-edge
 helm uninstall edge -n ais-edge
 ```
 
-The PersistentVolume, PersistentVolumeClaim, and namespace are annotated with `helm.sh/resource-policy: keep` and will not be deleted. Data on disk is not affected.
+The PersistentVolume and PersistentVolumeClaim are annotated with `helm.sh/resource-policy: keep` and will not be deleted. The namespace is not managed by the chart and is left in place. Data on disk is not affected.
 
 ## Configuration reference
 
