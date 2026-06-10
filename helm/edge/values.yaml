@@ -64,7 +64,7 @@ samba:
 
 # xnat-ingest settings. shared across sort, upload, and associate pods
 xnatIngest:
-  image: ghcr.io/australian-imaging-service/xnat-ingest:0.9.1
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.10.0
   imagePullPolicy: IfNotPresent
   delete: "0"               # do not delete source files after processing
   deidentify: "0"           # do not deidentify data
@@ -72,9 +72,10 @@ xnatIngest:
 
   # DICOM tag > XNAT field mapping, shared by all three pods
   dicomTagMapping:
-    project: AccessionNumber    # DICOM AccessionNumber: XNAT project ID
-    subject: PatientName        # DICOM PatientName: XNAT subject ID
-    sessionLabel: PatientID     # DICOM PatientID: XNAT session label (used directly, no concatenation)
+    project: RequestedProcedureID    # DICOM RequestedProcedureID: XNAT project ID
+    subject: PatientName             # DICOM PatientName: XNAT subject ID
+    sessionLabel: PatientID          # DICOM PatientID: XNAT session label (used directly, no concatenation)
+    sessionUid: StudyInstanceUID     # DICOM StudyInstanceUID: groups files into sessions
 
   sort:
     settleSeconds: 1800  # seconds of no new files in orthanc-storage before sort is triggered
