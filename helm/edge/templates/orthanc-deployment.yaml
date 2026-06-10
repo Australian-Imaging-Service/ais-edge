@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orthanc
+  template:
+    metadata:
+      labels:
+        app: orthanc
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/orthanc-configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.orthanc.podSecurityContext | nindent 8 }}
+      initContainers:
+      # hostPath PVs ignore fsGroup, so chown the data dir for the non-root orthanc user
+      - name: init-data-perms
+        image: busybox:1.36
+        command:
+          - sh
+          - -c
+          - chown {{ .Values.orthanc.podSecurityContext.runAsUser }}:{{ .Values.orthanc.podSecurityContext.runAsGroup }} /data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPath: orthanc-storage
+      containers:
+      - name: orthanc
+        image: {{ .Values.orthanc.image }}
+        imagePullPolicy: {{ .Values.orthanc.imagePullPolicy }}
+        securityContext:
+          {{- toYaml .Values.orthanc.securityContext | nindent 10 }}
+        ports:
+        - containerPort: {{ .Values.orthanc.dicomPort }}
+          name: dicom
+          protocol: TCP
+        - containerPort: {{ .Values.orthanc.httpPort }}
+          name: http
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        volumeMounts:
+        - name: data
+          mountPath: /data
+          subPath: orthanc-storage
+        - name: config
+          mountPath: /etc/orthanc/orthanc.json
+          subPath: orthanc.json
+        - name: credentials
+          mountPath: /etc/orthanc/users.json
+          subPath: users.json
+        resources:
+          {{- toYaml .Values.orthanc.resources | nindent 10 }}
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: {{ include "edge.pvcName" . }}
+      - name: config
+        configMap:
+          name: orthanc-config
+      - name: credentials
+        secret:
+          secretName: orthanc-credentials

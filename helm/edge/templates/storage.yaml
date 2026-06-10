@@ -1,0 +1,43 @@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-{{ include "edge.pvcName" . }}
+  annotations:
+    # keep: prevent helm uninstall from deleting the PV and its data
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  accessModes:
+  - ReadWriteMany
+  capacity:
+    storage: {{ .Values.storage.capacity }}
+  hostPath:
+    path: {{ .Values.storage.hostPath }}
+    type: DirectoryOrCreate
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Values.storageClassName }}
+  volumeMode: Filesystem
+  claimRef:
+    name: {{ include "edge.pvcName" . }}
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "edge.pvcName" . }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    # keep: prevent helm uninstall from deleting the PVC and its data
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  accessModes:
+  - ReadWriteMany
+  storageClassName: {{ .Values.storageClassName }}
+  volumeName: pv-{{ include "edge.pvcName" . }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.capacity }}

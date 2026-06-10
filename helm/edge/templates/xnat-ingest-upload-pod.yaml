@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: upload
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  containers:
+  - name: upload
+    image: {{ .Values.xnatIngest.image }}
+    imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+    env:
+    - name: XINGEST_ALWAYSINCLUDE
+      value: {{ .Values.xnatIngest.upload.alwaysInclude | quote }}
+    - name: XINGEST_VERIFY_SSL
+      value: {{ .Values.xnatIngest.upload.verifySsl | quote }}
+    - name: XINGEST_USE_CURL_JSESSION
+      value: {{ .Values.xnatIngest.upload.useCurlJsession | quote }}
+    - name: XINGEST_REQUIRE_MANIFEST
+      value: {{ .Values.xnatIngest.upload.requireManifest | quote }}
+    - name: XINGEST_LOOP
+      value: {{ .Values.xnatIngest.upload.loop | quote }}
+    - name: XINGEST_TEMPDIR
+      value: {{ .Values.xnatIngest.upload.tempdir | quote }}
+    - name: XINGEST_LOGGERS
+      value: {{ .Values.xnatIngest.upload.loggers | quote }}
+    {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
+    {{- include "edge.dicomTagEnv" . | nindent 4 }}
+    # XNAT credentials, injected from secret
+    # Create with: kubectl create secret generic xnat-credentials --from-literal=server=... --from-literal=username=... --from-literal=password=...
+    - name: XINGEST_SERVER
+      valueFrom:
+        secretKeyRef:
+          name: xnat-credentials
+          key: server
+    - name: XINGEST_USER
+      valueFrom:
+        secretKeyRef:
+          name: xnat-credentials
+          key: username
+    - name: XINGEST_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: xnat-credentials
+          key: password
+    envFrom:
+    - configMapRef:
+        name: proxy-config  # injects any proxy settings (currently empty)
+    command:
+    - bash
+    - -c
+    - |
+      set -x
+      mkdir -p /data/tmp /data/LOGS
+      sleep infinity  # pod stays running so kubectl exec can be used to run upload manually
+      # To upload manually:
+      # kubectl exec -it upload -n {{ .Values.namespace }} -- xnat-ingest upload /data/sorted $XINGEST_SERVER
+    volumeMounts:
+    - name: storage
+      mountPath: /data
+  {{- include "edge.xnatIngestVolumes" . | nindent 2 }}
