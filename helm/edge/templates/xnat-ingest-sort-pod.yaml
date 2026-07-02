@@ -23,8 +23,6 @@ spec:
       value: {{ .Values.xnatIngest.sort.copyMode | quote }}
     - name: XINGEST_LOGGERS
       value: {{ .Values.xnatIngest.sort.loggers | quote }}
-    - name: XINGEST_DELETE
-      value: {{ .Values.xnatIngest.delete | quote }}
     - name: SORT_SETTLE_SECONDS
       value: {{ .Values.xnatIngest.sort.settleSeconds | default 1800 | quote }}
     - name: SORT_POLL_SECONDS

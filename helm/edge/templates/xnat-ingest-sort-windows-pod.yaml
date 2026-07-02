@@ -22,8 +22,6 @@ spec:
       value: {{ .Values.xnatIngest.sortWindows.copyMode | quote }}
     - name: XINGEST_LOGGERS
       value: {{ .Values.xnatIngest.sortWindows.loggers | quote }}
-    - name: XINGEST_DELETE
-      value: {{ .Values.xnatIngest.delete | quote }}
     - name: SORT_SETTLE_SECONDS
       value: {{ .Values.xnatIngest.sortWindows.settleSeconds | default 1800 | quote }}
     - name: SORT_POLL_SECONDS
