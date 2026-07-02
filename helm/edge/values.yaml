@@ -90,8 +90,20 @@ xnatIngest:
     loop: "-1"
     tempdir: /data/tmp
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
+    settleSeconds: 600   # wait this long after last sorted file before uploading
+    pollSeconds: 300     # check interval for the upload watcher
 
   associate:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
+
+  # Second sort pod that watches a Windows machine directory mounted onto the VM node.
+  sortWindows:
+    enabled: false
+    watchDir: ""              # path inside the pod to watch for incoming files
+    settleSeconds: 1800
+    pollSeconds: 300
+    datatypes: "medimage/dicom-series"
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort-windows.log"

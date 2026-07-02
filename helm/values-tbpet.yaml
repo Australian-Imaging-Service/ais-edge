@@ -50,6 +50,14 @@ xnatIngest:
     visit: PatientID
     session: StudyInstanceUID
 
+  # ── Windows sort pod ────────────────────────────────────────────────────────
+  # Watches RAW-DATA-EXPORT within the usyd-export share, which is already
+  # accessible inside the pod via the existing PVC at /data/usyd-export/.
+  sortWindows:
+    enabled: true
+    watchDir: /data/usyd-export/RAW-DATA-EXPORT
+    datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.list-mode"
+
 # ── Storage class ─────────────────────────────────────────────────────────────
 # Set create: false if "hostpath-pipeline" already exists on the cluster
 

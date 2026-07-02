@@ -1,34 +1,33 @@
+{{- if .Values.xnatIngest.sortWindows.enabled }}
 apiVersion: v1
 kind: Pod
 metadata:
-  name: sort-orthanc
+  name: sort-windows
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
   containers:
-  - name: sort
+  - name: sort-windows
     image: {{ .Values.xnatIngest.image }}
     imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
     env:
     - name: SORT_POD_NAME
-      value: "orthanc"
+      value: "windows"
     - name: SORT_WATCH_DIR
-      value: /data/orthanc-storage
-    - name: SORT_COLLATE_RESOURCES
-      value: "medimage/dicom-series siblings"
+      value: {{ .Values.xnatIngest.sortWindows.watchDir | quote }}
     - name: XINGEST_DATATYPES
-      value: {{ .Values.xnatIngest.sort.datatypes | quote }}
+      value: {{ .Values.xnatIngest.sortWindows.datatypes | quote }}
     - name: XINGEST_COPY_MODE
-      value: {{ .Values.xnatIngest.sort.copyMode | quote }}
+      value: {{ .Values.xnatIngest.sortWindows.copyMode | quote }}
     - name: XINGEST_LOGGERS
-      value: {{ .Values.xnatIngest.sort.loggers | quote }}
+      value: {{ .Values.xnatIngest.sortWindows.loggers | quote }}
     - name: XINGEST_DELETE
       value: {{ .Values.xnatIngest.delete | quote }}
     - name: SORT_SETTLE_SECONDS
-      value: {{ .Values.xnatIngest.sort.settleSeconds | default 1800 | quote }}
+      value: {{ .Values.xnatIngest.sortWindows.settleSeconds | default 1800 | quote }}
     - name: SORT_POLL_SECONDS
-      value: {{ .Values.xnatIngest.sort.pollSeconds | default 300 | quote }}
+      value: {{ .Values.xnatIngest.sortWindows.pollSeconds | default 300 | quote }}
     {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
     {{- include "edge.dicomTagEnv" . | nindent 4 }}
     envFrom:
@@ -48,3 +47,4 @@ spec:
     configMap:
       name: sort-script
       defaultMode: 0755
+{{- end }}
