@@ -29,6 +29,8 @@ spec:
       value: {{ .Values.xnatIngest.upload.settleSeconds | default 600 | quote }}
     - name: UPLOAD_POLL_SECONDS
       value: {{ .Values.xnatIngest.upload.pollSeconds | default 300 | quote }}
+    - name: XINGEST_DRY_RUN
+      value: {{ .Values.xnatIngest.upload.dryRun | default "0" | quote }}
     {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
     {{- include "edge.dicomTagEnv" . | nindent 4 }}
     # XNAT credentials, injected from secret

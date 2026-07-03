@@ -17,6 +17,18 @@ spec:
       value: /data/orthanc-storage
     - name: SORT_COLLATE_RESOURCES
       value: "medimage/dicom-series siblings"
+    - name: ORTHANC_USER
+      valueFrom:
+        secretKeyRef:
+          name: orthanc-credentials
+          key: orthanc-user
+    - name: ORTHANC_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: orthanc-credentials
+          key: orthanc-password
+    - name: XINGEST_ORTHANC
+      value: "http://orthanc:{{ .Values.orthanc.httpPort }} $(ORTHANC_USER) $(ORTHANC_PASSWORD) /data/orthanc-storage"
     - name: XINGEST_DATATYPES
       value: {{ .Values.xnatIngest.sort.datatypes | quote }}
     - name: XINGEST_COPY_MODE

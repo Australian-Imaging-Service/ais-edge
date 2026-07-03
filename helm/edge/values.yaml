@@ -64,7 +64,7 @@ samba:
 
 # xnat-ingest settings. shared across sort, upload, and associate pods
 xnatIngest:
-  image: ghcr.io/australian-imaging-service/xnat-ingest:0.9.1
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.11.0
   imagePullPolicy: IfNotPresent
   delete: "0"               # do not delete source files after processing
   deidentify: "0"           # do not deidentify data
@@ -92,6 +92,7 @@ xnatIngest:
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
     settleSeconds: 600   # wait this long after last sorted file before uploading
     pollSeconds: 300     # check interval for the upload watcher
+    dryRun: "0"          # "1" = go through the motions without uploading to XNAT
 
   associate:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
