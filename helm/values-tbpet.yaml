@@ -55,7 +55,7 @@ xnatIngest:
   # accessible inside the pod via the existing PVC at /data/usyd-export/.
   sortWindows:
     enabled: true
-    watchDir: /data/usyd-export/RAW-DATA-EXPORT
+    watchDir: /data/usyd-export/TMP/RAW-DATA-EXPORT
     # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl)
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
