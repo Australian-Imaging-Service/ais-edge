@@ -56,6 +56,9 @@ xnatIngest:
   sortWindows:
     enabled: true
     watchDir: /data/usyd-export/RAW-DATA-EXPORT
+    # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl)
+    exportClaim: usyd-data-export
+    exportMountPath: /data/usyd-export
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.list-mode"
 
 # ── Storage class ─────────────────────────────────────────────────────────────

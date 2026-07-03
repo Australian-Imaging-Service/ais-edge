@@ -1,0 +1,30 @@
+# PV + PVC for the usyd-data-export NFS share (TBPET machine).
+# Apply once before deploying the edge chart:
+#   kubectl apply -f helm/usyd-data-export.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: usyd-data-export
+spec:
+  capacity:
+    storage: 5Ti
+  accessModes:
+    - ReadOnlyMany
+  nfs:
+    server: 192.168.0.1
+    path: /usyd-data-export/mirc-usyd-data-export-pvc-4091f6ae-3959-49e3-8527-fc4fc75a3178
+  storageClassName: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: usyd-data-export
+  namespace: ais-edge
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 5Ti
+  storageClassName: ""
+  volumeName: usyd-data-export

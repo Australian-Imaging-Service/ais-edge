@@ -102,6 +102,8 @@ xnatIngest:
   sortWindows:
     enabled: false
     watchDir: ""              # path inside the pod to watch for incoming files
+    exportClaim: ""           # PVC holding the exported data; mounted read-only if set
+    exportMountPath: /data/usyd-export
     settleSeconds: 1800
     pollSeconds: 300
     datatypes: "medimage/dicom-series"
