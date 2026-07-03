@@ -59,6 +59,10 @@ xnatIngest:
     # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl)
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
+    # Symlink into /data/sorted instead of copying. Requires the export PVC to
+    # also be mounted in the upload pod (handled by the chart when exportClaim
+    # is set).
+    copyMode: symlink_or_copy
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.list-mode"
 
 # ── Storage class ─────────────────────────────────────────────────────────────

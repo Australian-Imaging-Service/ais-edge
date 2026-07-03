@@ -57,6 +57,11 @@ spec:
       mountPath: /data
     - name: scripts
       mountPath: /scripts
+    {{- if and .Values.xnatIngest.sortWindows.enabled .Values.xnatIngest.sortWindows.exportClaim }}
+    - name: export
+      mountPath: {{ .Values.xnatIngest.sortWindows.exportMountPath }}
+      readOnly: true
+    {{- end }}
   volumes:
   - name: storage
     persistentVolumeClaim:
@@ -65,3 +70,9 @@ spec:
     configMap:
       name: upload-script
       defaultMode: 0755
+  {{- if and .Values.xnatIngest.sortWindows.enabled .Values.xnatIngest.sortWindows.exportClaim }}
+  - name: export
+    persistentVolumeClaim:
+      claimName: {{ .Values.xnatIngest.sortWindows.exportClaim }}
+      readOnly: true
+  {{- end }}
