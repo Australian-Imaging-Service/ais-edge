@@ -45,9 +45,9 @@ samba:
 
 xnatIngest:
   dicomTagMapping:
-    project: StudyDescription
-    subject: PatientName
-    visit: PatientID
+    project: StudyID
+    subject: PatientID
+    visit: AccessionNumber
     session: StudyInstanceUID
 
   # ── Windows sort pod ────────────────────────────────────────────────────────
