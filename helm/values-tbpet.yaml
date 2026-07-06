@@ -44,6 +44,12 @@ samba:
 # Maps DICOM tags to XNAT fields. Change only if your scanners use different tags.
 
 xnatIngest:
+  # ── TESTING timers — restore to 1800/300/1800 for production ───────────────
+  sort:
+    settleSeconds: 60    # dir quiet for this long before sort runs
+    pollSeconds: 30      # how often the watcher checks
+    waitPeriod: "60"     # per-session: skip sessions modified in the last N secs
+
   dicomTagMapping:
     project: PatientComments
     subject: PatientID
@@ -56,6 +62,10 @@ xnatIngest:
   sortWindows:
     enabled: true
     watchDir: /data/usyd-export/TMP/RAW-DATA-EXPORT
+    # TESTING timers — restore to 1800/300/1800 for production
+    settleSeconds: 60
+    pollSeconds: 30
+    waitPeriod: "60"
     # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl)
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
