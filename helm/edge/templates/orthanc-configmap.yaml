@@ -17,6 +17,9 @@ data:
       "Plugins": {{ .Values.orthanc.plugins | toJson }},
       "IngestTranscoding": {{ .Values.orthanc.ingestTranscoding | quote }},
       "DicomScuTimeout": {{ .Values.orthanc.dicomScuTimeout }},
+      "ExtraMainDicomTags": {
+        "Patient": ["PatientComments"]
+      },
       "OrthancExplorer2": {
         "UiOptions": {
           "EnableViewerQuickButton": true,
