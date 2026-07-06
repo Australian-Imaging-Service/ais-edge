@@ -27,7 +27,7 @@ the appropriate message to each configured receiver.
 
 ## Where it runs
 
-- Cluster: management cluster only
+- Cluster: the single-node cluster
 - Namespace: `observability`
 - Workload: StatefulSet `alertmanager-kube-prometheus-stack-alertmanager`
 - Service: `kube-prometheus-stack-alertmanager.observability.svc:9093`
@@ -47,9 +47,9 @@ severity=info     ─► slack-only            (lowest noise; skip email)
                      └─ slack: ${ALERT_SLACK_WEBHOOK}
 ```
 
-Inhibit rules: when `ManagementClusterDown` fires, downstream
-warning/info alerts on the same cluster are suppressed (no point
-paging about pods being NotReady when the whole cluster is gone).
+Inhibit rules: when a node-down / cluster-down alert fires, downstream
+warning/info alerts are suppressed (no point paging about individual pods being
+NotReady when the whole node is gone).
 
 ## Configuration
 
@@ -75,7 +75,7 @@ curl -s http://localhost:9093/api/v2/alerts | jq
 
 # Create a temporary silence (e.g. before maintenance)
 amtool --alertmanager.url=http://localhost:9093 silence add \
-  alertname=SeaweedFSDown --duration=30m --comment="planned restart"
+  alertname=XNATBacklogGrowing --duration=30m --comment="planned XNAT maintenance"
 
 # Rotate config (after editing the template or env vars)
 bash scripts/02d-install-observability.sh   # recreates the Secret
@@ -98,7 +98,7 @@ kubectl -n observability rollout restart statefulset/alertmanager-kube-prometheu
 | SMTP relay unreachable | Alerts queue up; eventually drop after `notify.deadline` | Configure a fallback receiver (Slack); monitor Alertmanager's own metrics for delivery failures |
 | Slack webhook revoked | Slack notifications silently drop | Alertmanager logs the error; rotate the webhook in `config/management.env` and re-run 02d |
 | SMTP password leak | Attacker can send mail-as-us | Stored as Secret; rotate by editing config and re-running 02d |
-| Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the existing rule only inhibits when `ManagementClusterDown` is firing |
+| Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the existing rule only inhibits when a node/cluster-down alert is firing |
 | Alertmanager pod restart | Brief delivery gap | StatefulSet replicas: 1 today; bump to 3 with peer config for HA |
 
 ## Replacements / future
@@ -113,7 +113,7 @@ kubectl -n observability rollout restart statefulset/alertmanager-kube-prometheu
 ## Future enhancements
 
 - HA: 3 replicas with `alertmanagerSpec.replicas: 3` and gossip via
-  the Service — only after the management cluster itself is HA
+  the Service — only relevant if this ever grows beyond a single node
 - Image-render attachments in Slack messages (a Grafana panel
   thumbnail next to the alert text)
 - `amtool` integration into ops runbooks for one-line silence creation

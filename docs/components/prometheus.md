@@ -10,20 +10,19 @@ and Alertmanager.
 
 ## Role in this stack
 
-The metrics layer of the observability stack. Prometheus scrapes:
-- **SeaweedFS** master/volume/filer/s3 metrics (ports 9324–9327)
-- **nginx-ingress controller** (`:10254/metrics`) — request rates per host
-- **cert-manager** (`:9402/metrics`) — certificate expiry, renewal events
+The metrics layer of the observability stack. On the single node Prometheus can
+scrape every pod directly (there is no konnectivity boundary). It scrapes:
 - **kube-state-metrics** — pod restarts, deployment status, PVC capacity
-- **Loki** (`:3100/metrics`) — its own internal health
-- **Vector** (`:9598/metrics`) — `ais_pipeline_events_total{event,cluster,…}`
-  derived from log lines
+- **node-exporter** — node CPU / memory / disk / network
 - **kubelet** (cAdvisor on `:10250/metrics/cadvisor`) — container CPU /
   memory / network
+- **Loki** (`:3100/metrics`) — its own internal health
 
 It evaluates the `PrometheusRule` files in
-`manifests/01-management/observability/alerts/` every 30s and pushes
-firing alerts to Alertmanager.
+`manifests/01-management/observability/alerts/` and pushes firing alerts to
+Alertmanager. Pipeline-event alerts (upload failures, invalid sessions, backlog)
+are evaluated by the Loki ruler over the JSON log stream instead — see
+[`alerting-architecture.md`](../alerting-architecture.md).
 
 ## What Prometheus has access to
 
@@ -36,9 +35,8 @@ firing alerts to Alertmanager.
 
 ## Where it runs
 
-- Cluster: management cluster only (edges are scraped indirectly via
-  Vector turning logs into metrics, since Prometheus does not scrape
-  across the konnectivity boundary)
+- Cluster: the single-node cluster (every pod is scraped directly — no
+  konnectivity boundary)
 - Namespace: `observability`
 - Workload: StatefulSet `prometheus-kube-prometheus-stack-prometheus-0`
   (single replica, managed by the prometheus-operator)
@@ -103,20 +101,13 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 ## Replacements / future
 
-- **Mimir** — see [`mimir.md`](mimir.md). Same wire protocol, but
-  horizontally scalable with object-storage backend. Drop-in once we
-  outgrow local PV
 - **VictoriaMetrics** — Prometheus-compatible TSDB with better compression
   and ingest throughput. Considered but not deployed
 - **Datadog / New Relic** — managed alternatives with their own agents.
-  Drop Prometheus and run Vector or DataDog-Agent as the scraper
+  Drop Prometheus and run Vector or a vendor agent as the scraper
 
 ## Future enhancements
 
 - Recording rules to pre-compute the heaviest dashboard queries
-- Remote write to Mimir for long-term retention (>30 days) when we
-  outgrow local PV
+- Remote write to a long-term store for retention beyond the local PV window
 - Alertmanager → PagerDuty / Opsgenie webhook for after-hours paging
-- A scrape job for the k0s API server's `/metrics` (currently disabled
-  in `kube-prometheus-stack` values because k0smotron doesn't expose it
-  through a stable Service name; revisit when it does)

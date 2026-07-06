@@ -14,16 +14,13 @@ stringData:
   username: "{{XNAT_USER}}"
   password: "{{XNAT_PASS}}"
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: s3-credentials
-  namespace: xnat-upload
-type: Opaque
-stringData:
-  access-key: "{{S3_ADMIN_ACCESS_KEY}}"
-  secret-key: "{{S3_ADMIN_SECRET_KEY}}"
----
+# TIER-1 (single node): the upload pod reads the LOCAL staging directory that
+# xnat-ingest sort writes to on this same machine (host /data/xnat-ingest,
+# mounted at /data, so /data/staging == host /data/xnat-ingest/staging) and
+# uploads sessions to XNAT over HTTPS. There is NO SeaweedFS / S3 hop anymore:
+# no s3:// source, no S3 credentials, no AWS_ENDPOINT_URL. xnat-ingest upload
+# accepts a local filesystem path as its source (same binary, different first
+# positional arg).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +31,8 @@ metadata:
     component: upload
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: xnat-ingest
@@ -46,24 +45,17 @@ spec:
     spec:
       containers:
         - name: upload
-          # Default points at our fork on ghcr.io with the AIS_LOG_FORMAT=json
-          # patch. Override XNAT_INGEST_IMAGE
-          # in config/management.env when upstream merges to switch back to
-          # ghcr.io/australian-imaging-service/xnat-ingest:latest.
           image: {{XNAT_INGEST_IMAGE}}
           command: ["xnat-ingest", "upload"]
           args:
-            - "s3://{{S3_BUCKET}}/staged"
+            - "/data/staging"          # LOCAL source dir written by sort (was s3://.../staged)
             - "$(XINGEST_HOST)"
             - "--always-include"
             - "all"
             - "--loop"
             - "60"
             - "--dont-require-manifest"
-            - "--dont-verify-ssl"
-            - "--store-credentials"
-            - "$(S3_ACCESS_KEY)"
-            - "$(S3_SECRET_KEY)"
+            - "--dont-verify-ssl"       # XNAT presents a private/self-signed cert
           env:
             - name: XINGEST_HOST
               valueFrom:
@@ -80,22 +72,18 @@ spec:
                 secretKeyRef:
                   name: xnat-credentials
                   key: password
-            - name: S3_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: access-key
-            - name: S3_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: s3-credentials
-                  key: secret-key
-            # Point boto3 at the in-cluster SeaweedFS service
-            - name: AWS_ENDPOINT_URL
-              value: "http://seaweedfs.seaweedfs.svc.cluster.local:8333"
-            - name: AWS_DEFAULT_REGION
-              value: "us-east-1"
             # Emit one JSON object per log line so Vector indexes
             # ts/level/logger/message without regex parsing.
             - name: AIS_LOG_FORMAT
               value: "json"
+          volumeMounts:
+            # Same host dir sort writes to. /data/staging in-container ==
+            # host /data/xnat-ingest/staging. Must be byte-identical to the
+            # sort pod's mount or upload reads an empty dir.
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/xnat-ingest
+            type: DirectoryOrCreate

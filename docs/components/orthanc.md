@@ -3,9 +3,9 @@
 ## Overview
 
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
-open-source DICOM server. In ais-edge it sits at the edge of each site,
-acts as the **DICOM receiver** for local modalities, and runs the AIS
-**deidentification Lua hook** before xnat-ingest sorts the data.
+open-source DICOM server. In this tier-1 single-node appliance it acts as the
+**DICOM receiver** for local modalities and runs the AIS **deidentification Lua
+hook** before xnat-ingest sorts the data.
 
 We use the [`jodogne/orthanc-plugins`](https://hub.docker.com/r/jodogne/orthanc-plugins)
 image (pinned to a version ≥ 1.12.0 because the deid hook uses
@@ -13,7 +13,7 @@ image (pinned to a version ≥ 1.12.0 because the deid hook uses
 
 ## Role in this stack
 
-Three jobs at each edge:
+Three jobs on the node:
 
 1. **DIMSE C-STORE SCP** on host port 4242 with `AET=AISEDGE`. Modalities
    on the local facility LAN push studies here.
@@ -58,13 +58,14 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
 ## Where it runs
 
 Single pod (`Recreate` strategy — hostPath isn't shareable across
-replicas), one per edge worker. Deployed by
+replicas) on the single node. Deployed by
 `scripts/07c-deploy-edge-orthanc.sh`. Manifest at
 [`manifests/02-edge/orthanc.yaml.tpl`](../../manifests/02-edge/orthanc.yaml.tpl).
 
-REST API exposed as a ClusterIP Service `orthanc.xnat-ingest.svc.cluster.local:8042`.
-DICOM port 4242 is exposed via `hostPort` directly on the edge node IP
-so modalities can reach it without an in-cluster Service.
+REST API exposed as a ClusterIP Service `orthanc.xnat-ingest.svc.cluster.local:8042`
+(this is how `xnat-ingest sort` REST-pulls). DICOM port 4242 is exposed via
+`hostPort` directly on the node's IP so modalities can reach it without an
+in-cluster Service.
 
 ## Configuration
 
@@ -75,8 +76,8 @@ and are turned into ConfigMaps by the deploy script. Four files:
 |---|---|
 | `orthanc.json` | Daemon config: AET, ports, storage path, `StableAge=30`, points at the Lua script |
 | `deidentify-and-forward.lua` | The deid + label hook. **Identical across all AIS-Edge deployments** — no site-specific bits |
-| `routing.json` | **Per-site**: maps modality AETs → recipe + XNAT project. Edit this for every new site |
-| `deidentification-profile.json` | The site's deid contract. Replace + Keep blocks following Orthanc's `/modify` API. Ships as `.template`; gitignored after copy. Applied to every accepted study |
+| `routing.json` | **Per-site**: `AETMap` maps each modality's Called-AET → XNAT project. Edit this before install. Ships as `.template`; gitignored after copy |
+| `deidentification-profile.json` | The site's deid contract. Replace + Keep blocks following Orthanc's `/modify` API. Ships as `.template`; gitignored after copy. A single profile is applied to every accepted study |
 
 The single per-deployment Secret is `AIS_DEID_HMAC_SALT`, set in
 `config/management.env`. Generate with `openssl rand -hex 32`.
@@ -87,17 +88,18 @@ so only rotate deliberately.
 
 ```bash
 # Pod state
-kubectl --kubeconfig kubeconfig-edge-<site> get pods -n xnat-ingest -l app=orthanc
+kubectl get pods -n xnat-ingest -l app=orthanc
 
 # Logs (deid events: instance_deidentified, study_labeled_ready)
-kubectl --kubeconfig kubeconfig-edge-<site> logs -n xnat-ingest deploy/orthanc
+kubectl logs -n xnat-ingest deploy/orthanc
 
 # Orthanc Explorer UI (port-forward + browser)
-kubectl --kubeconfig kubeconfig-edge-<site> port-forward -n xnat-ingest svc/orthanc 8042:8042
+kubectl port-forward -n xnat-ingest svc/orthanc 8042:8042
 # → http://localhost:8042/app/explorer.html
 
-# DICOM endpoint smoke-test from a modality side or with dcmtk
-storescu -aec AISEDGE -aet TEST_MOD <edge-ip> 4242 /path/to/study/*.dcm
+# DICOM endpoint smoke-test from a modality or with dcmtk. -aec must be an
+# AET listed in routing.json's AETMap.
+storescu -aec <AET-from-routing.json> -aet TEST_MOD <MGMT_NODE_IP> 4242 /path/to/study/*.dcm
 ```
 
 ## Known limitations

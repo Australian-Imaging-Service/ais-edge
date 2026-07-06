@@ -10,7 +10,7 @@
       "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "{namespace=\"xnat-ingest\"} |= \"$session\" | json | line_format \"{{.cluster}} | {{.component}} | {{.event}} | {{.message}}\"", "refId": "A" }
+        { "expr": "{namespace=~\"xnat-ingest|xnat-upload\"} |= \"$session\" | json | line_format \"{{.cluster}} | {{.component}} | {{.event}} | {{.message}}\"", "refId": "A" }
       ],
       "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Ascending" }
     }

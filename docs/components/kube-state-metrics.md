@@ -14,12 +14,12 @@ etc.
 ## Role in this stack
 
 The source of truth for "is this thing in the right state?" Most of
-our alerts depend on it:
-- `EdgeWorkerDisconnected` — `kube_node_status_condition{condition="Ready"}`
-- `EdgePodCrashLoop` — `kube_pod_container_status_restarts_total`
-- `KonnectivityTunnelFlapping` — same metric, scoped to konnectivity
-- `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment="seaweedfs"}`
-- `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
+our K8s-level alerts depend on it:
+- `NodeNotReady` — `kube_node_status_condition{condition="Ready"}`
+- `PodCrashLoop` — `kube_pod_container_status_restarts_total`
+- `OrthancDown` / `UploadPodDown` — `kube_deployment_status_replicas_ready{...}`
+- `PVCNearlyFull` — `kubelet_volume_stats_*` (kubelet, cross-referenced with KSM
+  PVC state)
 
 ## What kube-state-metrics has access to
 
@@ -30,7 +30,7 @@ our alerts depend on it:
 
 ## Where it runs
 
-- Cluster: management cluster only
+- Cluster: the single-node cluster
 - Namespace: `observability`
 - Workload: Deployment `kube-prometheus-stack-kube-state-metrics`
   (single replica)
@@ -82,7 +82,7 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 |---|---|---|
 | KSM down | Alerts that depend on its metrics stop firing | Auto-restarts; KPS scrapes regenerate state quickly |
 | API rate-limited | Stale metrics | KSM uses informers (cached); rate-limiting unlikely at our scale |
-| Cluster CRD added | New object kinds not exported | KSM has built-in support for popular CRDs (cert-manager, k0smotron); custom kinds need a CRD allow-list |
+| Cluster CRD added | New object kinds not exported | KSM has built-in support for popular CRDs; custom kinds need a CRD allow-list |
 | RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole; verify with `kubectl auth can-i list pods --as=system:serviceaccount:observability:kube-prometheus-stack-kube-state-metrics` |
 
 ## Replacements / future
@@ -95,8 +95,5 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 
 ## Future enhancements
 
-- Custom CRD scraping for k0smotron `Cluster` resources (KSM has a
-  generic CRD scraper; would expose
-  `cluster_status_ready{cluster="edge-dev"}` directly)
 - Per-component metric enable/disable to reduce series count if
   cardinality becomes a problem (KSM is verbose by default)

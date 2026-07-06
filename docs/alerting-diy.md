@@ -27,10 +27,10 @@ Decision tree:
 Is the thing you want to alert on …
 
   ┌─ already a Prometheus metric? (CPU, memory, kube_node_status,
-  │  cert-manager_certificate_expiration_timestamp_seconds, etc.)
+  │  kubelet_volume_stats_*, etc.)
   │     → Prometheus rule. See "Prometheus rules" below.
   │
-  ├─ a JSON log line emitted by xnat-ingest / s3-uploader / Orthanc /
+  ├─ a JSON log line emitted by xnat-ingest sort / upload / Orthanc /
   │  kube-prometheus components?
   │     → Loki ruler rule. See "Loki ruler rules" below.
   │
@@ -39,10 +39,11 @@ Is the thing you want to alert on …
           instead of `| json | <field>=<value>`.
 ```
 
-The split exists because the mgmt-cluster Prometheus cannot scrape edge
-pods directly (the konnectivity tunnel is one-way), but every edge pod's
-logs already flow into Loki via Vector. Pipeline-event alerts therefore
-live in Loki; K8s-resource-state alerts live in Prometheus.
+The split exists because pipeline events are JSON log lines (the natural source
+of truth for "did an upload fail?"), while K8s object state is already a
+Prometheus metric. Pipeline-event alerts therefore live in the Loki ruler;
+K8s-resource-state alerts live in Prometheus. See
+[`alerting-architecture.md`](alerting-architecture.md) for the full rationale.
 
 ---
 
@@ -68,15 +69,13 @@ Quick-find from CLI:
 # List all metric names matching a pattern
 kubectl -n observability port-forward svc/kube-prometheus-stack-prometheus 9090:9090 &
 curl -s 'http://localhost:9090/api/v1/label/__name__/values' \
-  | jq -r '.data[]' | grep -i seaweed
+  | jq -r '.data[]' | grep -i volume
 ```
 
 The metrics already shipped on this cluster include:
-- All `kube_*` from kube-state-metrics (pod, node, certificate, ingress, …)
+- All `kube_*` from kube-state-metrics (pod, node, deployment, PVC, …)
 - All `node_*` from node-exporter (cpu, memory, disk, network, …)
-- All `nginx_ingress_controller_*` (request rate, latency, 5xx)
-- All `cert_manager_*` (`certificate_expiration_timestamp_seconds`, `certificate_renewal_timestamp_seconds`, …)
-- All `seaweedfs_*` exposed via the ServiceMonitor (`s3_request_total`, `volumeServer_volumes`, …)
+- `kubelet_volume_stats_*` (PVC usage for Loki / Prometheus / Grafana volumes)
 - `loki_*` (ingestion rate, ruler eval status)
 - `up` (per-target liveness — single most useful metric in the stack)
 
@@ -94,33 +93,31 @@ this setup the high-value labels are:
 
 | Label | Example values | Why useful |
 |---|---|---|
-| `namespace` | `xnat-ingest`, `xnat-upload`, `seaweedfs`, `observability`, `kube-system`, `orthanc` | Coarse-grained filter |
-| `app` | `xnat-ingest`, `orthanc`, `seaweedfs`, `prometheus`, … | Single-service filter |
-| `component` | `sort`, `s3-uploader`, `upload`, `dicom-receiver` | Distinguish multiple pods in the same app |
-| `cluster` | `management`, `edge-dev`, `edge-clinic1`, … | Distinguish mgmt vs each edge child cluster |
+| `namespace` | `xnat-ingest`, `xnat-upload`, `observability`, `kube-system` | Coarse-grained filter |
+| `app` | `xnat-ingest`, `orthanc`, `prometheus`, … | Single-service filter |
+| `component` | `sort`, `upload`, `dicom-receiver` | Distinguish pods within the same app |
+| `cluster` | `mgmt` | Single node — one value |
 | `level` | `INFO`, `WARN`, `ERROR` | Severity filter (only set on JSON-formatted logs) |
 
 Example LogQL queries you can paste into Explore:
 
 ```logql
-# All upload_completed events on every edge in the last 1h:
-{namespace="xnat-ingest", component="s3-uploader"}
+# All upload_completed events in the last 1h:
+{namespace="xnat-upload", component="upload"}
   | json | event="upload_completed"
 
-# Pipeline events grouped by edge (table panel):
-sum by (edge) (
-  count_over_time({namespace="xnat-ingest", component="s3-uploader"}
-    | json | event="upload_completed" [1h])
-)
+# Completed uploads per hour (table panel):
+count_over_time({namespace="xnat-upload", component="upload"}
+  | json | event="upload_completed" [1h])
 
 # Anything containing "401" anywhere in the upload pod:
 {namespace="xnat-upload"} |~ "(?i)\\b401\\b"
 ```
 
-JSON parsing: our event-shaped logs (s3-uploader, sort, kube-prometheus
-operator, etc.) all use `level`, `logger`, `message` / `event` keys.
-`| json` extracts every JSON field as a label you can match on. Raw
-text logs use `|~ "regex"` instead.
+JSON parsing: our event-shaped logs (sort, upload, kube-prometheus operator,
+etc.) all use `level`, `logger`, `message` / `event` keys. `| json` extracts
+every JSON field as a label you can match on. Raw text logs use `|~ "regex"`
+instead.
 
 ### 2c. Read the existing rules as templates
 
@@ -144,22 +141,22 @@ One file per severity (`critical.yaml`, `warning.yaml`, `info.yaml`).
 Append a new entry under the existing `groups:` block. Minimal example:
 
 ```yaml
-- alert: HighIngressErrorRate
-  # rate of 5xx responses out of nginx-ingress over the last 5 minutes;
-  # > 0.5 per second means something downstream is broken.
+- alert: DataVolumeNearlyFull
+  # the node's data PVC (or any observability PVC) is over 85% full.
+  # /data filling up means staging + Orthanc storage will soon stall.
   expr: |
-    sum by (cluster) (
-      rate(nginx_ingress_controller_requests{status=~"5.."}[5m])
-    ) > 0.5
-  for: 5m       # debounce — must be true for 5 minutes before firing
+    (
+      kubelet_volume_stats_used_bytes
+      / kubelet_volume_stats_capacity_bytes
+    ) > 0.85
+  for: 10m      # debounce — must be true for 10 minutes before firing
   labels:
     severity: warning
-    cluster: management
   annotations:
-    summary: "nginx-ingress is returning many 5xx errors"
+    summary: "A persistent volume is over 85% full"
     description: |
-      The mgmt-cluster ingress is responding with {{ $value | humanize }}/s
-      5xx errors. Check the backend pods these ingresses route to.
+      PVC {{ $labels.persistentvolumeclaim }} is {{ $value | humanizePercentage }}
+      full. Expand the disk or clear the backlog.
 ```
 
 These files are applied directly by `kubectl apply -f <dir>` in step
@@ -330,11 +327,11 @@ expr: |
 for: 10m
 ```
 
-### "Alert when a cert is expiring soon"
+### "Alert when a deployment has no ready replicas"
 ```yaml
 expr: |
-  cert_manager_certificate_expiration_timestamp_seconds - time() < 14 * 24 * 3600
-for: 1h
+  kube_deployment_status_replicas_ready{deployment=~"orthanc|xnat-ingest-.*"} < 1
+for: 5m
 ```
 
 ---
@@ -350,5 +347,5 @@ for: 1h
 | `manifests/01-management/observability/alerts/info.yaml` | Prometheus rules for `severity: info` |
 | `manifests/01-management/observability/loki-ruler-rules.yaml` | Every log-derived alert (one ConfigMap, multiple rule groups) |
 | `manifests/01-management/observability/kube-prometheus-stack-values.yaml.tpl` | Stack-wide Prometheus tuning (retention, scrape intervals) |
-| `manifests/01-management/observability/loki-values.yaml.tpl` | Loki tuning (ruler eval interval, retention, S3 backend) |
+| `manifests/01-management/observability/loki-values.yaml.tpl` | Loki tuning (ruler eval interval, retention, filesystem storage) |
 | `scripts/02d-install-observability.sh` | The idempotent applier for everything in this directory |

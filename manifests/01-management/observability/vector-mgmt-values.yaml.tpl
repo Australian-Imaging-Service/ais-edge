@@ -1,17 +1,22 @@
 # =============================================================================
-# Vector helm-chart values  —  log shipper on the management node
+# Vector helm-chart values  —  the single log shipper for the whole node
 # =============================================================================
 # Used by: scripts/02d-install-observability.sh
 #   helm install vector-mgmt vector/vector -n observability -f <rendered-this-file>
 #
-# Vector tails kubelet log files (/var/log/pods/<ns>_<pod>_<uid>/<ctr>/N.log)
-# on each node, parses JSON automatically, enriches with kubernetes_logs
-# metadata (namespace, pod, container, node, labels), and pushes batches
-# of events to Loki over HTTPS.
+# This is a single-node "tier-1" appliance: ONE k0s node runs everything
+# (Orthanc, xnat-ingest sort, xnat-ingest upload, plus the system pods). This
+# single Vector DaemonSet tails ALL of their logs and ships them to Loki.
 #
-# Why not hostNetwork: Vector's only network needs are outbound (to
-# Loki). It does NOT need to bind any host port. dnsPolicy: ClusterFirst
-# (default) is fine — Loki resolves through cluster DNS to a ClusterIP.
+# Vector tails kubelet log files (/var/log/pods/<ns>_<pod>_<uid>/<ctr>/N.log),
+# parses JSON automatically, enriches with kubernetes_logs metadata
+# (namespace, pod, container, node, labels), and pushes batches of events to
+# the IN-CLUSTER Loki Service over plain HTTP — no ingress, no TLS, no SNI.
+# Traffic never leaves the node.
+#
+# Why not hostNetwork: Vector's only network need is outbound (to Loki). It
+# does NOT need to bind any host port. dnsPolicy: ClusterFirst (default) is
+# fine — Loki resolves through cluster DNS to a ClusterIP.
 #
 # hostPath /var/log/pods is read-only. The pod runs as a non-root user
 # with read-only root filesystem. Standard log-collector pattern.
@@ -95,6 +100,8 @@ customConfig:
     loki:
       type: loki
       inputs: [parse_json_messages]
+      # In-cluster Loki Service (gateway disabled). Plain HTTP, ClusterIP —
+      # resolves via cluster DNS and never leaves the node.
       endpoint: http://loki.observability.svc.cluster.local:3100
       # Slim down the JSON body before shipping. The `kubernetes_logs`
       # source enriches every event with a fat metadata block (file path,
@@ -132,11 +139,11 @@ customConfig:
         max_bytes: 1048576
         timeout_secs: 1
 
-# Vector on the management cluster only pushes logs OUT to Loki — it does
-# not expose any in-cluster endpoint. Disable the chart's default Service
-# and the (silently broken) serviceMonitor knob. Pipeline-event alerts run
-# inside Loki's ruler over the same logs; see manifests/01-management/
-# observability/loki-ruler-rules.yaml for the rule definitions.
+# Vector only pushes logs OUT to Loki — it does not expose any in-cluster
+# endpoint. Disable the chart's default Service and the (silently broken)
+# serviceMonitor knob. Pipeline-event alerts run inside Loki's ruler over the
+# same logs; see manifests/01-management/observability/loki-ruler-rules.yaml
+# for the rule definitions.
 service:
   enabled: false
 serviceMonitor:

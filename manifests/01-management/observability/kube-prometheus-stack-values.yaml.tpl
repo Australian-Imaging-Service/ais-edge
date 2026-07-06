@@ -85,8 +85,11 @@ grafana:
     userKey: admin-user
     passwordKey: admin-password
   defaultDashboardsEnabled: true   # ships generic K8s dashboards out of the box
+  # Single-node appliance: no nginx-ingress. Grafana is reached directly on a
+  # fixed NodePort on the k0s node — http://<NODE_IP>:{{GRAFANA_NODEPORT}}.
   service:
-    type: ClusterIP                # exposed via nginx-ingress, not direct
+    type: NodePort
+    nodePort: {{GRAFANA_NODEPORT}}
   persistence:
     enabled: true
     type: pvc

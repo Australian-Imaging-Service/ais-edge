@@ -36,12 +36,12 @@
     },
     {
       "type": "stat",
-      "title": "Sessions uploaded (last 1h)",
-      "description": "Count of upload_completed events. One per session that finished mc mirror with exit 0. Each session contains 1 or more DICOMs plus 1 MANIFEST.json.",
+      "title": "Sessions uploaded to XNAT (last 1h)",
+      "description": "Count of successful XNAT uploads by the xnat-ingest upload pod (each 'Successfully uploaded all files in' log line). Single-node pipeline: uploads go straight to XNAT over HTTPS — no S3 hop.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-upload\",component=\"upload\"} |~ \"Successfully uploaded all files in\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -49,12 +49,12 @@
     },
     {
       "type": "stat",
-      "title": "Upload failures (last 1h)",
-      "description": "Count of upload_failed events (mc mirror returned non-zero). 0 = pipeline healthy.",
+      "title": "Upload errors (last 1h)",
+      "description": "Count of error/failure log lines from the xnat-ingest upload pod. 0 = pipeline healthy.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-upload\",component=\"upload\"} |~ \"(?i)error|failed|exception|traceback\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -124,11 +124,11 @@
     },
     {
       "type": "timeseries",
-      "title": "Per-edge upload throughput (events/min)",
+      "title": "XNAT upload throughput (sessions/min)",
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 26 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" [1m]))", "legendFormat": "{{cluster}}", "refId": "A" }
+        { "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-upload\",component=\"upload\"} |~ \"Successfully uploaded all files in\" [1m]))", "legendFormat": "{{cluster}}", "refId": "A" }
       ],
       "fieldConfig": { "defaults": { "unit": "short" } }
     },
@@ -153,7 +153,7 @@
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {
-          "expr": "{namespace=\"xnat-ingest\"} | json | event != \"\" | line_format \"[{{.cluster}}/{{.component}}] event={{.event}}{{if .session}} session={{.session}}{{end}}{{if .duration_s}} duration={{.duration_s}}s{{end}}{{if .files}} files={{.files}}{{end}}{{if .bytes}} bytes={{.bytes}}{{end}} — {{.message}}\"",
+          "expr": "{namespace=~\"xnat-ingest|xnat-upload\"} | json | line_format \"[{{.cluster}}/{{.component}}]{{if .event}} event={{.event}}{{end}}{{if .session}} session={{.session}}{{end}}{{if .duration_s}} duration={{.duration_s}}s{{end}}{{if .files}} files={{.files}}{{end}}{{if .bytes}} bytes={{.bytes}}{{end}} — {{.message}}\"",
           "refId": "A"
         }
       ],

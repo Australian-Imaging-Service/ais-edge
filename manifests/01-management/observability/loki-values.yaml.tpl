@@ -4,49 +4,56 @@
 # Used by: scripts/02d-install-observability.sh
 #   helm install loki grafana/loki -n observability -f <rendered-this-file>
 #
-# Sizing rationale: one mgmt + a few edges sending JSON log lines through
-# Vector. Single-binary "monolithic" deployment handles this load fine —
-# the distributed mode (read/write/backend split) only pays off above
-# ~50 GB/day. Switch later if scale grows.
+# Sizing rationale: a single-node tier-1 appliance sending JSON log lines
+# through one Vector DaemonSet. Single-binary "monolithic" deployment handles
+# this load easily — the distributed mode (read/write/backend split) only pays
+# off above ~50 GB/day.
 #
-# Storage: chunks (the actual log data, gzipped) go to SeaweedFS via the S3
-# API. The boltdb-shipper index stays on a small local PV (chart default).
+# Storage: FILESYSTEM. Chunks (the actual gzipped log data), the tsdb index,
+# and the ruler runtime state all live on a single local-path PVC mounted at
+# /var/loki. No S3 / object-store hop — this is a self-contained single node.
 #
-# Auth: no Loki-side multi-tenancy. We rely on:
-#   - the bearer-token Secret on each edge that Vector uses to push, and
-#   - nginx-ingress on the management host doing TLS termination on
-#     loki.aisedge.local (cert signed by ais-edge-ca).
+# Auth: single-tenant, no multi-tenancy. Vector pushes to the in-cluster Loki
+# Service over plain HTTP (traffic never leaves the node). Loki's synthetic
+# tenant ID is `fake` when auth_enabled is false.
 #
-# Retention: 30 days (per config/management.env: OBSERVABILITY_RETENTION_DAYS).
+# Retention: {{OBSERVABILITY_RETENTION_DAYS}} days, enforced by the compactor
+# deleting expired chunks/index off the filesystem.
 # =============================================================================
 deploymentMode: SingleBinary
 
 loki:
-  auth_enabled: false               # we gate at the ingress with a bearer
+  auth_enabled: false               # single tenant (`fake`), no bearer needed
 
+  # tsdb index + filesystem object store. object_store: filesystem tells Loki
+  # to keep chunks on the local PV instead of an S3 bucket.
   schemaConfig:
     configs:
       - from: 2024-04-01
         store: tsdb
-        object_store: s3
+        object_store: filesystem
         schema: v13
         index:
           prefix: loki_index_
           period: 24h
 
+  # storage.type: filesystem (NOT in the object-storage set) makes the chart's
+  # commonStorageConfig helper emit a `common.storage.filesystem` block using
+  # these directories on the mounted PV.
   storage:
-    type: s3
-    bucketNames:
-      chunks:    "{{LOGS_BUCKET}}"
-      ruler:     "{{LOGS_BUCKET}}"
-      admin:     "{{LOGS_BUCKET}}"
-    s3:
-      endpoint: http://seaweedfs.seaweedfs.svc.cluster.local:8333
-      region: us-east-1            # SeaweedFS ignores this; required by SDK
-      s3ForcePathStyle: true       # SeaweedFS speaks path-style addressing
-      insecure: true               # in-cluster plain HTTP (does not leave node)
-      accessKeyId: "{{LOKI_S3_ACCESS_KEY}}"
-      secretAccessKey: "{{LOKI_S3_SECRET_KEY}}"
+    type: filesystem
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+
+  # Explicit storage_config so the tsdb shipper + filesystem object client
+  # write everything under the persistent /var/loki mount.
+  storage_config:
+    tsdb_shipper:
+      active_index_directory: /var/loki/tsdb-index
+      cache_location: /var/loki/tsdb-cache
+    filesystem:
+      directory: /var/loki/chunks
 
   limits_config:
     retention_period: {{LOKI_RETENTION_HOURS}}h
@@ -56,30 +63,32 @@ loki:
     ingestion_rate_mb: 16
     ingestion_burst_size_mb: 32
 
+  # Compactor drives retention. delete_request_store: filesystem so the
+  # retention-delete requests are persisted on the same local PV.
   compactor:
     working_directory: /var/loki/compactor
     retention_enabled: true
     retention_delete_delay: 2h
     retention_delete_worker_count: 150
-    delete_request_store: s3
+    delete_request_store: filesystem
 
   commonConfig:
     replication_factor: 1
 
   # =========================================================================
   # Ruler — runs LogQL alert rules on a schedule and emits firing alerts
-  # to Alertmanager. This replaces a separate Prometheus path for any
-  # log-derived alerts (which a mgmt-side Prometheus could not collect from
-  # the edge child clusters across the konnectivity boundary anyway).
+  # to Alertmanager. This is how log-derived pipeline alerts (stalled/parked
+  # sessions, upload failures, XNATUploadSuccess, disk usage) reach the
+  # existing email/Slack receivers.
+  #
+  # storage.type: local + rulerConfig.storage.local.directory point the ruler
+  # at the ConfigMap-mounted rule files on the local filesystem (no S3).
   #
   # Rule files are mounted as a ConfigMap at /etc/loki/rules/fake/ — `fake`
-  # is Loki's tenant ID when auth_enabled is false. The sidecar container
-  # in the loki Helm chart watches ConfigMaps with the configured label
-  # and writes them into that path so this stays declarative.
+  # is Loki's tenant ID when auth_enabled is false. singleBinary mounts the
+  # loki-ruler-rules ConfigMap there (see extraVolumes below).
   #
-  # Alertmanager URL points at the existing kube-prometheus-stack
-  # alertmanager Service; receivers (email/Slack) configured via
-  # ALERT_* env vars in config/management.env continue to handle these.
+  # Alertmanager URL points at the kube-prometheus-stack alertmanager Service.
   # =========================================================================
   rulerConfig:
     storage:
@@ -99,9 +108,12 @@ singleBinary:
   resources:
     requests:  { cpu: 200m, memory: 512Mi }
     limits:    { cpu: 2,    memory: 2Gi }
+  # Persist ALL Loki data (chunks, tsdb index, compactor, ruler runtime) on a
+  # local-path PVC so logs survive pod restarts. The chart mounts this PVC at
+  # /var/loki, which is exactly where storage_config/compactor point above.
   persistence:
     enabled: true
-    size: 10Gi
+    size: 20Gi
     storageClass: local-path
   # Mount the loki-ruler-rules ConfigMap at /etc/loki/rules/fake/ — the
   # ruler reads each YAML file there as a rule group. `fake` is Loki's
@@ -120,7 +132,8 @@ read:    { replicas: 0 }
 write:   { replicas: 0 }
 backend: { replicas: 0 }
 
-# Disable sub-charts we don't need (chunks already on S3)
+# Disable sub-charts we don't need — chunks live on the local filesystem, no
+# object storage, so no bundled MinIO and no chunk/results caches.
 minio:
   enabled: false
 chunksCache:
@@ -128,11 +141,12 @@ chunksCache:
 resultsCache:
   enabled: false
 
+# No external gateway — Vector pushes to the Loki Service directly in-cluster.
 gateway:
-  enabled: false                  # we expose Loki via nginx-ingress directly
+  enabled: false
 
-# Loki itself — internal Service (ClusterIP). External access is via the
-# observability-ingress.yaml.tpl with SNI = loki.aisedge.local.
+# Loki internal Service (ClusterIP). Vector and Grafana reach it at
+# http://loki.observability.svc.cluster.local:3100 — no ingress, no TLS.
 service:
   type: ClusterIP
 
