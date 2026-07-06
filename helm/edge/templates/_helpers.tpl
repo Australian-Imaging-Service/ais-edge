@@ -35,6 +35,12 @@ DICOM tag mapping env vars — included in sort, upload, and associate pods.
   value: {{ .Values.xnatIngest.dicomTagMapping.visit | quote }}
 - name: XINGEST_SESSION_UID
   value: {{ .Values.xnatIngest.dicomTagMapping.session | quote }}
+- name: XINGEST_SCAN_ID
+  value: {{ .Values.xnatIngest.dicomTagMapping.scanId | default "SeriesNumber" | quote }}
+- name: XINGEST_SCAN_DESC
+  value: {{ .Values.xnatIngest.dicomTagMapping.scanDesc | default "SeriesDescription" | quote }}
+- name: XINGEST_RESOURCE
+  value: {{ .Values.xnatIngest.dicomTagMapping.resource | default "ImageType[2:]" | quote }}
 {{- end }}
 
 {{/*

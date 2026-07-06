@@ -16,6 +16,10 @@ spec:
       value: "windows"
     - name: SORT_WATCH_DIR
       value: {{ .Values.xnatIngest.sortWindows.watchDir | quote }}
+    - name: XINGEST_AVOID_CLASHES
+      value: {{ .Values.xnatIngest.sortWindows.avoidClashes | default "1" | quote }}
+    - name: XINGEST_WAIT_PERIOD
+      value: {{ .Values.xnatIngest.sortWindows.waitPeriod | default "1800" | quote }}
     - name: XINGEST_DATATYPES
       value: {{ .Values.xnatIngest.sortWindows.datatypes | quote }}
     - name: XINGEST_COPY_MODE

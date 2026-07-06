@@ -17,6 +17,10 @@ spec:
       value: /data/orthanc-storage
     - name: SORT_COLLATE_RESOURCES
       value: "medimage/dicom-series siblings"
+    - name: XINGEST_AVOID_CLASHES
+      value: {{ .Values.xnatIngest.sort.avoidClashes | default "1" | quote }}
+    - name: XINGEST_WAIT_PERIOD
+      value: {{ .Values.xnatIngest.sort.waitPeriod | default "1800" | quote }}
     - name: ORTHANC_USER
       valueFrom:
         secretKeyRef:
