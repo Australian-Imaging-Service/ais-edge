@@ -18,7 +18,7 @@ echo "=== 07: Deploying xnat-ingest on ${CLUSTER_NAME} ==="
 # Sort's hardlink target. Other edge data dirs (orthanc-storage,
 # facility-backup) are created by 07c-deploy-edge-orthanc.sh.
 ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
-    "sudo mkdir -p /data/xnat-ingest/staging && sudo chmod 777 /data/xnat-ingest/staging"
+    "sudo mkdir -p /data/xnat-ingest/grouped /data/xnat-ingest/staging && sudo chmod 777 /data/xnat-ingest/grouped /data/xnat-ingest/staging"
 echo "Data directories ready on ${NODE_IP}"
 
 # Phase 2: ensure namespace exists and push the CA bundle as a Secret. The
@@ -77,5 +77,5 @@ if [ -f "${REPO_DIR}/ais-edge-ca.crt" ]; then
 fi
 
 echo "=== 07: Complete for ${CLUSTER_NAME} ==="
-echo "Sort is in REST-pull mode against Orthanc."
+echo "Pipeline: group-orthanc (REST-pull) -> assign -> s3-uploader -> SeaweedFS."
 echo "Push test DICOMs via C-STORE to AET=AISEDGE ${NODE_IP}:4242 (see step 07c output)."

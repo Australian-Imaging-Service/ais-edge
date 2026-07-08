@@ -17,72 +17,102 @@ stringData:
   access-key: "{{S3_EDGE_ACCESS_KEY}}"
   secret-key: "{{S3_EDGE_SECRET_KEY}}"
 ---
-# Sort pod: REST-pulls deid'd instances from Orthanc, hardlinks the DICOM
-# files from Orthanc's storage tree (/data/orthanc-storage) into staging
-# (/data/staging/PROJECT.SUBJECT.VISIT/). Hardlink requires same filesystem,
-# which is why the Orthanc pod and this pod share the same /data hostPath.
+# TIER-2 edge staging (upstream xnat-ingest >=0.12): the old single `sort`
+# command was split into `group-orthanc` (Orthanc REST-pull + group) and
+# `assign` (project/subject/session IDs). Both run on the edge worker and
+# share /data/xnat-ingest; assign's output in /data/staging is what the
+# s3-uploader mirrors to SeaweedFS. De-id is done in Orthanc, not here.
 #
-# Label contract with Orthanc:
-#   --orthanc-label xnat-ingest-ready   only consider instances with this label
-#                                   (added by the Lua deid hook on success)
-#   --orthanc-skip-label xnat-ingest-skip   skip instances already staged
-#                                   (sort adds this label after hardlink)
+# group-orthanc: pull studies labelled `xnat-ingest-ready`, hardlink deid'd
+# DICOMs from /data/orthanc-storage into grouped sessions at /data/grouped.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: xnat-ingest-sort
+  name: xnat-ingest-group
   namespace: xnat-ingest
   labels:
     app: xnat-ingest
-    component: sort
+    component: group
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: xnat-ingest
-      component: sort
+      component: group
   template:
     metadata:
       labels:
         app: xnat-ingest
-        component: sort
+        component: group
     spec:
-      {{#ONPREM_ONLY}}
-      # Pod-level /etc/hosts so any in-pod tool can resolve the
-      # management hostnames without external DNS. On cloud topology the
-      # whole block is stripped — edges resolve via real public DNS.
-      hostAliases:
-        - ip: "{{MGMT_NODE_IP}}"
-          hostnames:
-            - "{{SEAWEEDFS_HOSTNAME}}"
-            - "{{K0S_API_HOSTNAME}}"
-            - "{{KONNECTIVITY_HOSTNAME}}"
-            - "{{LOKI_HOSTNAME}}"
-            - "{{GRAFANA_HOSTNAME}}"
-      {{/ONPREM_ONLY}}
       containers:
-        - name: sort
-          # Default points at our fork on ghcr.io with the JSON-logging
-          # patch. Override XNAT_INGEST_IMAGE in config/management.env to
-          # switch (e.g. to upstream once merged).
+        - name: group
           image: {{XNAT_INGEST_IMAGE}}
-          command: ["xnat-ingest", "sort"]
+          command: ["xnat-ingest", "group-orthanc"]
           args:
-            - "/data/staging"
-            - "--orthanc-url"
             - "http://orthanc.xnat-ingest.svc.cluster.local:8042"
-            - "--orthanc-storage-dir"
             - "/data/orthanc-storage"
-            - "--orthanc-label"
+            - "/data/grouped"
+            - "orthanc"
+            - "orthanc"
+            - "--to-process-label"
             - "xnat-ingest-ready"
-            - "--orthanc-skip-label"
-            - "xnat-ingest-skip"
-            - "--project-id"
-            - "{{PROJECT_ID}}"
+            - "--processed-label"
+            - "xnat-ingest-processed"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
             - "--wait-period"
             - "{{INGEST_WAIT_PERIOD}}"
+          env:
+            - name: AIS_LOG_FORMAT
+              value: "json"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/xnat-ingest
+            type: DirectoryOrCreate
+---
+# assign: extract project/subject/session IDs (defaults subject=PatientID,
+# session=AccessionNumber, scan=SeriesDescription match the Orthanc deid
+# output) and collate into /data/staging for the s3-uploader.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xnat-ingest-assign
+  namespace: xnat-ingest
+  labels:
+    app: xnat-ingest
+    component: assign
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: assign
+  template:
+    metadata:
+      labels:
+        app: xnat-ingest
+        component: assign
+    spec:
+      containers:
+        - name: assign
+          image: {{XNAT_INGEST_IMAGE}}
+          command: ["xnat-ingest", "assign"]
+          args:
+            - "/data/grouped"
+            - "/data/staging"
+            - "--constant-project-id"
+            - "{{PROJECT_ID}}"
+            - "--loop"
+            - "{{INGEST_LOOP_SECONDS}}"
           env:
             - name: AIS_LOG_FORMAT
               value: "json"
