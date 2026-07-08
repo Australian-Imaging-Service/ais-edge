@@ -66,7 +66,6 @@ spec:
             - "{{INGEST_LOOP_SECONDS}}"
             - "--wait-period"
             - "{{INGEST_WAIT_PERIOD}}"
-            - "--dont-delete"
           env:
             - name: AIS_LOG_FORMAT
               value: "json"
