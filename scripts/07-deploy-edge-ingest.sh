@@ -7,14 +7,14 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 
-echo "=== Deploying xnat-ingest sort ==="
+echo "=== Deploying xnat-ingest staging (group-orthanc + assign) ==="
 
-# Sort's hardlink target. orthanc-storage + facility-backup are created by the
-# Orthanc deploy step. All three live under /data/xnat-ingest on this host so
-# the hardlink from orthanc-storage -> staging resolves (same filesystem).
-sudo mkdir -p /data/xnat-ingest/staging
-sudo chmod 777 /data/xnat-ingest/staging
-echo "Staging dir ready: /data/xnat-ingest/staging"
+# group-orthanc hardlinks from orthanc-storage into grouped/; assign collates
+# grouped/ into staging/. All dirs live under /data/xnat-ingest on this host so
+# the hardlinks resolve (same filesystem; cross-fs hardlink would EXDEV).
+sudo mkdir -p /data/xnat-ingest/grouped /data/xnat-ingest/staging
+sudo chmod 777 /data/xnat-ingest/grouped /data/xnat-ingest/staging
+echo "Staging dirs ready: /data/xnat-ingest/{grouped,staging}"
 
 kubectl create namespace xnat-ingest --dry-run=client -o yaml | kubectl apply -f -
 
@@ -25,7 +25,8 @@ render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
     XNAT_INGEST_IMAGE "${XNAT_INGEST_IMAGE:-ghcr.io/australian-imaging-service/xnat-ingest:latest}" \
     | kubectl apply -f -
 
-echo "Waiting for sort pod..."
-kubectl rollout status deployment/xnat-ingest-sort -n xnat-ingest --timeout=180s || true
+echo "Waiting for group + assign pods..."
+kubectl rollout status deployment/xnat-ingest-group  -n xnat-ingest --timeout=180s || true
+kubectl rollout status deployment/xnat-ingest-assign -n xnat-ingest --timeout=180s || true
 kubectl get pods -n xnat-ingest -o wide
-echo "=== sort deployed (REST-pull mode against Orthanc) ==="
+echo "=== staging deployed (group-orthanc REST-pull -> assign) ==="

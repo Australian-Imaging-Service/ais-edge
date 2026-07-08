@@ -95,7 +95,7 @@ data:
             # and upload stages — slow network, large session, or stuck retry.
             expr: |
               (sum by (cluster, session) (count_over_time(
-                {namespace="xnat-ingest", component="sort"}
+                {namespace="xnat-ingest", component="assign"}
                 | json | session != "" [15m])) > 0)
               unless on (cluster, session)
               (sum by (cluster, session) (count_over_time(
@@ -116,7 +116,7 @@ data:
             # XNAT uploads over the same window.
             expr: |
               (sum(count_over_time(
-                {namespace="xnat-ingest", component="sort"}
+                {namespace="xnat-ingest", component="assign"}
                 | json | session != "" [30m]))
                -
                sum(count_over_time(
@@ -134,7 +134,7 @@ data:
           - alert: DICOMValidationFailureSpike
             expr: |
               sum by (cluster) (count_over_time(
-                {namespace="xnat-ingest", component="sort"}
+                {namespace="xnat-ingest", component="assign"}
                 |~ "(?i)invalid|validation.*fail" [1h])) > 10
             for: 5m
             labels:

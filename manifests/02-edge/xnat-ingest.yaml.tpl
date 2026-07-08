@@ -3,64 +3,120 @@ kind: Namespace
 metadata:
   name: xnat-ingest
 ---
-# Sort pod: REST-pulls deid'd instances from Orthanc and hardlinks the DICOM
-# files from Orthanc's storage tree (/data/orthanc-storage) into staging
-# (/data/staging/PROJECT.SUBJECT.VISIT/). Hardlink requires the same
-# filesystem, which is why the Orthanc pod and this pod share the same
-# /data hostPath (/data/xnat-ingest on the host).
+# TIER-1 (single node) staging pipeline — upstream xnat-ingest (>=0.12.0).
 #
-# TIER-1 (single node): there is no S3 hop anymore. On this one machine the
-# xnat-ingest-upload pod reads the SAME /data/staging directory directly and
-# uploads to XNAT. The old s3-uploader (mc mirror -> SeaweedFS) is gone.
+# Upstream refactored the old single `sort` command into discrete stages.
+# The Orthanc REST-pull is now `group-orthanc`; ID assignment is `assign`:
 #
-# Label contract with Orthanc:
-#   --orthanc-label xnat-ingest-ready     only consider studies with this label
-#                                         (added by the Lua deid hook on success)
-#   --orthanc-skip-label xnat-ingest-skip skip studies already staged
-#                                         (sort adds this label after hardlink)
+#   Orthanc (deid + label "xnat-ingest-ready")
+#     -> group-orthanc : REST-pull labelled studies, HARDLINK deid'd DICOMs
+#                        from /data/orthanc-storage into grouped sessions at
+#                        /data/grouped, then label the study processed
+#     -> assign        : extract project/subject/session IDs and collate into
+#                        /data/staging/PROJECT.SUBJECT.SESSION/
+#     -> upload        : (xnat-upload ns) reads /data/staging -> XNAT
+#
+# De-identification is NOT done here: it already happened in Orthanc. Upstream
+# ships a separate optional `deidentify` command (specs + reversible re-id
+# metadata) that would slot between assign and upload — we do not run it,
+# because Orthanc de-identifies at source.
+#
+# All three stages share the host dir /data/xnat-ingest (mounted at /data) so
+# the hardlinks resolve across stages (cross-fs hardlink would EXDEV).
+---
+# group-orthanc: pull studies labelled `xnat-ingest-ready` (set by the Orthanc
+# deid hook) that are not yet labelled processed, and group them under /data/grouped.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: xnat-ingest-sort
+  name: xnat-ingest-group
   namespace: xnat-ingest
   labels:
     app: xnat-ingest
-    component: sort
+    component: group
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: xnat-ingest
-      component: sort
+      component: group
   template:
     metadata:
       labels:
         app: xnat-ingest
-        component: sort
+        component: group
     spec:
       containers:
-        - name: sort
-          # Default points at our fork on ghcr.io with the JSON-logging
-          # patch. Override XNAT_INGEST_IMAGE in config/management.env to
-          # switch (e.g. to upstream once merged).
+        - name: group
           image: {{XNAT_INGEST_IMAGE}}
-          command: ["xnat-ingest", "sort"]
+          command: ["xnat-ingest", "group-orthanc"]
           args:
-            - "/data/staging"
-            - "--orthanc-url"
-            - "http://orthanc.xnat-ingest.svc.cluster.local:8042"
-            - "--orthanc-storage-dir"
-            - "/data/orthanc-storage"
-            - "--orthanc-label"
+            - "http://orthanc.xnat-ingest.svc.cluster.local:8042"   # URL
+            - "/data/orthanc-storage"                               # STORE_DIR (as mounted)
+            - "/data/grouped"                                       # OUTPUT_DIR
+            - "orthanc"                                             # USER (Orthanc auth disabled)
+            - "orthanc"                                             # PASSWORD
+            - "--to-process-label"
             - "xnat-ingest-ready"
-            - "--orthanc-skip-label"
-            - "xnat-ingest-skip"
-            - "--project-id"
-            - "{{PROJECT_ID}}"
+            - "--processed-label"
+            - "xnat-ingest-processed"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
             - "--wait-period"
             - "{{INGEST_WAIT_PERIOD}}"
+            - "--dont-delete"
+          env:
+            - name: AIS_LOG_FORMAT
+              value: "json"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            path: /data/xnat-ingest
+            type: DirectoryOrCreate
+---
+# assign: extract project/subject/session IDs from the (deid'd) DICOM metadata
+# and collate into /data/staging. Defaults: subject=PatientID,
+# session=AccessionNumber, scan=SeriesDescription — which is exactly what the
+# Orthanc deid hook writes (subject hash -> PatientID, session hash ->
+# AccessionNumber). Project is forced with --constant-project-id.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xnat-ingest-assign
+  namespace: xnat-ingest
+  labels:
+    app: xnat-ingest
+    component: assign
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: assign
+  template:
+    metadata:
+      labels:
+        app: xnat-ingest
+        component: assign
+    spec:
+      containers:
+        - name: assign
+          image: {{XNAT_INGEST_IMAGE}}
+          command: ["xnat-ingest", "assign"]
+          args:
+            - "/data/grouped"        # INPUT_DIR (group-orthanc output)
+            - "/data/staging"        # OUTPUT_DIR (upload reads this)
+            - "--constant-project-id"
+            - "{{PROJECT_ID}}"
+            - "--loop"
+            - "{{INGEST_LOOP_SECONDS}}"
           env:
             - name: AIS_LOG_FORMAT
               value: "json"
