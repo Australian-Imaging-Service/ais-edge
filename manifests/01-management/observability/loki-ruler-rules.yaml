@@ -116,7 +116,7 @@ data:
           - alert: DICOMValidationFailureSpike
             expr: |
               sum by (cluster) (count_over_time(
-                {namespace="xnat-ingest", component="sort"}
+                {namespace="xnat-ingest", component="assign"}
                 |~ "(?i)invalid|validation.*fail" [1h])) > 10
             for: 5m
             labels:

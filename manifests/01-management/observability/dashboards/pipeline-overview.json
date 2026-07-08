@@ -67,7 +67,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -80,7 +80,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -106,7 +106,7 @@
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "{namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
+        "expr": "{namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
         "refId": "A"
       }],
       "options": { "showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }

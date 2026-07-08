@@ -33,7 +33,7 @@ bash script in `manifests/02-edge/xnat-ingest.yaml.tpl`:
 **dicoms vs files** is the most important distinction:
 - **`dicoms`** counts only image files (`.dcm` / `.DCM`). One DICOM dropped
   → `dicoms=1`.
-- **`files`** counts every S3 object written. xnat-ingest's sort step
+- **`files`** counts every S3 object written. xnat-ingest's assign step
   auto-generates `MANIFEST.json` per session, so a single DICOM drop yields
   `files=2`.
 
@@ -59,15 +59,15 @@ Cross-cluster view across every edge that's ever pushed logs.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `count_over_time(... level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])` | Sessions xnat-ingest sort routed to `/data/staging/__invalid__/` because the DICOM metadata is missing required fields (typically AccessionNumber). Each invalid session contributes exactly 1 (we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line that repeats the same content). |
-| **Sort cycles with errors (last 1h)** | `count_over_time(... message =~ "(?s)^Staging completed with.*" [1h])` | Per-cycle counter: each xnat-ingest sort loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
+| **Invalid sessions (last 1h)** | `count_over_time(... level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])` | Sessions xnat-ingest assign routed to `/data/staging/__invalid__/` because the DICOM metadata is missing required fields (typically AccessionNumber). Each invalid session contributes exactly 1 (we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line that repeats the same content). |
+| **Assign cycles with errors (last 1h)** | `count_over_time(... message =~ "(?s)^Staging completed with.*" [1h])` | Per-cycle counter: each xnat-ingest assign loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
 | **Active edge sites** | `count(count by (cluster) (count_over_time({cluster!="",cluster!="mgmt"}[1h])))` | Distinct non-mgmt cluster labels seen in Loki in the last hour. 1 when only edge-dev is shipping; grows by 1 per additional edge. |
 
 ### Logs panel — Recent invalid sessions
 
-LogQL: `{namespace="xnat-ingest",component="sort"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
+LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
 
-Each line is a session sort placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
+Each line is a session that assign placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
 
 ### Time series
 
