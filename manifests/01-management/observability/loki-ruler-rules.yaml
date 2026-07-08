@@ -4,7 +4,7 @@
 # These alerts evaluate LogQL queries on a schedule inside Loki and emit to
 # the kube-prometheus-stack Alertmanager (configured in loki-values.yaml.tpl
 # rulerConfig.alertmanager_url). They cover anything that depends on the
-# pipeline events emitted by the s3-uploader and xnat-ingest-sort pods on
+# pipeline events emitted by the s3-uploader, group, and assign pods on
 # every edge child cluster.
 #
 # The mgmt cluster's Prometheus cannot scrape edge pods directly (the
@@ -231,8 +231,8 @@ data:
                 ais-edge-ca cert.
 
           - alert: OrthancStorageGrowing
-            # Orthanc accepts C-STOREs into local storage before deid + sort
-            # pulls them out. If staging fills up faster than sort drains
+            # Orthanc accepts C-STOREs into local storage before deid + group-orthanc
+            # pulls them out. If staging fills up faster than group-orthanc drains
             # it, the edge will OOM. >1k stored instances accumulated over
             # the last hour is a useful early-warning threshold; tune per
             # site volume.
@@ -249,5 +249,5 @@ data:
               summary: "Orthanc received >1k instances on {{ $labels.cluster }} in the last hour"
               description: |
                 Either a real ingest spike (legitimate, may need to scale
-                edge storage) or sort isn't draining Orthanc. Check the
-                sort pod's REST-pull loop and Orthanc's storage PVC size.
+                edge storage) or group-orthanc isn't draining Orthanc. Check the
+                group-orthanc pod's REST-pull loop and Orthanc's storage PVC size.

@@ -96,7 +96,7 @@ this setup the high-value labels are:
 |---|---|---|
 | `namespace` | `xnat-ingest`, `xnat-upload`, `seaweedfs`, `observability`, `kube-system`, `orthanc` | Coarse-grained filter |
 | `app` | `xnat-ingest`, `orthanc`, `seaweedfs`, `prometheus`, … | Single-service filter |
-| `component` | `sort`, `s3-uploader`, `upload`, `dicom-receiver` | Distinguish multiple pods in the same app |
+| `component` | `group`, `assign`, `s3-uploader`, `upload`, `dicom-receiver` | Distinguish multiple pods in the same app |
 | `cluster` | `management`, `edge-dev`, `edge-clinic1`, … | Distinguish mgmt vs each edge child cluster |
 | `level` | `INFO`, `WARN`, `ERROR` | Severity filter (only set on JSON-formatted logs) |
 
