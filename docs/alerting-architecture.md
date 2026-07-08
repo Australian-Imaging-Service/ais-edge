@@ -49,7 +49,7 @@ expressions sit close to the dashboard queries that operators already trust.
 | `S3UploaderRetryStorm` | Loki ruler | `event="upload_failed"` count over a window, per cluster. |
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
 | `XNATBacklogGrowing` | Loki ruler | Difference between mgmt-side `xnat_upload_completed` and edge-side `upload_completed`. |
-| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on sort-pod log lines. |
+| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — kube-state-metrics on each edge child. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |

@@ -95,7 +95,7 @@ Per-cluster view selected by the **cluster** and **node** dropdowns at the top o
 | Panel | Query (with template vars expanded) | Meaning |
 |---|---|---|
 | **Completed uploads (last 10m, cluster=$cluster / node=$node)** | `count_over_time({cluster=X, node=~Y, component="s3-uploader"} | json | event="upload_completed" [10m])` | Last-10-min upload count for the selected cluster + node. Threshold: red below 1, green above. 0 with active scanners means the pipeline is stuck. |
-| **Sort errors (last 1h, cluster=$cluster / node=$node)** | Same shape as "Invalid sessions" but scoped to selected cluster + node | Per-edge view of DICOM validation failures. |
+| **Assign errors (last 1h, cluster=$cluster / node=$node)** | Same shape as "Invalid sessions" but scoped to selected cluster + node | Per-edge view of DICOM validation failures. |
 | **Upload failures (last 1h, cluster=$cluster / node=$node)** | Same shape as Pipeline Overview's "Upload failures" but scoped | Per-edge upload_failed count. |
 
 The previous "Pod restarts" and "Worker NotReady?" panels were querying

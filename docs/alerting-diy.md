@@ -117,7 +117,7 @@ sum by (edge) (
 {namespace="xnat-upload"} |~ "(?i)\\b401\\b"
 ```
 
-JSON parsing: our event-shaped logs (s3-uploader, sort, kube-prometheus
+JSON parsing: our event-shaped logs (s3-uploader, assign, kube-prometheus
 operator, etc.) all use `level`, `logger`, `message` / `event` keys.
 `| json` extracts every JSON field as a label you can match on. Raw
 text logs use `|~ "regex"` instead.
