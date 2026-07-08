@@ -45,10 +45,10 @@ no child cluster, no SeaweedFS/S3, no nginx-ingress, and no cert-manager.
 - [`dashboards.md`](dashboards.md) — every Grafana panel, its query,
   what it measures, and the JSON pipeline-event schema that backs the
   panels. Read this before changing any dashboard panel.
-- [`cai-lfs3-deployment-plan.md`](cai-lfs3-deployment-plan.md) — planning notes
-  (out of scope for the tier-1 pipeline).
-- [`zip-metadata-extraction-xnat-plan.md`](zip-metadata-extraction-xnat-plan.md) —
-  planning notes (out of scope for the tier-1 pipeline).
+- [`observability-integration.md`](observability-integration.md) — for a
+  platform team swapping the bundled Loki/Prometheus/Grafana/Vector stack for
+  their own tooling: the log-event schema, metric list, alert inventory, and
+  a component swap matrix (verified ground truth, not aspirational).
 
 ## How to add a new component doc
 
