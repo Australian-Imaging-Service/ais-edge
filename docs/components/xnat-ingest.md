@@ -3,30 +3,45 @@
 ## Overview
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
-is the AIS-maintained Python tool that:
-1. **Sorts** raw DICOM files dropped on a watch directory into XNAT
-   project/subject/session/scan hierarchy and stages them as a
-   structured directory
-2. **Uploads** staged sessions to an XNAT server via REST
+is the AIS-maintained Python tool that turns deid'd DICOMs into
+XNAT-ready sessions and uploads them. As of upstream **0.12.1** the old
+single `sort` command was split into two edge stages:
+1. **`group-orthanc`** — REST-pulls deid'd studies from Orthanc and
+   groups their DICOMs into per-session directories
+2. **`assign`** — extracts the XNAT project/subject/session/scan IDs from
+   the grouped DICOMs and stages them as a structured directory
+3. **`upload`** — pushes staged sessions to an XNAT server via REST
 
-We run it as two separate pods:
-- **`xnat-ingest sort`** on each edge VM
+We run these as three pods:
+- **`xnat-ingest group-orthanc`** and **`xnat-ingest assign`** on each
+  edge VM
 - **`xnat-ingest upload`** on the management node
+
+> **De-identification is done in Orthanc** (the Lua hook), not in
+> xnat-ingest. Upstream 0.12.1 also ships a standalone, optional
+> `deidentify` command (project-specific JSON specs + reversible
+> re-identification metadata) — this deployment does **not** use it.
 
 ## Role in this stack
 
-The DICOM ingest engine. Edge sites have a `/data/xnat-ingest/incoming/`
-drop directory; the sort pod parses metadata and produces a
-`/data/staging/<project>.<subject>.<visit>/` hierarchy. The s3-uploader
-mirrors the staged dirs to SeaweedFS, and the management upload pod
-pulls from SeaweedFS and pushes to XNAT.
+The DICOM ingest engine. On each edge worker Orthanc receives and
+de-identifies studies (see [orthanc.md](orthanc.md)); `group-orthanc`
+REST-pulls the studies Orthanc has labelled `xnat-ingest-ready` and
+groups their DICOMs into `/data/grouped/<session>/`, then `assign`
+produces the `/data/staging/<project>.<subject>.<visit>/` hierarchy. The
+s3-uploader mirrors the staged dirs to SeaweedFS, and the management
+upload pod pulls from SeaweedFS (an `s3://` source) and pushes to XNAT.
 
 ## What xnat-ingest has access to
 
-### sort pod (edge)
-- **hostPath `/data/xnat-ingest/`** — read incoming, write staging
-- **No outbound network** — purely local filesystem work
-- **No XNAT credentials** — sort doesn't talk to XNAT
+### group-orthanc + assign pods (edge)
+- **hostPath `/data/xnat-ingest/`** — group-orthanc reads
+  `orthanc-storage/` and writes `grouped/`; assign reads `grouped/` and
+  writes `staging/`
+- **In-cluster HTTP to Orthanc** — group-orthanc REST-pulls from
+  `orthanc.xnat-ingest.svc.cluster.local:8042`; assign is purely local
+  filesystem work
+- **No XNAT credentials** — neither edge stage talks to XNAT
 
 ### upload pod (mgmt)
 - **In-cluster S3** — `http://seaweedfs.seaweedfs.svc.cluster.local:8333`
@@ -40,32 +55,34 @@ pulls from SeaweedFS and pushes to XNAT.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `xnat-ingest-sort` | edge | `xnat-ingest` | `docker.io/library/xnat-ingest:logging-v1` |
+| `xnat-ingest-group` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
+| `xnat-ingest-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
 | `s3-uploader` | edge | `xnat-ingest` | `minio/mc:latest` (NOT xnat-ingest) |
-| `xnat-ingest-upload` | mgmt | `xnat-upload` | `docker.io/library/xnat-ingest:logging-v1` |
+| `xnat-ingest-upload` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
 
-The `:logging-v1` tag is our **local fork** with one minimal patch
-(JSON log output via `AIS_LOG_FORMAT=json`). The image is built from
-the fork at `/home/ubuntu/tmp/xnat-ingest-fork`, exported to a tar via
-`docker save`, and imported into k0s containerd via `ctr image import`
-on both the management host and each edge worker. See
-the upstream PR (in progress) for the full
-diff and rebuild instructions.
+The `0.12.1` tag is the **merged-upstream** AIS build pulled from
+`ghcr.io/australian-imaging-service/xnat-ingest` — it replaces the earlier
+local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
+structured-log output and the `upload --loop` reconnect fix) is now all
+upstream, so no local rebuild is needed: the image is pulled directly and
+imported into k0s containerd via `ctr image import` on the management host
+and each edge worker. Override `XNAT_INGEST_IMAGE` in
+`config/management.env` to pin a different tag.
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
 | `manifests/01-management/xnat-upload.yaml.tpl` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
-| `manifests/02-edge/xnat-ingest.yaml.tpl` | sort + s3-uploader Deployments, hostAliases |
+| `manifests/02-edge/xnat-ingest.yaml.tpl` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
 | `scripts/04-deploy-xnat-upload.sh` | apply mgmt-side Deployment |
 | `scripts/07-deploy-edge-ingest.sh` | apply edge-side Deployments + push CA bundle |
 | `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS` |
 | `config/edge-nodes.env` | per-edge `PROJECT_ID`, `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD` |
 
 Important env vars on each pod:
-- `AIS_LOG_FORMAT=json` — enable our fork's JSON log output (drops to
-  text format if unset, so the upstream image still works)
+- `AIS_LOG_FORMAT=json` — enable JSON structured log output (now
+  upstream; drops to text format if unset)
 - `AWS_ENDPOINT_URL` (upload pod only) — points boto3 at SeaweedFS
 - `XINGEST_HOST/USER/PASS` — XNAT REST credentials
 
@@ -90,7 +107,7 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 }
 ```
 
-The `dicoms` vs `files` split exists because xnat-ingest sort
+The `dicoms` vs `files` split exists because xnat-ingest assign
 auto-generates a `MANIFEST.json` per session and the s3-uploader writes
 it to S3 alongside the DICOMs. Dashboards / alerts that want a true
 DICOM count must read `dicoms`; ones that want "S3 PUT count" or
@@ -101,9 +118,11 @@ inline comments in the manifest for the `du -a | case`-pattern trick.
 ## Operations
 
 ```bash
-# Sort logs (will be JSON if AIS_LOG_FORMAT=json is set)
+# Edge staging logs (JSON if AIS_LOG_FORMAT=json is set)
 KUBECONFIG=kubeconfig-edge-dev kubectl logs -n xnat-ingest \
-  -l component=sort -f | jq
+  -l component=group -f | jq    # group-orthanc
+KUBECONFIG=kubeconfig-edge-dev kubectl logs -n xnat-ingest \
+  -l component=assign -f | jq   # assign
 
 # Upload logs
 kubectl logs -n xnat-upload -l component=upload -f | jq
@@ -122,9 +141,10 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
   AccessionNumber, multi-frame, multi-series) that we don't want to
   re-implement
 - **Idempotent** — re-running upload skips sessions already in XNAT
-- **Loop mode with `--delete`** — once staged, source files are
-  removed from incoming → no double-upload
-- **Connection-resilience patch** (already merged in our fork) — handles
+- **Loop mode with label tracking** — group-orthanc marks each pulled
+  study `xnat-ingest-processed`, so subsequent loops skip it → no
+  double-ingest
+- **Connection-resilience patch** (merged upstream) — handles
   transient network errors that previously killed the upload loop
 
 ## Risks and failure modes
@@ -135,7 +155,7 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 | XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down | uploads queue in SeaweedFS; backlog grows | `XNATBacklogGrowing` alert fires after 30 min |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
-| Sort pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
+| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
 
 ## Replacements / future
@@ -166,4 +186,4 @@ deliberately scoped out of the current change set:
   end-to-end integrity verification against XNAT.
 
 These would be small, additive PRs upstream — none of them require
-touching `sort.py` or `upload.py` core logic.
+touching the core group-orthanc / assign / upload logic.

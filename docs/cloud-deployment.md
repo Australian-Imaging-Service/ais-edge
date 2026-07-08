@@ -141,7 +141,7 @@ On Azure, a Standard LB with a pre-allocated public IP.
 ## End-to-end trace of one edge request in cloud mode
 
 ```
-   xnat-ingest-sort pod (edge cluster)
+   xnat-ingest-group pod (edge cluster)
          │
          │ HTTP push to  loki.dev-nectar-test.203-101-227-222.nip.io:443
          ▼
@@ -179,7 +179,7 @@ points to) — the LB and ingress controller only pass bytes through.
 | TLS termination | `curl -kv https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/` — expect TLS handshake + 404 default backend |
 | SNI passthrough | `curl --resolve loki.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/ready` — expect Loki's `ready` response |
 | Edge resolves via real DNS | `kubectl --kubeconfig kubeconfig-edge-dev exec -n xnat-ingest deploy/s3-uploader -- nslookup seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io` — should resolve via the worker's standard resolver |
-| Full pipeline | drop a DICOM into Orthanc (via `dcmsend`, `storescu`, or the Orthanc REST upload), wait for sort, watch `upload_completed` event land in Loki + dashboards |
+| Full pipeline | drop a DICOM into Orthanc (via `dcmsend`, `storescu`, or the Orthanc REST upload), wait for group-orthanc + assign to stage it, watch `upload_completed` event land in Loki + dashboards |
 | Memory leak fix | sample `kubectl top pod -n xnat-upload` over 2 hours — should stay flat ±20 MiB |
 
 ## When to use on-prem vs cloud

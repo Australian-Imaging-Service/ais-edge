@@ -18,7 +18,7 @@ Two deployments, both DaemonSets:
    node). Tails system + workload pod logs for the management cluster
    itself (cert-manager, ingress-nginx, k0smotron, seaweedfs, xnat-upload).
 2. **Edge-side** (`logging` namespace on each child cluster, one pod per
-   worker). Tails xnat-ingest sort + s3-uploader + system pods, pushes
+   worker). Tails xnat-ingest group-orthanc + assign + s3-uploader + system pods, pushes
    to Loki via the management nginx-ingress on `https://loki.aisedge.local:443`.
 
 Both shape the data identically before it hits Loki:

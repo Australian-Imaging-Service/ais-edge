@@ -180,10 +180,10 @@ inbound ports from the internet or management network.
        │  │   ↳ Ingress for API+konect    │         │      /data/orthanc-     │
        │  │                               │         │       storage/          │
        │  SeaweedFS (ClusterIP only)      │         │                          │
-       │  ├─ S3 :8333 (HTTP, in-cluster)  │         │  xnat-ingest-sort pod    │
-       │  │  edges hit via Ingress :443   │         │   ├─ REST-polls Orthanc │
-       │  │                               │         │   └─ hardlinks deid'd   │
-       │  xnat-ingest-upload pod          │         │      instances into     │
+       │  ├─ S3 :8333 (HTTP, in-cluster)  │         │  xnat-ingest group+assign│
+       │  │  edges hit via Ingress :443   │         │   ├─ group-orthanc pull │
+       │  │                               │         │   │  → /data/grouped    │
+       │  xnat-ingest-upload pod          │         │   └─ assign IDs →       │
        │  └─ in-cluster DNS to seaweedfs  │         │      /data/staging/     │
        │                                  │         │                          │
        │  cert-manager: ais-edge-ca       │         │  s3-uploader pod         │
@@ -225,13 +225,18 @@ inbound ports from the internet or management network.
      d. PUTs label "xnat-ingest-ready" on the study
          │
          ▼
-3. xnat-ingest sort (on edge, REST-pull mode)
-   - Polls Orthanc REST every INGEST_LOOP_SECONDS
-   - Filters: has label "xnat-ingest-ready", lacks label "xnat-ingest-skip"
-   - Hardlinks instances from /data/orthanc-storage/ into
-     /data/staging/PROJECT.SUBJECT.VISIT/<scan>/DICOM/
-     (same filesystem — hardlink, not copy)
-   - PUTs label "xnat-ingest-skip" on the study
+3. xnat-ingest edge staging — two commands (on edge)
+   a. group-orthanc (REST-pull mode)
+      - Polls Orthanc REST every INGEST_LOOP_SECONDS
+      - Filters: has label "xnat-ingest-ready", lacks label "xnat-ingest-processed"
+      - Groups the deid'd instances, hardlinking from /data/orthanc-storage/
+        into /data/grouped/<session>/ (same filesystem — hardlink, not copy)
+      - PUTs label "xnat-ingest-processed" on the study
+   b. assign
+      - Extracts XNAT IDs from the grouped DICOMs
+        (--constant-project-id PROJECT_ID; defaults subject=PatientID,
+        session=AccessionNumber, scan=SeriesDescription)
+      - Collates into /data/staging/PROJECT.SUBJECT.VISIT/<scan>/DICOM/
          │
          ▼
 4. s3-uploader (on edge, using `mc mirror`)
@@ -341,7 +346,7 @@ k0s-k0smotron-mvp/
 │   │   ├── edge-cluster.yaml.tpl          ← Hosted k0s control plane (with spec.ingress)
 │   │   └── xnat-upload.yaml.tpl           ← Reads SeaweedFS → uploads to XNAT
 │   └── 02-edge/                           ← Runs on edge workers (child cluster)
-│       ├── xnat-ingest.yaml.tpl           ← Sort (Orthanc REST-pull mode) + s3-uploader
+│       ├── xnat-ingest.yaml.tpl           ← group-orthanc + assign (REST-pull) + s3-uploader
 │       └── orthanc.yaml.tpl               ← Orthanc Deployment + Service + Secret
 ├── scripts/
 │   ├── 00-common.sh                       ← Shared functions
@@ -354,7 +359,7 @@ k0s-k0smotron-mvp/
 │   ├── 04-deploy-xnat-upload.sh           ← Mgmt-side XNAT upload pod
 │   ├── 05-setup-edge-cluster.sh           ← Per-edge: hosted control plane + token
 │   ├── 06-join-edge-worker.sh             ← Per-edge: install k0s worker, /etc/hosts, CoreDNS
-│   ├── 07-deploy-edge-ingest.sh           ← Per-edge: deploy sort (REST-pull) + s3-uploader
+│   ├── 07-deploy-edge-ingest.sh           ← Per-edge: deploy group-orthanc + assign + s3-uploader
 │   ├── 07b-deploy-edge-observability.sh   ← Per-edge: Vector log shipper (optional)
 │   ├── 07c-deploy-edge-orthanc.sh         ← Per-edge: deploy Orthanc + deid Lua hook
 │   ├── rotate-ca.sh                       ← CA rotation (--phase=1 / --phase=2)
@@ -433,7 +438,7 @@ rm kubeconfig-edge-uqcai join-token-edge-uqcai
 | SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035). ClusterIP only; external access via Ingress. |
 | MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader. Trusts `ais-edge-ca` via mounted ca-bundle Secret. |
 | Orthanc | 1.12.6 (plugins) | `jodogne/orthanc-plugins:1.12.6` — DICOM SCP on edge port 4242. Needs ≥ 1.12.0 for study-level labels. |
-| xnat-ingest | v0.1.0 | `ghcr.io/aswinnarayanan/xnat-ingest:v0.1.0` — logging-v3 + Orthanc REST-pull mode. |
+| xnat-ingest | 0.12.1 | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` — merged-upstream AIS build (JSON logs + Orthanc REST-pull upstream). Edge staging split into `group-orthanc` + `assign`. |
 | local-path-provisioner | v0.0.30 | Default StorageClass for etcd PVCs |
 
 To pin specific versions in production, replace `:latest` / `:3.99` tags in the `.tpl`
@@ -479,14 +484,15 @@ On each edge worker:
 ```
 /data/xnat-ingest/
 ├── orthanc-storage/     ← Orthanc DICOM storage tree (deid'd instances live here)
+├── grouped/             ← group-orthanc's REST-pulled, grouped sessions (hardlinks)
 └── staging/
-    └── PROJECT.SUBJECT.VISIT/  ← xnat-ingest sort's hardlinked output, awaiting S3 upload
+    └── PROJECT.SUBJECT.VISIT/  ← xnat-ingest assign's staged output, awaiting S3 upload
 
 /data/facility-backup/   ← ORIGINAL DICOMs (real identifiers) — site-controlled retention.
                            Written by the Orthanc deid Lua hook; never leaves the edge.
 ```
 
-Files flow: Modality C-STORE → Orthanc (deid + delete original, keep deid'd) → sort hardlinks → `staging/` → SeaweedFS → eventually deleted from edge after successful S3 upload.
+Files flow: Modality C-STORE → Orthanc (deid + delete original, keep deid'd) → group-orthanc (REST-pull + group into `grouped/`) → assign (stage) → `staging/` → SeaweedFS → eventually deleted from edge after successful S3 upload.
 
 `/data/orthanc-storage` and `/data/xnat-ingest/staging` **must be on the same physical filesystem** so hardlinks resolve (cross-fs hardlinks fail with EXDEV).
 
@@ -499,7 +505,7 @@ kubectl get nodes                                # management node should be Rea
 
 # Edge cluster health
 kubectl --kubeconfig kubeconfig-<name> get nodes  # edge worker should be Ready
-kubectl --kubeconfig kubeconfig-<name> get pods -n xnat-ingest  # sort + s3-uploader Running
+kubectl --kubeconfig kubeconfig-<name> get pods -n xnat-ingest  # group + assign + s3-uploader Running
 
 # SeaweedFS health (TLS via nginx-ingress; CA bundle is ais-edge-ca.crt)
 curl --cacert ais-edge-ca.crt \
@@ -523,7 +529,8 @@ curl -sk <XNAT_URL>                              # should return HTML
 
 # Check logs for errors
 kubectl logs -n xnat-upload -l component=upload --tail=5           # XNAT upload
-kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=sort --tail=5
+kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=group --tail=5
+kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=assign --tail=5
 kubectl --kubeconfig kubeconfig-<name> logs -n xnat-ingest -l component=s3-uploader --tail=5
 ```
 
@@ -557,7 +564,8 @@ mc admin info seaweed-admin                             # cluster info
 **Update xnat-ingest image:**
 ```bash
 # Edge cluster — restart pods to pull latest image
-kubectl --kubeconfig kubeconfig-<name> rollout restart deployment/xnat-ingest-sort -n xnat-ingest
+kubectl --kubeconfig kubeconfig-<name> rollout restart deployment/xnat-ingest-group -n xnat-ingest
+kubectl --kubeconfig kubeconfig-<name> rollout restart deployment/xnat-ingest-assign -n xnat-ingest
 kubectl --kubeconfig kubeconfig-<name> rollout restart deployment/s3-uploader -n xnat-ingest
 
 # Management cluster — restart XNAT upload pod
@@ -676,7 +684,8 @@ kubectl --kubeconfig kubeconfig-edge-uqcai get pods -n xnat-ingest
 kubectl --kubeconfig kubeconfig-edge-usyd get nodes
 
 # Logs
-kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=sort -f
+kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=group -f   # group-orthanc
+kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=assign -f  # assign
 kubectl --kubeconfig kubeconfig-edge-uqcai logs -n xnat-ingest -l component=s3-uploader -f
 kubectl logs -n xnat-upload -l component=upload -f   # management upload to XNAT
 
@@ -697,8 +706,10 @@ storescu -aec <AET-from-routing.json> -aet TEST_MOD <EDGE_IP> 4242 test.dcm
 kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest deploy/orthanc -f \
   | grep -E 'instance_deidentified|study_labeled_ready|REJECT|ERROR'
 
-# Watch sort pod REST-pull from Orthanc and hardlink into staging
-kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=sort -f
+# Watch group-orthanc REST-pull from Orthanc + hardlink into /data/grouped
+kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=group -f
+# Watch assign extract IDs + collate into /data/staging
+kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=assign -f
 
 # Watch s3-uploader push to SeaweedFS
 kubectl --kubeconfig kubeconfig-edge-dev logs -n xnat-ingest -l component=s3-uploader -f
@@ -761,8 +772,9 @@ reaches the API server. Useful when debugging or reviewing the design.
   │                      storage at /data/orthanc-storage                         │
   │     env       AIS_DEID_HMAC_SALT (Secret)                                     │
   │     mounts    ConfigMaps orthanc-config/-scripts/-routing/-recipes            │
-  │   xnat-ingest-sort   loop 60s, REST-pull from orthanc.xnat-ingest.svc:8042    │
-  │                      hardlinks /data/orthanc-storage → /data/staging          │
+  │   xnat-ingest-group  loop 60s, group-orthanc REST-pull from orthanc.svc:8042  │
+  │                      hardlinks /data/orthanc-storage → /data/grouped          │
+  │   xnat-ingest-assign loop 60s, assign IDs /data/grouped → /data/staging       │
   │   s3-uploader        loop 30s, runs:  mc mirror /data/staging  edge/bucket    │
   │     env       S3_ENDPOINT=https://seaweedfs.aisedge.local                     │
   │     mount     Secret ca-bundle (= ais-edge-ca.crt) → /root/.mc/certs/CAs/     │
@@ -947,7 +959,7 @@ Pin specific pods to specific workers using `nodeSelector` in the manifest.
 - Common cause: no StorageClass (management cluster needs local-path-provisioner)
 - Edge pods use hostPath, not PVC — check directory exists on worker
 
-**xnat-ingest sort puts files in __invalid__:**
+**xnat-ingest assign puts files in __invalid__:**
 - The DICOM file is missing required metadata (usually AccessionNumber)
 - This is normal for sample files. Rename and move manually for testing.
 - With real clinical DICOMs, this won't happen.

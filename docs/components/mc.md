@@ -126,7 +126,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
   considering if we ever need to sync to multiple targets
 - **Native xnat-ingest S3 push** — xnat-ingest could write to S3
   directly, removing the mc pod entirely. Currently it only reads
-  from S3 (in the upload command); a `--s3-target` flag for the sort
+  from S3 (in the upload command); a `--s3-target` flag for the assign
   command is a candidate upstream PR
 
 ## Future enhancements

@@ -133,7 +133,7 @@ amphora-build timeout fires.
 | 02d | Observability (Loki + Prom + Grafana + Vector + Alertmanager) | Ingresses for Grafana + Loki hostnames |
 | 05  | Per edge: `K0smotronControlPlane` resource | k0s API exposed through the same SNI ingress |
 | 06  | Per edge: install k0s worker, join through the LB | Cloud mode skips the `/etc/hosts` + CoreDNS-patch the onprem path does |
-| 07  | Per edge: xnat-ingest sort + s3-uploader pods | `hostAliases:` block stripped in cloud mode |
+| 07  | Per edge: xnat-ingest group-orthanc + assign + s3-uploader pods | `hostAliases:` block stripped in cloud mode |
 | 07b | Per edge: Vector log shipper | Push endpoint is the public Loki hostname |
 | 07c | Per edge: Orthanc + deidentification Lua hook | Same |
 
@@ -178,4 +178,4 @@ Re-run `./install.sh -y`. Everything else is unchanged.
 - LB:   203.101.228.227 (Octavia amphora, QRIScloud AZ, qld subnet)
 - Edge: 203.101.230.171 (`k0s-edge-worker-dev`, QRIScloud AZ)
 - DNS:  `*.dev-nectar-test.203-101-228-227.nip.io`
-- Pipeline: DICOM REST POST → Orthanc → sort REST-pull → s3-uploader → SeaweedFS S3 → `upload_completed` event with `bytes=13427, dicoms=1, files=3`
+- Pipeline: DICOM REST POST → Orthanc → group-orthanc REST-pull → assign → s3-uploader → SeaweedFS S3 → `upload_completed` event with `bytes=13427, dicoms=1, files=3`

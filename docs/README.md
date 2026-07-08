@@ -20,7 +20,7 @@ Operations → Risks → Replacements / Future).
 - [`seaweedfs.md`](components/seaweedfs.md) — S3-compatible storage for
   staged DICOM files
 - [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
-- [`xnat-ingest.md`](components/xnat-ingest.md) — DICOM sort + upload pods
+- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
 
 ### Control plane / networking
 
