@@ -33,3 +33,7 @@ config/orthanc/routing.json
 # Operator-edited per-site Orthanc deidentification profiles (copy from .template)
 config/orthanc/deidentification-profile*.json
 !config/orthanc/deidentification-profile*.json.template
+
+# Local planning / working notes — not part of the deliverable
+docs/cai-lfs3-deployment-plan.md
+docs/zip-metadata-extraction-xnat-plan.md
