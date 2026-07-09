@@ -25,15 +25,27 @@ while true; do
         read -r collate_type collate_method <<< "$SORT_COLLATE_RESOURCES"
         collate_args=(--collate-resources "$collate_type" "$collate_method")
       fi
-      if xnat-ingest sort \
+      # No --raise-errors: sessions that fail (e.g. a scan already staged from
+      # another source) are logged and skipped so the rest still get sorted.
+      # No --logger flag: logging comes from XINGEST_LOGGERS, which writes to
+      # stdout AND a persistent file under /data/LOGS/.
+      sort_output=$(mktemp)
+      xnat-ingest sort \
         "$WATCH_DIR" \
         /data/sorted \
         "${collate_args[@]}" \
         --recursive \
-        --raise-errors \
-        --logger stream info stdout; then
+        2>&1 | tee "$sort_output"
+      sort_status=${PIPESTATUS[0]}
+      skipped=$(grep -c "due to error in sorting" "$sort_output" || true)
+      rm -f "$sort_output"
+      if [[ $sort_status -eq 0 ]]; then
         LAST_RUN=$(date +%s)
-        log "Sort complete."
+        if [[ $skipped -gt 0 ]]; then
+          log "WARNING: sort finished but $skipped session(s) were SKIPPED due to errors — details in /data/LOGS/"
+        else
+          log "Sort complete."
+        fi
       else
         log "Sort failed — will retry next poll."
       fi

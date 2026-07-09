@@ -73,7 +73,7 @@ xnatIngest:
     # also be mounted in the upload pod (handled by the chart when exportClaim
     # is set).
     copyMode: symlink_or_copy
-    datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl"
+    datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
 
 # ── Storage class ─────────────────────────────────────────────────────────────
 # Set create: false if "hostpath-pipeline" already exists on the cluster

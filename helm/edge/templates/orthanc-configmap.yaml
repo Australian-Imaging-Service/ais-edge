@@ -18,7 +18,8 @@ data:
       "IngestTranscoding": {{ .Values.orthanc.ingestTranscoding | quote }},
       "DicomScuTimeout": {{ .Values.orthanc.dicomScuTimeout }},
       "ExtraMainDicomTags": {
-        "Patient": ["PatientComments"]
+        "Patient": ["PatientComments"],
+        "Study": ["PatientComments"]
       },
       "OrthancExplorer2": {
         "UiOptions": {
