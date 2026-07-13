@@ -7,8 +7,9 @@
 #      original from Orthanc, keeps the deid'd instance in Orthanc storage.
 #   3. Lua OnStableStudy (after StableAge=30s silence) PUTs the
 #      `xnat-ingest-ready` label on the study.
-#   4. xnat-ingest sort REST-pulls labelled studies and hardlinks instances
-#      from /data/orthanc-storage into /data/staging.
+#   4. xnat-ingest group-orthanc REST-pulls labelled studies and hardlinks
+#      instances from /data/orthanc-storage into /data/grouped; assign then
+#      collates them into /data/staging.
 #
 # ConfigMaps (orthanc-config, orthanc-scripts, orthanc-routing,
 # orthanc-deidentification-profile) are created by
@@ -81,8 +82,8 @@ spec:
               mountPath: /etc/orthanc/deidentification-profile.json
               subPath: deidentification-profile.json
               readOnly: true
-            # Shared with xnat-ingest sort. Same hostPath on both pods so
-            # hardlinks from /data/orthanc-storage to /data/staging resolve
+            # Shared with xnat-ingest group-orthanc/assign. Same hostPath on both pods so
+            # hardlinks from /data/orthanc-storage to /data/grouped resolve
             # to the same inode (cross-fs hardlink would EXDEV).
             - name: data
               mountPath: /data
@@ -111,7 +112,7 @@ spec:
             path: /data/facility-backup
             type: DirectoryOrCreate
 ---
-# ClusterIP for sort to reach Orthanc's REST API. DICOM port (4242) is
+# ClusterIP for group-orthanc to reach Orthanc's REST API. DICOM port (4242) is
 # exposed via hostPort on the Deployment, not via this Service.
 apiVersion: v1
 kind: Service

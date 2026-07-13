@@ -63,11 +63,11 @@
     {
       "type": "stat",
       "title": "Invalid sessions (last 1h)",
-      "description": "Sessions rejected by xnat-ingest sort because of missing/invalid DICOM headers (e.g. AccessionNumber). These land in /data/staging/__invalid__/ on the edge VM and require a human to rename and re-stage. Each session counts once: we anchor on the per-session error message and ignore the secondary 'Staging completed with N errors' summary line that repeats the same content.",
+      "description": "Sessions rejected by xnat-ingest assign because of missing/invalid DICOM headers (e.g. AccessionNumber). These land in /data/staging/__invalid__/ on the node and require a human to rename and re-stage. Each session counts once: we anchor on the per-session error message and ignore the secondary 'Staging completed with N errors' summary line that repeats the same content.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -75,12 +75,12 @@
     },
     {
       "type": "stat",
-      "title": "Sort cycles with errors (last 1h)",
-      "description": "Each xnat-ingest sort cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex uses (?s) so `.` matches the newlines that follow the colon in the multi-line summary.",
+      "title": "Assign cycles with errors (last 1h)",
+      "description": "Each xnat-ingest assign cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex uses (?s) so `.` matches the newlines that follow the colon in the multi-line summary.",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 4 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"sort\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h]))",
+        "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],
@@ -102,11 +102,11 @@
     {
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
-      "description": "Each line is a session that xnat-ingest sort routed to /data/staging/__invalid__/. Site-admin action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
+      "description": "Each line is a session that xnat-ingest assign routed to /data/staging/__invalid__/. Site-admin action: rename the dir to PROJECT.SUBJECT.SESSION and move it back to /data/staging/.",
       "gridPos": { "h": 9, "w": 24, "x": 0, "y": 8 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "{namespace=\"xnat-ingest\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
+        "expr": "{namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} — {{.message}}\"",
         "refId": "A"
       }],
       "options": { "showTime": true, "showLabels": false, "showCommonLabels": false, "wrapLogMessage": true, "sortOrder": "Descending" }

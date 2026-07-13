@@ -15,7 +15,7 @@ export ALERT_EMAIL_TO=""     # empty  -> observability step installs NOTHING
                              # set    -> installs Loki/Prometheus/Grafana/Alertmanager/Vector
 ```
 
-`scripts/02d-install-observability.sh` exits early when it's empty ([lines 26-32](../scripts/02d-install-observability.sh#L26-L32)). The pipeline (Orthanc → sort → upload → XNAT) installs and runs **completely independently** of this stack — verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
+`scripts/02d-install-observability.sh` exits early when it's empty ([lines 26-32](../scripts/02d-install-observability.sh#L26-L32)). The pipeline (Orthanc → group-orthanc → assign → upload → XNAT) installs and runs **completely independently** of this stack — verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
 
 So integration has three postures:
 1. **Leave it off** and run only your own tooling.
@@ -46,7 +46,7 @@ So integration has three postures:
   |---|---|---|
   | `namespace` | pod namespace | `xnat-ingest`, `xnat-upload` |
   | `app` | pod label `app` | `orthanc`, `xnat-ingest` |
-  | `component` | pod label `component` | `dicom-receiver`, `sort`, `upload` |
+  | `component` | pod label `component` | `dicom-receiver`, `group`, `assign`, `upload` |
   | `pod`, `container`, `node`, `cluster`, `level` | pod metadata | — |
 
 - **JSON message fields** — inside the log line itself, parsed with LogQL `| json`. **Availability varies by component** (below).
@@ -68,7 +68,7 @@ Any collector you swap in should preserve at least `namespace`/`app`/`component`
 Fields: `ts, component, event, mode, calledAet, project, session, originalId, newId, backupPath` (deid) / `ts, component, event, studyId, label` (ready). `event` and `session` are **real JSON fields** here — use `| json | event="instance_deidentified"`.
 Orthanc also emits its **native (non-JSON) server logs** (`DICOM server listening…`, `new stored instance`, Lua tracebacks) — matched by text, not `| json`.
 
-**xnat-ingest sort** (`app=xnat-ingest`, `component=sort`):
+**xnat-ingest group-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`) — upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (it also emits the `Invalid IDs found` lines):
 ```json
 {"ts":"2026-07-08T01:49:01+0000","level":"INFO","logger":"xnat-ingest","message":"Staged and labelled study '08c0…' -> 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
 ```
@@ -89,10 +89,10 @@ Fields: `ts, level, logger, message` (some progress lines carry only `message`).
 | **Upload success** (terminal) | upload | message `=~ "Successfully uploaded all files in"` |
 | Upload error | upload | message `=~ "(?i)error\|failed\|exception\|traceback"` |
 | XNAT auth failure | upload | message `=~ "(?i)\b(401\|403\|unauthorized\|forbidden)\b"` |
-| Invalid DICOM (`__invalid__`) | sort | message `=~ "(?i)invalid\|validation.*fail"` |
+| Invalid DICOM (`__invalid__`) | assign | message `=~ "(?i)invalid\|validation.*fail"` |
 | Orthanc backlog | orthanc | native log `=~ "new stored instance"` |
 
-> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For sort/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from sort/upload messages). Two bundled rules (`SessionUploadStalled`, `XNATBacklogGrowing`) use `component="sort" | json | session` — they work best when correlated against the Orthanc event; treat them as best-effort until sort/upload emit `session` as a first-class field.
+> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages). Two bundled rules (`SessionUploadStalled`, `XNATBacklogGrowing`) use `component="assign" | json | session` — they work best when correlated against the Orthanc event; treat them as best-effort until assign/upload emit `session` as a first-class field.
 
 ### 2d. Swapping the log path
 
@@ -128,7 +128,7 @@ Two engines. **Log alerts** (Loki ruler, LogQL over §2 logs) live in [`loki-rul
 | `XNATUploadRetryStorm` | warning | Loki | >5 upload errors in 10m |
 | `SessionUploadStalled` | warning | Loki | a staged session with no matching upload-success in 15m *(session-field caveat, §2c)* |
 | `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m |
-| `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation lines from sort in 1h |
+| `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation lines from assign in 1h |
 | `XNATUploadSuccess` | info | Loki | any `Successfully uploaded…` in 30s (audit/heartbeat) |
 | `XNATAuthFailure` | warning | Loki | 401/403/unauthorized/forbidden from upload in 5m |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from orthanc in 10m (deid stalled) |
@@ -169,7 +169,7 @@ Two engines. **Log alerts** (Loki ruler, LogQL over §2 logs) live in [`loki-rul
 ## 7. Ground-truth appendix (as verified 2026-07-08)
 
 - Loki stream labels present: `app, cluster, component, container, level, namespace, node, pod, service_name, stream`.
-- `namespace` values: `xnat-ingest`, `xnat-upload`, `observability`, `local-path-storage`. `component` values: `dicom-receiver`, `sort`, `upload`.
+- `namespace` values: `xnat-ingest`, `xnat-upload`, `observability`, `local-path-storage`. `component` values: `dicom-receiver`, `group`, `assign`, `upload`.
 - Pipeline ServiceMonitors: **none** (no custom pipeline metrics).
 - Loglevel/format: pipeline pods run with `AIS_LOG_FORMAT=json`; Orthanc mixes JSON hook events with native C++ server logs.
 - Naming leftover to be aware of: the metric alert `EdgeWorkerDisconnected` is really "this node NotReady" on a single-node appliance (cosmetic name from the two-node era).

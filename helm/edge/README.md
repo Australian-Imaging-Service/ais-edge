@@ -1,3 +1,13 @@
+> **⚠️ Reference only — NOT the tier-1 install path.**
+> This is James's original edge Helm chart, kept for reference/comparison. It is
+> **not** wired into the tier-1 installer: `install.sh` renders
+> `manifests/02-edge/*.yaml.tpl` via `scripts/` and never touches `helm/edge/`.
+> It still reflects the older design (image `0.9.1`, `sort`/`associate` pods,
+> Samba, Orthanc exposed via **NodePort** 30042/30842). The live tier-1 pipeline
+> uses upstream `xnat-ingest` (`group-orthanc` + `assign`), Orthanc DICOM on
+> **hostPort 4242** (REST 8042 internal-only), and no Samba. See the top-level
+> [`README.md`](../../README.md).
+
 ## Prerequisites
 
 - MicroK8s (or any Kubernetes cluster) with Helm v3 and kubectl installed

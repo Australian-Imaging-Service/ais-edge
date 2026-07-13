@@ -8,7 +8,7 @@ One Ubuntu machine runs the whole pipeline on a single-node
 [k0s](https://k0sproject.io/) cluster:
 
 ```
-modality --C-STORE--> Orthanc (deid) --> xnat-ingest sort --> xnat-ingest upload --> XNAT (HTTPS)
+modality --C-STORE--> Orthanc (deid) --> xnat-ingest group-orthanc --> xnat-ingest assign --> xnat-ingest upload --> XNAT (HTTPS)
 ```
 
 There is **no** SeaweedFS, **no** S3 hop, **no** k0smotron / child cluster /
@@ -83,9 +83,10 @@ all below.
 Everything runs on one node. Modalities C-STORE to Orthanc on the node's own IP
 (port 4242 on the local LAN). Orthanc de-identifies in-process, keeps the deid'd
 instance, and backs up the original to a node-local directory that never leaves
-the machine. `xnat-ingest sort` and `xnat-ingest upload` move the deid'd data to
-XNAT over HTTPS. The only inbound port is DICOM 4242; the only outbound path is
-HTTPS to XNAT (plus the Grafana NodePort for the local admin).
+the machine. `xnat-ingest group-orthanc`, `xnat-ingest assign`, and
+`xnat-ingest upload` move the deid'd data to XNAT over HTTPS. The only inbound
+port is DICOM 4242; the only outbound path is HTTPS to XNAT (plus the Grafana
+NodePort for the local admin).
 
 ```
 ════════════════════════════════════════════════════════════════════════════════
@@ -94,7 +95,8 @@ HTTPS to XNAT (plus the Grafana NodePort for the local admin).
 
   Host directories (all on one filesystem so hardlinks resolve)
     /data/xnat-ingest/orthanc-storage   deid'd DICOM instances (Orthanc storage)
-    /data/xnat-ingest/staging           PROJECT.SUBJECT.VISIT/ dirs (sort output)
+    /data/xnat-ingest/grouped           grouped studies (group-orthanc output)
+    /data/xnat-ingest/staging           PROJECT.SUBJECT.SESSION/ dirs (assign output)
     /data/facility-backup               ORIGINAL DICOMs (real IDs) — never leaves node
 
   ┌─ namespace: xnat-ingest ──────────────────────────────────────────────────┐
@@ -104,11 +106,13 @@ HTTPS to XNAT (plus the Grafana NodePort for the local admin).
   │                         write ORIGINAL → /facility-backup; keep deid'd     │
   │       OnStableStudy     label study `xnat-ingest-ready`                    │
   │     env  AIS_DEID_HMAC_SALT (Secret)                                       │
-  │     REST :8042 (ClusterIP) — how sort pulls                               │
+  │     REST :8042 (ClusterIP) — how group-orthanc pulls                      │
   │        │                                                                   │
   │        ▼  REST-pull labelled studies                                      │
-  │   xnat-ingest-sort   loop 60s; hardlinks deid'd DICOMs from               │
-  │                      /data/orthanc-storage → /data/staging/PROJECT.SUB.VIS │
+  │   xnat-ingest-group  loop 60s; hardlinks deid'd DICOMs from               │
+  │                      /data/orthanc-storage → /data/grouped                │
+  │   xnat-ingest-assign loop 60s; assigns IDs, /data/grouped →               │
+  │                      /data/staging/PROJECT.SUBJECT.SESSION                │
   └────────────────────────────────────────────────────────────────────────────┘
   ┌─ namespace: xnat-upload ──────────────────────────────────────────────────┐
   │   xnat-ingest-upload reads LOCAL /data/staging directly; loop 60s;         │
@@ -146,15 +150,23 @@ HTTPS to XNAT (plus the Grafana NodePort for the local admin).
      d. PUTs label "xnat-ingest-ready" on the study
          │
          ▼
-3. xnat-ingest sort (REST-pull mode)
+3. xnat-ingest group-orthanc (REST-pull mode)
    - Polls Orthanc's REST API every INGEST_LOOP_SECONDS (default 60s)
-   - Filters: has label "xnat-ingest-ready", lacks label "xnat-ingest-skip"
-   - Hardlinks instances from /data/orthanc-storage into
-     /data/staging/PROJECT.SUBJECT.VISIT/  (same filesystem — hardlink, not copy)
-   - PUTs label "xnat-ingest-skip" on the study
+   - Filters: has label "xnat-ingest-ready", lacks label "xnat-ingest-processed"
+   - Hardlinks instances from /data/orthanc-storage into grouped studies under
+     /data/grouped  (same filesystem — hardlink, not copy)
+   - PUTs label "xnat-ingest-processed" on the study
          │
          ▼
-4. xnat-ingest upload (local source → XNAT)
+4. xnat-ingest assign (ID assignment)
+   - Reads /data/grouped every INGEST_LOOP_SECONDS
+   - Derives XNAT project/subject/session IDs from the (deid'd) DICOM metadata
+     (project forced via --constant-project-id; subject=PatientID,
+     session=AccessionNumber)
+   - Collates each study into /data/staging/PROJECT.SUBJECT.SESSION/
+         │
+         ▼
+5. xnat-ingest upload (local source → XNAT)
    - Reads the LOCAL /data/staging directory directly (no S3)
    - Uploads sessions to XNAT via REST over HTTPS (XNAT credentials only here)
    - Creates project/subject/session/scan hierarchy in XNAT
@@ -166,11 +178,12 @@ The deid happens at step 2 inside Orthanc; everything downstream of
 in `/data/facility-backup` (real identifiers, site-retained) and nowhere else —
 it never leaves the node and is never uploaded.
 
-Orthanc, sort, and upload all mount the host directory `/data/xnat-ingest` at
-`/data`. Because `orthanc-storage`, `staging`, and the upload source all live on
-the same filesystem, sort can hardlink (rather than copy) and the upload pod reads
-byte-for-byte the same staged files sort wrote. Cross-filesystem hardlinks fail
-with `EXDEV`, so these directories **must** be on one physical mount.
+Orthanc and all three xnat-ingest stages mount the host directory
+`/data/xnat-ingest` at `/data`. Because `orthanc-storage`, `grouped`, `staging`,
+and the upload source all live on the same filesystem, `group-orthanc` can
+hardlink (rather than copy) and the upload pod reads byte-for-byte the same staged
+files. Cross-filesystem hardlinks fail with `EXDEV`, so these directories **must**
+be on one physical mount.
 
 ## Security Model
 
@@ -223,12 +236,12 @@ k0s-k0smotron-mvp/
 │   │   └── observability/                 ← Loki/Prometheus/Grafana/Alertmanager/Vector
 │   └── 02-edge/
 │       ├── orthanc.yaml.tpl               ← Orthanc Deployment + Service + deid-salt Secret
-│       └── xnat-ingest.yaml.tpl           ← Sort pod (Orthanc REST-pull mode)
+│       └── xnat-ingest.yaml.tpl           ← group + assign pods (Orthanc REST-pull → staging)
 ├── scripts/
 │   ├── 00-common.sh                       ← Shared functions (render, etc.)
 │   ├── 01-install-k0s.sh                  ← Install single-node k0s + local-path storage
 │   ├── 07c-deploy-edge-orthanc.sh         ← Deploy Orthanc + deid Lua hook
-│   ├── 07-deploy-edge-ingest.sh           ← Deploy xnat-ingest sort (REST-pull)
+│   ├── 07-deploy-edge-ingest.sh           ← Deploy xnat-ingest group + assign (REST-pull → staging)
 │   ├── 04-deploy-xnat-upload.sh           ← Deploy xnat-ingest upload (local staging → XNAT)
 │   ├── 02d-install-observability.sh       ← Loki + Prom + Grafana + Alertmanager + Vector (optional)
 │   └── uninstall.sh                       ← Tears everything down
@@ -280,7 +293,7 @@ self-signed certificate.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`) |
 | local-path-provisioner | v0.0.30 | Default StorageClass for observability PVCs |
 | Orthanc | 1.12.6 (plugins) | `jodogne/orthanc-plugins:1.12.6` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | v5 | `ghcr.io/akshitbeniwal/xnat-ingest:v5` — JSON logging, Orthanc REST-pull sort, and local-path upload source |
+| xnat-ingest | 0.12.3 | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, and local-path upload source (all AIS-Edge changes merged upstream) |
 | Loki | 3.x (single-binary) | Local **filesystem** storage on a PVC (no object store) |
 | Prometheus | kube-prometheus-stack | Metrics + alert-rule evaluation |
 | Grafana | kube-prometheus-stack | Dashboards, exposed on a NodePort |
@@ -305,8 +318,10 @@ storescu -aec <AET-from-routing.json> -aet TEST_MOD <MGMT_NODE_IP> 4242 study/*.
 kubectl logs -n xnat-ingest deploy/orthanc -f \
   | grep -E 'instance_deidentified|study_labeled_ready|REJECT|ERROR'
 
-# Watch sort REST-pull from Orthanc and hardlink into staging
-kubectl logs -n xnat-ingest -l component=sort -f
+# Watch group-orthanc REST-pull from Orthanc and hardlink into /data/grouped
+kubectl logs -n xnat-ingest -l component=group -f
+# Watch assign collate grouped studies into /data/staging
+kubectl logs -n xnat-ingest -l component=assign -f
 
 # Watch upload to XNAT
 kubectl logs -n xnat-upload -l component=upload -f
@@ -326,7 +341,8 @@ kubectl get nodes
 
 # The three pipeline log tails
 kubectl logs -n xnat-ingest deploy/orthanc --tail=20            # Orthanc + deid
-kubectl logs -n xnat-ingest -l component=sort --tail=20         # sort (REST-pull → staging)
+kubectl logs -n xnat-ingest -l component=group  --tail=20       # group-orthanc (REST-pull → /data/grouped)
+kubectl logs -n xnat-ingest -l component=assign --tail=20       # assign (IDs → /data/staging)
 kubectl logs -n xnat-upload -l component=upload --tail=20       # upload → XNAT
 
 # XNAT reachability
@@ -345,8 +361,8 @@ curl -sk <XNAT_URL>                                             # should return 
 | Node reboots | k0s auto-starts; pods resume; staged files are safe on the local disk | Nothing — the pipeline picks up where it left off |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
 | XNAT is down | Uploads fail; staged sessions accumulate in `/data/staging` | XNAT returns; the upload loop clears the backlog |
-| DICOM missing AccessionNumber | Sort routes the session to `/data/staging/__invalid__/` | Manual rename/move; real clinical DICOMs populate this field |
-| `/data` disk fills | Staging + Orthanc storage grow unbounded (no auto-cleanup) | Expand `/data`, or delete studies labelled `xnat-ingest-skip` once confirmed in XNAT |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/staging/__invalid__/` | Manual rename/move; real clinical DICOMs populate this field |
+| `/data` disk fills | Staging + Orthanc storage grow unbounded (no auto-cleanup) | Expand `/data`, or delete studies labelled `xnat-ingest-processed` once confirmed in XNAT |
 
 ## Observability
 

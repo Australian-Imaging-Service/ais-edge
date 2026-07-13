@@ -17,7 +17,8 @@ natural source of truth for each alert**, not about network topology.
 
 Two kinds of signal, two natural homes:
 
-1. **Pipeline events are JSON log lines.** `xnat-ingest sort` and the `xnat-ingest
+1. **Pipeline events are JSON log lines.** `xnat-ingest group-orthanc`,
+   `xnat-ingest assign`, and the `xnat-ingest
    upload` pod emit structured events (`{event: "upload_failed", session: "...",
    ...}`). The source of truth for "did an upload fail?" is the event itself, not
    a synthesised counter. Counting events in LogQL with `count_over_time` is the
@@ -44,8 +45,8 @@ pipeline-event alerts. So we keep pipeline alerts in the Loki ruler.
 |------|--------|------|
 | `XNATUploadFailing` | Loki ruler | Derived from `event="upload_failed"` vs `event="upload_completed"` JSON events on the upload pod. |
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
-| `XNATBacklogGrowing` | Loki ruler | Completed-upload rate drops while sort keeps staging — sessions piling up in `/data/staging`. |
-| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on sort-pod `ERROR` lines (`Invalid IDs found`). |
+| `XNATBacklogGrowing` | Loki ruler | Completed-upload rate drops while assign keeps staging — sessions piling up in `/data/staging`. |
+| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`). |
 | `NodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
 | `PodCrashLoop` | Prometheus | Container restart count, kube-state-metrics. |
 | `OrthancDown` / `UploadPodDown` | Prometheus | Deployment readiness, kube-state-metrics. |

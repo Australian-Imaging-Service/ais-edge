@@ -5,7 +5,7 @@
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
 open-source DICOM server. In this tier-1 single-node appliance it acts as the
 **DICOM receiver** for local modalities and runs the AIS **deidentification Lua
-hook** before xnat-ingest sorts the data.
+hook** before xnat-ingest groups and stages the data.
 
 We use the [`jodogne/orthanc-plugins`](https://hub.docker.com/r/jodogne/orthanc-plugins)
 image (pinned to a version ≥ 1.12.0 because the deid hook uses
@@ -23,10 +23,10 @@ Three jobs on the node:
    original is deleted from Orthanc; the deid'd instance is kept.
 3. **Lua `OnStableStudy` hook** PUTs the `xnat-ingest-ready` label on each
    study once it's been quiescent for `StableAge` seconds. This is the
-   signal for `xnat-ingest sort` to REST-pull the study.
+   signal for `xnat-ingest group-orthanc` to REST-pull the study.
 
-After sort hardlinks the instances into `/data/staging/`, it PUTs the
-`xnat-ingest-skip` label on the study so subsequent sort cycles skip it.
+After `group-orthanc` hardlinks the instances into `/data/grouped/`, it PUTs the
+`xnat-ingest-processed` label on the study so subsequent cycles skip it.
 
 ```
 Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
@@ -40,8 +40,9 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
                               PUT /studies/{id}/labels/xnat-ingest-ready
                                                       │
                                                       ▼
-                                xnat-ingest sort REST-pulls, hardlinks,
-                                PUTs label xnat-ingest-skip
+                                xnat-ingest group-orthanc REST-pulls,
+                                hardlinks to /data/grouped, PUTs label
+                                xnat-ingest-processed
 ```
 
 ## What Orthanc has access to
@@ -53,7 +54,7 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
 | hostPath `/data/facility-backup` mounted as `/facility-backup` | Canonical local copy of every received original DICOM. Site-controlled retention. Independent of AIS lifecycle. |
 | Four ConfigMaps mounted under `/etc/orthanc/` | `orthanc-config` (orthanc.json), `orthanc-scripts` (Lua), `orthanc-routing` (routing.json), `orthanc-deidentification-profile` (deid profile) |
 | One Secret env var | `AIS_DEID_HMAC_SALT` — per-deployment salt for SubjectHash / SessionHash derivation in the Lua hook |
-| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. xnat-ingest sort talks to it (in-cluster Service). |
+| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. xnat-ingest group-orthanc talks to it (in-cluster Service). |
 
 ## Where it runs
 
@@ -63,7 +64,7 @@ replicas) on the single node. Deployed by
 [`manifests/02-edge/orthanc.yaml.tpl`](../../manifests/02-edge/orthanc.yaml.tpl).
 
 REST API exposed as a ClusterIP Service `orthanc.xnat-ingest.svc.cluster.local:8042`
-(this is how `xnat-ingest sort` REST-pulls). DICOM port 4242 is exposed via
+(this is how `xnat-ingest group-orthanc` REST-pulls). DICOM port 4242 is exposed via
 `hostPort` directly on the node's IP so modalities can reach it without an
 in-cluster Service.
 
@@ -104,9 +105,9 @@ storescu -aec <AET-from-routing.json> -aet TEST_MOD <MGMT_NODE_IP> 4242 /path/to
 
 ## Known limitations
 
-- **No automatic cleanup** of deid'd instances in Orthanc storage after upload to XNAT. Manual or scripted cleanup needed for production (e.g. delete studies labelled `xnat-ingest-skip` once confirmed in XNAT).
+- **No automatic cleanup** of deid'd instances in Orthanc storage after upload to XNAT. Manual or scripted cleanup needed for production (e.g. delete studies labelled `xnat-ingest-processed` once confirmed in XNAT).
 - **Pure-Lua salted hash instead of true HMAC** for SubjectHash / SessionHash, because `jodogne/orthanc-plugins` doesn't expose `Compute*` crypto in Lua. Adequate for research deid; switch to `jodogne/orthanc-python` for HMAC-grade.
 - **Profile authoring is by hand** — no validation that referenced DICOM tags exist in Orthanc's dictionary before deployment. `07c` prompts the site admin for explicit confirmation of the AETMap + profile before applying.
-- **Hardlinks require shared filesystem** — `/data/xnat-ingest/orthanc-storage` and `/data/xnat-ingest/staging` must live on the same physical mount, or sort fails with EXDEV.
+- **Hardlinks require shared filesystem** — `/data/xnat-ingest/orthanc-storage`, `/data/xnat-ingest/grouped`, and `/data/xnat-ingest/staging` must live on the same physical mount, or `group-orthanc` fails with EXDEV.
 - **Modalities with unmapped CalledAETs are rejected** — instances are deleted and a REJECT line is logged. Keep `routing.json` AETMap up to date.
 - **`AIS_DEID_HMAC_SALT` rotation breaks subject linkage** — rotating the salt produces a different SubjectHash for the same patient. Rotate only deliberately.

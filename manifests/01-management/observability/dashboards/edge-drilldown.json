@@ -19,12 +19,12 @@
     },
     {
       "type": "stat",
-      "title": "Sort errors (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of ERROR-level log lines from the xnat-ingest sort pod in the last hour. Loki-derived because mgmt Prometheus cannot scrape edge clusters (no metrics path across the konnectivity boundary). A non-zero value typically indicates DICOM validation failures or staging errors.",
+      "title": "Assign errors (last 1h, cluster=$cluster / node=$node)",
+      "description": "Count of ERROR-level log lines from the xnat-ingest assign pod in the last hour. Loki-derived because mgmt Prometheus cannot scrape edge clusters (no metrics path across the konnectivity boundary). A non-zero value typically indicates DICOM validation failures or staging errors.",
       "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [{
-        "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"sort\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
+        "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h]))",
         "queryType": "instant",
         "refId": "A"
       }],

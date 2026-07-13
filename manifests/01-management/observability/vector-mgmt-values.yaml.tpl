@@ -5,7 +5,7 @@
 #   helm install vector-mgmt vector/vector -n observability -f <rendered-this-file>
 #
 # This is a single-node "tier-1" appliance: ONE k0s node runs everything
-# (Orthanc, xnat-ingest sort, xnat-ingest upload, plus the system pods). This
+# (Orthanc, xnat-ingest group-orthanc, assign, upload, plus the system pods). This
 # single Vector DaemonSet tails ALL of their logs and ships them to Loki.
 #
 # Vector tails kubelet log files (/var/log/pods/<ns>_<pod>_<uid>/<ctr>/N.log),

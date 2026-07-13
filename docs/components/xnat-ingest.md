@@ -4,44 +4,62 @@
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
 is the AIS-maintained Python tool that:
-1. **Sorts** DICOM files into an XNAT project/subject/session/scan hierarchy and
-   stages them as a structured directory
-2. **Uploads** staged sessions to an XNAT server via REST
+1. **Groups** DICOM instances into studies by REST-pulling them from Orthanc
+   (`group-orthanc`)
+2. **Assigns** each study an XNAT project/subject/session identity and stages it
+   as a structured directory (`assign`)
+3. **Uploads** staged sessions to an XNAT server via REST (`upload`)
 
-We run it as two pods on the single node:
-- **`xnat-ingest sort`** (namespace `xnat-ingest`) — REST-pulls de-identified
-  studies from Orthanc and hardlinks them into staging
-- **`xnat-ingest upload`** (namespace `xnat-upload`) — reads the LOCAL staging
-  directory and uploads sessions to XNAT
+Upstream ≥ 0.12 split the old single `sort` command into these discrete stages.
+We run them as three pods on the single node:
+- **`xnat-ingest group-orthanc`** (namespace `xnat-ingest`, `component=group`) —
+  REST-pulls de-identified studies from Orthanc and hardlinks them into
+  `/data/grouped`
+- **`xnat-ingest assign`** (namespace `xnat-ingest`, `component=assign`) — reads
+  `/data/grouped`, assigns project/subject/session IDs, and collates into
+  `/data/staging`
+- **`xnat-ingest upload`** (namespace `xnat-upload`, `component=upload`) — reads
+  the LOCAL staging directory and uploads sessions to XNAT
 
-There is **no S3 hop**. Sort writes to a local directory and upload reads that
-same local directory directly.
+There is **no S3 hop**. Every stage reads and writes local directories on one
+shared filesystem; upload reads the same `/data/staging` that `assign` wrote.
 
 ## Role in this stack
 
 The DICOM ingest engine downstream of Orthanc.
 
-- **sort** polls Orthanc's REST API on the node
+- **group-orthanc** polls Orthanc's REST API on the node
   (`http://orthanc.xnat-ingest.svc.cluster.local:8042`), selects studies labelled
-  `xnat-ingest-ready` (and not yet `xnat-ingest-skip`), and hardlinks the deid'd
-  instances from Orthanc's storage tree (`/data/orthanc-storage`) into
-  `/data/staging/<project>.<subject>.<visit>/`. Same filesystem ⇒ hardlink, not
-  copy. It then labels the study `xnat-ingest-skip` so later cycles skip it.
-- **upload** reads that same `/data/staging` directory (both pods mount the host
+  `xnat-ingest-ready` (and not yet `xnat-ingest-processed`), and hardlinks the
+  deid'd instances from Orthanc's storage tree (`/data/orthanc-storage`) into
+  grouped studies under `/data/grouped`. Same filesystem ⇒ hardlink, not copy. It
+  then labels the study `xnat-ingest-processed` so later cycles skip it.
+- **assign** reads `/data/grouped`, derives the XNAT project/subject/session IDs
+  from the (deid'd) DICOM metadata, and collates each study into
+  `/data/staging/<project>.<subject>.<session>/`. Project is forced with
+  `--constant-project-id`; subject/session default to PatientID/AccessionNumber —
+  exactly the fields the Orthanc deid hook writes.
+- **upload** reads that same `/data/staging` directory (all pods mount the host
   dir `/data/xnat-ingest` at `/data`) and pushes each session to XNAT over HTTPS.
 
 ## What xnat-ingest has access to
 
-### sort pod (`xnat-ingest` namespace)
+### group pod (`xnat-ingest` namespace, `component=group`)
 - **hostPath `/data/xnat-ingest`** mounted at `/data` — reads
-  `/data/orthanc-storage`, writes `/data/staging`
+  `/data/orthanc-storage`, writes `/data/grouped`
 - **Orthanc REST API** in-cluster at
-  `http://orthanc.xnat-ingest.svc.cluster.local:8042` (to list labelled studies)
-- **No XNAT credentials** — sort doesn't talk to XNAT
+  `http://orthanc.xnat-ingest.svc.cluster.local:8042` (to list labelled studies
+  and pull instances)
+- **No XNAT credentials** — group-orthanc doesn't talk to XNAT
 
-### upload pod (`xnat-upload` namespace)
+### assign pod (`xnat-ingest` namespace, `component=assign`)
+- **hostPath `/data/xnat-ingest`** mounted at `/data` — reads `/data/grouped`,
+  writes `/data/staging`
+- **No Orthanc or XNAT access** — it only reshapes local directories
+
+### upload pod (`xnat-upload` namespace, `component=upload`)
 - **hostPath `/data/xnat-ingest`** mounted at `/data` — reads `/data/staging`
-  (the SAME host directory sort writes to; the mount must be byte-identical or
+  (the SAME host directory `assign` writes to; the mount must be byte-identical or
   upload sees an empty dir)
 - **Outbound HTTPS** to the configured XNAT server
 - **One Secret** `xnat-credentials` — server URL, username, password
@@ -50,37 +68,54 @@ The DICOM ingest engine downstream of Orthanc.
 
 | Pod | Namespace | Image |
 |---|---|---|
-| `xnat-ingest-sort` | `xnat-ingest` | `${XNAT_INGEST_IMAGE}` (default `ghcr.io/akshitbeniwal/xnat-ingest:v5`) |
+| `xnat-ingest-group` | `xnat-ingest` | `${XNAT_INGEST_IMAGE}` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3`) |
+| `xnat-ingest-assign` | `xnat-ingest` | same `${XNAT_INGEST_IMAGE}` |
 | `xnat-ingest-upload` | `xnat-upload` | same `${XNAT_INGEST_IMAGE}` |
 
-`XNAT_INGEST_IMAGE` points at our fork on `ghcr.io`, which adds JSON log output
-(`AIS_LOG_FORMAT=json`), the Orthanc REST-pull sort mode, and a local-filesystem
-upload source (the first positional arg to `upload` is a local path, not an
-`s3://` URL). Override it in `config/management.env` to switch (e.g. to upstream
-once these land there).
+`XNAT_INGEST_IMAGE` points at the **upstream** image on `ghcr.io` — all the
+AIS-Edge changes (JSON log output via `AIS_LOG_FORMAT=json`, the `group-orthanc`
+Orthanc REST-pull, the `assign` ID-assignment stage, and a local-filesystem
+upload source where the first positional arg to `upload` is a local path, not an
+`s3://` URL) are now merged upstream. Override the tag in `config/management.env`
+to pin or bump the version.
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
 | `manifests/01-management/xnat-upload.yaml.tpl` | upload Deployment + `xnat-credentials` Secret, `AIS_LOG_FORMAT=json` |
-| `manifests/02-edge/xnat-ingest.yaml.tpl` | sort Deployment (Orthanc REST-pull mode) |
+| `manifests/02-edge/xnat-ingest.yaml.tpl` | group + assign Deployments (Orthanc REST-pull → staging) |
 | `scripts/04-deploy-xnat-upload.sh` | apply upload Deployment |
-| `scripts/07-deploy-edge-ingest.sh` | apply sort Deployment |
+| `scripts/07-deploy-edge-ingest.sh` | apply group + assign Deployments |
 | `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS`, `PROJECT_ID`, `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD`, `XNAT_INGEST_IMAGE` |
 
-### sort arguments
+### group-orthanc arguments
 
 ```
-xnat-ingest sort /data/staging
-  --orthanc-url          http://orthanc.xnat-ingest.svc.cluster.local:8042
-  --orthanc-storage-dir  /data/orthanc-storage
-  --orthanc-label        xnat-ingest-ready   # only consider studies with this label
-  --orthanc-skip-label   xnat-ingest-skip    # skip studies already staged
-  --project-id           ${PROJECT_ID}
-  --loop                 ${INGEST_LOOP_SECONDS}
-  --wait-period          ${INGEST_WAIT_PERIOD}
+xnat-ingest group-orthanc \
+  http://orthanc.xnat-ingest.svc.cluster.local:8042   # Orthanc REST URL
+  /data/orthanc-storage                               # Orthanc storage dir (as mounted)
+  /data/grouped                                       # output: grouped studies
+  orthanc orthanc                                     # Orthanc user / password (auth disabled)
+  --to-process-label   xnat-ingest-ready              # only pull studies with this label
+  --processed-label    xnat-ingest-processed          # label applied after pulling (skip next cycle)
+  --loop               ${INGEST_LOOP_SECONDS}
+  --wait-period        ${INGEST_WAIT_PERIOD}
 ```
+
+### assign arguments
+
+```
+xnat-ingest assign \
+  /data/grouped                        # input: group-orthanc output
+  /data/staging                        # output: upload reads this
+  --constant-project-id  ${PROJECT_ID} # force the XNAT project
+  --loop                 ${INGEST_LOOP_SECONDS}
+```
+
+`assign` defaults subject to PatientID and session to AccessionNumber — exactly
+the fields the Orthanc deid hook writes (SubjectHash → PatientID, SessionHash →
+AccessionNumber).
 
 ### upload arguments
 
@@ -95,15 +130,16 @@ xnat-ingest upload /data/staging ${XNAT_URL}   # LOCAL source dir (no s3://)
 Important env vars:
 - `AIS_LOG_FORMAT=json` — enable JSON log output (one object per line) so Vector
   indexes `ts/level/logger/message/event` without regex parsing. Drops to text if
-  unset, so the upstream image still works.
+  unset, so the image still works without it.
 - `XINGEST_HOST/USER/PASS` (upload pod only) — XNAT REST credentials, sourced from
   the `xnat-credentials` Secret.
 
 ## Operations
 
 ```bash
-# Sort logs (JSON when AIS_LOG_FORMAT=json)
-kubectl logs -n xnat-ingest -l component=sort -f | jq
+# Group + assign logs (JSON when AIS_LOG_FORMAT=json)
+kubectl logs -n xnat-ingest -l component=group  -f | jq
+kubectl logs -n xnat-ingest -l component=assign -f | jq
 
 # Upload logs
 kubectl logs -n xnat-upload -l component=upload -f | jq
@@ -113,7 +149,7 @@ sudo ls -R /data/xnat-ingest/staging/
 
 # Manually promote an invalid session to test upload
 sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
-        /data/xnat-ingest/staging/<project>.<subject>.<visit>
+        /data/xnat-ingest/staging/<project>.<subject>.<session>
 ```
 
 ## Benefits
@@ -121,21 +157,20 @@ sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 - **Battle-tested DICOM parsing** — handles edge cases (missing
   AccessionNumber, multi-frame, multi-series) we don't want to re-implement
 - **Idempotent** — re-running upload skips sessions already in XNAT
-- **Loop mode** — runs continuously; new studies are staged and uploaded as they
-  arrive
-- **Connection-resilience** (in our fork) — transient network errors don't kill
-  the upload loop
+- **Loop mode** — every stage runs continuously; new studies are grouped, staged,
+  and uploaded as they arrive
+- **Connection-resilience** — transient network errors don't kill the upload loop
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | Session routed to `/data/staging/__invalid__/` | Manual rename + move; `DICOMValidationFailureSpike` alert fires when this happens >10x/h |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/staging/__invalid__/` | Manual rename + move; `DICOMValidationFailureSpike` alert fires when this happens >10x/h |
 | XNAT login fails | upload pod crashes / errors | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down | uploads fail; staged sessions accumulate in `/data/staging` | `XNATBacklogGrowing` alert; upload loop clears the backlog when XNAT returns |
-| sort and upload mount different dirs | upload reads an empty dir | both mount host `/data/xnat-ingest` at `/data`; keep them identical |
-| cross-filesystem hardlink | sort fails with `EXDEV` | keep `/data/orthanc-storage` and `/data/staging` on one physical mount |
-| Sort pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids staging half-written studies |
+| stages mount different dirs | a stage reads an empty dir | all pods mount host `/data/xnat-ingest` at `/data`; keep them identical |
+| cross-filesystem hardlink | `group-orthanc` fails with `EXDEV` | keep `/data/orthanc-storage`, `/data/grouped`, and `/data/staging` on one physical mount |
+| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
 
 ## Replacements / future
 
@@ -153,3 +188,5 @@ sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
   `session_staged`, `xnat_upload_completed`) so Loki queries are cleaner.
 - **Structured DICOM SHA256** in the staging-event log for end-to-end integrity
   verification against XNAT.
+</content>
+</invoke>

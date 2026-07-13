@@ -10,7 +10,8 @@ what the panel actually computes; the **field semantics** are why those two
 match.
 
 In this single-node deployment the panels are driven by the structured JSON log
-events emitted by the pipeline pods: `xnat-ingest sort` (`component=sort`) and the
+events emitted by the pipeline pods: `xnat-ingest group-orthanc`/`assign`
+(`component=group`/`component=assign`) and the
 `xnat-ingest upload` pod (`component=upload`). The **upload events now come from
 the direct XNAT upload pod** — there is no s3-uploader / SeaweedFS layer anymore.
 Vector parses the JSON and pushes it to Loki, and every panel is a LogQL query
@@ -32,9 +33,10 @@ The upload pod emits one JSON line per session state change with `AIS_LOG_FORMAT
 }
 ```
 
-`xnat-ingest sort` emits its own JSON lines (staging progress, and per-session
-`ERROR` lines for sessions routed to `__invalid__/`). The dashboards count both
-event streams by `event` / `component` / `cluster`.
+`xnat-ingest assign` emits its own JSON lines (staging progress, and per-session
+`ERROR` lines for sessions routed to `__invalid__/`); `group-orthanc` emits
+REST-pull / grouping lines. The dashboards count both event streams by
+`event` / `component` / `cluster`.
 
 Where a panel historically split `dicoms` vs `files` (the s3-uploader's
 per-object counters), tier-1 counts **sessions** via `count_over_time` on
@@ -57,15 +59,15 @@ Single-node view over every pipeline event pushed to Loki.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `count_over_time(... level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])` | Sessions xnat-ingest sort routed to `/data/staging/__invalid__/` because the DICOM metadata is missing required fields (typically AccessionNumber). Each invalid session contributes exactly 1 (we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line that repeats the same content). |
-| **Sort cycles with errors (last 1h)** | `count_over_time(... message =~ "(?s)^Staging completed with.*" [1h])` | Per-cycle counter: each xnat-ingest sort loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
-| **Pipeline liveness** | `count_over_time({namespace="xnat-ingest",component="sort"}[1h]) > 0` | Non-zero when the sort loop is logging = the pipeline is alive. 0 means sort has stopped emitting (pod down or crash-looping). |
+| **Invalid sessions (last 1h)** | `count_over_time(... level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])` | Sessions xnat-ingest assign routed to `/data/staging/__invalid__/` because the DICOM metadata is missing required fields (typically AccessionNumber). Each invalid session contributes exactly 1 (we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line that repeats the same content). |
+| **Assign cycles with errors (last 1h)** | `count_over_time(... message =~ "(?s)^Staging completed with.*" [1h])` | Per-cycle counter: each xnat-ingest assign loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
+| **Pipeline liveness** | `count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > 0` | Non-zero when the assign loop is logging = the pipeline is alive. 0 means assign has stopped emitting (pod down or crash-looping). |
 
 ### Logs panel — Recent invalid sessions
 
-LogQL: `{namespace="xnat-ingest",component="sort"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
+LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
 
-Each line is a session sort placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
+Each line is a session assign placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.SESSION` and move it back to `/data/staging/`.
 
 ### Time series
 
@@ -77,7 +79,7 @@ Each line is a session sort placed in `__invalid__/`. Site-admin action: rename 
 
 LogQL: `{namespace=~"xnat-ingest|xnat-upload"} | json | event != "" | line_format "[{component}] event={event} session={session} — {message}"`
 
-Last 30 minutes of every structured event from the sort + upload pods, formatted for human reading.
+Last 30 minutes of every structured event from the group, assign, and upload pods, formatted for human reading.
 
 ---
 
@@ -96,19 +98,19 @@ retained for layout consistency with multi-node deployments.
 | Panel | Query (with template vars expanded) | Meaning |
 |---|---|---|
 | **Completed uploads (last 10m)** | `count_over_time({cluster=X, node=~Y, component="upload"} | json | event="upload_completed" [10m])` | Last-10-min upload count for the selected scope. Threshold: red below 1, green above. 0 with active scanners means the pipeline is stuck. |
-| **Sort errors (last 1h)** | Same shape as "Invalid sessions" but scoped | DICOM validation failures. |
+| **Assign errors (last 1h)** | Same shape as "Invalid sessions" but scoped | DICOM validation failures. |
 | **Upload failures (last 1h)** | Same shape as Pipeline Overview's "Upload failures" but scoped | `upload_failed` count. |
 
 ### Time series + log tail
 
 - **Upload events per minute** — `sum by (event) (count_over_time({cluster=X, node=~Y, component="upload"} | json | event != "" [1m]))`. Per-event timeseries for the selected scope.
-- **Live log tail** — every line from the sort + upload pods on the selected scope, formatted as `[{component}] event={event} session={session} {message}`.
+- **Live log tail** — every line from the group, assign, and upload pods on the selected scope, formatted as `[{component}] event={event} session={session} {message}`.
 
 ---
 
 ## Session Timeline (`ais-session-timeline`)
 
-Single-session trace. The dashboard variable `session` is a text input — paste a session name (e.g. `test-project.mrbrain.visit01`) and the dashboard shows every log line referencing it across the sort and upload pods.
+Single-session trace. The dashboard variable `session` is a text input — paste a session name (e.g. `test-project.mrbrain.visit01`) and the dashboard shows every log line referencing it across the group, assign, and upload pods.
 
 Query: `{namespace=~"xnat-ingest|xnat-upload"} |= "$session" | json | line_format "{component} | {event} | {message}"`.
 

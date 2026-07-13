@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Deploy the xnat-ingest SORT pod (single node).
-#   Sort REST-pulls labelled studies from Orthanc and hardlinks the deid'd
-#   DICOMs into /data/xnat-ingest/staging, where the upload pod picks them up.
+# Deploy the xnat-ingest group-orthanc + assign pods (single node).
+#   group-orthanc REST-pulls labelled studies from Orthanc and hardlinks the
+#   deid'd DICOMs into /data/xnat-ingest/grouped; assign then collates them into
+#   /data/xnat-ingest/staging, where the upload pod picks them up.
 # =============================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"

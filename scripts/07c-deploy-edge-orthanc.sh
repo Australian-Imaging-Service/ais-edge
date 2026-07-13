@@ -4,7 +4,7 @@
 #   Orthanc: DIMSE SCP on host port 4242 (AET=AISEDGE). The Lua hook
 #   OnStoredInstance de-identifies per the profile selected by routing.json,
 #   writes the ORIGINAL to /facility-backup, keeps the deid'd instance, and
-#   OnStableStudy labels the study `xnat-ingest-ready` for the sort pod.
+#   OnStableStudy labels the study `xnat-ingest-ready` for group-orthanc.
 # =============================================================================
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
@@ -41,7 +41,7 @@ if [ "${AIS_AUTO_CONFIRM:-}" != "yes" ] && [ -t 0 ]; then
     [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted at deid-policy review."; exit 1; }
 fi
 
-# --- Host-side directories (local; shared with sort so hardlinks resolve) ---
+# --- Host-side directories (local; shared with group-orthanc/assign so hardlinks resolve) ---
 sudo mkdir -p /data/xnat-ingest/orthanc-storage /data/facility-backup
 sudo chmod 777 /data/xnat-ingest/orthanc-storage
 sudo chmod 750 /data/facility-backup

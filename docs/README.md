@@ -21,7 +21,7 @@ no child cluster, no SeaweedFS/S3, no nginx-ingress, and no cert-manager.
 
 - [`orthanc.md`](components/orthanc.md) — DICOM SCP on the node; runs
   the deid Lua hook before xnat-ingest sees the data
-- [`xnat-ingest.md`](components/xnat-ingest.md) — DICOM sort + upload pods
+- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
 
 ### Observability stack (optional, install via `scripts/02d-...`)
 

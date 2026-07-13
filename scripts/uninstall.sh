@@ -11,10 +11,10 @@ source "${SCRIPT_DIR}/config/management.env" 2>/dev/null || true
 
 echo "============================================"
 echo "This will remove from THIS node:"
-echo "  - xnat-ingest namespace (Orthanc + sort)"
+echo "  - xnat-ingest namespace (Orthanc + group + assign)"
 echo "  - xnat-upload namespace (upload pod)"
 echo "  - observability namespace (Loki/Prometheus/Grafana/Alertmanager/Vector)"
-echo "  - local staging data (/data/xnat-ingest/staging)"
+echo "  - local intermediate data (/data/xnat-ingest/grouped and /data/xnat-ingest/staging)"
 echo "  - /data/facility-backup (original DICOMs) is LEFT INTACT"
 echo "============================================"
 if [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ]; then
@@ -34,8 +34,8 @@ helm uninstall loki         -n observability 2>/dev/null || true
 helm uninstall kube-prometheus-stack -n observability 2>/dev/null || true
 kubectl delete namespace observability --ignore-not-found 2>/dev/null || true
 
-echo "=== Removing local staging ==="
-sudo rm -rf /data/xnat-ingest/staging 2>/dev/null || true
+echo "=== Removing local intermediate data (grouped + staging) ==="
+sudo rm -rf /data/xnat-ingest/grouped /data/xnat-ingest/staging 2>/dev/null || true
 echo "  (kept /data/facility-backup and /data/xnat-ingest/orthanc-storage)"
 
 if [ "${INSTALL_MODE:-existing}" = "fresh" ]; then

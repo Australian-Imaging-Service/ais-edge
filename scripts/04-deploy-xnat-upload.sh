@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Deploy the xnat-ingest UPLOAD pod (single node).
-#   Reads the LOCAL staging dir written by sort (/data/xnat-ingest/staging)
+#   Reads the LOCAL staging dir written by assign (/data/xnat-ingest/staging)
 #   and uploads sessions to XNAT over HTTPS. No SeaweedFS / S3 hop.
 # =============================================================================
 set -euo pipefail

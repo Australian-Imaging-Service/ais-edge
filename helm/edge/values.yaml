@@ -1,3 +1,11 @@
+# =============================================================================
+# ⚠️  REFERENCE ONLY — NOT the tier-1 install path.
+# James's original edge Helm chart, kept for comparison. install.sh renders
+# manifests/02-edge/*.yaml.tpl and never uses this chart. Values here reflect the
+# OLDER design (xnat-ingest 0.9.1, sort/associate pods, Samba, Orthanc via
+# NodePort 30042/30842). The live tier-1 pipeline uses upstream group-orthanc +
+# assign, Orthanc DICOM on hostPort 4242, and no Samba. See helm/edge/README.md.
+# =============================================================================
 namespace: ais-edge
 
 # Name for the PV and PVC. Override if running multiple releases in the same cluster.

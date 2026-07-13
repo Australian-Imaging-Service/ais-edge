@@ -163,8 +163,9 @@ end
 function OnStableStudy(studyId, tags, metadata)
   -- Fires StableAge seconds after the last instance arrives. By now
   -- OnStoredInstance has run for every instance; the study contains only
-  -- deid'd copies. Label idempotently so sort picks it up (filters
-  -- --orthanc-label xnat-ingest-ready and --orthanc-skip-label xnat-ingest-skip).
+  -- deid'd copies. Label idempotently so group-orthanc picks it up (via
+  -- --to-process-label xnat-ingest-ready; it sets --processed-label
+  -- xnat-ingest-processed after pulling so later cycles skip the study).
   RestApiPut("/studies/" .. studyId .. "/labels/xnat-ingest-ready", "")
 
   print(DumpJson({

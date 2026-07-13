@@ -3,8 +3,9 @@
 # Tier-1 (single-node) edge ingest — installer
 # =============================================================================
 # One machine runs the whole pipeline:
-#   modality --C-STORE--> Orthanc (deid) --> xnat-ingest sort --> xnat-ingest
-#   upload --> XNAT (HTTPS). No SeaweedFS, no k0smotron, no separate worker.
+#   modality --C-STORE--> Orthanc (deid) --> xnat-ingest group-orthanc -->
+#   xnat-ingest assign --> xnat-ingest upload --> XNAT (HTTPS). No SeaweedFS,
+#   no k0smotron, no separate worker.
 #   Observability (Loki/Prometheus/Grafana/Alertmanager/Vector) runs locally.
 #
 # Only edit config/management.env — never edit scripts.
@@ -58,7 +59,7 @@ cat <<EOF
  Steps:
    01.  Install/verify single-node k0s (+ local-path storage)
    07c. Deploy Orthanc DICOM receiver + deid hook
-   07.  Deploy xnat-ingest sort (Orthanc REST-pull)
+   07.  Deploy xnat-ingest group-orthanc + assign (Orthanc REST-pull -> staging)
    04.  Deploy xnat-ingest upload (local staging -> XNAT)
    02d. Observability (skipped automatically if ALERT_EMAIL_TO is empty)
 ============================================
@@ -75,7 +76,7 @@ run_step() {
 
 run_step "Step 01: single-node k0s"        01-install-k0s.sh
 run_step "Step 07c: Orthanc + deid hook"   07c-deploy-edge-orthanc.sh
-run_step "Step 07: xnat-ingest sort"       07-deploy-edge-ingest.sh
+run_step "Step 07: xnat-ingest group+assign" 07-deploy-edge-ingest.sh
 run_step "Step 04: xnat-ingest upload"     04-deploy-xnat-upload.sh
 run_step "Step 02d: observability"         02d-install-observability.sh
 
@@ -90,7 +91,8 @@ cat <<EOF
 
  Logs:
    Orthanc:      kubectl logs -n xnat-ingest deploy/orthanc -f
-   Sort:         kubectl logs -n xnat-ingest -l component=sort -f
+   Group:        kubectl logs -n xnat-ingest -l component=group -f
+   Assign:       kubectl logs -n xnat-ingest -l component=assign -f
    Upload:       kubectl logs -n xnat-upload -l component=upload -f
 EOF
 [ -n "${ALERT_EMAIL_TO:-}" ] && \

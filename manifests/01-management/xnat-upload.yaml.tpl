@@ -15,7 +15,7 @@ stringData:
   password: "{{XNAT_PASS}}"
 ---
 # TIER-1 (single node): the upload pod reads the LOCAL staging directory that
-# xnat-ingest sort writes to on this same machine (host /data/xnat-ingest,
+# xnat-ingest assign writes to on this same machine (host /data/xnat-ingest,
 # mounted at /data, so /data/staging == host /data/xnat-ingest/staging) and
 # uploads sessions to XNAT over HTTPS. There is NO SeaweedFS / S3 hop anymore:
 # no s3:// source, no S3 credentials, no AWS_ENDPOINT_URL. xnat-ingest upload
@@ -48,7 +48,7 @@ spec:
           image: {{XNAT_INGEST_IMAGE}}
           command: ["xnat-ingest", "upload"]
           args:
-            - "/data/staging"          # LOCAL source dir written by sort (was s3://.../staged)
+            - "/data/staging"          # LOCAL source dir written by assign (was s3://.../staged)
             - "$(XINGEST_HOST)"
             - "--always-include"
             - "all"
@@ -77,9 +77,9 @@ spec:
             - name: AIS_LOG_FORMAT
               value: "json"
           volumeMounts:
-            # Same host dir sort writes to. /data/staging in-container ==
+            # Same host dir assign writes to. /data/staging in-container ==
             # host /data/xnat-ingest/staging. Must be byte-identical to the
-            # sort pod's mount or upload reads an empty dir.
+            # assign pod's mount or upload reads an empty dir.
             - name: data
               mountPath: /data
       volumes:

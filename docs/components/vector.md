@@ -10,8 +10,9 @@ it is the **log shipper**: it tails kubelet pod-log files and pushes them to Lok
 ## Role in this stack
 
 A single **DaemonSet** in the `observability` namespace (one pod on the single
-node). It tails every pod's stdout — Orthanc, `xnat-ingest sort`, the upload pod,
-and the kube-system / observability components — and pushes the lines to the
+node). It tails every pod's stdout — Orthanc, `xnat-ingest group-orthanc`,
+`xnat-ingest assign`, the upload pod, and the kube-system / observability
+components — and pushes the lines to the
 in-cluster Loki Service.
 
 Before pushing, it shapes the data:

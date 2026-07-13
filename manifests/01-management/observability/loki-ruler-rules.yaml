@@ -4,10 +4,10 @@
 # These alerts evaluate LogQL queries on a schedule inside Loki and emit to
 # the kube-prometheus-stack Alertmanager (configured in loki-values.yaml.tpl
 # rulerConfig.alertmanager_url). They cover the pipeline events emitted by the
-# Orthanc, xnat-ingest sort, and xnat-ingest upload pods.
+# Orthanc, xnat-ingest group-orthanc/assign, and xnat-ingest upload pods.
 #
 # TIER-1 (single node): the pipeline is
-#   Orthanc (deid) -> xnat-ingest sort -> xnat-ingest upload -> XNAT (HTTPS).
+#   Orthanc (deid) -> xnat-ingest group-orthanc -> assign -> upload -> XNAT (HTTPS).
 # There is NO S3 hop and NO s3-uploader stage anymore, so rules that used to
 # key on the deleted s3-uploader component's events (upload_started /
 # upload_completed to SeaweedFS, mc-alias failures) have been retargeted onto
@@ -88,10 +88,10 @@ data:
               description: "xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n xnat-upload -l component=upload` for the actual error."
 
           - alert: SessionUploadStalled
-            # Retargeted for the single-node pipeline: sort staged a session
-            # (component=sort emits a `session` field in its JSON logs) but the
+            # Retargeted for the single-node pipeline: assign staged a session
+            # (component=assign emits a `session` field in its JSON logs) but the
             # upload pod produced NO successful XNAT upload for that session in
-            # the same 15-min window. Detects a session parked between the sort
+            # the same 15-min window. Detects a session parked between the assign
             # and upload stages — slow network, large session, or stuck retry.
             expr: |
               (sum by (cluster, session) (count_over_time(
@@ -107,12 +107,12 @@ data:
               source: loki-ruler
             annotations:
               summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been parked for 15+ minutes"
-              description: "sort staged this session but upload did not confirm it to XNAT within the expected window. Could be a slow network, large session, or stuck retry. Check `kubectl logs -n xnat-upload -l component=upload`."
+              description: "assign staged this session but upload did not confirm it to XNAT within the expected window. Could be a slow network, large session, or stuck retry. Check `kubectl logs -n xnat-upload -l component=upload`."
 
           - alert: XNATBacklogGrowing
-            # Sessions being staged by sort faster than the upload pod pushes
+            # Sessions being staged by assign faster than the upload pod pushes
             # them to XNAT. Retargeted for the single-node pipeline: staging
-            # rate (component=sort, per-session log lines) minus successful
+            # rate (component=assign, per-session log lines) minus successful
             # XNAT uploads over the same window.
             expr: |
               (sum(count_over_time(
@@ -225,8 +225,8 @@ data:
                 the deidentification-profile.json for syntax issues.
 
           - alert: OrthancStorageGrowing
-            # Orthanc accepts C-STOREs into local storage before deid + sort
-            # pulls them out. If staging fills up faster than sort drains
+            # Orthanc accepts C-STOREs into local storage before deid + group-orthanc
+            # pulls them out. If staging fills up faster than group-orthanc drains
             # it, the edge will OOM. >1k stored instances accumulated over
             # the last hour is a useful early-warning threshold; tune per
             # site volume.
@@ -243,5 +243,5 @@ data:
               summary: "Orthanc received >1k instances on {{ $labels.cluster }} in the last hour"
               description: |
                 Either a real ingest spike (legitimate, may need to scale
-                edge storage) or sort isn't draining Orthanc. Check the
-                sort pod's REST-pull loop and Orthanc's storage PVC size.
+                edge storage) or group-orthanc isn't draining Orthanc. Check the
+                group-orthanc pod's REST-pull loop and Orthanc's storage PVC size.

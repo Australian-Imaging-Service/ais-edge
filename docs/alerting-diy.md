@@ -30,8 +30,8 @@ Is the thing you want to alert on …
   │  kubelet_volume_stats_*, etc.)
   │     → Prometheus rule. See "Prometheus rules" below.
   │
-  ├─ a JSON log line emitted by xnat-ingest sort / upload / Orthanc /
-  │  kube-prometheus components?
+  ├─ a JSON log line emitted by xnat-ingest group-orthanc / assign / upload /
+  │  Orthanc / kube-prometheus components?
   │     → Loki ruler rule. See "Loki ruler rules" below.
   │
   └─ raw text emitted somewhere?
@@ -95,7 +95,7 @@ this setup the high-value labels are:
 |---|---|---|
 | `namespace` | `xnat-ingest`, `xnat-upload`, `observability`, `kube-system` | Coarse-grained filter |
 | `app` | `xnat-ingest`, `orthanc`, `prometheus`, … | Single-service filter |
-| `component` | `sort`, `upload`, `dicom-receiver` | Distinguish pods within the same app |
+| `component` | `group`, `assign`, `upload`, `dicom-receiver` | Distinguish pods within the same app |
 | `cluster` | `mgmt` | Single node — one value |
 | `level` | `INFO`, `WARN`, `ERROR` | Severity filter (only set on JSON-formatted logs) |
 
@@ -114,8 +114,8 @@ count_over_time({namespace="xnat-upload", component="upload"}
 {namespace="xnat-upload"} |~ "(?i)\\b401\\b"
 ```
 
-JSON parsing: our event-shaped logs (sort, upload, kube-prometheus operator,
-etc.) all use `level`, `logger`, `message` / `event` keys. `| json` extracts
+JSON parsing: our event-shaped logs (group, assign, upload, kube-prometheus
+operator, etc.) all use `level`, `logger`, `message` / `event` keys. `| json` extracts
 every JSON field as a label you can match on. Raw text logs use `|~ "regex"`
 instead.
 
