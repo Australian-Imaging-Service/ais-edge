@@ -1,0 +1,12 @@
+{{- if .Values.xnatIngest.fsIngest.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fs-pipeline-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  fs-pipeline.sh: |
+    {{- .Files.Get "files/fs-pipeline.sh" | nindent 4 }}
+{{- end }}

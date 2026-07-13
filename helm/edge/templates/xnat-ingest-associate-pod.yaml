@@ -11,6 +11,8 @@ spec:
     image: {{ .Values.xnatIngest.image }}
     imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
     env:
+    - name: XINGEST_DELETE
+      value: {{ .Values.xnatIngest.delete | quote }}
     - name: XINGEST_DATATYPES
       value: {{ .Values.xnatIngest.associate.datatypes | quote }}
     - name: XINGEST_COPY_MODE

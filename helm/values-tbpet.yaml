@@ -44,36 +44,33 @@ samba:
 # Maps DICOM tags to XNAT fields. Change only if your scanners use different tags.
 
 xnatIngest:
-  # ── TESTING timers — restore to 1800/300/1800 for production ───────────────
-  sort:
-    settleSeconds: 60    # dir quiet for this long before sort runs
-    pollSeconds: 30      # how often the watcher checks
-    waitPeriod: "60"     # per-session: skip sessions modified in the last N secs
-
   dicomTagMapping:
     project: PatientComments
     subject: PatientID
-    visit: AccessionNumber
-    session: StudyInstanceUID
+    sessionLabel: AccessionNumber
+    sessionUid: StudyInstanceUID
+    scanDesc: SeriesDescription
 
-  # ── Windows sort pod ────────────────────────────────────────────────────────
-  # Watches RAW-DATA-EXPORT within the usyd-export share, which is already
-  # accessible inside the pod via the existing PVC at /data/usyd-export/.
-  sortWindows:
-    enabled: true
-    watchDir: /data/usyd-export/TMP/RAW-DATA-EXPORT
-    # TESTING timers — restore to 1800/300/1800 for production
-    settleSeconds: 60
-    pollSeconds: 30
-    waitPeriod: "60"
-    # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl)
+  # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
+  orthancIngest:
+    interval: 60          # TESTING — restore to 300 for production
+
+  # Pipeline B: Windows RAW-DATA-EXPORT -> /data/grouped-fs -> /data/assigned
+  fsIngest:
+    enabled: false   # TESTING — re-enable once one-file manual test passes
+    interval: 60          # TESTING — restore to 300 for production
+    inputGlob: "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
+    # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl).
+    # Mounted read-only in the ingest-fs and upload pods.
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
-    # Symlink into /data/sorted instead of copying. Requires the export PVC to
-    # also be mounted in the upload pod (handled by the chart when exportClaim
-    # is set).
+    waitPeriod: 60        # TESTING — restore to 1800 for production
     copyMode: symlink_or_copy
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
+
+  upload:
+    loop: 60              # TESTING — restore to 300 for production
+    waitPeriod: 60
 
 # ── Storage class ─────────────────────────────────────────────────────────────
 # Set create: false if "hostpath-pipeline" already exists on the cluster

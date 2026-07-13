@@ -62,51 +62,53 @@ samba:
       memory: "512Mi"
       cpu: "500m"
 
-# xnat-ingest settings. shared across sort, upload, and associate pods
+# xnat-ingest settings. shared across the pipeline, upload, and associate pods
 xnatIngest:
-  image: ghcr.io/australian-imaging-service/xnat-ingest:0.11.0
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.12.3
   imagePullPolicy: IfNotPresent
   delete: "0"               # do not delete source files after processing
   deidentify: "0"           # do not deidentify data
   spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
 
-  # DICOM tag > XNAT field mapping, shared by all three pods
+  # DICOM tag > XNAT field mapping
   dicomTagMapping:
-    project: StudyDescription   # DICOM StudyDescription: XNAT project ID
-    subject: PatientName        # DICOM PatientName: XNAT subject ID
-    visit: PatientID            # DICOM PatientID: XNAT visit/session label
-    session: StudyInstanceUID   # DICOM StudyInstanceUID: unique session identifier
+    project: StudyDescription        # XNAT project ID 
+    subject: PatientName             # XNAT subject ID 
+    sessionLabel: PatientID          # XNAT session label
+    sessionUid: StudyInstanceUID     # groups files into sessions (used by group)
+    scanDesc: SeriesDescription      # scan description
 
-  sort:
-    datatypes: "medimage/dicom-series"
+  # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
+  # group-orthanc and assign run sequentially in one pod (group-orthanc is not atomic)
+  orthancIngest:
+    interval: 300                   # seconds between pipeline cycles
+    processedLabel: "xnat-sorted"   # label applied to Orthanc studies after processing
     copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort.log"
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc.log"
+
+  # Pipeline B: filesystem drop dir -> /data/grouped-fs -> /data/assigned
+  fsIngest:
+    enabled: false
+    interval: 300                   # seconds between pipeline cycles
+    inputGlob: ""                   # source glob for dropped files
+    exportClaim: ""                 # PVC holding an external export share; mounted read-only if set
+    exportMountPath: /data/usyd-export
+    waitPeriod: 60                  # skip files modified within this window (seconds)
+    datatypes: "medimage/dicom-series" 
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs.log"
 
   upload:
-    alwaysInclude: "medimage/dicom-series"
+    alwaysInclude: "all"
     verifySsl: "1"
     useCurlJsession: "0"
-    requireManifest: "1"
-    loop: "-1"
+    requireManifest: "0"
+    loop: 300             # poll interval (seconds)
+    waitPeriod: 60        # skip sessions assign is still writing (seconds)
     tempdir: /data/tmp
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
-    settleSeconds: 600   # wait this long after last sorted file before uploading
-    pollSeconds: 300     # check interval for the upload watcher
-    dryRun: "0"          # "1" = go through the motions without uploading to XNAT
 
   associate:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
-
-  # Second sort pod that watches a Windows machine directory mounted onto the VM node.
-  sortWindows:
-    enabled: false
-    watchDir: ""              # path inside the pod to watch for incoming files
-    exportClaim: ""           # PVC holding the exported data; mounted read-only if set
-    exportMountPath: /data/usyd-export
-    settleSeconds: 1800
-    pollSeconds: 300
-    datatypes: "medimage/dicom-series"
-    copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort-windows.log"

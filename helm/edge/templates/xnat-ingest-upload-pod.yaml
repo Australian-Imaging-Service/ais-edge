@@ -25,14 +25,9 @@ spec:
       value: {{ .Values.xnatIngest.upload.tempdir | quote }}
     - name: XINGEST_LOGGERS
       value: {{ .Values.xnatIngest.upload.loggers | quote }}
-    - name: UPLOAD_SETTLE_SECONDS
-      value: {{ .Values.xnatIngest.upload.settleSeconds | default 600 | quote }}
-    - name: UPLOAD_POLL_SECONDS
-      value: {{ .Values.xnatIngest.upload.pollSeconds | default 300 | quote }}
-    - name: XINGEST_DRY_RUN
-      value: {{ .Values.xnatIngest.upload.dryRun | default "0" | quote }}
+    - name: XINGEST_WAIT_PERIOD
+      value: {{ .Values.xnatIngest.upload.waitPeriod | default 300 | quote }}
     {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
-    {{- include "edge.dicomTagEnv" . | nindent 4 }}
     # XNAT credentials, injected from secret
     # Create with: kubectl create secret generic xnat-credentials --from-literal=server=... --from-literal=username=... --from-literal=password=...
     - name: XINGEST_SERVER
@@ -59,9 +54,9 @@ spec:
       mountPath: /data
     - name: scripts
       mountPath: /scripts
-    {{- if and .Values.xnatIngest.sortWindows.enabled .Values.xnatIngest.sortWindows.exportClaim }}
+    {{- if and .Values.xnatIngest.fsIngest.enabled .Values.xnatIngest.fsIngest.exportClaim }}
     - name: export
-      mountPath: {{ .Values.xnatIngest.sortWindows.exportMountPath }}
+      mountPath: {{ .Values.xnatIngest.fsIngest.exportMountPath }}
       readOnly: true
     {{- end }}
   volumes:
@@ -72,9 +67,9 @@ spec:
     configMap:
       name: upload-script
       defaultMode: 0755
-  {{- if and .Values.xnatIngest.sortWindows.enabled .Values.xnatIngest.sortWindows.exportClaim }}
+  {{- if and .Values.xnatIngest.fsIngest.enabled .Values.xnatIngest.fsIngest.exportClaim }}
   - name: export
     persistentVolumeClaim:
-      claimName: {{ .Values.xnatIngest.sortWindows.exportClaim }}
+      claimName: {{ .Values.xnatIngest.fsIngest.exportClaim }}
       readOnly: true
   {{- end }}
