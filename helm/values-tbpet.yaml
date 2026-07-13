@@ -57,7 +57,7 @@ xnatIngest:
 
   # Pipeline B: Windows RAW-DATA-EXPORT -> /data/grouped-fs -> /data/assigned
   fsIngest:
-    enabled: false   # TESTING — re-enable once one-file manual test passes
+    enabled: true
     interval: 60          # TESTING — restore to 300 for production
     inputGlob: "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
     # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl).
