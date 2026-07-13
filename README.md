@@ -438,7 +438,7 @@ rm kubeconfig-edge-uqcai join-token-edge-uqcai
 | SeaweedFS | 3.99 | `chrislusf/seaweedfs:3.99` (last 3.x stable, avoids 4.18/4.19 filer memory regression — issue #9035). ClusterIP only; external access via Ingress. |
 | MinIO Client (mc) | latest | `minio/mc:latest` — vendor-neutral S3 client used by edge s3-uploader. Trusts `ais-edge-ca` via mounted ca-bundle Secret. |
 | Orthanc | 1.12.6 (plugins) | `jodogne/orthanc-plugins:1.12.6` — DICOM SCP on edge port 4242. Needs ≥ 1.12.0 for study-level labels. |
-| xnat-ingest | 0.12.1 | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` — merged-upstream AIS build (JSON logs + Orthanc REST-pull upstream). Edge staging split into `group-orthanc` + `assign`. |
+| xnat-ingest | 0.12.3 | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` — merged-upstream AIS build (JSON logs + Orthanc REST-pull upstream). Edge staging split into `group-orthanc` + `assign`. |
 | local-path-provisioner | v0.0.30 | Default StorageClass for etcd PVCs |
 
 To pin specific versions in production, replace `:latest` / `:3.99` tags in the `.tpl`

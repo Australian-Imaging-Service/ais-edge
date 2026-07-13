@@ -4,7 +4,7 @@
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
 is the AIS-maintained Python tool that turns deid'd DICOMs into
-XNAT-ready sessions and uploads them. As of upstream **0.12.1** the old
+XNAT-ready sessions and uploads them. As of upstream **0.12.3** the old
 single `sort` command was split into two edge stages:
 1. **`group-orthanc`** — REST-pulls deid'd studies from Orthanc and
    groups their DICOMs into per-session directories
@@ -18,7 +18,7 @@ We run these as three pods:
 - **`xnat-ingest upload`** on the management node
 
 > **De-identification is done in Orthanc** (the Lua hook), not in
-> xnat-ingest. Upstream 0.12.1 also ships a standalone, optional
+> xnat-ingest. Upstream 0.12.3 also ships a standalone, optional
 > `deidentify` command (project-specific JSON specs + reversible
 > re-identification metadata) — this deployment does **not** use it.
 
@@ -55,12 +55,12 @@ upload pod pulls from SeaweedFS (an `s3://` source) and pushes to XNAT.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `xnat-ingest-group` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
-| `xnat-ingest-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
+| `xnat-ingest-group` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `xnat-ingest-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
 | `s3-uploader` | edge | `xnat-ingest` | `minio/mc:latest` (NOT xnat-ingest) |
-| `xnat-ingest-upload` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.1` |
+| `xnat-ingest-upload` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
 
-The `0.12.1` tag is the **merged-upstream** AIS build pulled from
+The `0.12.3` tag is the **merged-upstream** AIS build pulled from
 `ghcr.io/australian-imaging-service/xnat-ingest` — it replaces the earlier
 local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
