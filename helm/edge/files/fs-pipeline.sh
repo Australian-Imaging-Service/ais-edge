@@ -35,14 +35,26 @@ while true; do
         "${datatype_args[@]}" \
         --wait-period "$WAIT_PERIOD" \
         --copy-mode "$COPY_MODE"; then
-      xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
-        --project "$PROJECT_FIELD" \
-        --subject "$SUBJECT_FIELD" \
-        --session "$SESSION_FIELD" \
-        --scan "$SCAN_FIELD" \
-        --copy-mode "$COPY_MODE" \
-        --unlink-source all \
-        || log "assign failed for $study — will retry next cycle"
+      if xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
+          --project "$PROJECT_FIELD" \
+          --subject "$SUBJECT_FIELD" \
+          --session "$SESSION_FIELD" \
+          --scan "$SCAN_FIELD" \
+          --copy-mode "$COPY_MODE"; then
+        # Flatten: rewrite symlinks that point into grouped-fs to their final
+        # resolved target (the real NFS file), while the chain is still intact.
+        find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | while IFS= read -r lnk; do
+          tgt=$(readlink -f "$lnk")
+          if [[ -n "$tgt" && -e "$tgt" ]]; then
+            ln -sfn "$tgt" "$lnk"
+          else
+            log "WARNING: could not resolve $lnk — leaving untouched"
+          fi
+        done
+        rm -rf "$GROUPED_DIR"/* 2>/dev/null
+      else
+        log "assign failed for $study — will retry next cycle"
+      fi
     else
       log "group failed for $study — skipping assign"
     fi
