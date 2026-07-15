@@ -40,7 +40,7 @@ three are gitignored once copied, so secrets never end up in version control.
 
 | File (after copy) | What to set | Source |
 |---|---|---|
-| `config/management.env` | `MGMT_NODE_IP`, XNAT URL/user/pass, `PROJECT_ID`, `AIS_DEID_HMAC_SALT`, optional observability vars | `management.env.template` |
+| `config/management.env` | `MGMT_NODE_IP`, XNAT URL/user/pass, `AIS_DEID_HMAC_SALT`, optional observability vars | `management.env.template` |
 | `config/orthanc/routing.json` | `AETMap` — each modality's Called-AET → XNAT project | `routing.json.template` |
 | `config/orthanc/deidentification-profile.json` | Replace / Keep blocks per Orthanc `/modify` API — the deid contract for this site. Applied to every accepted study | `deidentification-profile.json.template` |
 
@@ -160,9 +160,9 @@ NodePort for the local admin).
          ▼
 4. xnat-ingest assign (ID assignment)
    - Reads /data/grouped every INGEST_LOOP_SECONDS
-   - Derives XNAT project/subject/session IDs from the (deid'd) DICOM metadata
-     (project forced via --constant-project-id; subject=PatientID,
-     session=AccessionNumber)
+   - Derives XNAT project/subject/session IDs from the DICOM clinical-trial tags
+     the Orthanc hook writes (project=ClinicalTrialProtocolID from routing.json's
+     AETMap, subject=ClinicalTrialSubjectID, session=ClinicalTrialTimePointID)
    - Collates each study into /data/staging/PROJECT.SUBJECT.SESSION/
          │
          ▼
@@ -273,8 +273,10 @@ and the node must have `/data` available.
 Before ingesting data, ensure:
 
 1. **The XNAT project exists** — create it in the XNAT web UI first. Its ID must
-   match both `PROJECT_ID` in `config/management.env` and the `project` value in
-   `routing.json`'s AETMap. The Lua hook does not create the project.
+   match the `project` value in `routing.json`'s AETMap (the single source of the
+   destination project). The Lua hook does not create the project. Use IDs in
+   `[A-Za-z0-9_]` only — xnat-ingest normalises other characters (e.g. a hyphen)
+   to `_`, so `test-project` would become `test_project`.
 2. **The XNAT user is a local account** — not AAF/OIDC. Create via
    Administer → Users.
 3. **The XNAT user has project permissions** — at least Member or Collaborator on

@@ -35,10 +35,11 @@ The DICOM ingest engine downstream of Orthanc.
   grouped studies under `/data/grouped`. Same filesystem ⇒ hardlink, not copy. It
   then labels the study `xnat-ingest-processed` so later cycles skip it.
 - **assign** reads `/data/grouped`, derives the XNAT project/subject/session IDs
-  from the (deid'd) DICOM metadata, and collates each study into
-  `/data/staging/<project>.<subject>.<session>/`. Project is forced with
-  `--constant-project-id`; subject/session default to PatientID/AccessionNumber —
-  exactly the fields the Orthanc deid hook writes.
+  from the DICOM clinical-trial tags the Orthanc deid hook writes, and collates
+  each study into `/data/staging/<project>.<subject>.<session>/`. Project comes
+  from `ClinicalTrialProtocolID` (= the `routing.json` AETMap entry for the
+  sending AET), subject from `ClinicalTrialSubjectID`, session from
+  `ClinicalTrialTimePointID` — no hardcoded project constant.
 - **upload** reads that same `/data/staging` directory (all pods mount the host
   dir `/data/xnat-ingest` at `/data`) and pushes each session to XNAT over HTTPS.
 
@@ -87,7 +88,7 @@ to pin or bump the version.
 | `manifests/02-edge/xnat-ingest.yaml.tpl` | group + assign Deployments (Orthanc REST-pull → staging) |
 | `scripts/04-deploy-xnat-upload.sh` | apply upload Deployment |
 | `scripts/07-deploy-edge-ingest.sh` | apply group + assign Deployments |
-| `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS`, `PROJECT_ID`, `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD`, `XNAT_INGEST_IMAGE` |
+| `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS`, `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD`, `XNAT_INGEST_IMAGE` (project comes from `routing.json`) |
 
 ### group-orthanc arguments
 
@@ -107,15 +108,19 @@ xnat-ingest group-orthanc \
 
 ```
 xnat-ingest assign \
-  /data/grouped                        # input: group-orthanc output
-  /data/staging                        # output: upload reads this
-  --constant-project-id  ${PROJECT_ID} # force the XNAT project
-  --loop                 ${INGEST_LOOP_SECONDS}
+  /data/grouped                          # input: group-orthanc output
+  /data/staging                          # output: upload reads this
+  --project  ClinicalTrialProtocolID     # project from the deid-written tag
+  --subject  ClinicalTrialSubjectID      # subject hash
+  --session  ClinicalTrialTimePointID    # session hash
+  --loop     ${INGEST_LOOP_SECONDS}
 ```
 
-`assign` defaults subject to PatientID and session to AccessionNumber — exactly
-the fields the Orthanc deid hook writes (SubjectHash → PatientID, SessionHash →
-AccessionNumber).
+The `ClinicalTrial*` tags are written by the Orthanc deid hook
+(`ClinicalTrialProtocolID` = project, `ClinicalTrialSubjectID` = SubjectHash,
+`ClinicalTrialTimePointID` = SessionHash), so `assign` reads them directly — the
+project comes from `routing.json`, not a config constant. IDs are normalised to
+`[A-Za-z0-9_]`, so keep XNAT project IDs in that set (a hyphen becomes `_`).
 
 ### upload arguments
 
