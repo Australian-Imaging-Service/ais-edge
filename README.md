@@ -233,9 +233,9 @@ inbound ports from the internet or management network.
         into /data/grouped/<session>/ (same filesystem — hardlink, not copy)
       - PUTs label "xnat-ingest-processed" on the study
    b. assign
-      - Extracts XNAT IDs from the grouped DICOMs
-        (--constant-project-id PROJECT_ID; defaults subject=PatientID,
-        session=AccessionNumber, scan=SeriesDescription)
+      - Extracts XNAT IDs from the grouped DICOMs' clinical-trial tags
+        (project=ClinicalTrialProtocolID from routing.json's AETMap,
+        subject=ClinicalTrialSubjectID, session=ClinicalTrialTimePointID)
       - Collates into /data/staging/PROJECT.SUBJECT.VISIT/<scan>/DICOM/
          │
          ▼
@@ -666,7 +666,9 @@ internal architecture changes; the external API does not.
 Before ingesting data, ensure:
 
 1. **XNAT project exists** — create it in the XNAT web UI before uploading.
-   The project ID must match `PROJECT_ID` in `config/edge-nodes.env`.
+   The project ID must match the `project` value in `config/orthanc/routing.json`'s
+   AETMap (the single source of the destination project). Use IDs in `[A-Za-z0-9_]`
+   only — xnat-ingest normalises other characters (e.g. a hyphen) to `_`.
 2. **XNAT user is a local account** — not AAF/OIDC. Create via Administer → Users.
 3. **XNAT user has project permissions** — at least Member or Collaborator on the target project.
 

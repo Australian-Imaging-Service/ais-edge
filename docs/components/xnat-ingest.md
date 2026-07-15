@@ -78,7 +78,7 @@ and each edge worker. Override `XNAT_INGEST_IMAGE` in
 | `scripts/04-deploy-xnat-upload.sh` | apply mgmt-side Deployment |
 | `scripts/07-deploy-edge-ingest.sh` | apply edge-side Deployments + push CA bundle |
 | `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS` |
-| `config/edge-nodes.env` | per-edge `PROJECT_ID`, `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD` |
+| `config/edge-nodes.env` | per-edge `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD` (destination project comes from `config/orthanc/routing.json`) |
 
 Important env vars on each pod:
 - `AIS_LOG_FORMAT=json` — enable JSON structured log output (now
