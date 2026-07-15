@@ -79,10 +79,13 @@ spec:
             type: DirectoryOrCreate
 ---
 # assign: extract project/subject/session IDs from the (deid'd) DICOM metadata
-# and collate into /data/staging. Defaults: subject=PatientID,
-# session=AccessionNumber, scan=SeriesDescription — which is exactly what the
-# Orthanc deid hook writes (subject hash -> PatientID, session hash ->
-# AccessionNumber). Project is forced with --constant-project-id.
+# and collate into /data/staging. They are read from the standard DICOM
+# clinical-trial tags the Orthanc deid hook writes:
+#   ClinicalTrialProtocolID   = project (from routing.json AETMap[AET].project)
+#   ClinicalTrialSubjectID    = subject hash
+#   ClinicalTrialTimePointID  = session hash
+# No project constant — routing.json's AET->project map is the single source of
+# truth (assign normalises IDs to [A-Za-z0-9_]; keep XNAT project IDs in that set).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -112,8 +115,12 @@ spec:
           args:
             - "/data/grouped"        # INPUT_DIR (group-orthanc output)
             - "/data/staging"        # OUTPUT_DIR (upload reads this)
-            - "--constant-project-id"
-            - "{{PROJECT_ID}}"
+            - "--project"            # derive project from the deid-written tag
+            - "ClinicalTrialProtocolID"
+            - "--subject"            # derive subject from the deid-written tag
+            - "ClinicalTrialSubjectID"
+            - "--session"            # derive session from the deid-written tag
+            - "ClinicalTrialTimePointID"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
           env:

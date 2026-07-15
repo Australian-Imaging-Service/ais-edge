@@ -30,7 +30,7 @@ confirm() {
 }
 
 # --- Validate required config ---
-for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS PROJECT_ID AIS_DEID_HMAC_SALT; do
+for var in MGMT_NODE_IP XNAT_URL XNAT_USER XNAT_PASS AIS_DEID_HMAC_SALT; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: ${var} is not set in config/management.env"
         [ "$var" = "AIS_DEID_HMAC_SALT" ] && echo "       Generate one with: openssl rand -hex 32"
@@ -53,7 +53,7 @@ cat <<EOF
 ============================================
  Node:           ${MGMT_NODE_IP}
  Install mode:   ${INSTALL_MODE}
- XNAT target:    ${XNAT_URL}   (project: ${PROJECT_ID})
+ XNAT target:    ${XNAT_URL}   (projects via routing.json)
  Observability:  ${obs}
 
  Steps:

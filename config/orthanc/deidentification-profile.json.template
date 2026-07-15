@@ -18,6 +18,9 @@
     "PatientBirthDate": "${BirthYearOnly}0101",
     "AccessionNumber": "${SessionHash}",
     "StudyID": "${SessionHash}",
+    "ClinicalTrialProtocolID": "${ProjectCode}",
+    "ClinicalTrialSubjectID": "${SubjectHash}",
+    "ClinicalTrialTimePointID": "${SessionHash}",
     "InstitutionName": "AIS",
 
     "InstitutionAddress": "",

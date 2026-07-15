@@ -20,7 +20,6 @@ echo "Staging dirs ready: /data/xnat-ingest/{grouped,staging}"
 kubectl create namespace xnat-ingest --dry-run=client -o yaml | kubectl apply -f -
 
 render "${REPO_DIR}/manifests/02-edge/xnat-ingest.yaml.tpl" \
-    PROJECT_ID "$PROJECT_ID" \
     INGEST_LOOP_SECONDS "${INGEST_LOOP_SECONDS:-60}" \
     INGEST_WAIT_PERIOD "${INGEST_WAIT_PERIOD:-60}" \
     XNAT_INGEST_IMAGE "${XNAT_INGEST_IMAGE:-ghcr.io/australian-imaging-service/xnat-ingest:latest}" \
