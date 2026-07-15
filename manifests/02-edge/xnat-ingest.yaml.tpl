@@ -77,9 +77,12 @@ spec:
             path: /data/xnat-ingest
             type: DirectoryOrCreate
 ---
-# assign: extract project/subject/session IDs (defaults subject=PatientID,
-# session=AccessionNumber, scan=SeriesDescription match the Orthanc deid
-# output) and collate into /data/staging for the s3-uploader.
+# assign: extract project/subject/session IDs from the standard DICOM
+# clinical-trial tags the Orthanc deid hook writes (ClinicalTrialProtocolID =
+# project from routing.json AETMap, ClinicalTrialSubjectID/TimePointID hashes)
+# and collate into /data/staging for the s3-uploader. No project constant —
+# routing.json's AET->project map is the single source of truth (assign
+# normalises IDs to [A-Za-z0-9_]; keep XNAT project IDs in that set).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -109,8 +112,12 @@ spec:
           args:
             - "/data/grouped"
             - "/data/staging"
-            - "--constant-project-id"
-            - "{{PROJECT_ID}}"
+            - "--project"
+            - "ClinicalTrialProtocolID"
+            - "--subject"
+            - "ClinicalTrialSubjectID"
+            - "--session"
+            - "ClinicalTrialTimePointID"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
           env:

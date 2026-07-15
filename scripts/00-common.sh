@@ -71,7 +71,7 @@ render_with_topology() {
 # Parse an EDGE_NODES entry into variables
 parse_edge_entry() {
     local entry="$1"
-    IFS='|' read -r CLUSTER_NAME NODE_IP SSH_USER SSH_KEY PROJECT_ID EDGE_ACCESS_KEY EDGE_SECRET_KEY <<< "$entry"
+    IFS='|' read -r CLUSTER_NAME NODE_IP SSH_USER SSH_KEY EDGE_ACCESS_KEY EDGE_SECRET_KEY <<< "$entry"
     EDGE_SSH="${SSH_USER}@${NODE_IP}"
     SSH_KEY_OPT=""
     [ -n "${SSH_KEY}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"

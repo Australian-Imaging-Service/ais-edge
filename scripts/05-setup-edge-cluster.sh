@@ -9,7 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <edge-entry>"
-    echo "  edge-entry format: CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|PROJECT_ID|ACCESS_KEY|SECRET_KEY"
+    echo "  edge-entry format: CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|ACCESS_KEY|SECRET_KEY"
     exit 1
 fi
 
