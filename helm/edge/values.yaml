@@ -71,16 +71,6 @@ xnatIngest:
   deidentify: "0"           # do not deidentify data
   spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
 
-  # Applied to all xnat-ingest pods. The memory limit matters: group loads
-  # every matched file's metadata into RAM, so an oversized drop of files gets
-  # the pod OOMKilled (recoverable) instead of freezing the node.
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "8Gi"
-      cpu: "2000m"
 
   # DICOM tag > XNAT field mapping
   dicomTagMapping:
@@ -137,13 +127,6 @@ s3Sync:
   interval: 300                   # seconds between sweeps of /data/assigned
   settleMinutes: 5                # skip sessions modified within this window
   credentialsSecret: s3-credentials
-  resources:
-    requests:
-      memory: "128Mi"
-      cpu: "100m"
-    limits:
-      memory: "1Gi"
-      cpu: "1000m"
 
 # Outbound proxy env vars (HTTP_PROXY/HTTPS_PROXY/NO_PROXY and lowercase
 # variants), injected into the xnat-ingest and s3sync pods via the

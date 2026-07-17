@@ -38,8 +38,6 @@ spec:
         - secretRef:
             name: {{ .Values.s3Sync.credentialsSecret }}
         command: ["bash", "/scripts/s3sync.sh"]
-        resources:
-          {{- toYaml .Values.s3Sync.resources | nindent 10 }}
         volumeMounts:
         - name: storage
           mountPath: /data

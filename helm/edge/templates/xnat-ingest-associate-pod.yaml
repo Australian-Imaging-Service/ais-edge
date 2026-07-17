@@ -47,8 +47,6 @@ spec:
           #   --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
           #     '{PatientName}/**/*.rda' \
           #     '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
-        resources:
-          {{- toYaml .Values.xnatIngest.resources | nindent 10 }}
         volumeMounts:
         - name: storage
           mountPath: /data

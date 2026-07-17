@@ -64,8 +64,6 @@ spec:
         - configMapRef:
             name: proxy-config
         command: ["bash", "/scripts/upload.sh"]
-        resources:
-          {{- toYaml .Values.xnatIngest.resources | nindent 10 }}
         volumeMounts:
         - name: storage
           mountPath: /data
