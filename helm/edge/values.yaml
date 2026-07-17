@@ -19,6 +19,7 @@ orthanc:
   image: jodogne/orthanc-plugins:1.12.11
   imagePullPolicy: IfNotPresent
   aet: ORTHANC                          # Application Entity Title, used by scanners to address Orthanc
+  authenticationEnabled: true           # require credentials for the web UI / REST API
   dicomPort: 4242
   httpPort: 8042
   nodePorts:
@@ -70,6 +71,17 @@ xnatIngest:
   deidentify: "0"           # do not deidentify data
   spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
 
+  # Applied to all xnat-ingest pods. The memory limit matters: group loads
+  # every matched file's metadata into RAM, so an oversized drop of files gets
+  # the pod OOMKilled (recoverable) instead of freezing the node.
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "8Gi"
+      cpu: "2000m"
+
   # DICOM tag > XNAT field mapping
   dicomTagMapping:
     project: StudyDescription        # XNAT project ID 
@@ -81,6 +93,7 @@ xnatIngest:
   # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
   # group-orthanc and assign run sequentially in one pod (group-orthanc is not atomic)
   orthancIngest:
+    enabled: true
     interval: 300                   # seconds between pipeline cycles
     processedLabel: "xnat-sorted"   # label applied to Orthanc studies after processing
     copyMode: hardlink_or_copy
@@ -99,6 +112,7 @@ xnatIngest:
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs.log"
 
   upload:
+    enabled: true         # set false to hold sessions in /data/assigned without uploading
     alwaysInclude: "all"
     verifySsl: "1"
     useCurlJsession: "0"
@@ -112,3 +126,26 @@ xnatIngest:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
+
+# Syncs assigned sessions to an S3 staging bucket (s3sync pod).
+# behind a proxy, the `proxy:` map below.
+s3Sync:
+  enabled: false
+  image: amazon/aws-cli:latest
+  imagePullPolicy: IfNotPresent
+  dest: ""                        # s3://bucket/PREFIX (no trailing slash)
+  interval: 300                   # seconds between sweeps of /data/assigned
+  settleMinutes: 5                # skip sessions modified within this window
+  credentialsSecret: s3-credentials
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+# Outbound proxy env vars (HTTP_PROXY/HTTPS_PROXY/NO_PROXY and lowercase
+# variants), injected into the xnat-ingest and s3sync pods via the
+# proxy-config configmap. 
+proxy: {}

@@ -53,24 +53,40 @@ xnatIngest:
 
   # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
   orthancIngest:
-    interval: 60          # TESTING — restore to 300 for production
+    enabled: false
+    interval: 300
 
   # Pipeline B: Windows RAW-DATA-EXPORT -> /data/grouped-fs -> /data/assigned
   fsIngest:
     enabled: true
-    interval: 60          # TESTING — restore to 300 for production
+    interval: 300
     inputGlob: "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
     # NFS PV/PVC defined in helm/usyd-data-export.yaml (apply once with kubectl).
     # Mounted read-only in the ingest-fs and upload pods.
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
-    waitPeriod: 60        # TESTING — restore to 1800 for production
+    # Skip files modified within the last 30 min
+    waitPeriod: 1800
     copyMode: symlink_or_copy
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
 
   upload:
-    loop: 60              # TESTING — restore to 300 for production
+    enabled: false
+    loop: 300
     waitPeriod: 60
+
+s3Sync:
+  enabled: true
+  dest: "s3://ais-s3-tbp-s3bucket-1afz0bzdw5jd6/STAGING-202607"
+
+# Site egress goes via this proxy; pods have no proxy env without it (TBPET specific)
+proxy:
+  HTTP_PROXY: "http://10.26.16.251:7777/"
+  HTTPS_PROXY: "http://10.26.16.251:7777/"
+  http_proxy: "http://10.26.16.251:7777/"
+  https_proxy: "http://10.26.16.251:7777/"
+  NO_PROXY: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local,10.1.0.0/16,10.152.183.0/24,192.168.0.0/24"
+  no_proxy: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local,10.1.0.0/16,10.152.183.0/24,192.168.0.0/24"
 
 # ── Storage class ─────────────────────────────────────────────────────────────
 # Set create: false if "hostpath-pipeline" already exists on the cluster

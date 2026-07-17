@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Uploads assigned sessions to XNAT.
-# Loop interval and settle-time controlled by XINGEST_LOOP and XINGEST_WAIT_PERIOD
+# xnat-ingest loops internally (XINGEST_LOOP / XINGEST_WAIT_PERIOD); the bash
+# loop only restarts it if it crashes.
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [upload] $*"; }
 
 mkdir -p /data/assigned /data/tmp /data/LOGS
-log "Started"
+log "Started (server=${XINGEST_SERVER})"
 
 while true; do
-  # UPLOAD DISABLED FOR TESTING — uncomment the block below to enable
-  log "[DISABLED] would run: xnat-ingest upload /data/assigned ${XINGEST_SERVER}"
-  # xnat-ingest upload /data/assigned "$XINGEST_SERVER" \
-  #   --user "$XINGEST_USER" \
-  #   --password "$XINGEST_PASSWORD" \
-  #   --always-include "medimage/dicom-series" || log "upload exited with error — restarting in 30s"
-  sleep 300
+  xnat-ingest upload /data/assigned "$XINGEST_SERVER" \
+    --user "$XINGEST_USER" \
+    --password "$XINGEST_PASSWORD" \
+    || log "upload exited with error — restarting in 60s"
+  sleep 60
 done

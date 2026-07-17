@@ -68,6 +68,14 @@ prompt        XNAT_SERVER "XNAT server URL"
 prompt        XNAT_USER   "XNAT username"
 prompt_secret XNAT_PASS   "XNAT password"
 
+echo
+echo "=== AWS credentials for S3 staging sync (leave key ID blank to skip) ==="
+prompt        AWS_KEY_ID  "AWS access key ID" ""
+if [[ -n "$AWS_KEY_ID" ]]; then
+    prompt_secret AWS_SECRET "AWS secret access key"
+    prompt        AWS_REGION "AWS region" "ap-southeast-2"
+fi
+
 # ── namespace ─────────────────────────────────────────────────────────────────
 
 echo
@@ -108,6 +116,16 @@ kubectl create secret generic xnat-credentials \
     --from-literal="password=${XNAT_PASS}" \
     -n "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f -
+
+if [[ -n "$AWS_KEY_ID" ]]; then
+    info "Creating s3-credentials secret..."
+    kubectl create secret generic s3-credentials \
+        --from-literal="AWS_ACCESS_KEY_ID=${AWS_KEY_ID}" \
+        --from-literal="AWS_SECRET_ACCESS_KEY=${AWS_SECRET}" \
+        --from-literal="AWS_DEFAULT_REGION=${AWS_REGION}" \
+        -n "$NAMESPACE" \
+        --dry-run=client -o yaml | kubectl apply -f -
+fi
 
 # ── helm install ──────────────────────────────────────────────────────────────
 

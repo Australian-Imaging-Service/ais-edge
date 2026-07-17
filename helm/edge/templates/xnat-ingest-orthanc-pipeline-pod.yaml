@@ -1,64 +1,82 @@
-apiVersion: v1
-kind: Pod
+{{- if .Values.xnatIngest.orthancIngest.enabled }}
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: ingest-orthanc
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
-  containers:
-  - name: ingest-orthanc
-    image: {{ .Values.xnatIngest.image }}
-    imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
-    env:
-    # Orthanc connection
-    - name: ORTHANC_URL
-      value: "http://orthanc:{{ .Values.orthanc.httpPort }}"
-    - name: ORTHANC_STORE_DIR
-      value: /data/orthanc-storage
-    - name: ORTHANC_USER
-      valueFrom:
-        secretKeyRef:
-          name: orthanc-credentials
-          key: orthanc-user
-    - name: ORTHANC_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          name: orthanc-credentials
-          key: orthanc-password
-    # Orthanc label preventing re-processing of already-staged studies
-    - name: PROCESSED_LABEL
-      value: {{ .Values.xnatIngest.orthancIngest.processedLabel | quote }}
-    # ID field mapping for assign (plain DICOM field names)
-    - name: PROJECT_FIELD
-      value: {{ .Values.xnatIngest.dicomTagMapping.project | quote }}
-    - name: SUBJECT_FIELD
-      value: {{ .Values.xnatIngest.dicomTagMapping.subject | quote }}
-    - name: SESSION_FIELD
-      value: {{ .Values.xnatIngest.dicomTagMapping.sessionLabel | quote }}
-    - name: SCAN_FIELD
-      value: {{ .Values.xnatIngest.dicomTagMapping.scanDesc | quote }}
-    - name: COPY_MODE
-      value: {{ .Values.xnatIngest.orthancIngest.copyMode | quote }}
-    - name: PIPELINE_INTERVAL_SECONDS
-      value: {{ .Values.xnatIngest.orthancIngest.interval | quote }}
-    - name: XINGEST_LOGGERS
-      value: {{ .Values.xnatIngest.orthancIngest.loggers | quote }}
-    {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
-    envFrom:
-    - configMapRef:
-        name: proxy-config
-    command: ["bash", "/scripts/orthanc-pipeline.sh"]
-    volumeMounts:
-    - name: storage
-      mountPath: /data
-    - name: scripts
-      mountPath: /scripts
-  volumes:
-  - name: storage
-    persistentVolumeClaim:
-      claimName: {{ include "edge.pvcName" . }}
-  - name: scripts
-    configMap:
-      name: orthanc-pipeline-script
-      defaultMode: 0755
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ingest-orthanc
+  template:
+    metadata:
+      labels:
+        app: ingest-orthanc
+      annotations:
+        # roll the pod automatically when the pipeline script changes
+        checksum/script: {{ include (print $.Template.BasePath "/orthanc-pipeline-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - name: ingest-orthanc
+        image: {{ .Values.xnatIngest.image }}
+        imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+        env:
+        # Orthanc connection
+        - name: ORTHANC_URL
+          value: "http://orthanc:{{ .Values.orthanc.httpPort }}"
+        - name: ORTHANC_STORE_DIR
+          value: /data/orthanc-storage
+        - name: ORTHANC_USER
+          valueFrom:
+            secretKeyRef:
+              name: orthanc-credentials
+              key: orthanc-user
+        - name: ORTHANC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: orthanc-credentials
+              key: orthanc-password
+        # Orthanc label preventing re-processing of already-staged studies
+        - name: PROCESSED_LABEL
+          value: {{ .Values.xnatIngest.orthancIngest.processedLabel | quote }}
+        # ID field mapping for assign (plain DICOM field names)
+        - name: PROJECT_FIELD
+          value: {{ .Values.xnatIngest.dicomTagMapping.project | quote }}
+        - name: SUBJECT_FIELD
+          value: {{ .Values.xnatIngest.dicomTagMapping.subject | quote }}
+        - name: SESSION_FIELD
+          value: {{ .Values.xnatIngest.dicomTagMapping.sessionLabel | quote }}
+        - name: SCAN_FIELD
+          value: {{ .Values.xnatIngest.dicomTagMapping.scanDesc | quote }}
+        - name: COPY_MODE
+          value: {{ .Values.xnatIngest.orthancIngest.copyMode | quote }}
+        - name: PIPELINE_INTERVAL_SECONDS
+          value: {{ .Values.xnatIngest.orthancIngest.interval | quote }}
+        - name: XINGEST_LOGGERS
+          value: {{ .Values.xnatIngest.orthancIngest.loggers | quote }}
+        {{- include "edge.xnatIngestCommonEnv" . | nindent 8 }}
+        envFrom:
+        - configMapRef:
+            name: proxy-config
+        command: ["bash", "/scripts/orthanc-pipeline.sh"]
+        resources:
+          {{- toYaml .Values.xnatIngest.resources | nindent 10 }}
+        volumeMounts:
+        - name: storage
+          mountPath: /data
+        - name: scripts
+          mountPath: /scripts
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: {{ include "edge.pvcName" . }}
+      - name: scripts
+        configMap:
+          name: orthanc-pipeline-script
+          defaultMode: 0755
+{{- end }}

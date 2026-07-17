@@ -9,7 +9,10 @@ GROUPED_DIR=/data/grouped-fs
 ASSIGNED_DIR=/data/assigned
 INTERVAL=${PIPELINE_INTERVAL_SECONDS:-300}
 
+DONE_LIST=/data/LOGS/fs-pipeline-done.list
+
 mkdir -p "$GROUPED_DIR" "$ASSIGNED_DIR" /data/LOGS
+touch "$DONE_LIST"
 log "Started (interval=${INTERVAL}s)"
 
 # DATATYPES is a semicolon-separated list expanded to repeated --datatype args.
@@ -28,35 +31,47 @@ while true; do
     [[ -d "$study_dir" ]] || continue
     found=1
     study=$(basename "$study_dir")
+    grep -Fxq "$study" "$DONE_LIST" && continue
+
     log "Grouping study: $study"
-    if xnat-ingest group \
+    xnat-ingest group \
         "${study_dir}**/*" \
         "$GROUPED_DIR" \
         "${datatype_args[@]}" \
-        --wait-period "$WAIT_PERIOD" \
-        --copy-mode "$COPY_MODE"; then
-      if xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
-          --project "$PROJECT_FIELD" \
-          --subject "$SUBJECT_FIELD" \
-          --session "$SESSION_FIELD" \
-          --scan "$SCAN_FIELD" \
-          --copy-mode "$COPY_MODE"; then
-        # Flatten: rewrite symlinks that point into grouped-fs to their final
-        # resolved target (the real NFS file), while the chain is still intact.
-        find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | while IFS= read -r lnk; do
-          tgt=$(readlink -f "$lnk")
-          if [[ -n "$tgt" && -e "$tgt" ]]; then
-            ln -sfn "$tgt" "$lnk"
-          else
-            log "WARNING: could not resolve $lnk — leaving untouched"
-          fi
-        done
-        rm -rf "$GROUPED_DIR"/* 2>/dev/null
+        --wait-period "${WAIT_PERIOD:?}" \
+        --copy-mode "${COPY_MODE:?}"
+
+    if ! compgen -G "$GROUPED_DIR/_.*" >/dev/null; then
+      log "Nothing staged for $study (still transferring?) — will retry"
+      continue
+    fi
+
+    xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
+        --project "${PROJECT_FIELD:?}" \
+        --subject "${SUBJECT_FIELD:?}" \
+        --session "${SESSION_FIELD:?}" \
+        --scan "${SCAN_FIELD:?}" \
+        --copy-mode "$COPY_MODE"
+
+    # Assigned files are symlinks into grouped-fs, which in turn symlink to
+    # the NFS source. Flatten them to point directly at the real files while
+    # the chain is still intact, so grouped-fs can be cleared without dangling
+    # anything.
+    find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | while IFS= read -r lnk; do
+      tgt=$(readlink -f "$lnk")
+      if [[ -n "$tgt" && -e "$tgt" ]]; then
+        ln -sfn "$tgt" "$lnk"
       else
-        log "assign failed for $study — will retry next cycle"
+        log "WARNING: could not resolve $lnk — leaving untouched"
       fi
+    done
+
+    if find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | grep -q .; then
+      log "Unresolved links still point into grouped — keeping grouped for $study"
     else
-      log "group failed for $study — skipping assign"
+      rm -rf "$GROUPED_DIR"/*
+      echo "$study" >> "$DONE_LIST"
+      log "Done: $study"
     fi
   done
 
