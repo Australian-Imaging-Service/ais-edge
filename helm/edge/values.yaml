@@ -19,6 +19,7 @@ orthanc:
   image: jodogne/orthanc-plugins:1.12.11
   imagePullPolicy: IfNotPresent
   aet: ORTHANC                          # Application Entity Title, used by scanners to address Orthanc
+  authenticationEnabled: true           # require credentials for the web UI / REST API
   dicomPort: 4242
   httpPort: 8042
   nodePorts:
@@ -62,36 +63,54 @@ samba:
       memory: "512Mi"
       cpu: "500m"
 
-# xnat-ingest settings. shared across sort, upload, and associate pods
+# xnat-ingest settings. shared across the pipeline, upload, and associate pods
 xnatIngest:
-  image: ghcr.io/australian-imaging-service/xnat-ingest:0.10.0
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.12.3
   imagePullPolicy: IfNotPresent
   delete: "0"               # do not delete source files after processing
   deidentify: "0"           # do not deidentify data
   spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
 
-  # DICOM tag > XNAT field mapping, shared by all three pods
-  dicomTagMapping:
-    project: RequestedProcedureID    # DICOM RequestedProcedureID: XNAT project ID
-    subject: PatientName             # DICOM PatientName: XNAT subject ID
-    sessionLabel: PatientID          # DICOM PatientID: XNAT session label (used directly, no concatenation)
-    sessionUid: StudyInstanceUID     # DICOM StudyInstanceUID: groups files into sessions
 
-  sort:
-    settleSeconds: 1800  # seconds of no new files in orthanc-storage before sort is triggered
-    pollSeconds: 300     # how often the sort script checks for new data
+  # DICOM tag > XNAT field mapping
+  dicomTagMapping:
+    project: StudyDescription        # XNAT project ID
+    subject: PatientName             # XNAT subject ID
+    sessionLabel: PatientID          # XNAT session label
+    sessionUid: StudyInstanceUID     # groups files into sessions (used by group)
+    scanDesc: SeriesDescription      # scan description
+
+  # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
+  # group-orthanc and assign run sequentially in one pod (group-orthanc is not atomic)
+  orthancIngest:
+    enabled: true
+    interval: 300                   # seconds between pipeline cycles
+    processedLabel: "xnat-sorted"   # label applied to Orthanc studies after processing
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc.log"
+
+  # Pipeline B: filesystem drop dir -> /data/grouped-fs -> /data/assigned
+  fsIngest:
+    enabled: false
+    interval: 300                   # seconds between pipeline cycles
+    inputGlob: ""                   # source glob for dropped files
+    exportClaim: ""                 # PVC holding an external export share; mounted read-only if set
+    exportMountPath: /data/usyd-export
+    waitPeriod: 60                  # skip files modified within this window (seconds)
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort.log"
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs.log"
 
   upload:
-    alwaysInclude: "medimage/dicom-series"
+    enabled: true         # set false to hold sessions in /data/assigned without uploading
+    replicas: 1
+    alwaysInclude: "all"
     verifySsl: "1"
     useCurlJsession: "0"
-    requireManifest: "1"
-    loop: "-1"
-    settleSeconds: 300   # seconds of no new files in /data/sorted before uploading
-    pollSeconds: 300     # how often the upload script checks for new data
+    requireManifest: "0"
+    checkChecksums: "0"
+    loop: 300             # poll interval (seconds)
+    waitPeriod: 60        # skip sessions assign is still writing (seconds)
     tempdir: /data/tmp
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
 
@@ -99,3 +118,19 @@ xnatIngest:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
+
+# Syncs assigned sessions to an S3 staging bucket (s3sync pod).
+# behind a proxy, the `proxy:` map below.
+s3Sync:
+  enabled: false
+  image: amazon/aws-cli:latest
+  imagePullPolicy: IfNotPresent
+  dest: ""                        # s3://bucket/PREFIX (no trailing slash)
+  interval: 300                   # seconds between sweeps of /data/assigned
+  settleMinutes: 5                # skip sessions modified within this window
+  credentialsSecret: s3-credentials
+
+# Outbound proxy env vars (HTTP_PROXY/HTTPS_PROXY/NO_PROXY and lowercase
+# variants), injected into the xnat-ingest and s3sync pods via the
+# proxy-config configmap.
+proxy: {}

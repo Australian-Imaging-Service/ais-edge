@@ -17,7 +17,8 @@ orthanc:
   # AET must match what scanners are configured to send to
   aet: ORTHANC
 
-  authenticationEnabled: false
+  # Require credentials for the web UI / REST API
+  authenticationEnabled: true
 
   # External ports on the VM
   nodePorts:
@@ -45,10 +46,56 @@ samba:
 
 xnatIngest:
   dicomTagMapping:
-    project: StudyDescription
-    subject: PatientName
-    visit: PatientID
-    session: StudyInstanceUID
+    project: StudyDescription        # XNAT project ID
+    subject: PatientName             # XNAT subject ID
+    sessionLabel: PatientID          # XNAT session label
+    sessionUid: StudyInstanceUID     # groups files into sessions (used by group)
+    scanDesc: SeriesDescription      # scan description
+
+  # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
+  orthancIngest:
+    enabled: true
+    interval: 300
+
+  # Pipeline B: filesystem drop dir -> /data/grouped-fs -> /data/assigned.
+  # If the drop dir is on the SAME disk as the pipeline storage, leave
+  # exportClaim unset and use copyMode: hardlink_or_copy. If it is a separate
+  # disk/NFS share, set exportClaim/exportMountPath (PV+PVC created outside
+  # the chart) and use copyMode: symlink_or_copy — see the chart README.
+  fsIngest:
+    enabled: false
+    interval: 300
+    inputGlob: ""                   # e.g. "/data/my-export/**/*"
+    # exportClaim: my-export-pvc
+    # exportMountPath: /data/my-export
+    waitPeriod: 60                  # skip files modified within this window (seconds)
+    copyMode: hardlink_or_copy
+    datatypes: "medimage/dicom-series"   # semicolon-separated list
+
+  # Uploads assigned sessions to XNAT (xnat-credentials secret)
+  upload:
+    enabled: true
+    replicas: 1
+    checkChecksums: "0"
+    loop: 300
+    waitPeriod: 60
+
+# Syncs assigned sessions to an S3 staging bucket (s3-credentials secret)
+s3Sync:
+  enabled: false
+  dest: ""                          # s3://bucket/PREFIX (no trailing slash)
+
+# Outbound proxy env vars, injected into the xnat-ingest and s3sync pods.
+# Required if the site routes egress through a proxy; keep in-cluster names
+# in NO_PROXY (see chart README).
+proxy: {}
+# proxy:
+#   HTTP_PROXY: "http://proxy.example.org:8080/"
+#   HTTPS_PROXY: "http://proxy.example.org:8080/"
+#   http_proxy: "http://proxy.example.org:8080/"
+#   https_proxy: "http://proxy.example.org:8080/"
+#   NO_PROXY: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local"
+#   no_proxy: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local"
 
 # ── Storage class ─────────────────────────────────────────────────────────────
 # Set create: false if "hostpath-pipeline" already exists on the cluster

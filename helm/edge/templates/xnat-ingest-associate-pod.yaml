@@ -1,42 +1,53 @@
-apiVersion: v1
-kind: Pod
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: associate
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
 spec:
-  containers:
-  - name: associate
-    image: {{ .Values.xnatIngest.image }}
-    imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
-    env:
-    - name: XINGEST_DELETE
-      value: {{ .Values.xnatIngest.delete | quote }}
-    - name: XINGEST_DATATYPES
-      value: {{ .Values.xnatIngest.associate.datatypes | quote }}
-    - name: XINGEST_COPY_MODE
-      value: {{ .Values.xnatIngest.associate.copyMode | quote }}
-    - name: XINGEST_LOGGERS
-      value: {{ .Values.xnatIngest.associate.loggers | quote }}
-    {{- include "edge.xnatIngestCommonEnv" . | nindent 4 }}
-    {{- include "edge.dicomTagEnv" . | nindent 4 }}
-    envFrom:
-    - configMapRef:
-        name: proxy-config  # injects any proxy settings (currently empty)
-    command:
-    - bash
-    - -c
-    - |
-      set -x
-      sleep infinity  # pod stays running so kubectl exec can be used to run associate manually
-      # To associate manually (example for RDA files):
-      # kubectl exec -it associate -n {{ .Values.namespace }} -- \
-      #   xnat-ingest associate /data/cima-export /data/staging/sorted \
-      #   --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
-      #     '{PatientName}/**/*.rda' \
-      #     '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
-    volumeMounts:
-    - name: storage
-      mountPath: /data
-  {{- include "edge.xnatIngestVolumes" . | nindent 2 }}
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: associate
+  template:
+    metadata:
+      labels:
+        app: associate
+    spec:
+      containers:
+      - name: associate
+        image: {{ .Values.xnatIngest.image }}
+        imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+        env:
+        - name: XINGEST_DELETE
+          value: {{ .Values.xnatIngest.delete | quote }}
+        - name: XINGEST_DATATYPES
+          value: {{ .Values.xnatIngest.associate.datatypes | quote }}
+        - name: XINGEST_COPY_MODE
+          value: {{ .Values.xnatIngest.associate.copyMode | quote }}
+        - name: XINGEST_LOGGERS
+          value: {{ .Values.xnatIngest.associate.loggers | quote }}
+        {{- include "edge.xnatIngestCommonEnv" . | nindent 8 }}
+        {{- include "edge.dicomTagEnv" . | nindent 8 }}
+        envFrom:
+        - configMapRef:
+            name: proxy-config  # proxy env vars from the `proxy:` values map
+        command:
+        - bash
+        - -c
+        - |
+          set -x
+          sleep infinity  # pod stays running so kubectl exec can be used to run associate manually
+          # To associate manually (example for RDA files):
+          # kubectl exec -it deploy/associate -n {{ .Values.namespace }} -- \
+          #   xnat-ingest associate /data/cima-export /data/staging/sorted \
+          #   --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
+          #     '{PatientName}/**/*.rda' \
+          #     '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
+        volumeMounts:
+        - name: storage
+          mountPath: /data
+      {{- include "edge.xnatIngestVolumes" . | nindent 6 }}

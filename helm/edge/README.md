@@ -1,140 +1,172 @@
+# AIS Edge Pipeline Helm Chart
+
+Receives imaging data at a scanner site, resolves XNAT identifiers from DICOM
+metadata, and stages sessions for upload.
+
+## Architecture
+
+```
+scanner ──DICOM──▶ Orthanc ──▶ ingest-orthanc: group-orthanc ─▶ assign ─┐
+                                                                        ├─▶ /data/assigned/<Project.Subject.Session>/
+file export ────▶ drop dir ──▶ ingest-fs:      group ────────▶ assign ─┘
+                                                                        │
+                                                          ┌─────────────┴─────────────┐
+                                                          ▼                           ▼
+                                                   upload (XNAT)              s3sync (S3 bucket)
+```
+
+Every component is a single-replica Deployment (Recreate strategy) and
+individually switchable in values: `xnatIngest.orthancIngest.enabled`,
+`xnatIngest.fsIngest.enabled`, `xnatIngest.upload.enabled`,
+`s3Sync.enabled`.
+`helm upgrade` rolls pods automatically.
+
 ## Prerequisites
 
 - MicroK8s (or any Kubernetes cluster) with Helm v3 and kubectl installed
-- NodePorts 30042, 30842, and host port 445 must be free on the node
+- The configured NodePorts and host port 445 (Samba) free on the node
 
-## Quick install
+Conventions: run all commands on the edge VM. Text in `<angle brackets>` is
+a placeholder. Everything the chart installs lives in one Kubernetes namespace, `ais-edge` by default (the `namespace`
+key in values).
 
-The setup script handles everything, namespace, secrets, and chart install:
+## Install
 
-```bash
-bash helm/setup.sh
-```
-
-It will prompt for all credentials and site-specific values, then install the chart.
-
-To pass a values override file (see `helm/values-example.yaml`):
+1. Copy a values file and edit it for your site (see `values-cimax.yaml`
+   for a working example, or the Configuration reference below):
 
 ```bash
-bash helm/setup.sh helm/values-example.yaml
+cp helm/values-example.yaml helm/values-<my-site>.yaml
 ```
 
-## Manual installation
-
-If you prefer to install step by step:
-
-### 1. Edit values
-
-Copy and edit the site values template:
+2. Run the setup script:
 
 ```bash
-cp helm/values-example.yaml helm/my-site.yaml
-# edit my-site.yaml for your site
+bash helm/setup.sh helm/values-<my-site>.yaml
 ```
 
-### 2. Create the namespace
-
-```bash
-kubectl create namespace ais-edge
-```
-
-### 3. Create required secrets
-
-**Orthanc** (web UI and REST API users):
-
-```bash
-kubectl create secret generic orthanc-credentials \
-  --from-literal=users.json='{"RegisteredUsers": {"admin": "changeme"}}' \
-  -n ais-edge
-```
-
-**Samba** (file share login):
-
-```bash
-kubectl create secret generic samba-credentials \
-  --from-literal=username=<user> \
-  --from-literal=password=<pass> \
-  -n ais-edge
-```
-
-**XNAT** (required before running upload):
-
-```bash
-kubectl create secret generic xnat-credentials \
-  --from-literal=server=https://xnat.example.org \
-  --from-literal=username=<user> \
-  --from-literal=password=<pass> \
-  -n ais-edge
-```
-
-### 4. Install
-
-```bash
-helm install edge helm/edge -f helm/my-site.yaml -n ais-edge
-```
-
-After install, Helm prints connection URLs and example commands for the site.
-
-## Verify
+3. Check everything came up (all pods should show `Running` after a minute
+   or two):
 
 ```bash
 kubectl get pods -n ais-edge
-kubectl get pvc  -n ais-edge
-kubectl get svc  -n ais-edge
 ```
 
-All pods should reach `Running` status. The xnat-ingest pods (sort, upload, associate) are intentionally idle. They run `sleep infinity` until invoked manually.
+That's a complete install. The rest of this section is only needed if you
+skip the setup script or have to recreate a credential later.
 
-## Running the pipeline
-
-**Sort** (organise DICOM files from Orthanc into sessions):
+Credentials live in Kubernetes secrets (the pipeline reads them from there;
+they are never stored in the values file). To create one manually, delete it first with
+`kubectl delete secret <name> -n ais-edge`, then:
 
 ```bash
-kubectl exec -it sort -n ais-edge -- \
-  xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
+kubectl create secret generic orthanc-credentials -n ais-edge \
+  --from-literal=users.json='{"RegisteredUsers": {"admin": "<password>"}}' \
+  --from-literal=orthanc-user=admin --from-literal=orthanc-password=<password>
+
+kubectl create secret generic samba-credentials -n ais-edge \
+  --from-literal=username=<user> --from-literal=password=<password>
+
+kubectl create secret generic xnat-credentials -n ais-edge \
+  --from-literal=server=<https://xnat.example.org> \
+  --from-literal=username=<user> --from-literal=password=<password>
+
+# only if s3Sync.enabled:
+kubectl create secret generic s3-credentials -n ais-edge \
+  --from-literal=AWS_ACCESS_KEY_ID=<key-id> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<secret> \
+  --from-literal=AWS_DEFAULT_REGION=<region>
 ```
 
-**Upload** (push sorted sessions to XNAT):
+Installing without the setup script: create the namespace
+(`kubectl create namespace ais-edge`), create the secrets as above, then:
 
 ```bash
-kubectl exec -it upload -n ais-edge -- \
-  xnat-ingest upload /data/staging/sorted $XINGEST_SERVER
+helm upgrade --install edge helm/edge -f helm/values-<my-site>.yaml -n ais-edge
 ```
 
-**Associate**:
+Behind a corporate proxy, set the `proxy:` map in values — without it pods
+have **no** proxy env and outbound requests (S3, XNAT) hang, typically with
+no error at all. Keep in-cluster names (`orthanc`, `.svc`, `.cluster.local`)
+in `NO_PROXY` or pipeline pods will send Orthanc API calls to the proxy.
+
+## Runbook
+
+The two watch-points needing routine attention:
+
+* **`/data/assigned/__invalid__/`** — sessions assign could not identify
+  (missing/typo'd project field in the DICOM headers). Fix the metadata
+  problem, delete the `__invalid__` entry, and remove the study's file from
+  `/data/LOGS/fs-pipeline-state/` to re-process it.
+* **`changed after processing` in the fs pipeline log** — files were added,
+  removed, or modified after the study was assigned. Review and remove the
+  existing assigned session before deleting its state file to re-process it.
+* **`FAIL` lines in `/data/LOGS/s3sync.log`** — failed or refused syncs.
+  Transfer errors retry automatically each cycle; "dangling symlinks" means
+  the source study was removed from the share before it was synced.
+
+Common operations:
 
 ```bash
-kubectl exec -it associate -n ais-edge -- \
-  xnat-ingest associate /data/cima-export /data/staging/sorted \
-    --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
-      '{PatientName}/**/*.rda' \
-      '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
+# live logs (-f = keep following; Ctrl-C to stop).
+kubectl logs deploy/ingest-orthanc -n ais-edge -f   # Orthanc pipeline activity
+kubectl logs deploy/ingest-fs -n ais-edge -f        # fs pipeline activity
+kubectl logs deploy/upload -n ais-edge -f           # XNAT upload activity
+kubectl logs deploy/s3sync -n ais-edge -f           # sync activity
+kubectl exec deploy/s3sync -n ais-edge -- tail -50 /data/LOGS/s3sync.log
+
+# re-process a study from scratch:
+#   1. remove /data/LOGS/fs-pipeline-state/<study>
+#   2. delete its session dir(s) under /data/assigned
+#   3. delete /data/LOGS/s3sync-state/<session>
+
+# force a re-sync of one session
+kubectl exec deploy/s3sync -n ais-edge -- rm "/data/LOGS/s3sync-state/<session>"
+
+# make an Orthanc study eligible for re-staging:
+#   remove its processed label (default "xnat-sorted") in the Orthanc UI
 ```
 
-## Upgrade
+State on `/data` (survives pod restarts and upgrades):
+
+| Path | What it is |
+|---|---|
+| `/data/LOGS/fs-pipeline-state/<study>` | fingerprint of a processed fs study; delete to re-process |
+| `/data/LOGS/s3sync-state/<session>` | fingerprint of last successful sync; delete to force re-sync |
+| `/data/LOGS/s3sync.log` | sync audit trail (SYNC / DONE / FAIL) |
+| `/data/LOGS/xnat-ingest-*.log` | xnat-ingest debug logs per component |
+| `/data/assigned/__invalid__/` | sessions with unresolvable IDs; never auto-retried |
+
+## Upgrade / uninstall
+
+After any change to your values file or the chart:
 
 ```bash
-helm upgrade edge . -f my-site.yaml -n ais-edge
+helm upgrade edge helm/edge -f helm/values-<my-site>.yaml -n ais-edge
 ```
 
-## Uninstall
+Pods restart themselves as needed.
 
 ```bash
 helm uninstall edge -n ais-edge
 ```
 
-The PersistentVolume, PersistentVolumeClaim, and namespace are annotated with `helm.sh/resource-policy: keep` and will not be deleted. Data on disk is not affected.
+The PV, PVC, and namespace carry `helm.sh/resource-policy: keep` — uninstall
+does not touch data on disk.
 
 ## Configuration reference
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `namespace` | `ais-edge` | Target namespace |
-| `storageClassName` | `hostpath-pipeline` | Storage class for PV/PVC |
 | `storage.hostPath` | `/data/ais-edge` | Host directory for pipeline data |
-| `storage.capacity` | `1500Gi` | PV/PVC size |
-| `orthanc.nodePorts.dicom` | `30042` | External port for DICOM receipt |
-| `orthanc.nodePorts.http` | `30842` | External port for Orthanc web UI |
+| `storage.capacity` | `1500Gi` | Nominal PV/PVC size (hostPath: not enforced) |
+| `orthanc.aet` / `nodePorts` | see values.yaml | DICOM receiver identity/ports |
+| `orthanc.authenticationEnabled` | `true` | Require credentials for web UI / REST |
 | `samba.shareName` | `edge` | SMB share name |
-| `xnatIngest.dicomTagMapping` | see values.yaml | DICOM tag to XNAT field mapping |
-| `storageClass.create` | `true` | Create the storage class — set to false if it already exists |
+| `xnatIngest.dicomTagMapping` | see values.yaml | DICOM tag → XNAT field mapping |
+| `xnatIngest.orthancIngest.*` | enabled | Orthanc → assigned pipeline |
+| `xnatIngest.fsIngest.*` | disabled | drop dir → assigned pipeline (glob, datatypes, copyMode, exportClaim) |
+| `xnatIngest.upload.*` | enabled | assigned → XNAT upload |
+| `s3Sync.*` | disabled | assigned → S3 staging sync (dest, interval, settleMinutes) |
+| `proxy` | `{}` | outbound proxy env for all pipeline pods |

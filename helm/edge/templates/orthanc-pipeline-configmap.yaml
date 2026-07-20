@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orthanc-pipeline-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  orthanc-pipeline.sh: |
+    {{- .Files.Get "files/orthanc-pipeline.sh" | nindent 4 }}

@@ -1,0 +1,67 @@
+{{- if .Values.s3Sync.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3sync
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: s3sync
+  template:
+    metadata:
+      labels:
+        app: s3sync
+      annotations:
+        # roll the pod automatically when the sync script changes
+        checksum/script: {{ include (print $.Template.BasePath "/s3sync-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - name: s3sync
+        image: {{ .Values.s3Sync.image }}
+        imagePullPolicy: {{ .Values.s3Sync.imagePullPolicy }}
+        env:
+        - name: S3_DEST
+          value: {{ required "s3Sync.dest is required when s3Sync.enabled is true" .Values.s3Sync.dest | quote }}
+        - name: SYNC_INTERVAL_SECONDS
+          value: {{ .Values.s3Sync.interval | quote }}
+        - name: SETTLE_MINUTES
+          value: {{ .Values.s3Sync.settleMinutes | quote }}
+        envFrom:
+        - configMapRef:
+            name: proxy-config
+        - secretRef:
+            name: {{ .Values.s3Sync.credentialsSecret }}
+        command: ["bash", "/scripts/s3sync.sh"]
+        volumeMounts:
+        - name: storage
+          mountPath: /data
+        - name: scripts
+          mountPath: /scripts
+        {{- if and .Values.xnatIngest.fsIngest.enabled .Values.xnatIngest.fsIngest.exportClaim }}
+        # fs-ingested sessions are symlinks into the export share; the share must
+        # be mounted here or every fs session looks dangling and is never synced
+        - name: export
+          mountPath: {{ .Values.xnatIngest.fsIngest.exportMountPath }}
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: {{ include "edge.pvcName" . }}
+      - name: scripts
+        configMap:
+          name: s3sync-script
+          defaultMode: 0755
+      {{- if and .Values.xnatIngest.fsIngest.enabled .Values.xnatIngest.fsIngest.exportClaim }}
+      - name: export
+        persistentVolumeClaim:
+          claimName: {{ .Values.xnatIngest.fsIngest.exportClaim }}
+          readOnly: true
+      {{- end }}
+{{- end }}

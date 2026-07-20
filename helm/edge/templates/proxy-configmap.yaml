@@ -1,4 +1,5 @@
-# Empty ConfigMap required by all xnat-ingest pods.
+# Proxy env vars injected into the xnat-ingest and s3sync pods via envFrom.
+# Populated from the `proxy:` map in values; empty map = no proxy env set.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,4 +7,7 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
-data: {}
+data:
+  {{- with .Values.proxy }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}

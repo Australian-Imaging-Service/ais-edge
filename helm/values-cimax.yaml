@@ -1,0 +1,85 @@
+# CIMA-X site values.
+# Pass to setup.sh: bash helm/setup.sh helm/values-cimax.yaml
+# Or directly:      helm upgrade --install edge helm/edge -f helm/values-cimax.yaml -n ais-edge
+
+# ── Required ──────────────────────────────────────────────────────────────────
+
+# Kubernetes namespace to deploy into
+namespace: ais-edge
+
+# Directory on the VM host that will hold all pipeline data
+storage:
+  hostPath: /data/ais-edge
+  capacity: 1500Gi
+
+# ── Orthanc ───────────────────────────────────────────────────────────────────
+
+orthanc:
+  # AET must match what scanners are configured to send to
+  aet: ORTHANC
+
+  authenticationEnabled: true
+
+  # External ports on the VM
+  nodePorts:
+    dicom: 30042   # scanner sends DICOM here
+    http:  30842   # Orthanc web UI and REST API
+
+# ── Samba ─────────────────────────────────────────────────────────────────────
+
+samba:
+  # SMB share name, connect via \\<vm-ip>\<shareName>
+  shareName: cima-x
+
+# ── DICOM tag mapping ─────────────────────────────────────────────────────────
+# Maps DICOM tags to XNAT fields. Change only if your scanners use different tags.
+
+xnatIngest:
+  dicomTagMapping:
+    project: AdmittingDiagnosesDescription
+    subject: PatientName
+    sessionLabel: PatientID
+    sessionUid: StudyInstanceUID
+    scanDesc: SeriesDescription
+
+  # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
+  orthancIngest:
+    enabled: true
+    interval: 300
+
+  # Pipeline B: scanner exports dropped on the Samba share -> /data/grouped-fs
+  # -> /data/assigned.
+  # Unlike TBPET, the export dir lives on the SAME disk as the pipeline
+  # storage (cima-export is a folder on the ais-edge PVC / Samba share), so:
+  #   - no exportClaim / extra mount is needed anywhere
+  #   - hardlink_or_copy works (same filesystem), no symlink flattening applies
+  fsIngest:
+    enabled: true
+    interval: 300
+    inputGlob: "/data/cima-export/**/*"
+    # Skip files modified within this window (partial-transfer guard)
+    waitPeriod: 60
+    copyMode: hardlink_or_copy
+    datatypes: "medimage/dicom-series"
+
+  upload:
+    enabled: true
+    replicas: 0           # standby until assigned sessions are approved
+    alwaysInclude: "medimage/dicom-series"
+    loop: 300
+    waitPeriod: 60
+
+# Assigned-session sync to the S3 staging bucket. Set dest and flip enabled
+# once a dedicated CIMA-X bucket exists and pipeline output has been verified.
+s3Sync:
+  enabled: false
+  dest: ""
+
+# No outbound proxy at the CIMA-X site
+proxy: {}
+
+# ── Storage class ─────────────────────────────────────────────────────────────
+# Set create: false if "hostpath-pipeline" already exists on the cluster
+
+storageClass:
+  create: true
