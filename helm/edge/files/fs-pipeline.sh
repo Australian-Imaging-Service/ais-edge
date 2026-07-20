@@ -46,32 +46,36 @@ while true; do
       continue
     fi
 
-    xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
+    if xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
         --project "${PROJECT_FIELD:?}" \
         --subject "${SUBJECT_FIELD:?}" \
         --session "${SESSION_FIELD:?}" \
         --scan "${SCAN_FIELD:?}" \
-        --copy-mode "$COPY_MODE"
+        --copy-mode "$COPY_MODE"; then
 
-    # Assigned files are symlinks into grouped-fs, which in turn symlink to
-    # the NFS source. Flatten them to point directly at the real files while
-    # the chain is still intact, so grouped-fs can be cleared without dangling
-    # anything.
-    find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | while IFS= read -r lnk; do
-      tgt=$(readlink -f "$lnk")
-      if [[ -n "$tgt" && -e "$tgt" ]]; then
-        ln -sfn "$tgt" "$lnk"
+      # Assigned files are symlinks into grouped-fs, which in turn symlink to
+      # the NFS source. Flatten them to point directly at the real files while
+      # the chain is still intact, so grouped-fs can be cleared without
+      # dangling anything.
+      find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | while IFS= read -r lnk; do
+        tgt=$(readlink -f "$lnk")
+        if [[ -n "$tgt" && -e "$tgt" ]]; then
+          ln -sfn "$tgt" "$lnk"
+        else
+          log "WARNING: could not resolve $lnk — leaving untouched"
+        fi
+      done
+
+      if find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | grep -q .; then
+        log "Unresolved links still point into grouped — keeping grouped for $study"
       else
-        log "WARNING: could not resolve $lnk — leaving untouched"
+        rm -rf "$GROUPED_DIR"/*
+        echo "$study" >> "$DONE_LIST"
+        log "Done: $study"
       fi
-    done
-
-    if find "$ASSIGNED_DIR" -lname "$GROUPED_DIR/*" | grep -q .; then
-      log "Unresolved links still point into grouped — keeping grouped for $study"
     else
+      log "assign crashed for $study — clearing staged data, will retry next cycle"
       rm -rf "$GROUPED_DIR"/*
-      echo "$study" >> "$DONE_LIST"
-      log "Done: $study"
     fi
   done
 
