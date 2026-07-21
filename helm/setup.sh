@@ -53,6 +53,10 @@ read -r -p "Continue with this cluster? [y/N]: " confirm
 
 info "Using site values: $VALUES_FILE"
 
+RENDERED_CHART=$(helm template "$RELEASE" "$CHART_DIR" \
+  --namespace "$NAMESPACE" \
+  --values "$VALUES_FILE")
+
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace "$NAMESPACE" app.kubernetes.io/managed-by=Helm --overwrite
 kubectl annotate namespace "$NAMESPACE" \
@@ -105,6 +109,23 @@ else
     -n "$NAMESPACE"
 fi
 
+if grep -q '^  name: s3sync$' <<< "$RENDERED_CHART"; then
+  if kubectl get secret s3-credentials -n "$NAMESPACE" >/dev/null 2>&1; then
+    info "Reusing existing s3-credentials secret"
+  else
+    echo
+    echo "=== AWS credentials for S3 sync (stored in Kubernetes) ==="
+    prompt AWS_ACCESS_KEY_ID "AWS access key ID"
+    prompt_secret AWS_SECRET_ACCESS_KEY "AWS secret access key"
+    prompt AWS_DEFAULT_REGION "AWS region" "ap-southeast-2"
+    kubectl create secret generic s3-credentials \
+      --from-literal="AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" \
+      --from-literal="AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" \
+      --from-literal="AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION" \
+      -n "$NAMESPACE"
+  fi
+fi
+
 info "Installing AIS Edge"
 helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
@@ -127,6 +148,11 @@ if UPLOAD_REPLICAS=$(kubectl get deployment upload -n "$NAMESPACE" \
 else
   UPLOAD_STATUS="disabled"
 fi
+if kubectl get deployment s3sync -n "$NAMESPACE" >/dev/null 2>&1; then
+  S3_STATUS="enabled"
+else
+  S3_STATUS="disabled"
+fi
 
 echo
 info "AIS Edge is installed"
@@ -136,5 +162,6 @@ echo "  Orthanc web:    http://$NODE_IP:$HTTP_NODE_PORT/ui/app/"
 echo "  Samba share:    //$NODE_IP/$SHARE_NAME"
 echo "  File drop:      /data/ais-edge/incoming"
 echo "  Upload:         $UPLOAD_STATUS"
+echo "  S3 sync:        $S3_STATUS"
 echo
 kubectl get deployments,pods,pvc -n "$NAMESPACE"

@@ -124,6 +124,18 @@ Set an ingest component's `enabled` value back to `true`, or set upload
 `replicas` back to `1`, to resume it. Orthanc and Samba remain available when
 their respective ingest pipelines are disabled.
 
+S3 sync is optional and disabled by default:
+
+```yaml
+s3Sync:
+  enabled: true
+  dest: "s3://example-bucket/site-prefix"
+```
+
+When enabled, `setup.sh` prompts for the AWS access key, secret key, and region
+and stores them in the `s3-credentials` Kubernetes Secret. Set `enabled: false`
+and rerun setup to remove the S3 sync Deployment.
+
 ## Inputs
 
 ### Orthanc
@@ -206,6 +218,28 @@ kubectl logs deployment/upload -n ais-edge -f
 
 To pause upload for testing or review, set `replicas: 0` and repeat the Helm
 upgrade.
+
+## Optional S3 sync
+
+S3 sync independently copies completed directories from `/data/assigned` to
+the configured S3 prefix. It skips `__invalid__` and other directories whose
+names begin with `__`, waits for files to settle, and records fingerprints in
+`/data/LOGS/s3sync-state` to avoid uploading unchanged sessions repeatedly.
+
+Monitor it with:
+
+```bash
+kubectl logs deployment/s3sync -n ais-edge -f
+```
+
+Failures are retried during the next sweep and recorded in
+`/data/LOGS/s3sync.log`. To force one session to sync again, remove its state
+file:
+
+```bash
+kubectl exec deployment/s3sync -n ais-edge -- \
+  rm "/data/LOGS/s3sync-state/<session-directory>"
+```
 
 ## Upgrade and uninstall
 

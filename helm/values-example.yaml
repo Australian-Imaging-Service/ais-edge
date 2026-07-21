@@ -31,3 +31,9 @@ xnatIngest:
   upload:
     enabled: true
     replicas: 1
+
+# Optional copy of assigned sessions to S3. When enabled, setup prompts for
+# AWS credentials and stores them in the s3-credentials Kubernetes Secret.
+s3Sync:
+  enabled: false
+  dest: "s3://example-bucket/site-prefix"

@@ -103,3 +103,12 @@ xnatIngest:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
+
+s3Sync:
+  enabled: false
+  image: amazon/aws-cli:latest
+  imagePullPolicy: IfNotPresent
+  dest: ""
+  interval: 300
+  settleMinutes: 5
+  credentialsSecret: s3-credentials

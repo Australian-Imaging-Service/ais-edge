@@ -10,6 +10,7 @@ Pipelines:
   Orthanc ingest:  {{ if .Values.xnatIngest.orthancIngest.enabled }}enabled{{ else }}disabled{{ end }}
   Filesystem ingest: {{ if .Values.xnatIngest.fsIngest.enabled }}enabled{{ else }}disabled{{ end }}
   XNAT upload:     {{ if .Values.xnatIngest.upload.enabled }}configured ({{ .Values.xnatIngest.upload.replicas }} replicas){{ else }}disabled{{ end }}
+  S3 sync:         {{ if .Values.s3Sync.enabled }}enabled ({{ .Values.s3Sync.dest }}){{ else }}disabled{{ end }}
 
 Review before upload:
   kubectl exec deployment/ingest-fs -n {{ .Values.namespace }} -- \
@@ -19,8 +20,12 @@ Logs:
   kubectl logs deployment/ingest-orthanc -n {{ .Values.namespace }} -f
   kubectl logs deployment/ingest-fs -n {{ .Values.namespace }} -f
   kubectl logs deployment/upload -n {{ .Values.namespace }} -f
+  {{- if .Values.s3Sync.enabled }}
+  kubectl logs deployment/s3sync -n {{ .Values.namespace }} -f
+  {{- end }}
 
 Secrets:
   orthanc-credentials  users.json / orthanc-user / orthanc-password
   samba-credentials    username / password
   xnat-credentials     server / username / password (only required for upload)
+  s3-credentials       AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION (only required for S3 sync)
