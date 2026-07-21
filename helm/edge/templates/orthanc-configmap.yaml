@@ -13,7 +13,7 @@ data:
       "DicomPort": {{ .Values.orthanc.dicomPort }},
       "HttpPort": {{ .Values.orthanc.httpPort }},
       "RemoteAccessAllowed": true,
-      "AuthenticationEnabled": true,
+      "AuthenticationEnabled": {{ .Values.orthanc.authenticationEnabled }},
       "Plugins": {{ .Values.orthanc.plugins | toJson }},
       "IngestTranscoding": {{ .Values.orthanc.ingestTranscoding | quote }},
       "DicomScuTimeout": {{ .Values.orthanc.dicomScuTimeout }},

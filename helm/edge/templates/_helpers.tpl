@@ -31,18 +31,16 @@ DICOM tag mapping env vars — included in sort, upload, and associate pods.
   value: {{ .Values.xnatIngest.dicomTagMapping.project | quote }}
 - name: XINGEST_SUBJECT
   value: {{ .Values.xnatIngest.dicomTagMapping.subject | quote }}
-- name: XINGEST_VISIT
-  value: {{ .Values.xnatIngest.dicomTagMapping.visit | quote }}
-- name: XINGEST_SESSION
-  value: {{ .Values.xnatIngest.dicomTagMapping.session | quote }}
+- name: XINGEST_SESSION_LABEL
+  value: {{ .Values.xnatIngest.dicomTagMapping.sessionLabel | quote }}
+- name: XINGEST_SESSION_UID
+  value: {{ .Values.xnatIngest.dicomTagMapping.sessionUid | quote }}
 {{- end }}
 
 {{/*
 Common xnat-ingest env vars shared by all three pods.
 */}}
 {{- define "edge.xnatIngestCommonEnv" -}}
-- name: XINGEST_DELETE
-  value: {{ .Values.xnatIngest.delete | quote }}
 - name: XINGEST_DEIDENTIFY
   value: {{ .Values.xnatIngest.deidentify | quote }}
 - name: XINGEST_SPACES_TO_UNDERSCORES

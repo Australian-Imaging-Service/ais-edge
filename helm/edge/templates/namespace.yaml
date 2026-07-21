@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  annotations:
+    # keep: prevent helm uninstall from deleting the namespace and its external secrets
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}

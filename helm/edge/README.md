@@ -1,140 +1,236 @@
-## Prerequisites
+# AIS Edge Helm chart
 
-- MicroK8s (or any Kubernetes cluster) with Helm v3 and kubectl installed
-- NodePorts 30042, 30842, and host port 445 must be free on the node
+AIS Edge receives imaging data on a MicroK8s VM, groups it into XNAT sessions, and uploads them to XNAT.
 
-## Quick install
+## Default architecture
 
-The setup script handles everything, namespace, secrets, and chart install:
-
-```bash
-bash helm/setup.sh
+```text
+Scanner -> Orthanc -> ingest-orthanc --\
+                                         -> /data/assigned -> upload -> XNAT
+Samba -> incoming/ -> ingest-fs --------/
 ```
 
-It will prompt for all credentials and site-specific values, then install the chart.
+- Host storage: `/data/ais-edge`
+- Orthanc storage: `/data/ais-edge/orthanc-storage`
+- Samba drop directory: `/data/ais-edge/incoming`
+- Assigned sessions: `/data/ais-edge/assigned`
+- Copy mode: `hardlink_or_copy`
+- XNAT upload: enabled with one replica
+- Source deletion and de-identification: disabled
 
-To pass a values override file (see `helm/values-example.yaml`):
+Allow inbound TCP ports `445`, `30042`, and `30842` in the VM or site
+firewall. Restrict them to the local facility network.
+
+Both ingest Deployments run `group` followed by `assign`. Orthanc studies are
+marked with the `xnat-sorted` label. Filesystem studies are tracked
+with content fingerprints under `/data/LOGS/fs-pipeline-state`.
+
+## Fresh Ubuntu VM installation
+
+Before running setup, install MicroK8s, enable its DNS add-on, install Helm and
+`kubectl`, and configure `kubectl` to use the MicroK8s cluster. Confirm the
+cluster is ready:
 
 ```bash
-bash helm/setup.sh helm/values-example.yaml
+kubectl get nodes
+helm version
 ```
 
-## Manual installation
-
-If you prefer to install step by step:
-
-### 1. Edit values
-
-Copy and edit the site values template:
+Copy and edit the non-secret example values to suit your facilities needs (see **Site values**):
 
 ```bash
-cp helm/values-example.yaml helm/my-site.yaml
-# edit my-site.yaml for your site
+cp helm/values-example.yaml ~/.config/ais-edge/my-site.yaml
+$EDITOR ~/.config/ais-edge/my-site.yaml
 ```
 
-### 2. Create the namespace
+Then run setup from the repository root:
 
 ```bash
-kubectl create namespace ais-edge
+bash helm/setup.sh ~/.config/ais-edge/my-site.yaml
 ```
 
-### 3. Create required secrets
+The setup script:
 
-**Orthanc** (web UI and REST API users):
+1. Confirms the current Kubernetes context.
+2. Creates Kubernetes Secrets for Orthanc and Samba.
+3. Creates the XNAT credentials Secret.
+4. Installs or upgrades the Helm release using the supplied values.
+5. Prints Orthanc and Samba connection details.
+
+Credentials are never written to the values file. Existing Secrets are reused
+on later runs with the same command:
 
 ```bash
-kubectl create secret generic orthanc-credentials \
-  --from-literal=users.json='{"RegisteredUsers": {"admin": "changeme"}}' \
-  -n ais-edge
+bash helm/setup.sh ~/.config/ais-edge/my-site.yaml
 ```
 
-**Samba** (file share login):
+## Site values
 
-```bash
-kubectl create secret generic samba-credentials \
-  --from-literal=username=<user> \
-  --from-literal=password=<pass> \
-  -n ais-edge
+See `helm/values-example.yaml`. The most important settings are:
+
+```yaml
+orthanc:
+  aet: ORTHANC
+
+samba:
+  shareName: edge
+
+xnatIngest:
+  dicomTagMapping:
+    project: StudyDescription
+    subject: PatientName
+    sessionLabel: PatientID
+    sessionUid: StudyInstanceUID
+    scanDesc: SeriesDescription
+
+  upload:
+    enabled: true
+    replicas: 1
 ```
 
-**XNAT** (required before running upload):
+The project, subject, and session fields must exist in the incoming DICOM
+metadata. Verify the mapping before running setup because upload starts
+automatically (disable in your values file if you don't want this).
 
-```bash
-kubectl create secret generic xnat-credentials \
-  --from-literal=server=https://xnat.example.org \
-  --from-literal=username=<user> \
-  --from-literal=password=<pass> \
-  -n ais-edge
+## Enable or disable pipeline components
+
+All components are enabled by default. Change the following settings in the
+site values file, then rerun `setup.sh` to apply them.
+
+```yaml
+xnatIngest:
+  # Stop processing studies received by Orthanc.
+  orthancIngest:
+    enabled: false
+
+  # Stop processing studies copied to the Samba/local drop directory.
+  fsIngest:
+    enabled: false
+
+  # Keep the Upload Deployment installed but stop automatic XNAT uploads.
+  upload:
+    replicas: 0
 ```
 
-### 4. Install
+To remove the Upload Deployment entirely, use:
 
-```bash
-helm install edge helm/edge -f helm/my-site.yaml -n ais-edge
+```yaml
+xnatIngest:
+  upload:
+    enabled: false
 ```
 
-After install, Helm prints connection URLs and example commands for the site.
+Set an ingest component's `enabled` value back to `true`, or set upload
+`replicas` back to `1`, to resume it. Orthanc and Samba remain available when
+their respective ingest pipelines are disabled.
 
-## Verify
+## Inputs
 
-```bash
-kubectl get pods -n ais-edge
-kubectl get pvc  -n ais-edge
-kubectl get svc  -n ais-edge
+### Orthanc
+
+Configure scanners with the VM address, the configured AET, and NodePort
+`30042`. Open Orthanc Explorer at:
+
+```text
+http://<vm-ip>:30842/ui/app/
 ```
 
-All pods should reach `Running` status. The xnat-ingest pods (sort, upload, associate) are intentionally idle. They run `sleep infinity` until invoked manually.
+### Samba
 
-## Running the pipeline
+Connect to:
 
-**Sort** (organise DICOM files from Orthanc into sessions):
-
-```bash
-kubectl exec -it sort -n ais-edge -- \
-  xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
+```text
+\\<vm-ip>\<share-name>
 ```
 
-**Upload** (push sorted sessions to XNAT):
+Copy each complete study into its own directory under `incoming/`. The
+filesystem pipeline waits for recent writes to settle before processing.
+
+## Monitor and review
 
 ```bash
-kubectl exec -it upload -n ais-edge -- \
-  xnat-ingest upload /data/staging/sorted $XINGEST_SERVER
+kubectl get deployments,pods,pvc -n ais-edge
+kubectl logs deployment/ingest-orthanc -n ais-edge -f
+kubectl logs deployment/ingest-fs -n ais-edge -f
 ```
 
-**Associate**:
+Review assigned sessions:
 
 ```bash
-kubectl exec -it associate -n ais-edge -- \
-  xnat-ingest associate /data/cima-export /data/staging/sorted \
-    --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
-      '{PatientName}/**/*.rda' \
-      '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
+kubectl exec deployment/ingest-fs -n ais-edge -- \
+  find /data/assigned -mindepth 1 -maxdepth 2 -type d
 ```
 
-## Upgrade
+Sessions with missing identifiers are retained under:
 
-```bash
-helm upgrade edge . -f my-site.yaml -n ais-edge
+```text
+/data/assigned/__invalid__/
 ```
 
-## Uninstall
+Set upload replicas to zero before testing or manual review if sessions should
+not be sent to XNAT.
+
+If files are added to an already processed filesystem study, the pipeline logs
+`changed after processing` and does not merge them automatically. Review and
+remove the existing assigned output, then remove the study state file to
+reprocess:
 
 ```bash
+kubectl exec deployment/ingest-fs -n ais-edge -- \
+  rm "/data/LOGS/fs-pipeline-state/<study-directory>"
+```
+
+## Control XNAT upload
+
+Setup creates the required `xnat-credentials` Secret. Upload starts
+automatically with:
+
+```yaml
+xnatIngest:
+  upload:
+    enabled: true
+    replicas: 1
+```
+
+Apply the reusable values file:
+
+```bash
+helm upgrade edge helm/edge \
+  -f ~/.config/ais-edge/my-site.yaml \
+  -n ais-edge \
+  --rollback-on-failure \
+  --timeout 10m
+
+kubectl logs deployment/upload -n ais-edge -f
+```
+
+To pause upload for testing or review, set `replicas: 0` and repeat the Helm
+upgrade.
+
+## Upgrade and uninstall
+
+```bash
+helm upgrade edge helm/edge \
+  -f ~/.config/ais-edge/my-site.yaml \
+  -n ais-edge \
+  --rollback-on-failure \
+  --timeout 10m
+
 helm uninstall edge -n ais-edge
 ```
 
-The PersistentVolume and PersistentVolumeClaim are annotated with `helm.sh/resource-policy: keep` and will not be deleted. The namespace is not managed by the chart and is left in place. Data on disk is not affected.
+The PV and PVC use the `keep` resource policy and the host data directory is
+not removed by uninstall.
 
-## Configuration reference
+## Important paths
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `namespace` | `ais-edge` | Target namespace |
-| `storageClassName` | `hostpath-pipeline` | Storage class for PV/PVC |
-| `storage.hostPath` | `/data/ais-edge` | Host directory for pipeline data |
-| `storage.capacity` | `1500Gi` | PV/PVC size |
-| `orthanc.nodePorts.dicom` | `30042` | External port for DICOM receipt |
-| `orthanc.nodePorts.http` | `30842` | External port for Orthanc web UI |
-| `samba.shareName` | `edge` | SMB share name |
-| `xnatIngest.dicomTagMapping` | see values.yaml | DICOM tag to XNAT field mapping |
-| `storageClass.create` | `true` | Create the storage class — set to false if it already exists |
+| Path | Purpose |
+|---|---|
+| `/data/incoming` | Samba/local filesystem drop directory |
+| `/data/orthanc-storage` | Orthanc database and DICOM files |
+| `/data/grouped-orthanc` | Temporary Orthanc grouping |
+| `/data/grouped-fs` | Temporary filesystem grouping |
+| `/data/assigned` | Sessions ready for review or upload |
+| `/data/assigned/__invalid__` | Sessions with unresolved identifiers |
+| `/data/LOGS/fs-pipeline-state` | Completed filesystem study fingerprints |
+| `/data/LOGS/xnat-ingest-*.log` | Component logs |
