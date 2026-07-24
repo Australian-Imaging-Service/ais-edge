@@ -1,0 +1,52 @@
+{{- if .Values.xnatIngest.fsIngest.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-fs-group
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ingest-fs-group
+  template:
+    metadata:
+      labels:
+        app: ingest-fs-group
+    spec:
+      containers:
+      - name: group
+        image: {{ .Values.xnatIngest.image }}
+        imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+        env:
+        - name: XINGEST_LOGGERS
+          value: {{ .Values.xnatIngest.fsIngest.groupLoggers | quote }}
+        {{- include "edge.xnatIngestCommonEnv" . | nindent 8 }}
+        command:
+        - xnat-ingest
+        - group
+        args:
+        - {{ .Values.xnatIngest.fsIngest.inputGlob | quote }}
+        - /data/grouped
+        {{- range splitList ";" .Values.xnatIngest.fsIngest.datatypes }}
+        {{- if . }}
+        - --datatype
+        - {{ . | quote }}
+        {{- end }}
+        {{- end }}
+        - --wait-period
+        - {{ .Values.xnatIngest.fsIngest.waitPeriod | quote }}
+        - --copy-mode
+        - {{ .Values.xnatIngest.fsIngest.copyMode | quote }}
+        - --unlink-source
+        - all
+        - --loop
+        - {{ .Values.xnatIngest.fsIngest.interval | quote }}
+        volumeMounts:
+        {{- include "edge.xnatIngestVolumeMount" . | nindent 8 }}
+      {{- include "edge.xnatIngestVolumes" . | nindent 6 }}
+{{- end }}

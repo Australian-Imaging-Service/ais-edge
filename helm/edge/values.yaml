@@ -75,7 +75,7 @@ xnatIngest:
     interval: 300
     processedLabel: xnat-sorted
     copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc.log"
+    groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc-group.log"
 
   fsIngest:
     enabled: true
@@ -84,7 +84,12 @@ xnatIngest:
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs.log"
+    groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs-group.log"
+
+  assign:
+    interval: 300
+    copyMode: hardlink_or_copy
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-assign.log"
 
   upload:
     enabled: true

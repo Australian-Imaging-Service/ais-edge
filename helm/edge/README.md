@@ -5,9 +5,9 @@ AIS Edge receives imaging data on a MicroK8s VM, groups it into XNAT sessions, a
 ## Default architecture
 
 ```text
-Scanner -> Orthanc -> ingest-orthanc --\
-                                         -> /data/assigned -> upload -> XNAT
-Samba -> incoming/ -> ingest-fs --------/
+Scanner -> Orthanc -> group-orthanc --\
+                                       -> /data/grouped -> assign -> /data/assigned -> upload -> XNAT
+Samba -> incoming/ -> group ----------/
 ```
 
 - Host storage: `/data/ais-edge`
@@ -21,9 +21,12 @@ Samba -> incoming/ -> ingest-fs --------/
 Allow inbound TCP ports `445`, `30042`, and `30842` in the VM or site
 firewall. Restrict them to the local facility network.
 
-Both ingest Deployments run `group` followed by `assign`. Orthanc studies are
-marked with the `xnat-sorted` label. Filesystem studies are tracked
-with content fingerprints under `/data/LOGS/fs-pipeline-state`.
+Both grouping Deployments use the native `xnat-ingest --loop` option and hand
+off through `/data/grouped`. A separate looping assignment Deployment monitors
+that shared directory and writes assigned sessions to `/data/assigned`.
+Orthanc studies are marked with the `xnat-sorted` label. Successfully grouped
+filesystem source files are removed from `/data/incoming` to prevent them
+being processed again.
 
 ## Fresh Ubuntu VM installation
 
@@ -156,20 +159,23 @@ Connect to:
 ```
 
 Copy each complete study into its own directory under `incoming/`. The
-filesystem pipeline waits for recent writes to settle before processing.
+filesystem grouping Deployment waits for recent writes to settle before
+processing. Successfully grouped files are removed from `incoming/`; their
+assigned copies remain under `/data/assigned`.
 
 ## Monitor and review
 
 ```bash
 kubectl get deployments,pods,pvc -n ais-edge
-kubectl logs deployment/ingest-orthanc -n ais-edge -f
-kubectl logs deployment/ingest-fs -n ais-edge -f
+kubectl logs deployment/ingest-orthanc-group -n ais-edge -f
+kubectl logs deployment/ingest-fs-group -n ais-edge -f
+kubectl logs deployment/ingest-assign -n ais-edge -f
 ```
 
 Review assigned sessions:
 
 ```bash
-kubectl exec deployment/ingest-fs -n ais-edge -- \
+kubectl exec deployment/ingest-assign -n ais-edge -- \
   find /data/assigned -mindepth 1 -maxdepth 2 -type d
 ```
 
@@ -181,16 +187,6 @@ Sessions with missing identifiers are retained under:
 
 Set upload replicas to zero before testing or manual review if sessions should
 not be sent to XNAT.
-
-If files are added to an already processed filesystem study, the pipeline logs
-`changed after processing` and does not merge them automatically. Review and
-remove the existing assigned output, then remove the study state file to
-reprocess:
-
-```bash
-kubectl exec deployment/ingest-fs -n ais-edge -- \
-  rm "/data/LOGS/fs-pipeline-state/<study-directory>"
-```
 
 ## Control XNAT upload
 
@@ -262,9 +258,7 @@ not removed by uninstall.
 |---|---|
 | `/data/incoming` | Samba/local filesystem drop directory |
 | `/data/orthanc-storage` | Orthanc database and DICOM files |
-| `/data/grouped-orthanc` | Temporary Orthanc grouping |
-| `/data/grouped-fs` | Temporary filesystem grouping |
+| `/data/grouped` | Grouped studies awaiting assignment |
 | `/data/assigned` | Sessions ready for review or upload |
 | `/data/assigned/__invalid__` | Sessions with unresolved identifiers |
-| `/data/LOGS/fs-pipeline-state` | Completed filesystem study fingerprints |
 | `/data/LOGS/xnat-ingest-*.log` | Component logs |

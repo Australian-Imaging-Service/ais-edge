@@ -13,12 +13,13 @@ Pipelines:
   S3 sync:         {{ if .Values.s3Sync.enabled }}enabled ({{ .Values.s3Sync.dest }}){{ else }}disabled{{ end }}
 
 Review before upload:
-  kubectl exec deployment/ingest-fs -n {{ .Values.namespace }} -- \
+  kubectl exec deployment/ingest-assign -n {{ .Values.namespace }} -- \
     find /data/assigned -mindepth 1 -maxdepth 2 -type d
 
 Logs:
-  kubectl logs deployment/ingest-orthanc -n {{ .Values.namespace }} -f
-  kubectl logs deployment/ingest-fs -n {{ .Values.namespace }} -f
+  kubectl logs deployment/ingest-orthanc-group -n {{ .Values.namespace }} -f
+  kubectl logs deployment/ingest-fs-group -n {{ .Values.namespace }} -f
+  kubectl logs deployment/ingest-assign -n {{ .Values.namespace }} -f
   kubectl logs deployment/upload -n {{ .Values.namespace }} -f
   {{- if .Values.s3Sync.enabled }}
   kubectl logs deployment/s3sync -n {{ .Values.namespace }} -f
