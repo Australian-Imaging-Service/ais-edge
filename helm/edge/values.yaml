@@ -59,7 +59,6 @@ samba:
 xnatIngest:
   image: ghcr.io/australian-imaging-service/xnat-ingest:0.12.3
   imagePullPolicy: IfNotPresent
-  delete: "0"
   deidentify: "0"
   spacesToUnderscores: "0"
 
@@ -84,11 +83,13 @@ xnatIngest:
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
+    unlinkSource: all
     groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs-group.log"
 
   assign:
     interval: 300
     copyMode: hardlink_or_copy
+    unlinkSource: all
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-assign.log"
 
   upload:
@@ -107,6 +108,7 @@ xnatIngest:
   associate:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
+    unlinkSource: ""
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
 
 s3Sync:

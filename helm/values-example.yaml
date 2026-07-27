@@ -25,6 +25,14 @@ xnatIngest:
   fsIngest:
     enabled: true
     inputGlob: "/data/incoming/**/*"
+    # Set to "" to retain source files after successful grouping.
+    unlinkSource: all
+
+  assign:
+    unlinkSource: all
+
+  associate:
+    unlinkSource: ""
 
   # Upload starts automatically. Set replicas to 0 to hold assigned sessions
   # for manual review instead.

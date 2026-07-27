@@ -25,6 +25,10 @@ spec:
         env:
         - name: XINGEST_LOGGERS
           value: {{ .Values.xnatIngest.fsIngest.groupLoggers | quote }}
+        {{- with .Values.xnatIngest.fsIngest.unlinkSource }}
+        - name: XINGEST_UNLINK_SOURCE
+          value: {{ . | quote }}
+        {{- end }}
         {{- include "edge.xnatIngestCommonEnv" . | nindent 8 }}
         command:
         - xnat-ingest
@@ -42,8 +46,6 @@ spec:
         - {{ .Values.xnatIngest.fsIngest.waitPeriod | quote }}
         - --copy-mode
         - {{ .Values.xnatIngest.fsIngest.copyMode | quote }}
-        - --unlink-source
-        - all
         - --loop
         - {{ .Values.xnatIngest.fsIngest.interval | quote }}
         volumeMounts:
