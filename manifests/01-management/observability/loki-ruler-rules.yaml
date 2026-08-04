@@ -275,28 +275,37 @@ data:
                 the deidentification-profile.json for syntax issues.
 
           - alert: S3UploaderRestartedRecently
-            # The s3-uploader exits non-zero (and crashloops) when its mc
-            # alias setup fails — the fix we committed today. A restart
-            # within 5m means SeaweedFS was unreachable at pod start, or
-            # the edge-writer S3 key is wrong. Often transient at install
-            # time; a sustained spike means a real config drift.
+            # The s3-uploader exits non-zero (and crashloops) when its
+            # pre-flight bucket probe fails. A restart within 5m means the
+            # object store was unreachable at pod start, or the edge S3 key
+            # is wrong. Often transient at install time; a sustained spike
+            # means real config drift.
+            #
+            # Matches BOTH event spellings on purpose. `alias_failed` was the
+            # minio/mc-era name; the AWS CLI uploader emits `endpoint_failed`
+            # ("alias" was an mc concept). Keeping both means this alert works
+            # across the client migration and against any edge still running
+            # the old image. Do not drop `alias_failed` until every site has
+            # been migrated — a rule that silently stops matching is
+            # indistinguishable from a healthy pipeline.
             expr: |
               sum by (cluster) (count_over_time(
                 {namespace="xnat-ingest", component="s3-uploader"}
-                |~ "(?i)refusing to start upload loop|alias_failed" [5m])) > 0
+                |~ "(?i)refusing to start upload loop|alias_failed|endpoint_failed" [5m])) > 0
             for: 2m
             labels:
               severity: warning
               source: loki-ruler
               category: s3-auth
             annotations:
-              summary: "s3-uploader on {{ $labels.cluster }} could not establish its S3 alias"
+              summary: "s3-uploader on {{ $labels.cluster }} could not reach its S3 endpoint"
               description: |
-                The s3-uploader pre-flight probe (mc alias + bucket round-
-                trip) failed in the last 5 minutes. Check the SeaweedFS
-                Ingress is reachable, the edge-writer key matches the IAM
-                JSON in scripts/03, and the ca-bundle Secret contains the
-                ais-edge-ca cert.
+                The s3-uploader pre-flight probe (head-bucket round-trip)
+                failed in the last 5 minutes. Check the SeaweedFS Ingress is
+                reachable, the edge S3 key matches the IAM identity for this
+                cluster, and the ca-bundle Secret contains the ais-edge-ca
+                cert (the AWS CLI reads it as a single file via
+                AWS_CA_BUNDLE, not as a directory of PEMs).
 
           - alert: OrthancStorageGrowing
             # Orthanc accepts C-STOREs into local storage before deid + group-orthanc

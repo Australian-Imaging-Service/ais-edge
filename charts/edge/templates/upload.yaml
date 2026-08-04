@@ -1,0 +1,218 @@
+{{- /*
+Upload. Exactly one of these two renders — see upload.mode in values.yaml.
+Both enabled would push every session into XNAT twice, which is why the mode
+is a single enum rather than two booleans.
+*/ -}}
+{{- if eq .Values.upload.mode "s3" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-s3-uploader
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get: the script contains ${...} and backticks that Helm
+         templating would otherwise have to be escaped around, and keeping it
+         a real file means `bash -n` can lint it in CI. */}}
+  s3-uploader.sh: |
+    {{- .Files.Get "files/s3-uploader.sh" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-s3-uploader
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: s3-uploader
+spec:
+  replicas: 1
+  # Two uploaders would race on the same session directories and on the
+  # reclaim that follows a successful sync.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: s3-uploader
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        # LOAD-BEARING LABEL. Every s3-uploader alert rule and dashboard
+        # panel selects on component="s3-uploader". Renaming it disables
+        # them silently.
+        component: s3-uploader
+      annotations:
+        # Checksum the script FILE, not the rendered template. Including the
+        # template that contains this annotation recurses infinitely, and
+        # hashing the file is more precise anyway: the pod rolls exactly when
+        # the uploader logic changes.
+        checksum/script: {{ .Files.Get "files/s3-uploader.sh" | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: uploader
+          image: "{{ .Values.upload.s3.image.repository }}:{{ .Values.upload.s3.image.tag }}"
+          imagePullPolicy: {{ .Values.upload.s3.image.pullPolicy }}
+          # The image's entrypoint is `aws`; override it to run our loop.
+          command: ["/bin/bash", "/scripts/s3-uploader.sh"]
+          env:
+            - name: EDGE_NAME
+              value: {{ .Values.clusterLabel | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.upload.s3.bucket | quote }}
+            - name: S3_PREFIX
+              value: {{ .Values.upload.s3.prefix | quote }}
+            - name: ASSIGNED_DIR
+              value: /data/assigned
+            - name: STATE_DIR
+              value: /data/LOGS/s3-uploader-state
+            - name: INTERVAL
+              value: {{ .Values.upload.s3.interval | quote }}
+            - name: SETTLE_MINUTES
+              value: {{ .Values.upload.s3.settleMinutes | quote }}
+            - name: RECLAIM
+              value: {{ .Values.dataPolicy.derived.assigned.reclaim | quote }}
+            - name: DRY_RUN
+              value: {{ and .Values.dataPolicy.enabled .Values.dataPolicy.dryRun | quote }}
+
+            # --- AWS CLI configuration -------------------------------------
+            - name: AWS_ENDPOINT_URL
+              value: {{ .Values.upload.s3.endpoint | quote }}
+            # SeaweedFS ignores the region; the AWS CLI refuses to run without
+            # one.
+            - name: AWS_DEFAULT_REGION
+              value: {{ .Values.upload.s3.region | quote }}
+            # Addressing style is deliberately not set. A custom
+            # AWS_ENDPOINT_URL makes botocore resolve with ForcePathStyle=True
+            # by itself, which is what the single-SAN SeaweedFS certificate
+            # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not an
+            # environment variable, so setting it here would do nothing.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.s3.existingSecret }}
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.s3.existingSecret }}
+                  key: secret-key
+            {{- if .Values.upload.s3.caBundleSecret }}
+            # Emitted ONLY when there is a real value. An empty AWS_CA_BUNDLE
+            # does not fall back to the system trust store — it disables
+            # certificate verification entirely and merely logs
+            # "Unverified HTTPS request is being made". Rendering this
+            # unconditionally would silently turn TLS validation off.
+            # _helpers.tpl additionally refuses to render an https endpoint
+            # with no CA configured.
+            - name: AWS_CA_BUNDLE
+              value: /etc/ssl/ais-edge/{{ .Values.upload.s3.caBundleKey }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.upload.s3.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            {{- if .Values.upload.s3.caBundleSecret }}
+            - name: ca-bundle
+              mountPath: /etc/ssl/ais-edge
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        - name: scripts
+          configMap:
+            name: {{ include "edge.fullname" . }}-s3-uploader
+            defaultMode: 0755
+        {{- if .Values.upload.s3.caBundleSecret }}
+        - name: ca-bundle
+          secret:
+            secretName: {{ .Values.upload.s3.caBundleSecret }}
+        {{- end }}
+{{- else if eq .Values.upload.mode "direct" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-upload
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: upload
+spec:
+  replicas: {{ .Values.upload.direct.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: upload
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: upload
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: upload
+          image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          # xnat-ingest loops internally via --loop; no bash wrapper needed.
+          command: ["xnat-ingest", "upload"]
+          args:
+            - "/data/assigned"
+            - "$(XINGEST_HOST)"
+            - "--always-include"
+            - {{ .Values.upload.direct.alwaysInclude | quote }}
+            - "--loop"
+            - {{ .Values.upload.direct.loop | quote }}
+            - "--wait-period"
+            - {{ .Values.upload.direct.waitPeriod | quote }}
+            {{- if not .Values.upload.direct.requireManifest }}
+            - "--dont-require-manifest"
+            {{- end }}
+            {{- if not .Values.upload.direct.verifySsl }}
+            - "--dont-verify-ssl"
+            {{- end }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            - name: XINGEST_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.direct.existingSecret }}
+                  key: server
+            - name: XINGEST_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.direct.existingSecret }}
+                  key: username
+            - name: XINGEST_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.direct.existingSecret }}
+                  key: password
+            - name: XINGEST_TEMPDIR
+              value: {{ .Values.upload.direct.tempDir | quote }}
+          resources:
+            {{- toYaml .Values.upload.direct.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+{{- end }}
