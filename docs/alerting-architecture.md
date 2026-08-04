@@ -18,7 +18,7 @@ those pods directly — k0smotron's konnectivity tunnel is one-way (worker →
 control plane), so there is no path from mgmt Prometheus back into a child
 cluster's pod network.
 
-There are two production-grade options:
+There are two options that work unattended:
 
 1. **Edge Prometheus → mgmt remote-write.** Stand up a Vector
    `prometheus_exporter` sink on each edge, expose it through the edge's

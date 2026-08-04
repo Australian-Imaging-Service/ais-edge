@@ -137,7 +137,7 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 
 ## Benefits
 
-- **Battle-tested DICOM parsing** — handles edge cases (missing
+- **DICOM parsing already handles our edge cases** — (missing
   AccessionNumber, multi-frame, multi-series) that we don't want to
   re-implement
 - **Idempotent** — re-running upload skips sessions already in XNAT

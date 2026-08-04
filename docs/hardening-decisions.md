@@ -1,4 +1,4 @@
-# Production hardening — findings, recommendations, and a critique of how we got here
+# Hardening — findings, decisions, and a critique of how we got here
 
 Status: **the charts render and validate, but are NOT safe to install on the
 existing management cluster yet.** This document is the decision list that has
@@ -408,7 +408,7 @@ not after.
 
 **Version pinning was done from what is running, which is right, but I did not
 check those versions for known CVEs** — worth doing before this is called
-production-grade.
+trusted with real data.
 
 ## Structural things I would change
 

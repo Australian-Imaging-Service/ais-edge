@@ -81,7 +81,7 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 ## Benefits
 
-- **Industry standard** — rich ecosystem, every CNCF project ships with
+- **Widely adopted** — rich ecosystem, every CNCF project ships with
   metrics in Prometheus exposition format
 - **Pull model** — scrape failures are visible (target listed as down),
   unlike push systems where missing data could mean either "agent died"

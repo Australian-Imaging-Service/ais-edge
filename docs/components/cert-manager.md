@@ -92,7 +92,7 @@ kubectl get clusterissuer
 - **Standard CRDs** — every Kubernetes engineer knows them
 - **Multi-issuer** — drop in a Let's Encrypt ACME issuer later if we
   ever want public CA chain on the management ingress
-- **Battle-tested** — used by every major K8s distro
+- **Widely deployed** — used by every major K8s distro
 
 ## Risks and failure modes
 
