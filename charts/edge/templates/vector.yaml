@@ -1,0 +1,162 @@
+{{- if .Values.observability.enabled }}
+{{- /*
+Vector log shipper for the edge cluster.
+
+Hand-written rather than a Vector subchart: the edge needs hostAliases for
+the management hostnames, our CA bundle for the Loki TLS, and a hostPath
+data dir. Wiring all of that through the upstream chart's values is more
+code than the DaemonSet itself, and the mgmt side already uses the chart, so
+this is the one place the two differ deliberately.
+
+Security posture: no hostNetwork (outbound TLS only), pod logs mounted
+read-only, all capabilities dropped, RuntimeDefault seccomp.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "edge.fullname" . }}-vector
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "edge.fullname" . }}-vector
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+rules:
+  # Read-only pod metadata, used to enrich log events with the labels the
+  # alert rules select on. Vector needs nothing else.
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "edge.fullname" . }}-vector
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "edge.fullname" . }}-vector
+    namespace: {{ .Values.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "edge.fullname" . }}-vector
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-vector
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, NOT an inline template. The config is full of Vector's
+         own {{ field }} event templates; rendering it through Helm would
+         resolve them to empty strings and strip every Loki stream label. */}}
+  vector.yaml: |
+    {{- .Files.Get "files/vector.yaml" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "edge.fullname" . }}-vector
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: vector
+spec:
+  selector:
+    matchLabels:
+      app: vector
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: vector
+      annotations:
+        checksum/config: {{ .Files.Get "files/vector.yaml" | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "edge.fullname" . }}-vector
+      hostNetwork: false
+      dnsPolicy: ClusterFirst
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      tolerations:
+        # Ship logs from every node, including tainted ones — a node we
+        # cannot see the logs of is a node we cannot debug.
+        - operator: Exists
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vector
+          image: "{{ .Values.observability.vector.image.repository }}:{{ .Values.observability.vector.image.tag }}"
+          imagePullPolicy: {{ .Values.observability.vector.image.pullPolicy }}
+          args: ["--config", "/etc/vector/vector.yaml"]
+          env:
+            # Interpolated by Vector when it loads the config file. This is
+            # what keeps the config a plain file rather than a Helm template.
+            - name: CLUSTER_LABEL
+              value: {{ .Values.clusterLabel | quote }}
+            - name: LOKI_ENDPOINT
+              value: {{ .Values.observability.loki.endpoint | quote }}
+            - name: LOKI_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.loki.existingTokenSecret }}
+                  key: token
+            # The kubernetes_logs source scopes its tailing by node name.
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VECTOR_SELF_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VECTOR_SELF_POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # readOnlyRootFilesystem is deliberately omitted: Vector's source
+            # checkpoints need a writable /vector-data-dir.
+          resources:
+            {{- toYaml .Values.observability.vector.resources | nindent 12 }}
+          volumeMounts:
+            - {name: config,         mountPath: /etc/vector,          readOnly: true}
+            - {name: data,           mountPath: /vector-data-dir}
+            - {name: pod-logs,       mountPath: /var/log/pods,        readOnly: true}
+            - {name: container-logs, mountPath: /var/log/containers,  readOnly: true}
+            - {name: ca-bundle,      mountPath: /etc/ssl/ais-edge-ca, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "edge.fullname" . }}-vector
+        # hostPath, not emptyDir. With emptyDir, rolling the DaemonSet wiped
+        # Vector's file-position checkpoints, it re-tailed every pod log from
+        # offset 0, and Loki ingested duplicate copies of old events — which
+        # showed up as inflated counts on the dashboards.
+        - name: data
+          hostPath:
+            path: /var/lib/vector
+            type: DirectoryOrCreate
+        - name: pod-logs
+          hostPath: {path: /var/log/pods}
+        - name: container-logs
+          hostPath: {path: /var/log/containers}
+        - name: ca-bundle
+          secret:
+            secretName: {{ .Values.observability.loki.caBundleSecret }}
+            items:
+              - key: {{ .Values.observability.loki.caBundleKey }}
+                path: ca.crt
+{{- end }}

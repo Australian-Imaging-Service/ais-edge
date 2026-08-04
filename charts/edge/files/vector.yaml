@@ -1,0 +1,92 @@
+# =============================================================================
+# Vector — edge log shipper configuration
+# =============================================================================
+# Loaded with .Files.Get and mounted verbatim. It is deliberately NOT a Helm
+# template, because it contains two different kinds of substitution that Helm
+# must not touch:
+#
+#   {{ kubernetes.pod_name }}   Vector event-time templates, evaluated per log
+#                               line. Helm would try to resolve these at chart
+#                               render time and render them EMPTY — producing
+#                               a Loki stream with no pod/component labels and
+#                               silently breaking every alert rule and
+#                               dashboard panel that selects on them.
+#
+#   ${LOKI_ENDPOINT}            Environment interpolation, performed by Vector
+#                               when it loads this file. This is how per-site
+#                               values get in without templating: the chart
+#                               passes them as env vars on the DaemonSet.
+#
+# So: anything site-specific is an env var, anything per-event is a Vector
+# template, and Helm passes the whole file through untouched.
+# =============================================================================
+data_dir: /vector-data-dir
+api:
+  enabled: false
+
+sources:
+  kubelet_logs:
+    type: kubernetes_logs
+    auto_partial_merge: true
+
+transforms:
+  add_cluster_label:
+    type: remap
+    inputs: [kubelet_logs]
+    source: |
+      .cluster = "${CLUSTER_LABEL}"
+
+  # The ingest pods emit one JSON object per line. Merging the parsed keys
+  # into the event makes `event`, `component` and `session` first-class
+  # fields, which is what lets the Loki ruler use `| json | event="..."`
+  # rather than regexing raw text.
+  parse_json_messages:
+    type: remap
+    inputs: [add_cluster_label]
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+      }
+
+sinks:
+  loki:
+    type: loki
+    inputs: [parse_json_messages]
+    endpoint: ${LOKI_ENDPOINT}
+    auth:
+      strategy: bearer
+      token: ${LOKI_BEARER_TOKEN}
+    tls:
+      ca_file: /etc/ssl/ais-edge-ca/ca.crt
+    # Slim the body: kubernetes_logs metadata is already promoted to stream
+    # labels below, so repeating it inside the payload only inflates storage
+    # and clutters the Grafana live tail.
+    encoding:
+      codec: json
+      except_fields:
+        - kubernetes
+        - file
+        - source_type
+        - stream
+        - tags
+    labels:
+      # LOAD-BEARING. Every alert rule and dashboard panel selects on these
+      # label names. `component` in particular is how the s3-uploader, group,
+      # assign and orthanc log streams are told apart.
+      cluster: "{{ cluster }}"
+      namespace: "{{ kubernetes.pod_namespace }}"
+      pod: "{{ kubernetes.pod_name }}"
+      container: "{{ kubernetes.container_name }}"
+      # Lets queries scope to an individual worker within a cluster. Costs one
+      # stream-set per worker; negligible at our scale.
+      node: "{{ kubernetes.pod_node_name }}"
+      app: "{{ kubernetes.pod_labels.app }}"
+      component: "{{ kubernetes.pod_labels.component }}"
+      level: "{{ level }}"
+    remove_label_fields: true
+    out_of_order_action: accept
+    compression: gzip
+    batch:
+      max_bytes: 1048576
+      timeout_secs: 1
