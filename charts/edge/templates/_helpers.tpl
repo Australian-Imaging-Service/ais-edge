@@ -45,6 +45,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.upload.s3.endpoint }}
       {{- fail "upload.mode=s3 requires upload.s3.endpoint (e.g. https://seaweedfs.<domain>)" }}
     {{- end }}
+    {{- /* No default. A shared bucket name is exactly the mistake this is
+           preventing: SeaweedFS scopes identities per BUCKET with no
+           prefix-level control, so two sites in one bucket can read and
+           delete each other's staged imaging. The name has to be stated. */ -}}
+    {{- if not .Values.upload.s3.bucket }}
+      {{- fail "upload.s3.bucket is empty. Set it to THIS site's own staging bucket — the management chart names them ingest-<edge name>. There is deliberately no default: a shared bucket gives every site read and delete access to every other site's staged imaging, because SeaweedFS scopes identities per bucket and has no prefix-level scoping." }}
+    {{- end }}
 
     {{- /* THE trap measured against SeaweedFS 3.99: AWS_CA_BUNDLE set to an
            empty string does NOT fall back to the system trust store — it

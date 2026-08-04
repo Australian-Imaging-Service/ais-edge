@@ -378,7 +378,13 @@ upload:
 
   s3:
     endpoint: ""                       # https://seaweedfs.<domain>
-    bucket: ingest-bucket
+    # THIS SITE'S OWN staging bucket. The management chart names them
+    # ingest-<edge name> by default, and scopes this edge's S3 identity to
+    # exactly this bucket — SeaweedFS enforces actions per BUCKET, with no
+    # prefix-level scoping, so a shared bucket means every site can read and
+    # delete every other site's staged imaging. Must match the name the
+    # management chart derived for this site.
+    bucket: ""   # e.g. ingest-edge-dev
     prefix: staged
     region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
 

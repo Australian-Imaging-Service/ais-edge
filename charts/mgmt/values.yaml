@@ -166,8 +166,29 @@ seaweedfs:
     capacity: 500Gi
     volumeSizeLimitMB: 1024
 
+  # ONE STAGING BUCKET PER EDGE SITE.
+  #
+  # SeaweedFS enforces identity actions as "<action>:<bucket>", so
+  # `Write:<bucket>/*` covers the whole bucket — there is no prefix-level
+  # scoping. Measured on the live cluster: an edge key lists its own bucket
+  # and gets AccessDenied on another. The bucket IS the boundary, so while
+  # every site shared one, any edge key could read, list and delete every
+  # other site's staged imaging.
+  #
+  # Per-site buckets are named <bucketPrefix>-<edge name>, or set `bucket:`
+  # on an individual edge entry to override.
+  #
+  # Set false to keep every site in buckets.ingest below — the pre-existing
+  # shared-bucket layout. That exists so sites can be migrated one at a time,
+  # not because it is a reasonable end state.
+  perSiteBuckets: true
+  bucketPrefix: ingest
+
   buckets:
+    # Only used when perSiteBuckets is false, or by sites not yet migrated.
     ingest: ingest-bucket
+    # Loki's chunks. Deliberately its own bucket and its own identity, so a
+    # Loki compromise cannot reach staged patient data.
     logs: logs-bucket
 
   # Admin identity, used by the bucket-creation hook.
@@ -214,7 +235,10 @@ xnatUpload:
   xnatSecretRef: xnat-credentials     # keys: server, username, password
   s3SecretRef: seaweedfs-upload       # keys: access-key, secret-key
 
-  bucket: ingest-bucket
+  # No `bucket` key: with perSiteBuckets the uploader is rendered once per
+  # edge, each against that site's own bucket via the mgmt.edgeBucket helper.
+  # A single fleet-wide bucket value here is what made one uploader a
+  # fleet-wide single point of failure.
   prefix: staged
   region: us-east-1
 

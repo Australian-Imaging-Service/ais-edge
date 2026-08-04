@@ -149,3 +149,50 @@ whole reason the reclaimer needs the filer. Measured on SeaweedFS 3.99:
 {{- define "mgmt.filerInternalEndpoint" -}}
 http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8888
 {{- end }}
+
+{{/* ===================================================================== */}}
+{{/* Per-site bucket naming                                                */}}
+{{/* ===================================================================== */}}
+{{/*
+The staging bucket for one edge site.
+
+WHY ONE BUCKET PER SITE. SeaweedFS matches an identity's actions as
+"<action>:<bucket>", so `Write:<bucket>/*` is BUCKET-WIDE — there is no
+prefix-level scoping. Measured on the live cluster: the edge-dev key lists
+ingest-bucket fine and gets AccessDenied on logs-bucket, so the bucket is the
+enforcement boundary, and only the bucket. While every site shared one bucket,
+any edge key could read, list and delete every other site's staged imaging.
+
+A bucket per site makes that boundary line up with the trust boundary. It also
+means the uploader and reclaimer are per-site, which removes a fleet-wide
+single point of failure: one site's poison session, stuck multipart or expired
+credential no longer stops delivery for everybody.
+
+`seaweedfs.buckets.ingest` remains as the SHARED bucket for sites that have
+not been migrated yet, so this can roll out one site at a time.
+*/}}
+{{- define "mgmt.edgeBucket" -}}
+{{- $ctx := index . 0 -}}{{- $edge := index . 1 -}}
+{{- if $edge.bucket -}}
+{{- $edge.bucket }}
+{{- else if $ctx.Values.seaweedfs.perSiteBuckets -}}
+{{- printf "%s-%s" $ctx.Values.seaweedfs.bucketPrefix $edge.name | trunc 63 | trimSuffix "-" }}
+{{- else -}}
+{{- $ctx.Values.seaweedfs.buckets.ingest }}
+{{- end -}}
+{{- end }}
+
+{{/* Every distinct staging bucket in use, so the bucket-creation hook and the
+     admin identity cover them all without duplicating the naming rule. */}}
+{{- define "mgmt.allIngestBuckets" -}}
+{{- $ctx := . -}}
+{{- $seen := dict -}}
+{{- range $ctx.Values.edges }}
+  {{- $b := include "mgmt.edgeBucket" (list $ctx .) -}}
+  {{- $_ := set $seen $b true -}}
+{{- end }}
+{{- if not $ctx.Values.seaweedfs.perSiteBuckets }}
+  {{- $_ := set $seen $ctx.Values.seaweedfs.buckets.ingest true -}}
+{{- end }}
+{{- keys $seen | sortAlpha | join " " }}
+{{- end }}

@@ -189,17 +189,29 @@ spec:
               {
                 printf '{"identities":['
                 emit 'admin' "$SRC/admin" '["Admin","Read","Write","List","Tagging"]'
-                {{- range .Values.edges }}
-                # Scoped to the ingest bucket and nothing else. A leaked edge
-                # key can neither reach XNAT nor read another site's staged
-                # sessions — and cannot touch the logs bucket either.
-                emit {{ .name | squote }} "$SRC/edge/{{ .name }}" '["Read:{{ $ingestBucket }}","List:{{ $ingestBucket }}","Write:{{ $ingestBucket }}/*","Tagging:{{ $ingestBucket }}"]'
+                {{- $ctx := . }}
+                {{- range $edge := .Values.edges }}
+                {{- $eb := include "mgmt.edgeBucket" (list $ctx $edge) }}
+                # Scoped to THIS SITE'S OWN BUCKET.
+                #
+                # SeaweedFS enforces actions as "<action>:<bucket>", so
+                # `Write:<bucket>/*` is bucket-wide and there is no prefix-level
+                # scoping — measured: an edge key lists its own bucket and gets
+                # AccessDenied on another. While every site shared one bucket,
+                # this line granted each edge read and delete over every other
+                # site's staged imaging. One bucket per site is what makes the
+                # enforcement boundary and the trust boundary the same thing.
+                emit {{ $edge.name | squote }} "$SRC/edge/{{ $edge.name }}" '["Read:{{ $eb }}","List:{{ $eb }}","Write:{{ $eb }}/*","Tagging:{{ $eb }}"]'
                 {{- end }}
                 {{- if $uploaderIdentity }}
                 # The S3->XNAT uploader. Write is what lets it REMOVE a staged
                 # session once XNAT has confirmed it (SeaweedFS folds object
                 # DELETE into the Write action); see dataPolicy.derived.s3Staged.
-                emit 'xnat-upload' "$SRC/xnat-upload" '["Read:{{ .Values.xnatUpload.bucket }}","List:{{ .Values.xnatUpload.bucket }}","Write:{{ .Values.xnatUpload.bucket }}/*","Tagging:{{ .Values.xnatUpload.bucket }}"]'
+                {{- $uctx := . }}
+                {{- range $edge := .Values.edges }}
+                {{- $ub := include "mgmt.edgeBucket" (list $uctx $edge) }}
+                emit {{ printf "upload-%s" $edge.name | squote }} "$SRC/upload/{{ $edge.name }}" '["Read:{{ $ub }}","List:{{ $ub }}","Write:{{ $ub }}/*","Tagging:{{ $ub }}"]'
+                {{- end }}
                 {{- end }}
                 {{- if $lokiIdentity }}
                 # Loki chunk storage. Deliberately cannot see the ingest
@@ -308,13 +320,16 @@ spec:
                       path: edge/{{ .name }}/secret-key
               {{- end }}
               {{- if $uploaderIdentity }}
+              {{- $pctx := . }}
+              {{- range $edge := .Values.edges }}
               - secret:
-                  name: {{ .Values.xnatUpload.s3SecretRef }}
+                  name: {{ $edge.uploadSecretRef | default $pctx.Values.xnatUpload.s3SecretRef }}
                   items:
                     - key: access-key
-                      path: xnat-upload/access-key
+                      path: upload/{{ $edge.name }}/access-key
                     - key: secret-key
-                      path: xnat-upload/secret-key
+                      path: upload/{{ $edge.name }}/secret-key
+              {{- end }}
               {{- end }}
               {{- if $lokiIdentity }}
               - secret:
@@ -562,8 +577,18 @@ spec:
                 fi
               }
 
+              # Every distinct staging bucket in use, derived from the same
+              # helper the uploader and identities use, so the three can never
+              # disagree about a site's bucket name.
+              {{- range $b := splitList " " (include "mgmt.allIngestBuckets" .) }}
+              {{- if $b }}
+              create_only {{ $b | squote }}
+              {{- end }}
+              {{- end }}
               {{- range $key, $bucket := .Values.seaweedfs.buckets }}
+              {{- if not (and $.Values.seaweedfs.perSiteBuckets (eq $key "ingest")) }}
               create_only {{ $bucket | squote }}
+              {{- end }}
               {{- end }}
           env:
             - name: AWS_ENDPOINT_URL

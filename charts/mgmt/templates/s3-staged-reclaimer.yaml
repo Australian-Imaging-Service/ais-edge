@@ -40,31 +40,35 @@ the cluster that could later be resumed by accident.
        this job used to require. A CronJob that can open a shell in any pod in
        the namespace is a much larger blast radius than one that can call a
        single HTTP verb. */ -}}
+{{- $root := . }}
+{{- range $edge := .Values.edges }}
+{{- $bucket := include "mgmt.edgeBucket" (list $root $edge) }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "mgmt.fullname" . }}-s3-reclaimer
-  namespace: {{ .Values.xnatUpload.namespace }}
+  name: {{ include "mgmt.fullname" $root }}-reclaim-{{ $edge.name }}
+  namespace: {{ $root.Values.xnatUpload.namespace }}
   labels:
-    {{- include "mgmt.labels" . | nindent 4 }}
+    {{- include "mgmt.labels" $root | nindent 4 }}
 data:
   {{- /* .Files.Get, never inline: the script is full of ${...}, backticks and
          JMESPath, and keeping it a real file is what lets `bash -n` lint it
          in CI and lets it be run against mocks. */}}
   reclaim-staged.sh: |
-    {{- .Files.Get "files/reclaim-staged.sh" | nindent 4 }}
+    {{- $root.Files.Get "files/reclaim-staged.sh" | nindent 4 }}
 ---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "mgmt.fullname" . }}-s3-reclaimer
-  namespace: {{ .Values.xnatUpload.namespace }}
+  name: {{ include "mgmt.fullname" $root }}-reclaim-{{ $edge.name }}
+  namespace: {{ $root.Values.xnatUpload.namespace }}
   labels:
-    {{- include "mgmt.labels" . | nindent 4 }}
+    {{- include "mgmt.labels" $root | nindent 4 }}
     app: xnat-ingest
     component: s3-reclaimer
 spec:
-  schedule: {{ $s3staged.schedule | quote }}
+  schedule: {{ $root.Values.dataPolicy.derived.s3Staged.schedule | quote }}
   # Two reclaimers listing and deleting the same prefix concurrently would
   # each confirm a session the other is mid-way through removing. Forbid, not
   # Replace: killing a run between `fs.rm -r` and the verification listing
@@ -80,7 +84,7 @@ spec:
   jobTemplate:
     metadata:
       labels:
-        {{- include "mgmt.labels" . | nindent 8 }}
+        {{- include "mgmt.labels" $root | nindent 8 }}
     spec:
       # No retries. Every decision is re-derived from a live listing on the
       # next scheduled run anyway, so a retry buys nothing and a retry loop
@@ -93,7 +97,7 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "mgmt.labels" . | nindent 12 }}
+            {{- include "mgmt.labels" $root | nindent 12 }}
             app: xnat-ingest
             # LOAD-BEARING LABELS. Vector turns these into the Loki stream
             # labels the ruler selects on (namespace / app / component /
@@ -103,42 +107,42 @@ spec:
           annotations:
             # Hash the script FILE, so a change to the reclaim logic is
             # visible in `helm diff` even though a CronJob has no rollout.
-            checksum/script: {{ .Files.Get "files/reclaim-staged.sh" | sha256sum }}
-            {{- with .Values.podAnnotations }}
+            checksum/script: {{ $root.Files.Get "files/reclaim-staged.sh" | sha256sum }}
+            {{- with $root.Values.podAnnotations }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
         spec:
           automountServiceAccountToken: false
           restartPolicy: Never
-          {{- include "mgmt.schedulingRules" . | nindent 10 }}
+          {{- include "mgmt.schedulingRules" $root | nindent 10 }}
           containers:
             - name: reclaimer
-              image: "{{ $s3staged.image.repository }}:{{ $s3staged.image.tag }}"
-              imagePullPolicy: {{ $s3staged.image.pullPolicy | default "IfNotPresent" }}
+              image: "{{ $root.Values.dataPolicy.derived.s3Staged.image.repository }}:{{ $root.Values.dataPolicy.derived.s3Staged.image.tag }}"
+              imagePullPolicy: {{ $root.Values.dataPolicy.derived.s3Staged.image.pullPolicy | default "IfNotPresent" }}
               # The aws-cli-style images use `aws` as their entrypoint.
               command: ["/bin/bash", "/scripts/reclaim-staged.sh"]
               env:
                 - name: CLUSTER_LABEL
-                  value: {{ .Values.clusterLabel | quote }}
+                  value: {{ $edge.name | quote }}
                 # Deliberately the UPLOADER's bucket and prefix, not
                 # seaweedfs.buckets.*: the reclaimer must act on exactly the
                 # prefix the uploader reads, and one values key for both is
                 # the only way that stays true.
                 - name: S3_BUCKET
-                  value: {{ .Values.xnatUpload.bucket | quote }}
+                  value: {{ $bucket | quote }}
                 - name: S3_PREFIX
-                  value: {{ .Values.xnatUpload.prefix | quote }}
+                  value: {{ $root.Values.xnatUpload.prefix | quote }}
                 - name: RECLAIM
-                  value: {{ $s3staged.reclaim | quote }}
+                  value: {{ $root.Values.dataPolicy.derived.s3Staged.reclaim | quote }}
                 - name: MIN_AGE
-                  value: {{ $s3staged.minAge | quote }}
+                  value: {{ $root.Values.dataPolicy.derived.s3Staged.minAge | quote }}
                 - name: VERIFY_XNAT
-                  value: {{ $s3staged.verifyAgainstXnat | quote }}
+                  value: {{ $root.Values.dataPolicy.derived.s3Staged.verifyAgainstXnat | quote }}
                 # Blast-radius cap. A bug that decided "delete everything" is
                 # bounded to this many sessions per run, leaving the rest for
                 # an operator to notice before they are gone.
                 - name: MAX_REMOVALS
-                  value: {{ $s3staged.maxRemovals | quote }}
+                  value: {{ $root.Values.dataPolicy.derived.s3Staged.maxRemovals | quote }}
                 # dryRun OR disabled — either one means "decide and log, delete
                 # nothing". Note this is deliberately NOT the edge chart's
                 # `and .enabled .dryRun`: with dataPolicy.enabled=false that
@@ -146,7 +150,7 @@ spec:
                 # policy that deletes. Nothing that removes patient data
                 # should read a disabled policy as permission.
                 - name: DRY_RUN
-                  value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
+                  value: {{ or (not $root.Values.dataPolicy.enabled) $root.Values.dataPolicy.dryRun | quote }}
 
                 # --- where the filer lives ------------------------------------
                 # Only the FILER can remove a directory ENTRY.
@@ -157,15 +161,15 @@ spec:
                 # :8888 removes it properly, over plain http inside the
                 # cluster, with no kubectl and no RBAC.
                 - name: FILER_ENDPOINT
-                  value: {{ include "mgmt.filerInternalEndpoint" . | quote }}
+                  value: {{ include "mgmt.filerInternalEndpoint" $root | quote }}
 
                 # --- S3 -------------------------------------------------------
                 - name: AWS_ENDPOINT_URL
-                  value: {{ include "mgmt.s3InternalEndpoint" . | quote }}
+                  value: {{ include "mgmt.s3InternalEndpoint" $root | quote }}
                 # SeaweedFS ignores the region; botocore refuses to sign
                 # without one.
                 - name: AWS_DEFAULT_REGION
-                  value: {{ .Values.xnatUpload.region | quote }}
+                  value: {{ $root.Values.xnatUpload.region | quote }}
                 # Path-style addressing is not configured here on purpose: a
                 # custom AWS_ENDPOINT_URL already makes botocore resolve with
                 # ForcePathStyle=True, and AWS_S3_ADDRESSING_STYLE is a
@@ -173,12 +177,12 @@ spec:
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.xnatUpload.s3SecretRef }}
+                      name: {{ $edge.uploadSecretRef | default $root.Values.xnatUpload.s3SecretRef }}
                       key: access-key
                 - name: AWS_SECRET_ACCESS_KEY
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.xnatUpload.s3SecretRef }}
+                      name: {{ $edge.uploadSecretRef | default $root.Values.xnatUpload.s3SecretRef }}
                       key: secret-key
 
                 # --- XNAT -----------------------------------------------------
@@ -187,24 +191,24 @@ spec:
                 - name: XNAT_SERVER
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.xnatUpload.xnatSecretRef }}
+                      name: {{ $root.Values.xnatUpload.xnatSecretRef }}
                       key: server
                 - name: XNAT_USER
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.xnatUpload.xnatSecretRef }}
+                      name: {{ $root.Values.xnatUpload.xnatSecretRef }}
                       key: username
                 - name: XNAT_PASS
                   valueFrom:
                     secretKeyRef:
-                      name: {{ .Values.xnatUpload.xnatSecretRef }}
+                      name: {{ $root.Values.xnatUpload.xnatSecretRef }}
                       key: password
                 # Follows the uploader. If the uploader is allowed to skip
                 # verification against this XNAT, the reclaimer must be too —
                 # a reclaimer that is stricter than the uploader confirms
                 # nothing and keeps everything, forever, silently.
                 - name: XNAT_VERIFY_SSL
-                  value: {{ .Values.xnatUpload.verifySsl | quote }}
+                  value: {{ $root.Values.xnatUpload.verifySsl | quote }}
               # Not from values: there is no resources key for this job. It
               # shells out to aws/curl a few dozen times an hour and
               # holds one listing in memory.
@@ -218,6 +222,7 @@ spec:
           volumes:
             - name: scripts
               configMap:
-                name: {{ include "mgmt.fullname" . }}-s3-reclaimer
+                name: {{ include "mgmt.fullname" $root }}-reclaim-{{ $edge.name }}
                 defaultMode: 0755
+{{- end }}
 {{- end }}
