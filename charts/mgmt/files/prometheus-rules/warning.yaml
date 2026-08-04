@@ -10,15 +10,44 @@ groups:
   - name: ais-edge-warning
     interval: 30s
     rules:
+      # Uses SeaweedFS's OWN exported disk gauge, not kubelet PVC stats.
+      #
+      # This rule previously selected
+      #   kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*seaweedfs.*"}
+      # which does not exist and never will: SeaweedFS's /data is a hostPath,
+      # and the hostPath volume plugin has no MetricsProvider, so kubelet
+      # publishes no volume stats for it. Verified on the live Prometheus —
+      # `count(kubelet_volume_stats_used_bytes)` returns no series at all. The
+      # alert had been green its entire life for want of an input.
+      #
+      # SeaweedFS exports the real thing on :9324, already scraped by the
+      # ServiceMonitor (measured on the live cluster):
+      #   SeaweedFS_volumeServer_resource{name="/data",type="all"}  211247489024
+      #   SeaweedFS_volumeServer_resource{name="/data",type="used"}  92370411520
+      #   SeaweedFS_volumeServer_resource{name="/data",type="free"} 118877077504
+      # This is also the better source regardless of storage type: it is what
+      # the process writing the data believes about its own disk.
       - alert: SeaweedFSDiskFull
+        # `ignoring(type)` is load-bearing. The two sides differ on the
+        # `type` label ("used" vs "all"), and PromQL binary operators match
+        # on the FULL label set, so a bare `/` matches nothing and the rule
+        # silently returns no data — the same failure mode this rule was
+        # already in. Caught by the unit test in tests/warning_test.yaml.
         expr: |
-          (kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*seaweedfs.*"}
-            / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~".*seaweedfs.*"}) > 0.80
+          (
+            SeaweedFS_volumeServer_resource{type="used"}
+            / ignoring(type)
+            SeaweedFS_volumeServer_resource{type="all"}
+          ) > 0.80
         for: 5m
         labels: { severity: warning }
         annotations:
-          summary: "SeaweedFS volume >80% full"
-          description: "/data/seaweedfs hostPath disk usage is over 80%. Either grow the disk or run a retention sweep."
+          summary: "SeaweedFS disk >80% full on {{ $labels.name }}"
+          description: |
+            The staging store is over 80% full. Staged sessions are patient
+            data that has not necessarily reached XNAT yet, so DO NOT clear
+            them blindly — check dataPolicy.derived.s3Staged and the
+            s3-reclaimer logs first, then grow the disk.
 
       - alert: CertificateExpiringSoon
         expr: |
