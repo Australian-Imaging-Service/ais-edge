@@ -88,6 +88,19 @@ dataPolicy:
       verifyAgainstXnat: true
       # How often the reclaimer runs.
       schedule: "17 * * * *"
+      # Cap on how many sessions one run may remove. A bug that decided
+      # "delete everything" is bounded to this many per run, leaving the rest
+      # for someone to notice first. At the hourly schedule this still drains
+      # ~1200 sessions/day.
+      maxRemovals: 50
+      # amazon/aws-cli carries everything the reclaimer needs: `aws` for the
+      # authoritative S3 listing and `curl` for both the XNAT confirmation and
+      # the filer delete. Pinned like every other image — an unpinned tag would
+      # be worst of all on the one job that deletes patient data.
+      image:
+        repository: amazon/aws-cli
+        tag: "2.31.19"
+        pullPolicy: IfNotPresent
 
   telemetry:
     podLogFiles: {retain: 14d}
@@ -264,10 +277,26 @@ observability:
   # only if kube-prometheus-stack is installed as a separate release.
   prometheusReleaseLabel: ""
 
+  # StorageClass for the four observability PVCs. On a k0s management node
+  # this is the built-in local-path provisioner.
+  storageClassName: local-path
+
   grafana:
     adminSecretRef: grafana-admin-credentials   # keys: admin-user, admin-password
-    ingress: {enabled: true, tlsSecretName: grafana-tls}
+    ingress: {enabled: true, tlsSecretName: grafana-tls, proxyBodySize: 16m}
     dashboardFolder: "AIS Edge"
+    persistenceSize: 5Gi
+
+  prometheus:
+    persistenceSize: 20Gi
+
+  vector:
+    image:
+      repository: timberio/vector
+      tag: "0.57.0-distroless-libc"
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits:   {cpu: 1,    memory: 512Mi}
 
   loki:
     # s3         chunks in SeaweedFS. Needs seaweedfs.enabled.
@@ -291,7 +320,14 @@ observability:
     smtpHost: ""
     smtpPort: 587
     smtpRequireTLS: true
+    # Alertmanager has smtp_auth_password_FILE but no smtp_auth_username_file,
+    # so unlike the password this cannot come from the mounted Secret and has
+    # to be a plain value. It is not sensitive on its own. Leaving it empty
+    # means no SMTP auth, and a relay that requires auth will reject every
+    # message — which surfaces only as alerts that never arrive.
+    smtpUsername: ""
     slackWebhookSecretRef: ""           # optional
+    persistenceSize: 2Gi
 
 
 # =============================================================================
@@ -309,3 +345,360 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+
+
+# =============================================================================
+# SUBCHART VALUES
+# =============================================================================
+# Everything below configures a PINNED upstream chart from Chart.yaml.
+#
+# THE CONSTRAINT THAT SHAPES ALL OF IT: Helm does NOT template values.yaml.
+# A subchart value cannot say `{{ .Release.Name }}-something` and expect it to
+# resolve — UNLESS that particular subchart runs `tpl` over that field itself.
+# Fields marked [tpl] rely on subchart-side tpl and do resolve; everything
+# else is a literal that has to be kept in step with a parent value by hand.
+# templates/observability.yaml renders a consistency check for every coupling
+# it can see, because each of these mismatches is otherwise completely silent.
+# -----------------------------------------------------------------------------
+
+kube-prometheus-stack:
+  # Our own alerts ship from files/prometheus-rules/, version-controlled
+  # alongside the code that emits the events they alert on.
+  defaultRules:
+    create: false
+
+  prometheus:
+    prometheusSpec:
+      retention: 15d                    # MUST MATCH dataPolicy.telemetry.prometheus.retain
+      retentionSize: ""
+      scrapeInterval: 30s
+      evaluationInterval: 30s
+      # DELETED ON PURPOSE — do not re-add:
+      #   ruleSelector: {matchLabels: {release: kube-prometheus-stack}}
+      # That literal was correct only because the shell installer's release
+      # happened to be named kube-prometheus-stack. As a subchart the release
+      # is ours. Leaving the selectors empty keeps *SelectorNilUsesHelmValues
+      # at its default of true, which makes the chart template
+      # `release: <parent release>` into the selectors automatically — so
+      # they track mgmt.prometheusReleaseLabel with no literal to forget.
+      ruleNamespaceSelector: {}
+      serviceMonitorNamespaceSelector: {}
+      podMonitorNamespaceSelector: {}
+      storageSpec:
+        volumeClaimTemplate:
+          metadata:
+            annotations:
+              helm.sh/resource-policy: keep
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: local-path
+            resources: {requests: {storage: 20Gi}}
+      resources:
+        requests: {cpu: 250m, memory: 1Gi}
+        limits:   {cpu: 2,    memory: 4Gi}
+
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      configSecret: alertmanager-aisedge-config
+      # Mounted at /etc/alertmanager/secrets/<name>/<key>. This is how the
+      # SMTP password reaches Alertmanager WITHOUT being templated into a
+      # manifest — the config uses smtp_auth_password_file.
+      secrets:
+        - alertmanager-smtp
+      storage:
+        volumeClaimTemplate:
+          metadata:
+            annotations:
+              # Holds the notification log. Wiping it re-sends every alert
+              # that is still firing.
+              helm.sh/resource-policy: keep
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            storageClassName: local-path
+            resources: {requests: {storage: 2Gi}}
+      resources:
+        requests: {cpu: 50m,  memory: 128Mi}
+        limits:   {cpu: 500m, memory: 512Mi}
+
+  grafana:
+    enabled: true
+    admin:
+      existingSecret: grafana-admin-credentials
+      userKey: admin-user
+      passwordKey: admin-password
+    defaultDashboardsEnabled: true
+    service: {type: ClusterIP}          # published only through nginx-ingress
+    persistence:
+      enabled: true
+      type: pvc
+      storageClassName: local-path
+      accessModes: ["ReadWriteOnce"]
+      size: 5Gi
+      annotations:
+        helm.sh/resource-policy: keep
+    # The PVC is RWO, so a rolling update deadlocks: the new pod cannot mount
+    # the volume while the old one holds it, and the old one will not
+    # terminate until the new one is Ready.
+    deploymentStrategy:
+      type: Recreate
+    # Once Grafana has run, subdirectories like pdf/ are mode 700 owned by
+    # 472:472. The init container runs with drop:ALL + add:[CHOWN]; without
+    # DAC_OVERRIDE it cannot traverse them and `chown -R` fails. Ownership is
+    # already correct, and fsGroup handles a fresh PVC.
+    initChownData:
+      enabled: false
+    deleteDatasources:
+      # Grafana's provisioner addresses datasources by UID. A previous install
+      # may have left a `Loki` row with a generated UID in grafana.db on the
+      # PVC, and re-provisioning the same name with an explicit UID then fails
+      # with "data source not found". No-op on a fresh database.
+      - name: Loki
+        orgId: 1
+    additionalDataSources:
+      # [tpl] kube-prometheus-stack renders additionalDataSources through tpl,
+      # so this resolves — and it must, because the Service name contains the
+      # release name.
+      - name: Loki
+        uid: loki                       # dashboards reference {"type":"loki","uid":"loki"}
+        type: loki
+        access: proxy
+        url: http://{{ .Release.Name }}-loki.{{ .Release.Namespace }}.svc.cluster.local:3100
+        isDefault: false
+        jsonData: {maxLines: 5000}
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        folderAnnotation: grafana_dashboard_folder
+        provider: {foldersFromFilesStructure: true}
+      datasources: {enabled: true}
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits:   {cpu: 1,    memory: 1Gi}
+
+  # Host metrics off, matching the edges. The kubelet's cAdvisor still
+  # provides pod-level metrics.
+  prometheus-node-exporter: {enabled: false}
+  nodeExporter: {enabled: false}
+
+  # Required by the SeaweedFSDown / EdgePodCrashLoop rules.
+  kubeStateMetrics: {enabled: true}
+  kube-state-metrics:
+    resources:
+      requests: {cpu: 50m,  memory: 128Mi}
+      limits:   {cpu: 200m, memory: 256Mi}
+
+  # k0s either embeds these or does not expose them the way the upstream
+  # chart assumes.
+  kubeApiServer:         {enabled: true}
+  kubeControllerManager: {enabled: false}
+  kubeScheduler:         {enabled: false}
+  kubeProxy:             {enabled: false}
+  kubeEtcd:              {enabled: false}   # k0smotron etcd is per child cluster
+  kubelet:               {enabled: true}
+  coreDns:               {enabled: true}
+
+
+loki:
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false                 # gated at the Ingress instead
+    schemaConfig:
+      configs:
+        - from: 2024-04-01
+          store: tsdb
+          object_store: s3
+          schema: v13
+          index: {prefix: loki_index_, period: 24h}
+    storage:
+      type: s3
+      bucketNames:                      # MUST MATCH seaweedfs.buckets.logs
+        chunks: logs-bucket
+        ruler:  logs-bucket
+        admin:  logs-bucket
+      s3:
+        # [tpl] the loki chart renders its config through tpl. Plain http on
+        # purpose — it never leaves the node.
+        endpoint: http://{{ .Release.Name }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
+        region: us-east-1               # ignored by SeaweedFS, required by the SDK
+        s3ForcePathStyle: true
+        insecure: true
+        # NO CREDENTIALS HERE. ${...} is expanded by Loki itself at startup
+        # (-config.expand-env below), not by Helm, so the key never appears in
+        # a rendered manifest or in git.
+        accessKeyId: ${LOKI_S3_ACCESS_KEY}
+        secretAccessKey: ${LOKI_S3_SECRET_KEY}
+    limits_config:
+      retention_period: 30d             # MUST MATCH dataPolicy.telemetry.loki.retain
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      max_global_streams_per_user: 10000
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+    compactor:
+      working_directory: /var/loki/compactor
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 150
+      delete_request_store: s3
+    commonConfig:
+      replication_factor: 1
+    # The ruler evaluates the LogQL alert rules and pushes firing alerts to
+    # Alertmanager. It lives here rather than in Prometheus because mgmt
+    # Prometheus cannot scrape edge pods across the one-way konnectivity
+    # tunnel, and because the source of truth for these alerts is the JSON log
+    # event, not a derived metric.
+    rulerConfig:
+      storage:
+        type: local
+        local: {directory: /etc/loki/rules}
+      rule_path: /var/loki/rules-runtime
+      # [tpl]
+      alertmanager_url: http://{{ .Release.Name }}-kube-prometheus-stack-alertmanager.{{ .Release.Namespace }}.svc.cluster.local:9093
+      enable_alertmanager_v2: true
+      enable_api: true
+      ring: {kvstore: {store: inmemory}}
+  singleBinary:
+    replicas: 1
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits:   {cpu: 2,    memory: 2Gi}
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: local-path
+      annotations:
+        helm.sh/resource-policy: keep
+    # Turns the S3 key into env vars without putting it in values.
+    extraArgs:
+      - -config.expand-env=true
+    extraEnv:
+      - name: LOKI_S3_ACCESS_KEY
+        valueFrom: {secretKeyRef: {name: loki-s3-credentials, key: access-key}}
+      - name: LOKI_S3_SECRET_KEY
+        valueFrom: {secretKeyRef: {name: loki-s3-credentials, key: secret-key}}
+    # `fake` is Loki's tenant ID when auth_enabled is false; the ruler reads
+    # every YAML file in that directory as a rule group.
+    extraVolumes:
+      - name: rules
+        configMap: {name: loki-ruler-rules}
+    extraVolumeMounts:
+      - {name: rules, mountPath: /etc/loki/rules/fake, readOnly: true}
+  read:    {replicas: 0}
+  write:   {replicas: 0}
+  backend: {replicas: 0}
+  minio:        {enabled: false}        # chunks live in SeaweedFS
+  chunksCache:  {enabled: false}
+  resultsCache: {enabled: false}
+  gateway:      {enabled: false}        # exposed through nginx-ingress directly
+  service:      {type: ClusterIP}
+  monitoring:
+    serviceMonitor:
+      enabled: true
+      # NOT tpl'd by the loki chart, so this is a literal release name. Only
+      # Loki's own self-metrics depend on it; no alert rule does, so a
+      # mismatch fails quietly rather than dangerously.
+      labels: {release: mgmt}
+    selfMonitoring: {enabled: false}
+    lokiCanary:     {enabled: false}
+  test: {enabled: false}
+
+
+vector:
+  role: Agent                           # DaemonSet, one per node
+  hostNetwork: false
+  dnsPolicy: ClusterFirst
+  podSecurityContext:
+    seccompProfile: {type: RuntimeDefault}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities: {drop: ["ALL"]}
+  tolerations:
+    - operator: Exists
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits:   {cpu: 1,    memory: 512Mi}
+  dataDir: /vector-data-dir
+  extraVolumes:
+    - name: pod-logs
+      hostPath: {path: /var/log/pods}
+    - name: containerd-logs
+      hostPath: {path: /var/log/containers}
+  extraVolumeMounts:
+    - {name: pod-logs,        mountPath: /var/log/pods,       readOnly: true}
+    - {name: containerd-logs, mountPath: /var/log/containers, readOnly: true}
+  customConfig:
+    data_dir: /vector-data-dir
+    api: {enabled: false}
+    sources:
+      kubelet_logs:
+        type: kubernetes_logs
+        auto_partial_merge: true
+    transforms:
+      add_cluster_label:
+        type: remap
+        inputs: [kubelet_logs]
+        source: |
+          .cluster = "mgmt"
+      parse_json_messages:
+        type: remap
+        inputs: [add_cluster_label]
+        source: |
+          parsed, err = parse_json(.message)
+          if err == null && is_object(parsed) {
+            . = merge!(., parsed)
+          }
+    sinks:
+      loki:
+        type: loki
+        inputs: [parse_json_messages]
+        # Same-cluster push: plain http, no bearer token, unlike the edges
+        # which arrive over the Ingress.
+        endpoint: http://mgmt-loki.observability.svc.cluster.local:3100
+        # Vector >=0.49 rejects a label template with no literal prefix
+        # ("template confinement") without this. Symptom: sink build error
+        # "template references event fields but has no literal string prefix".
+        dangerously_allow_unconfined_template_resolution: true
+        encoding:
+          codec: json
+          except_fields: [kubernetes, file, source_type, stream, tags]
+        # ---------------------------------------------------------------
+        # THE BACKTICK ESCAPING BELOW IS REQUIRED. DO NOT "SIMPLIFY" IT.
+        #
+        # The Vector chart runs `tpl` over customConfig, so this file's
+        # contents ARE evaluated as a Helm template. Written bare, `{{ cluster }}`
+        # would be resolved against the CHART context, find no `cluster`, and
+        # render EMPTY — every mgmt log line would lose its stream labels and
+        # every ruler rule selecting on them would stop matching, with no
+        # error anywhere.
+        #
+        # Confirmed against the live cluster: the source carries the escaping
+        # and the rendered ConfigMap contains `cluster: '{{ cluster }}'`.
+        # Verify after any change to this block:
+        #   kubectl -n observability get cm mgmt-vector -o yaml | grep 'cluster:'
+        # must show {{ cluster }}, not an empty string.
+        #
+        # (charts/edge takes the other route for the same problem — its Vector
+        # config is a plain file loaded with .Files.Get, which Helm never
+        # templates, so it needs no escaping at all.)
+        # ---------------------------------------------------------------
+        labels:
+          cluster:   "{{`{{ cluster }}`}}"
+          namespace: "{{`{{ kubernetes.pod_namespace }}`}}"
+          pod:       "{{`{{ kubernetes.pod_name }}`}}"
+          container: "{{`{{ kubernetes.container_name }}`}}"
+          node:      "{{`{{ kubernetes.pod_node_name }}`}}"
+          app:       "{{`{{ kubernetes.pod_labels.app }}`}}"
+          component: "{{`{{ kubernetes.pod_labels.component }}`}}"
+          level:     "{{`{{ level }}`}}"
+        remove_label_fields: true
+        out_of_order_action: accept
+        compression: gzip
+        batch:
+          max_bytes: 1048576
+          timeout_secs: 1
+  # mgmt Vector only pushes out; it exposes nothing in-cluster.
+  service:        {enabled: false}
+  serviceMonitor: {enabled: false}

@@ -1,0 +1,158 @@
+{{- if and .Values.k0smotron.enabled .Values.edges }}
+{{- /*
+One k0smotron hosted control plane per edge site.
+
+Replaces `scripts/05-setup-edge-cluster.sh <edge-entry>`, which had to be run
+once per site with a pipe-separated string that two other scripts parsed with
+a different field count. Here the fleet is a list and every site is rendered
+from the same template, so no site can be one rebuild behind another.
+
+WHAT THIS TEMPLATE DELIBERATELY DOES NOT DO: it does not create the
+JoinTokenRequest or rewrite the join token's `server:` URL. A JoinTokenRequest
+is a one-shot imperative act whose output is a Secret nothing here consumes —
+rendering it from Helm would re-issue a token on every `helm upgrade`. That
+stays in scripts/05.
+
+ANNOTATED helm.sh/resource-policy: keep, ON PURPOSE.
+Dropping a site from `edges` is a one-line values edit, usually made while
+thinking about something else. Without `keep`, that edit deletes the site's
+Cluster CR, and the k0smotron finalizer takes the control plane, the etcd
+StatefulSet and the child cluster's state with it — an entire site
+decommissioned as a side effect of a fleet-wide values change. Teardown must
+be a deliberate `kubectl delete cluster.k0smotron.io/<name> -n <name>`.
+*/ -}}
+{{- /* ssl-passthrough is not cosmetic here: the k0s API and konnectivity are
+       mTLS end to end. If nginx terminates TLS instead of passing it through,
+       the ingress and the API both come up healthy and only the WORKER fails,
+       with an x509 error in a journal on a machine at the other end of the
+       link. Refuse to render rather than ship that. */ -}}
+{{- if and .Values.ingressNginx.enabled (not .Values.ingressNginx.sslPassthrough) }}
+  {{- fail "ingressNginx.sslPassthrough=false while k0smotron hosted control planes are enabled. The k0s API and konnectivity are mTLS end-to-end; terminating TLS at the ingress leaves the management side looking healthy and breaks only the edge workers' join, which surfaces as an x509 error on the edge VM rather than here." }}
+{{- end }}
+{{- range $i, $edge := .Values.edges }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  # The Cluster CR and everything k0smotron derives from it — the
+  # <name>-kubeconfig Secret, the join-token Secret, the per-cluster CA
+  # Secrets and the etcd PVC — all live in a namespace named after the site,
+  # which is what scripts/05 and scripts/06 assume when they read them back.
+  name: {{ $edge.name }}
+  annotations:
+    # `keep` on the Cluster CR alone is not enough: deleting this namespace
+    # deletes the etcd PVC underneath it, and the default local-path
+    # StorageClass has reclaimPolicy Delete, so the child cluster's datastore
+    # is gone before the Cluster CR has noticed.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+---
+apiVersion: k0smotron.io/v1beta1
+kind: Cluster
+metadata:
+  name: {{ $edge.name }}
+  namespace: {{ $edge.name }}
+  {{- if $.Values.k0smotron.resourcePolicyKeep }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  # Not a values key: replicas > 1 requires an external kine datasource
+  # (spec.kineDataSourceURL), so raising it here alone yields a control plane
+  # that will not start.
+  replicas: 1
+  # DEFECT FIXED IN THE PORT. The CR used to pin v1.35.2+k0s.0 while
+  # scripts/01 (management) and scripts/06 (worker) each did `curl | sh` of
+  # whatever k0s was latest that morning. The control plane and its workers
+  # could therefore be built from different k0s releases weeks apart, which
+  # shows up as a kubelet that registers and then misbehaves in ways that
+  # look like anything but a version skew. One value, both ends.
+  version: {{ $.Values.k0smotron.k0sVersion | quote }}
+  externalAddress: {{ $.Values.domain.mgmtNodeIP | quote }}
+  service:
+    # Kept from the imperative manifest for in-cluster reachability of the
+    # child's kubernetes Service (10.96.0.1:443) — kube-router, kube-proxy
+    # and metrics-server use that path. Edges themselves join over the
+    # Ingress below, so their outbound firewall stays single-port 443.
+    #
+    # DEFECT FIXED IN THE PORT: the template hardcoded 30443/30132 for every
+    # site. NodePorts are cluster-wide, so the second edge's Service failed
+    # to allocate ("provided port is already allocated") and its control
+    # plane never came up — invisible while the fleet was exactly one site.
+    # Offsetting by list index keeps the first entry on the ports the running
+    # edge-dev already uses, so this is not a migration for existing sites.
+    type: NodePort
+    apiPort: {{ add 30443 $i }}
+    konnectivityPort: {{ add 30132 $i }}
+  ingress:
+    # k0smotron creates the API and konnectivity Ingresses itself; both are
+    # SNI-routed on :443 with passthrough, which is what keeps an edge site
+    # to a single outbound port.
+    deploy: true
+    className: nginx
+    apiHost: {{ include "mgmt.k0sApiHost" $ | quote }}
+    konnectivityHost: {{ include "mgmt.konnectivityHost" $ | quote }}
+    port: {{ $.Values.ingressPort }}
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+  # DEFECT FIXED IN THE PORT: this was `type: emptyDir`. That gave the k0s
+  # controller pod an ephemeral /var/lib/k0s, so a pod restart — an eviction,
+  # a node reboot, an operator upgrade — rebuilt the controller's local state
+  # from scratch.
+  persistence:
+    type: {{ $.Values.k0smotron.persistence.type }}
+    {{- if eq $.Values.k0smotron.persistence.type "pvc" }}
+    # k0smotron deletes the claim with the Cluster only if this is true.
+    # Stated explicitly because it is the last thing standing between a
+    # mistaken `kubectl delete cluster` and the site's state.
+    autoDeletePVCs: false
+    persistentVolumeClaim:
+      metadata:
+        name: {{ $edge.name }}-k0s-state
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $.Values.k0smotron.persistence.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $.Values.k0smotron.persistence.size }}
+    {{- end }}
+  etcd:
+    # THE ACTUAL CHILD-CLUSTER DATASTORE. k0smotron runs etcd as a second
+    # StatefulSet (kmc-<name>-etcd) with its own claim, which
+    # spec.persistence above does NOT govern — sizing it here is the
+    # difference between the site's state living on a 1Gi default claim and
+    # living on the volume the operator asked for.
+    #
+    # NOTE FOR EXISTING SITES: volumeClaimTemplates are immutable. Changing
+    # this size for a cluster that is already running requires deleting the
+    # etcd StatefulSet with --cascade=orphan and letting k0smotron recreate
+    # it; a plain `helm upgrade` is rejected by the API server.
+    autoDeletePVCs: false
+    persistence:
+      size: {{ $.Values.k0smotron.persistence.size }}
+      {{- with $.Values.k0smotron.persistence.storageClassName }}
+      storageClass: {{ . | quote }}
+      {{- end }}
+  k0sConfig:
+    apiVersion: k0s.k0sproject.io/v1beta1
+    kind: ClusterConfig
+    spec:
+      api:
+        # Workers verify the API server certificate against the hostname in
+        # the (rewritten) join token, not against the node IP. Without these
+        # SANs the join fails TLS verification on the edge and succeeds
+        # nowhere visible from here.
+        sans:
+          - {{ include "mgmt.k0sApiHost" $ | quote }}
+          - {{ include "mgmt.konnectivityHost" $ | quote }}
+          - {{ $.Values.domain.mgmtNodeIP | quote }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,147 @@
+# =============================================================================
+# Alertmanager configuration  —  email primary, optional Slack secondary
+# =============================================================================
+# LOADED WITH .Files.Get, NEVER INLINED IN A TEMPLATE.
+#
+# Everything below that looks like `{{ .CommonLabels.session }}` or
+# `{{ range .Alerts }}` is an ALERTMANAGER notification template, evaluated by
+# Alertmanager at notification time. Helm's own delimiters are identical. If
+# this file were pasted into templates/observability.yaml, Helm would evaluate
+# those expressions against the CHART's context, find no `.CommonLabels`, and
+# render them as empty strings — every alert email would arrive with a blank
+# subject line and every Slack message with an empty body, with no error
+# anywhere. .Files.Get returns the bytes untouched, which is the whole reason
+# this is a file.
+#
+# For the same reason this file CANNOT be a Helm template, the values the
+# installer used to substitute are written as __SENTINEL__ tokens and replaced
+# with `replace` in templates/observability.yaml. `replace` is a plain string
+# substitution: it cannot see, and cannot eat, the Go templates above.
+#
+# CREDENTIALS ARE NOT SUBSTITUTED. The SMTP password and the Slack webhook are
+# read by Alertmanager FROM FILES at notification time
+# (`smtp_auth_password_file`, `api_url_file`). The prometheus-operator mounts
+# every Secret named in alertmanagerSpec.secrets at
+#   /etc/alertmanager/secrets/<secret-name>/<key>
+# so the credential never passes through Helm, never lands in a rendered
+# manifest, and stays SOPS-encryptable in its own Secret.
+#
+# Routing tree:
+#   alertname=DICOMRejectedUnmappedAET  →  email, firing only
+#   alertname=XNATUploadSuccess         →  email, one per session
+#   severity=info                       →  slack only (dropped if no Slack)
+#   severity=critical                   →  email + slack
+#   everything else                     →  email
+# =============================================================================
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "__ALERT_SMTP_HOST__:__ALERT_SMTP_PORT__"
+  smtp_from: "__ALERT_EMAIL_FROM__"
+  smtp_auth_username: "__ALERT_SMTP_USERNAME__"
+  # Read at send time from the mounted Secret. Alertmanager has no
+  # `smtp_auth_username_file`, which is why the username above is a plain
+  # value and the password is not.
+  smtp_auth_password_file: "__ALERT_SMTP_PASSWORD_FILE__"
+  smtp_require_tls: __ALERT_SMTP_REQUIRE_TLS__
+
+route:
+  group_by: ["alertname", "cluster"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: email-primary       # default — every alert hits the inbox
+  routes:
+    # Per-alert override: XNATUploadSuccess is severity=info (so the
+    # default routing tree below would send it to Slack), but operators
+    # want an email confirmation for every successful XNAT push for
+    # audit / peace-of-mind reasons. Putting this matcher first
+    # overrides the `severity=info → slack-only` route below.
+    # Quarantine alerts: send the FIRING mail, but never a "[RESOLVED]" one.
+    # The expression only measures "no new rejections in the last 5 minutes",
+    # which is NOT the same as the problem being fixed — the rejected studies
+    # are still sitting in <FacilityBackupDir>/__unmapped_aet__/<AET>/ until
+    # an operator maps the AET and re-sends them. A "Resolved" mail here
+    # would be false reassurance. (Resolving on "quarantine directory is
+    # empty" would need a component that reports that state; Alertmanager and
+    # the Loki ruler only ever see logs, never the filesystem.)
+    - matchers:
+        - alertname = "DICOMRejectedUnmappedAET"
+      receiver: email-no-resolved
+      continue: false
+    - matchers:
+        - alertname = "XNATUploadSuccess"
+      receiver: email-upload-success
+      # Group by session so each session that lands in XNAT is its own
+      # notification group: a new session emails straight away, while the
+      # same session — which the uploader keeps re-logging every --loop pass
+      # while it remains in the S3 staging prefix — is held off by
+      # repeat_interval instead of emailing every cycle.
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 10s          # land in the inbox promptly after the upload
+      group_interval: 5m
+      repeat_interval: 24h     # one email per session, not one per loop
+      continue: false
+    - matchers:
+        - severity = "info"
+      receiver: slack-only
+      continue: false
+    - matchers:
+        - severity = "critical"
+      receiver: email-and-slack
+      continue: false
+
+receivers:
+  - name: email-primary
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: true
+
+  # Upload-success is an EVENT ("this session landed in XNAT"), not a
+  # condition that clears. send_resolved: false stops the pointless
+  # "[RESOLVED]" follow-up ~5 min later (resolve_timeout) — the operator
+  # only wants the single "upload completed" mail.
+  # Firing-only email. For alerts whose "resolved" state would be misleading
+  # (see the DICOMRejectedUnmappedAET route above).
+  - name: email-no-resolved
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+
+  - name: email-upload-success
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge: XNAT upload completed — {{ .CommonLabels.session }}'
+
+  - name: email-and-slack
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: true
+    slack_configs:
+      - api_url_file: "__ALERT_SLACK_WEBHOOK_FILE__"
+        channel: "#ais-edge-alerts"
+        send_resolved: true
+        title: "{{ .CommonLabels.alertname }} — {{ .CommonLabels.severity }}"
+        text: |
+          {{ range .Alerts }}
+          *{{ .Labels.alertname }}* — `{{ .Labels.cluster }}`
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+  - name: slack-only
+    slack_configs:
+      - api_url_file: "__ALERT_SLACK_WEBHOOK_FILE__"
+        channel: "#ais-edge-alerts"
+        send_resolved: false
+
+inhibit_rules:
+  # If a node is down, suppress per-pod alerts on that node.
+  - source_matchers:
+      - alertname = "ManagementClusterDown"
+    target_matchers:
+      - severity =~ "warning|info"
+    equal: ["cluster"]
+
+templates: []

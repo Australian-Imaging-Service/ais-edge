@@ -1,0 +1,589 @@
+{{- include "mgmt.validate" . -}}
+{{- if .Values.seaweedfs.enabled }}
+{{- /*
+SeaweedFS — the S3 staging store every edge site uploads into.
+
+All-in-one: `weed server` runs master + volume + filer + S3 gateway in one
+process, one pod, one hostPath volume. That is the right shape for a
+single-node management plane; scaling out means splitting into StatefulSets,
+not adding replicas here.
+
+THE S3 IDENTITY DOCUMENT IS THE INTERESTING PART OF THIS FILE.
+
+scripts/03-deploy-seaweedfs.sh built s3.json on the installer's laptop by
+interpolating every site's access key and secret key out of edge-nodes.env,
+then `kubectl create configmap s3-config --from-file=s3.json`. Two problems:
+
+  1. A ConfigMap. Every edge's S3 secret key, in plaintext, readable by
+     anything with configmap read in the namespace, and rendered in full by
+     `kubectl get cm -o yaml`.
+  2. It parsed edge-nodes.env with its own 7-field `IFS='|' read` while the
+     rest of the scripts used a 6-field one, so accessKey got bound to the
+     secret and secretKey came out EMPTY for every edge identity. SeaweedFS
+     starts perfectly happily with an empty secretKey — the edge just gets
+     403 on every PUT, forever, with nothing wrong on the management side.
+
+A Helm template cannot read a Secret's contents, so this chart cannot render
+s3.json at all — which is the point. The identities document is assembled
+INSIDE the pod by the build-s3-identities init container below, from the
+per-identity Secrets projected in by name. Nothing secret is ever templated,
+nothing secret is ever written to a second object at rest, and s3.json itself
+lives only in a tmpfs emptyDir for the lifetime of the pod.
+
+Consequences worth knowing:
+  * Adding or removing an entry in `edges` changes the projected volume and
+    the init script, so Helm rolls the pod by itself. The S3_CONFIG_HASH
+    annotation the shell installer needed is gone.
+  * ROTATING a key inside an existing Secret does NOT change the pod spec and
+    does NOT roll the pod, and `weed server -s3.config` reads the file once at
+    startup. After a rotation:
+      kubectl rollout restart deploy/{{ include "mgmt.fullname" . }}-seaweedfs -n {{ .Release.Namespace }}
+  * A missing or empty credential is a hard init-container failure (CrashLoop
+    with a named identity in the log) rather than a silent 403 later.
+*/ -}}
+{{- $fullName := printf "%s-seaweedfs" (include "mgmt.fullname" .) -}}
+{{- $ingestBucket := .Values.seaweedfs.buckets.ingest -}}
+{{- $logsBucket := .Values.seaweedfs.buckets.logs -}}
+{{- /* The uploader and Loki are separate identities, not the admin identity:
+       neither has any business holding Admin on the whole store. Both render
+       only when the component that uses them is actually enabled, because a
+       projected Secret source that does not exist blocks the pod from
+       starting. */ -}}
+{{- $uploaderIdentity := and .Values.xnatUpload.enabled .Values.xnatUpload.s3SecretRef -}}
+{{- $lokiIdentity := and .Values.observability.enabled (eq .Values.observability.loki.storage "s3") .Values.observability.loki.s3SecretRef -}}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  # PVs are cluster-scoped, so the name carries the release name. It also has
+  # to keep the substring "seaweedfs": the disk-usage alert selects PVCs with
+  # persistentvolumeclaim=~".*seaweedfs.*".
+  name: {{ $fullName }}
+  annotations:
+    # This is the staging copy of real patient data on its way to XNAT. A
+    # `helm uninstall` must not take it with the release — deleting it is a
+    # separate, deliberate act.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+spec:
+  accessModes: [ReadWriteOnce]
+  capacity:
+    storage: {{ .Values.seaweedfs.storage.capacity }}
+  hostPath:
+    path: {{ .Values.seaweedfs.storage.hostPath }}
+    type: DirectoryOrCreate
+  persistentVolumeReclaimPolicy: Retain
+  # Explicitly empty, not omitted. An omitted storageClassName lets the
+  # cluster's DEFAULT StorageClass claim the PVC and dynamically provision a
+  # different, empty volume — SeaweedFS would come up healthy on blank storage
+  # and every previously staged session would appear to have vanished.
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef:
+    name: {{ $fullName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: {{ $fullName }}
+  resources:
+    requests:
+      storage: {{ .Values.seaweedfs.storage.capacity }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+    component: seaweedfs
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, never RollingUpdate. One hostPath volume holding the master,
+    # volume and filer state cannot be opened by two `weed server` processes;
+    # a rolling update would start the new pod on the same directory while the
+    # old one still has it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: seaweedfs
+      component: seaweedfs
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "mgmt.labels" . | nindent 8 }}
+        # LOAD-BEARING. The SeaweedFS-down alert's runbook is
+        # `kubectl logs -l app=seaweedfs`, and the metrics ServiceMonitor
+        # selects the Service that fronts these pods on app: seaweedfs.
+        app: seaweedfs
+        component: seaweedfs
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "mgmt.schedulingRules" . | nindent 6 }}
+      initContainers:
+        # Assembles s3.json from the Secrets projected at
+        # /etc/seaweedfs-identity-sources. See the header of this file for why
+        # this is not a rendered ConfigMap or a rendered Secret.
+        #
+        # Same image as the server on purpose: no second image to pin, no
+        # second thing to keep in step with values.seaweedfs.image.
+        - name: build-s3-identities
+          image: "{{ .Values.seaweedfs.image.repository }}:{{ .Values.seaweedfs.image.tag }}"
+          imagePullPolicy: {{ .Values.seaweedfs.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              SRC=/etc/seaweedfs-identity-sources
+              OUT=/etc/seaweedfs/s3.json
+
+              # Read one credential file and JSON-escape it.
+              #
+              # The empty check is the direct fix for the field-count bug: an
+              # identity with an empty secretKey is valid JSON and SeaweedFS
+              # loads it without complaint, so the failure surfaces days later
+              # as one site getting 403s. Fail here, loudly, with a name.
+              read_cred() {
+                if [ ! -s "$1" ]; then
+                  echo "FATAL: $1 is missing or empty — refusing to write an s3.json with a blank credential" >&2
+                  return 1
+                fi
+                # tr: Secrets created from a file carry a trailing newline that
+                # would end up inside the JSON string and silently invalidate
+                # the key.
+                tr -d '\r\n' < "$1" | sed -e 's/[\\"]/\\&/g'
+              }
+
+              sep=""
+              emit() {
+                _ak=$(read_cred "$2/access-key") || exit 1
+                _sk=$(read_cred "$2/secret-key") || exit 1
+                printf '%s{"name":"%s","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":%s}' \
+                  "$sep" "$1" "$_ak" "$_sk" "$3"
+                sep=","
+                echo "  identity: $1  actions: $3" >&2
+              }
+
+              # s3.json is credentials in cleartext. It is written to a tmpfs
+              # emptyDir, mode 0600, and never touches the node's disk.
+              umask 077
+              {
+                printf '{"identities":['
+                emit 'admin' "$SRC/admin" '["Admin","Read","Write","List","Tagging"]'
+                {{- range .Values.edges }}
+                # Scoped to the ingest bucket and nothing else. A leaked edge
+                # key can neither reach XNAT nor read another site's staged
+                # sessions — and cannot touch the logs bucket either.
+                emit {{ .name | squote }} "$SRC/edge/{{ .name }}" '["Read:{{ $ingestBucket }}","List:{{ $ingestBucket }}","Write:{{ $ingestBucket }}/*","Tagging:{{ $ingestBucket }}"]'
+                {{- end }}
+                {{- if $uploaderIdentity }}
+                # The S3->XNAT uploader. Write is what lets it REMOVE a staged
+                # session once XNAT has confirmed it (SeaweedFS folds object
+                # DELETE into the Write action); see dataPolicy.derived.s3Staged.
+                emit 'xnat-upload' "$SRC/xnat-upload" '["Read:{{ .Values.xnatUpload.bucket }}","List:{{ .Values.xnatUpload.bucket }}","Write:{{ .Values.xnatUpload.bucket }}/*","Tagging:{{ .Values.xnatUpload.bucket }}"]'
+                {{- end }}
+                {{- if $lokiIdentity }}
+                # Loki chunk storage. Deliberately cannot see the ingest
+                # bucket: the log store has no business holding a key that
+                # reads imaging data.
+                emit 'loki-writer' "$SRC/loki" '["Read:{{ $logsBucket }}","List:{{ $logsBucket }}","Write:{{ $logsBucket }}/*","Tagging:{{ $logsBucket }}"]'
+                {{- end }}
+                printf ']}'
+              } > "$OUT"
+              echo "wrote $OUT ($(wc -c < "$OUT") bytes)" >&2
+          volumeMounts:
+            - name: identity-sources
+              mountPath: /etc/seaweedfs-identity-sources
+              readOnly: true
+            - name: s3-config
+              mountPath: /etc/seaweedfs
+      containers:
+        - name: seaweedfs
+          image: "{{ .Values.seaweedfs.image.repository }}:{{ .Values.seaweedfs.image.tag }}"
+          imagePullPolicy: {{ .Values.seaweedfs.image.pullPolicy }}
+          command: ["weed"]
+          args:
+            - "server"
+            - "-dir=/data"
+            - "-master.volumeSizeLimitMB={{ .Values.seaweedfs.storage.volumeSizeLimitMB }}"
+            # No cap on volume count: the store grows with the disk instead of
+            # refusing writes at an arbitrary number.
+            - "-volume.max=0"
+            # -filer is not optional. The S3 gateway is a front end to the
+            # filer; without it S3 accepts connections and fails every request.
+            - "-filer"
+            - "-s3"
+            - "-s3.config=/etc/seaweedfs/s3.json"
+            - "-s3.port=8333"
+            # `weed server` exposes ONE Prometheus endpoint aggregating
+            # master + volume + filer + s3. The per-subsystem metricsPort flags
+            # that the 4.x docs describe do not exist in 3.x.
+            - "-metricsPort=9324"
+            # SeaweedFS already logs every S3 request to stdout with
+            # bucket/key/status/bytes, which Vector indexes into Loki. That is
+            # the per-object audit trail; no extra flag needed for it.
+          ports:
+            - { containerPort: 8333, name: s3 }
+            - { containerPort: 9333, name: master }
+            - { containerPort: 8080, name: volume }
+            - { containerPort: 8888, name: filer }
+            - { containerPort: 9324, name: metrics }
+          readinessProbe:
+            # Master /cluster/status returns 200 + JSON once the cluster is up.
+            httpGet:
+              path: /cluster/status
+              port: 9333
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            # TCP, not HTTP: an unauthenticated GET / on the S3 port returns
+            # 403, which an httpGet probe would read as a failure and restart
+            # a perfectly healthy gateway in a loop.
+            tcpSocket:
+              port: 8333
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.seaweedfs.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: s3-config
+              mountPath: /etc/seaweedfs
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $fullName }}
+        # tmpfs. The assembled s3.json is every site's S3 secret key in
+        # cleartext and must not be written to the node's filesystem.
+        - name: s3-config
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # ONE projected volume rather than one volume per identity, so adding
+        # a site adds two lines here instead of a volume plus a mount.
+        #
+        # Sources are non-optional on purpose: if an edge is listed in `edges`
+        # but its Secret has not been created, the pod stays Pending with the
+        # missing Secret named in its events. The alternative — starting
+        # without that identity — is the silent 403 failure again.
+        - name: identity-sources
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: {{ .Values.seaweedfs.adminSecretRef }}
+                  items:
+                    - key: access-key
+                      path: admin/access-key
+                    - key: secret-key
+                      path: admin/secret-key
+              {{- range .Values.edges }}
+              - secret:
+                  name: {{ .s3SecretRef }}
+                  items:
+                    - key: access-key
+                      path: edge/{{ .name }}/access-key
+                    - key: secret-key
+                      path: edge/{{ .name }}/secret-key
+              {{- end }}
+              {{- if $uploaderIdentity }}
+              - secret:
+                  name: {{ .Values.xnatUpload.s3SecretRef }}
+                  items:
+                    - key: access-key
+                      path: xnat-upload/access-key
+                    - key: secret-key
+                      path: xnat-upload/secret-key
+              {{- end }}
+              {{- if $lokiIdentity }}
+              - secret:
+                  name: {{ .Values.observability.loki.s3SecretRef }}
+                  items:
+                    - key: access-key
+                      path: loki/access-key
+                    - key: secret-key
+                      path: loki/secret-key
+              {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # This name is contractual: mgmt.s3InternalEndpoint in _helpers.tpl builds
+  # http://<fullname>-seaweedfs.<ns>.svc.cluster.local:8333 from it, and the
+  # uploader, Loki and the bucket hook all dial that.
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    # Deliberately NOT app: seaweedfs. That label is the ServiceMonitor's
+    # selector, and if this Service carried it Prometheus would add a second
+    # target here for a port named "metrics" that does not exist on it.
+spec:
+  # ClusterIP only. Everything external arrives through nginx-ingress on :443.
+  # The master and filer admin UIs are intentionally not published at all:
+  #   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ $fullName }} 9333:9333   # master
+  #   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ $fullName }} 8888:8888   # filer
+  type: ClusterIP
+  selector:
+    app: seaweedfs
+    component: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - { port: 8333, targetPort: s3, name: s3 }
+    - { port: 9333, targetPort: master, name: master }
+    - { port: 8888, targetPort: filer, name: filer }
+---
+# A separate metrics-only Service, so the ServiceMonitor can select on
+# app: seaweedfs without also matching the S3 Service above.
+#
+# Binding note: `weed server -metricsPort=9324` listens on the pod IP, not on
+# 127.0.0.1. `kubectl port-forward` to it therefore fails while Prometheus,
+# which dials the Service IP and gets routed to the pod IP, scrapes fine —
+# do not read a failed port-forward as broken metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullName }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+    # Not used for discovery of a Service — Prometheus finds Services through
+    # the ServiceMonitor's selector — but kept in step with the ServiceMonitor
+    # so the pair cannot drift apart. Hardcoding it (the installer wrote
+    # `release: kube-prometheus-stack` in five files) is what silently
+    # unhooked Prometheus from our rules.
+    release: {{ include "mgmt.prometheusReleaseLabel" . }}
+spec:
+  type: ClusterIP
+  selector:
+    app: seaweedfs
+    component: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - { port: 9324, targetPort: metrics, name: metrics }
+{{- if .Values.seaweedfs.ingress.enabled }}
+---
+{{- /*
+S3 published on :443.
+
+This Ingress TERMINATES TLS; it does not use ssl-passthrough, and that is a
+decision, not an omission:
+
+  * The leg that needs encrypting is edge -> management, across the public
+    internet. nginx -> SeaweedFS is a ClusterIP hop inside the node.
+  * SeaweedFS has no TLS listener configured on 8333, so passthrough would
+    hand it a TLS ClientHello it cannot answer.
+
+It has to COEXIST with ingressNginx.sslPassthrough=true, which the k0smotron
+child API and konnectivity require. With --enable-ssl-passthrough the
+controller puts a SNI-routing TCP proxy in front of :443 and forwards every
+non-passthrough host to its own internal HTTPS listener, where these
+annotations still apply. Two things follow:
+
+  * Clients MUST send SNI. The passthrough proxy routes on the TLS server
+    name, so an edge that dials https://<mgmtNodeIP>/ instead of the hostname
+    lands on the default backend and gets a 404 that looks like a routing bug.
+  * backend-protocol is pinned to HTTP below so that enabling passthrough
+    cluster-wide can never be misread as applying to this host.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    # A single DICOM session is routinely tens of GB. nginx's 1m default would
+    # 413 the multipart parts, which surfaces at the edge as an upload that
+    # retries forever.
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.seaweedfs.ingress.proxyBodySize | quote }}
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Stream the body straight through. With buffering on, nginx spools each
+    # multipart part to its own disk first — doubling the write and filling
+    # the controller pod's ephemeral storage on large sessions.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - {{ include "mgmt.seaweedfsHost" . }}
+      secretName: {{ .Values.seaweedfs.ingress.tlsSecretName }}
+  rules:
+    - host: {{ include "mgmt.seaweedfsHost" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  name: s3
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.seaweedfs.ingress.tlsSecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+spec:
+  secretName: {{ .Values.seaweedfs.ingress.tlsSecretName }}
+  duration: 8760h        # 1y
+  renewBefore: 720h      # 30d
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  dnsNames:
+    - {{ include "mgmt.seaweedfsHost" . }}
+  {{- if eq .Values.topology "onprem" }}
+  # An IP SAN only for onprem, where edges reach this host through a
+  # hostAliases pin rather than DNS. It is a convenience for debugging by IP;
+  # note that the ssl-passthrough proxy in front of :443 needs SNI regardless,
+  # so an IP-addressed request will not actually route here. Public CAs do not
+  # issue IP SANs at all, which is the other reason this is onprem-only.
+  ipAddresses:
+    - {{ .Values.domain.mgmtNodeIP | quote }}
+  {{- end }}
+  issuerRef:
+    name: {{ .Values.certManager.issuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}
+{{- if .Values.seaweedfs.buckets }}
+---
+{{- /*
+Bucket creation.
+
+Replaces the tail of scripts/03: curl the MinIO client off the internet into
+/usr/local/bin, background a `kubectl port-forward`, poll it, `mc mb`, then
+kill the port-forward from a trap. That needed a workstation with internet
+access, sudo on the management node, and a port-forward that stayed up for
+the duration — and its exit code told you nothing, because `mc mb` was piped
+to /dev/null.
+
+In-cluster instead: the same S3 API, over the ClusterIP Service, with the
+admin identity mounted from a Secret.
+
+CREATE-ONLY. head-bucket first, create only on a miss, and there is no
+pre-delete or post-delete hook anywhere in this chart. `helm uninstall` must
+never be able to remove a bucket holding staged sessions.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullName }}-buckets
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+    component: bucket-init
+  annotations:
+    # post-*, not pre-*: the S3 gateway has to exist before it can be talked
+    # to. The Deployment may still be starting when this runs, hence the wait
+    # loop in the script.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    # before-hook-creation clears the previous Job object (Jobs have immutable
+    # pod templates, so a re-run would otherwise fail with "field is
+    # immutable"). hook-succeeded keeps a FAILED Job around for its logs.
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        {{- include "mgmt.labels" . | nindent 8 }}
+        app: seaweedfs
+        component: bucket-init
+    spec:
+      restartPolicy: Never
+      {{- include "mgmt.schedulingRules" . | nindent 6 }}
+      containers:
+        - name: create-buckets
+          # Pinned to the same AWS CLI the edge s3-uploader runs, so the two
+          # ends of the ingest path speak an identical S3 dialect. There is no
+          # values key for this image — see the chart README/report.
+          image: amazon/aws-cli:2.31.19
+          # The image's entrypoint is `aws`; override it to run a script.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              # The Deployment is created in the same Helm operation as this
+              # hook, so on a first install the gateway is usually still
+              # pulling its image. Five minutes of patience beats a failed
+              # install that only needed a retry.
+              i=0
+              until aws s3api list-buckets >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then
+                  echo "FATAL: $AWS_ENDPOINT_URL never answered. Check: kubectl logs -n {{ .Release.Namespace }} -l app=seaweedfs" >&2
+                  exit 1
+                fi
+                echo "waiting for the S3 gateway ($i/60)..."
+                sleep 5
+              done
+
+              create_only() {
+                if aws s3api head-bucket --bucket "$1" >/dev/null 2>&1; then
+                  echo "bucket $1 already exists — left untouched"
+                else
+                  aws s3api create-bucket --bucket "$1"
+                  echo "bucket $1 created"
+                fi
+              }
+
+              {{- range $key, $bucket := .Values.seaweedfs.buckets }}
+              create_only {{ $bucket | squote }}
+              {{- end }}
+          env:
+            - name: AWS_ENDPOINT_URL
+              value: {{ include "mgmt.s3InternalEndpoint" . | quote }}
+            # SeaweedFS ignores the region entirely; the AWS CLI refuses to
+            # make any call without one being set.
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.seaweedfs.adminSecretRef }}
+                  key: access-key
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.seaweedfs.adminSecretRef }}
+                  key: secret-key
+          resources:
+            requests: {memory: 64Mi, cpu: 50m}
+            limits:   {memory: 256Mi, cpu: 500m}
+{{- end }}
+{{- end }}

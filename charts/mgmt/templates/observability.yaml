@@ -1,0 +1,480 @@
+{{- include "mgmt.validate" . -}}
+{{- if .Values.observability.enabled }}
+{{- /*
+Observability — the parts of the stack that are OURS.
+
+Prometheus, Alertmanager, Grafana, Loki and Vector themselves are pinned
+subcharts (see Chart.yaml). This file holds only the objects that glue them
+to this site: the TLS certs, the two Ingresses, the SeaweedFS ServiceMonitor,
+the Alertmanager config, the Loki ruler rules, the PrometheusRules and the
+dashboards.
+
+THE ONE THING TO UNDERSTAND BEFORE EDITING THIS FILE
+----------------------------------------------------
+Four different systems here use `{{ }}` as their own template delimiter:
+
+  Alertmanager notification templates   {{ .CommonLabels.session }}
+  Prometheus / Loki rule annotations    {{ $labels.cluster }}
+  Grafana LogQL line_format             {{ .component }}
+  Helm                                  everything in this file
+
+They are indistinguishable to Helm. Anything containing the first three is
+loaded with .Files.Get / .Files.Glob and NEVER inlined here, because inlining
+does not error — Helm evaluates the expression against the chart context,
+finds no `.CommonLabels` / no `$labels`, and substitutes an empty string. The
+result installs cleanly, and then alert emails have blank subjects, alert
+descriptions lose the cluster name, and dashboard log panels show unlabelled
+lines. Nothing anywhere reports a problem. .Files.Get returns raw bytes and
+performs no template evaluation, which is the whole mechanism.
+
+The only substitution performed on those files is `replace` over explicit
+__SENTINEL__ tokens, which is plain string surgery and cannot touch a
+`{{ ... }}` expression.
+*/ -}}
+
+{{- $ns := .Release.Namespace }}
+{{- $promRelease := include "mgmt.prometheusReleaseLabel" . }}
+
+{{- /* Subchart Service names. Derived from .Release.Name because that is what
+       the subcharts derive THEIR names from — not from mgmt.fullname, which
+       fullnameOverride can move independently and would then point these
+       Ingresses at a Service that does not exist. */ -}}
+{{- $grafanaSvc := printf "%s-grafana" .Release.Name }}
+{{- $lokiSvc := printf "%s-loki" .Release.Name }}
+
+{{- /* Fixed literal names, deliberately NOT derived from the release.
+
+       Helm does not template values.yaml, so a subchart value can never say
+       `{{ .Release.Name }}-something`. Both names below are written into
+       kube-prometheus-stack / loki subchart values as plain strings, so they
+       must be plain strings here too. The consistency block underneath is
+       what stops the two sides drifting apart silently. See
+       charts/mgmt/SUBCHART-VALUES.md. */ -}}
+{{- $amConfigSecretName := "alertmanager-aisedge-config" }}
+{{- $rulerConfigMapName := "loki-ruler-rules" }}
+
+{{- $alerting := .Values.observability.alerting }}
+{{- $smtpRef := $alerting.smtpSecretRef }}
+{{- $slackRef := $alerting.slackWebhookSecretRef }}
+
+
+{{/* ===================================================================== */}}
+{{/* Cross-chart consistency — every failure below is otherwise SILENT     */}}
+{{/* ===================================================================== */}}
+{{- /*
+None of these can be expressed as a subchart value referencing a parent value,
+so they are checked at render time instead. Each check is skipped entirely
+when the corresponding subchart values block is absent, so this costs nothing
+until the values are actually filled in.
+*/ -}}
+{{- $kps           := (index .Values "kube-prometheus-stack") | default dict }}
+{{- $kpsPromSpec   := (get ((get $kps "prometheus") | default dict) "prometheusSpec") | default dict }}
+{{- $kpsAMSpec     := (get ((get $kps "alertmanager") | default dict) "alertmanagerSpec") | default dict }}
+{{- $kpsGrafana    := (get $kps "grafana") | default dict }}
+
+{{- /* THE landmine from the imperative installer: `release: kube-prometheus-
+       stack` hardcoded in five files. Prometheus discovers PrometheusRule and
+       ServiceMonitor objects purely by this label. If it stops matching, our
+       rules are not loaded, no rule fails, no pod restarts, and the alerting
+       stack simply never fires again. */ -}}
+{{- range $sel := list "rule" "serviceMonitor" }}
+  {{- $selKey := printf "%sSelector" $sel }}
+  {{- $nilKey := printf "%sSelectorNilUsesHelmValues" $sel }}
+  {{- $labels := (get ((get $kpsPromSpec $selKey) | default dict) "matchLabels") | default dict }}
+  {{- $explicit := (get $labels "release") | default "" }}
+  {{- $nilUses := true }}
+  {{- if hasKey $kpsPromSpec $nilKey }}{{ $nilUses = (get $kpsPromSpec $nilKey) }}{{ end }}
+  {{- if $nilUses }}
+    {{- if and $explicit (ne $explicit $.Release.Name) }}
+      {{- fail (printf "kube-prometheus-stack.prometheus.prometheusSpec.%s sets release=%q but %s is true, so kube-prometheus-stack OVERWRITES the selector with release=%q and your %s is silently ignored. Either drop the explicit selector or set %s: false." $selKey $explicit $nilKey $.Release.Name $selKey $nilKey) }}
+    {{- end }}
+    {{- if ne $promRelease $.Release.Name }}
+      {{- fail (printf "observability.prometheusReleaseLabel is %q but kube-prometheus-stack selects %s with release=%q (%s defaults to true). Prometheus would load none of this chart's rules or monitors. Set %s: false and an explicit %s, or clear prometheusReleaseLabel." $promRelease $selKey $.Release.Name $nilKey $nilKey $selKey) }}
+    {{- end }}
+  {{- else if ne $explicit $promRelease }}
+    {{- fail (printf "kube-prometheus-stack.prometheus.prometheusSpec.%s selects release=%q but this chart labels its rules and monitors release=%q. Prometheus would load none of them." $selKey $explicit $promRelease) }}
+  {{- end }}
+{{- end }}
+
+{{- if $kps }}
+  {{- /* Without configSecret the operator mounts the chart's own default
+         config: alerts are received, matched against a routing tree that has
+         no email receiver, and dropped. */ -}}
+  {{- $configSecret := (get $kpsAMSpec "configSecret") | default "" }}
+  {{- if ne $configSecret $amConfigSecretName }}
+    {{- fail (printf "kube-prometheus-stack.alertmanager.alertmanagerSpec.configSecret must be %q (it is %q). Without it Alertmanager runs the chart's default config and every alert is routed to a null receiver." $amConfigSecretName $configSecret) }}
+  {{- end }}
+
+  {{- /* The SMTP password and Slack webhook are read from files mounted by
+         the operator. A Secret missing from this list means the file does not
+         exist and every notification fails at send time. */ -}}
+  {{- $mounted := (get $kpsAMSpec "secrets") | default (list) }}
+  {{- if not (has $smtpRef $mounted) }}
+    {{- fail (printf "kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets must include %q (observability.alerting.smtpSecretRef) so the operator mounts it at /etc/alertmanager/secrets/%s/ — the config reads the SMTP password from there rather than embedding it." $smtpRef $smtpRef) }}
+  {{- end }}
+  {{- if and $slackRef (not (has $slackRef $mounted)) }}
+    {{- fail (printf "kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets must include %q (observability.alerting.slackWebhookSecretRef)." $slackRef) }}
+  {{- end }}
+{{- end }}
+
+{{- if $kpsGrafana }}
+  {{- $grafanaSecret := (get ((get $kpsGrafana "admin") | default dict) "existingSecret") | default "" }}
+  {{- if ne $grafanaSecret .Values.observability.grafana.adminSecretRef }}
+    {{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret is %q but observability.grafana.adminSecretRef is %q. Grafana would come up with the chart's generated random password and nobody would have it." $grafanaSecret .Values.observability.grafana.adminSecretRef) }}
+  {{- end }}
+{{- end }}
+
+{{- /* The ruler mounts the rules ConfigMap by NAME. A mismatch leaves the
+       StatefulSet unschedulable (missing volume) — loud, but only after the
+       install has already reported success. */ -}}
+{{- $lokiSB := (get ((index .Values "loki") | default dict) "singleBinary") | default dict }}
+{{- if $lokiSB }}
+  {{- $mountsRules := false }}
+  {{- range (get $lokiSB "extraVolumes") | default (list) }}
+    {{- if eq ((get ((get . "configMap") | default dict) "name") | default "") $rulerConfigMapName }}
+      {{- $mountsRules = true }}
+    {{- end }}
+  {{- end }}
+  {{- if not $mountsRules }}
+    {{- fail (printf "loki.singleBinary.extraVolumes must mount the %q ConfigMap at /etc/loki/rules/fake — otherwise Loki starts with an empty ruler and every log-derived alert (XNATUploadSuccess, DICOMRejectedUnmappedAET, ...) stops existing." $rulerConfigMapName) }}
+  {{- end }}
+{{- end }}
+
+
+{{/* ===================================================================== */}}
+{{/* TLS — server certs for the Grafana and Loki Ingresses                 */}}
+{{/* ===================================================================== */}}
+{{- /*
+IP SANs are emitted only in onprem topology, where there is no DNS and edges
+resolve these hostnames via hostAliases/etc-hosts to mgmtNodeIP, so clients
+verify by IP as well as by name. In cloud topology the LB address differs from
+mgmtNodeIP and an IP SAN would be wrong; public CAs do not issue them at all.
+*/ -}}
+{{- if .Values.observability.grafana.ingress.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.observability.grafana.ingress.tlsSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.observability.grafana.ingress.tlsSecretName }}
+  duration: 8760h          # 1 year
+  renewBefore: 720h        # cert-manager auto-renews 30 days before expiry
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  dnsNames:
+    - {{ include "mgmt.grafanaHost" . }}
+  {{- if eq .Values.topology "onprem" }}
+  ipAddresses:
+    - {{ .Values.domain.mgmtNodeIP }}
+  {{- end }}
+  issuerRef:
+    name: {{ .Values.certManager.issuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+{{- end }}
+{{- if .Values.observability.loki.ingress.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.observability.loki.ingress.tlsSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.observability.loki.ingress.tlsSecretName }}
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  dnsNames:
+    - {{ include "mgmt.lokiHost" . }}
+  {{- if eq .Values.topology "onprem" }}
+  ipAddresses:
+    - {{ .Values.domain.mgmtNodeIP }}
+  {{- end }}
+  issuerRef:
+    name: {{ .Values.certManager.issuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+{{- end }}
+
+{{/* ===================================================================== */}}
+{{/* Ingresses — two more SNI routes on the existing :443 listener         */}}
+{{/* ===================================================================== */}}
+{{- if .Values.observability.grafana.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mgmt.fullname" . }}-grafana
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+  annotations:
+    # Browser traffic only; a dashboard import is the largest thing posted.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # Explore queries over a 30-day Loki range routinely exceed the 60s default.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - {{ include "mgmt.grafanaHost" . }}
+      secretName: {{ .Values.observability.grafana.ingress.tlsSecretName }}
+  rules:
+    - host: {{ include "mgmt.grafanaHost" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $grafanaSvc }}
+                port:
+                  number: 80
+---
+{{- end }}
+{{- if .Values.observability.loki.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mgmt.fullname" . }}-loki
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+  annotations:
+    # Vector batches are capped at 1 MiB (batch.max_bytes) but arrive gzipped
+    # and in bursts after an edge reconnects; 50m leaves headroom.
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    # Stream push bodies straight through instead of spooling them to disk on
+    # the ingress node.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    {{- if .Values.observability.loki.push.requireAuth }}
+    {{- /*
+    Loki runs auth_enabled: false, so it accepts ANY push it receives. The
+    Ingress is the only place a per-edge credential is checked; without these
+    annotations `observability.loki.push.requireAuth: true` is decorative and
+    the push endpoint is open to anything that can reach :443.
+
+    KNOWN CONTRACT BREAK — read before enabling on a live fleet.
+    ingress-nginx can only validate Basic credentials from an annotation
+    (snippet annotations, which is what a bearer check would need, are
+    rejected by default since ingress-nginx 1.9). charts/edge ships Vector
+    with `auth: {strategy: bearer}`, which sends `Authorization: Bearer <tok>`
+    and will get a 401 here. The one-line fix belongs on the edge side —
+    charts/edge/files/vector.yaml, `strategy: basic` with user/password —
+    and both ends must be changed together. Until then, either coordinate
+    that change or run with requireAuth: false and rely on the network path.
+    */}}
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: {{ .Values.observability.loki.push.authSecretRef }}
+    nginx.ingress.kubernetes.io/auth-secret-type: auth-map
+    nginx.ingress.kubernetes.io/auth-realm: "AIS Edge Loki push"
+    {{- end }}
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - {{ include "mgmt.lokiHost" . }}
+      secretName: {{ .Values.observability.loki.ingress.tlsSecretName }}
+  rules:
+    - host: {{ include "mgmt.lokiHost" . }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                # The single-binary Service, not loki-gateway: the gateway is
+                # disabled in the subchart values, so its Service never exists.
+                name: {{ $lokiSvc }}
+                port:
+                  number: 3100
+---
+{{- end }}
+
+{{/* ===================================================================== */}}
+{{/* ServiceMonitor — SeaweedFS /metrics                                   */}}
+{{/* ===================================================================== */}}
+{{- if .Values.seaweedfs.enabled }}
+{{- /*
+`weed server -metricsPort=9324` binds the pod IP, not 127.0.0.1, so
+`kubectl port-forward` to it fails while Prometheus (which dials the Service
+IP) scrapes it fine. Do not "fix" the ServiceMonitor because port-forward
+does not work.
+
+In the imperative installer this object had to be applied in step 02d rather
+than next to SeaweedFS in step 03, because the ServiceMonitor CRD did not
+exist until kube-prometheus-stack was installed. Inside one release that
+ordering constraint is gone: Helm applies subchart crds/ before rendering any
+template.
+*/ -}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "mgmt.fullname" . }}-seaweedfs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    release: {{ $promRelease }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $ns }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app: seaweedfs
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+{{- end }}
+
+{{/* ===================================================================== */}}
+{{/* Alertmanager configuration                                            */}}
+{{/* ===================================================================== */}}
+{{- /*
+The file is read raw and only __SENTINEL__ tokens are replaced, so the
+Alertmanager notification templates inside it ({{ .CommonLabels.session }},
+{{ range .Alerts }}) reach Alertmanager intact.
+
+No credential is substituted. The SMTP password and the Slack webhook stay in
+their own Secrets and are read by Alertmanager from
+/etc/alertmanager/secrets/<secret>/<key>, mounted by the prometheus-operator
+from alertmanagerSpec.secrets. That is what keeps those Secrets SOPS-encrypted
+and out of the rendered manifest.
+*/ -}}
+{{- $secretsDir := "/etc/alertmanager/secrets" }}
+{{- $slackFile := printf "%s/slack-not-configured/webhook-url" $secretsDir }}
+{{- if $slackRef }}
+  {{- $slackFile = printf "%s/%s/webhook-url" $secretsDir $slackRef }}
+{{- end }}
+{{- $am := .Files.Get "files/alertmanager-config.yaml" }}
+{{- $am = $am | replace "__ALERT_EMAIL_TO__"          $alerting.emailTo }}
+{{- $am = $am | replace "__ALERT_EMAIL_FROM__"        ($alerting.emailFrom | default $alerting.emailTo) }}
+{{- $am = $am | replace "__ALERT_SMTP_HOST__"         $alerting.smtpHost }}
+{{- $am = $am | replace "__ALERT_SMTP_PORT__"         (toString $alerting.smtpPort) }}
+{{- $am = $am | replace "__ALERT_SMTP_REQUIRE_TLS__"  (toString $alerting.smtpRequireTLS) }}
+{{- /* NOTE: observability.alerting has no smtpUsername key yet — see
+       SUBCHART-VALUES.md. Empty means "no SMTP auth", which is what an
+       unset ALERT_SMTP_USERNAME did in the shell installer. */ -}}
+{{- $am = $am | replace "__ALERT_SMTP_USERNAME__"     (default "" $alerting.smtpUsername) }}
+{{- $am = $am | replace "__ALERT_SMTP_PASSWORD_FILE__" (printf "%s/%s/password" $secretsDir $smtpRef) }}
+{{- /* When no Slack Secret is configured this points at a path that does not
+       exist. Alertmanager reads api_url_file at SEND time, so the config
+       still loads and email keeps working — only Slack notifications error.
+       This mirrors the shell installer's https://hooks.slack.com/disabled
+       placeholder, and is deliberate: an empty api_url_file would make
+       Alertmanager reject the whole config and stop delivering everything. */ -}}
+{{- $am = $am | replace "__ALERT_SLACK_WEBHOOK_FILE__" $slackFile }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $amConfigSecretName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    {{- $am | nindent 4 }}
+---
+
+{{/* ===================================================================== */}}
+{{/* Loki ruler rules — log-derived alerts                                 */}}
+{{/* ===================================================================== */}}
+{{- /*
+Mounted by the Loki StatefulSet at /etc/loki/rules/fake (`fake` is Loki's
+tenant ID when auth_enabled is false), one rule group file per key.
+
+The rules select on the labels Vector promotes to Loki streams — namespace,
+component, cluster, app — and on the JSON events the pipeline emits
+(upload_started / upload_completed / upload_failed from the edge s3-uploader,
+xnat_upload_completed from the mgmt uploader). Renaming any of those breaks
+the rules with no error. Alert NAMES are matched by the Alertmanager routes in
+files/alertmanager-config.yaml, so they are equally load-bearing.
+
+scripts/02d applied this ConfigMap before the Loki release specifically so the
+volume would exist when the pod scheduled. Inside one release that is
+unnecessary: Helm's install order puts ConfigMaps well before StatefulSets.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $rulerConfigMapName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get: every annotation in here contains {{ $labels.cluster }},
+         {{ $labels.session }} or {{ $labels.aet }}. Inlined, Helm would blank
+         them and the alert emails would name neither the site nor the
+         session. */}}
+  ais-edge-pipeline.yaml: |
+    {{- .Files.Get "files/loki-ruler-rules.yaml" | nindent 4 }}
+---
+
+{{/* ===================================================================== */}}
+{{/* PrometheusRules — the K8s/cert-manager-metric alerts                  */}}
+{{/* ===================================================================== */}}
+{{- /*
+One PrometheusRule per file in files/prometheus-rules/. Each file holds the
+`spec:` body only; the wrapper is here so the release label and chart labels
+cannot be forgotten on a new file.
+
+Files rather than inline YAML for the same reason as everything else above:
+`{{ $labels.node }}`, `{{ $labels.pod }}` and `{{ $labels.name }}` in the
+annotations are Prometheus's templates, not Helm's.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "mgmt.fullname" $ }}-{{ base $path | trimSuffix ".yaml" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    release: {{ include "mgmt.prometheusReleaseLabel" $ }}
+spec:
+  {{- $.Files.Get $path | nindent 2 }}
+---
+{{- end }}
+
+{{/* ===================================================================== */}}
+{{/* Grafana dashboards                                                    */}}
+{{/* ===================================================================== */}}
+{{- /*
+The Grafana sidecar imports any ConfigMap labelled grafana_dashboard=1 in its
+own namespace and files it under the folder named by the
+grafana_dashboard_folder annotation.
+
+.Files.Glob, not inline JSON: the log panels use LogQL
+`line_format "{{ .component }} — {{ .message }}"`. Helm would render those to
+`line_format " — "`, the dashboard would import without complaint, and every
+log panel would show blank lines.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mgmt.fullname" $ }}-dashboard-{{ base $path | trimSuffix ".json" }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    grafana_dashboard: "1"
+  annotations:
+    grafana_dashboard_folder: {{ $.Values.observability.grafana.dashboardFolder | quote }}
+data:
+  {{ base $path }}: |-
+    {{- $.Files.Get $path | nindent 4 }}
+---
+{{- end }}
+{{- end }}
