@@ -1,0 +1,67 @@
+apiVersion: v2
+name: ais-mgmt
+description: >-
+  AIS Edge management cluster: SeaweedFS S3 staging, the S3->XNAT uploader,
+  the observability stack (Prometheus / Loki / Grafana / Alertmanager /
+  Vector), cert-manager issuers, and the k0smotron hosted control planes for
+  each edge site.
+type: application
+
+version: 0.1.0
+appVersion: "0.12.3"
+
+# =============================================================================
+# Pinned dependencies.
+# =============================================================================
+# Version pinning is the single strongest reason this chart exists. The
+# imperative installer ran six `helm upgrade --install` commands with NO
+# --version, plus cert-manager from a `/latest/` URL and k0smotron from a
+# `/stable/` URL. A rebuild months later was not reproducible: whatever
+# upstream had published that morning is what a site got.
+#
+# Every version below is what is CURRENTLY RUNNING and verified working on
+# stream-2-ab-dev, read out of the live Helm release metadata rather than
+# chosen from a changelog. Upgrade them deliberately, one at a time.
+#
+# NOTE ON CRDs: kube-prometheus-stack ships the Prometheus CRDs in its own
+# crds/ directory, and this chart creates PrometheusRule + ServiceMonitor
+# resources that depend on them. Helm applies subchart CRDs before rendering
+# templates, so a single install works — but `helm template` cannot validate
+# those CRs offline, and a cluster that has never had the CRDs will fail a
+# server-side dry run. Install once, then dry-run subsequently.
+dependencies:
+  - name: kube-prometheus-stack
+    version: "87.19.2"          # app v0.92.1
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: observability.enabled
+
+  - name: loki
+    version: "7.1.0"            # app 3.6.8
+    repository: https://grafana.github.io/helm-charts
+    condition: observability.enabled
+
+  - name: vector
+    version: "0.57.0"
+    repository: https://helm.vector.dev
+    condition: observability.enabled
+
+  - name: ingress-nginx
+    version: "4.15.1"           # app 1.15.1
+    repository: https://kubernetes.github.io/ingress-nginx
+    condition: ingressNginx.enabled
+
+  - name: cert-manager
+    version: "v1.20.3"
+    repository: https://charts.jetstack.io
+    condition: certManager.enabled
+
+keywords:
+  - xnat
+  - seaweedfs
+  - observability
+  - k0smotron
+home: https://github.com/Australian-Imaging-Service/ais-edge
+sources:
+  - https://github.com/Australian-Imaging-Service/ais-edge
+maintainers:
+  - name: Australian Imaging Service

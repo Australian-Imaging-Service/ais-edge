@@ -1,0 +1,311 @@
+# =============================================================================
+# AIS Edge — management cluster chart
+# =============================================================================
+# The central half of a tier-2 deployment. Runs on the k0s management node and
+# provides, for a fleet of edge sites:
+#
+#   * SeaweedFS      the S3 staging bucket every edge uploads into
+#   * xnatUpload     pushes staged sessions from S3 into XNAT
+#   * observability  Prometheus / Loki / Grafana / Alertmanager / Vector
+#   * certManager    the internal CA and the issuers that sign our TLS certs
+#   * ingressNginx   :443 with SNI routing and ssl-passthrough
+#   * edges[]        one k0smotron hosted control plane per edge site
+#
+# A tier-1 / standalone site does NOT need this chart at all — install
+# charts/edge with upload.mode=direct instead.
+#
+# CREDENTIALS ARE NOT IN THIS FILE, BY DESIGN.
+# Everything secret is referenced by Secret name. This file is safe to commit
+# per-site; the Secrets are created separately, SOPS-encrypted.
+# =============================================================================
+
+# Free-text name for this management plane. Appears as the `cluster` label on
+# its own logs and metrics, so it must not collide with any edge clusterLabel.
+clusterLabel: mgmt
+
+nameOverride: ""
+fullnameOverride: ""
+
+# onprem | cloud
+topology: onprem
+
+domain:
+  # Base domain the management services are published under. With no real DNS,
+  # a wildcard-resolver domain such as nip.io works:
+  #   dev-cai.203-101-224-211.nip.io
+  internal: ""
+  # Public IP of the management node. Used for the LoadBalancer address and,
+  # on edges, for the hostAliases that pin these hostnames.
+  mgmtNodeIP: ""
+
+# Hostnames published on :443. All resolve to mgmtNodeIP; nginx routes by SNI.
+hostnames:
+  seaweedfs: ""        # seaweedfs.<domain.internal>
+  grafana: ""          # grafana.<domain.internal>
+  loki: ""             # loki.<domain.internal>
+  k0sApi: ""           # k0s.<domain.internal>          — child cluster API
+  konnectivity: ""     # konnectivity.<domain.internal> — reverse tunnel
+ingressPort: 443
+
+
+# =============================================================================
+# dataPolicy
+# =============================================================================
+# THE SAME BLOCK AS charts/edge. Keep one copy in sites/<site>/values.yaml and
+# pass it to both releases, so a site has exactly one answer to "what is kept
+# and for how long". This chart acts only on the stores it owns:
+#   derived.s3Staged   the staging prefix in SeaweedFS
+#   telemetry          Loki and Prometheus retention
+# The rest is present so the file validates identically against both charts.
+# -----------------------------------------------------------------------------
+dataPolicy:
+  enabled: false
+  dryRun: true
+
+  originals:
+    facilityBackup: {enabled: true, retain: forever, minFreeDiskPercent: 10}
+    quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}
+    fileDrop:       {reclaim: never, minAge: 30d}
+
+  derived:
+    orthancStorage: {reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
+    grouped:        {reclaim: onAssigned, minAge: 0}
+    assigned:       {reclaim: onUploaded, minAge: 0}
+
+    # Owned by THIS chart.
+    #
+    # `xnat-ingest upload` has no S3 retention of its own: it rebuilds its
+    # work list from a live listing of the staging prefix every loop, so a
+    # session that has been uploaded stays there and is re-listed, re-uploaded
+    # and re-alerted forever. The reclaimer below is what closes that gap.
+    #
+    # onXnatConfirmed re-queries XNAT for the session before removing
+    # anything, rather than trusting the uploader's exit code — an exit code
+    # tells you the upload call returned, not that the data is in XNAT.
+    s3Staged:
+      reclaim: onXnatConfirmed   # never | onXnatConfirmed
+      minAge: 1d
+      verifyAgainstXnat: true
+      # How often the reclaimer runs.
+      schedule: "17 * * * *"
+
+  telemetry:
+    podLogFiles: {retain: 14d}
+    loki:        {retain: 30d}
+    prometheus:  {retain: 15d}
+
+
+# =============================================================================
+# edges — one entry per edge site
+# =============================================================================
+# A TYPED LIST, replacing the pipe-separated EDGE_NODES strings the shell
+# installer parsed. Four scripts each parsed those strings with their own
+# field layout and two of them disagreed about the field count, which silently
+# produced broken S3 identities. A list of objects cannot drift like that.
+#
+# Each entry produces:
+#   * a k0smotron hosted control plane (Cluster CR)
+#   * a scoped SeaweedFS S3 identity — write+list on the staging bucket only
+#   * a Loki push token
+#
+# Secrets are referenced, never inlined:
+#   s3SecretRef   Secret with keys access-key / secret-key
+#   lokiTokenRef  Secret with key token
+#
+# edges:
+#   - name: edge-dev
+#     nodeIP: 203.101.230.171
+#     s3SecretRef: edge-dev-s3
+#     lokiTokenRef: edge-dev-loki-token
+edges: []
+
+# k0smotron hosted control planes.
+k0smotron:
+  enabled: true
+  # Must match the k0s version on the edge WORKERS. The installer used to
+  # curl | sh the latest k0s independently on the management node and on each
+  # worker, so the two could drift apart silently.
+  k0sVersion: "v1.35.2+k0s.0"
+  # The hosted control plane's datastore. emptyDir means a control-plane pod
+  # restart discards the child cluster's state, so this is a PVC.
+  persistence:
+    type: pvc
+    size: 10Gi
+    storageClassName: ""
+  # Cluster CRs carry helm.sh/resource-policy: keep, so removing a site from
+  # `edges` above does NOT tear down its control plane. Teardown is a
+  # deliberate `kubectl delete`, not a side effect of a fleet-wide upgrade.
+  resourcePolicyKeep: true
+
+
+# =============================================================================
+# seaweedfs — the S3 staging store
+# =============================================================================
+seaweedfs:
+  enabled: true
+  image:
+    repository: chrislusf/seaweedfs
+    tag: "3.99"
+    pullPolicy: IfNotPresent
+
+  storage:
+    hostPath: /data/seaweedfs
+    capacity: 500Gi
+    volumeSizeLimitMB: 1024
+
+  buckets:
+    ingest: ingest-bucket
+    logs: logs-bucket
+
+  # Admin identity, used by the bucket-creation hook and by charts/mgmt's own
+  # uploader. Per-edge identities are generated from `edges` above and are
+  # scoped to the ingest bucket only, so losing one edge key exposes neither
+  # XNAT nor any other site's data.
+  adminSecretRef: seaweedfs-admin
+
+  # The generated s3.json goes into a SECRET, not a ConfigMap. The imperative
+  # installer wrote every site's S3 keys into a ConfigMap in plaintext.
+  identitiesSecretName: seaweedfs-identities
+
+  ingress:
+    enabled: true
+    # mc multipart / large session uploads.
+    proxyBodySize: 50g
+    tlsSecretName: seaweedfs-tls
+
+  resources:
+    requests: {memory: 512Mi, cpu: 200m}
+    limits:   {memory: 4Gi,   cpu: "2"}
+
+
+# =============================================================================
+# xnatUpload — staged S3 -> XNAT
+# =============================================================================
+xnatUpload:
+  enabled: true
+  namespace: xnat-upload
+  image:
+    repository: ghcr.io/australian-imaging-service/xnat-ingest
+    tag: "0.12.3"
+    pullPolicy: IfNotPresent
+
+  xnatSecretRef: xnat-credentials     # keys: server, username, password
+  s3SecretRef: seaweedfs-upload       # keys: access-key, secret-key
+
+  bucket: ingest-bucket
+  prefix: staged
+  region: us-east-1
+
+  loop: 60
+  alwaysInclude: "all"
+  requireManifest: false
+  verifySsl: false
+
+  # Recreate, not RollingUpdate: two uploaders running --loop against the same
+  # staging prefix would process the same sessions concurrently.
+  strategy: Recreate
+
+  resources:
+    requests: {memory: 256Mi, cpu: 100m}
+    limits:   {memory: 2Gi,   cpu: "2"}
+
+
+# =============================================================================
+# certManager + issuers
+# =============================================================================
+certManager:
+  # The subchart. Set false if cert-manager is already installed cluster-wide.
+  enabled: true
+  installCRDs: true
+
+  # ais-edge-ca      self-signed internal CA. The default, and what every
+  #                  in-cluster client trusts via the ca-bundle Secret.
+  # letsencrypt-*    public certificates. Requires a real, publicly resolvable
+  #                  domain AND a DNS-01 solver — nip.io cannot satisfy
+  #                  HTTP-01 or DNS-01, which is why the internal CA is the
+  #                  default rather than a fallback.
+  issuer: ais-edge-ca
+
+  ca:
+    secretName: ais-edge-ca-secret
+    commonName: ais-edge-ca
+    durationHours: 87600      # 10y
+  acme:
+    email: ""
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Provider-specific solver block, passed through verbatim.
+    dns01Solver: {}
+
+
+# =============================================================================
+# ingressNginx
+# =============================================================================
+ingressNginx:
+  enabled: true
+  # Required: the k0smotron child-cluster API and konnectivity tunnel are TLS
+  # end-to-end and must NOT be terminated at the ingress.
+  sslPassthrough: true
+  loadBalancerIP: ""
+  proxyBodySize: 50g
+
+
+# =============================================================================
+# observability
+# =============================================================================
+observability:
+  enabled: true
+
+  # LANDMINE. Prometheus discovers PrometheusRule and ServiceMonitor objects
+  # by label. The imperative installer hardcoded `release: kube-prometheus-stack`
+  # in five files because that was the release name it used. As a SUBCHART the
+  # release name is this chart's, so the label must follow it — otherwise
+  # Prometheus silently stops loading our rules and the Grafana Ingress 503s,
+  # with no error anywhere. Templated from .Release.Name by default; override
+  # only if kube-prometheus-stack is installed as a separate release.
+  prometheusReleaseLabel: ""
+
+  grafana:
+    adminSecretRef: grafana-admin-credentials   # keys: admin-user, admin-password
+    ingress: {enabled: true, tlsSecretName: grafana-tls}
+    dashboardFolder: "AIS Edge"
+
+  loki:
+    # s3         chunks in SeaweedFS. Needs seaweedfs.enabled.
+    # filesystem single PVC. What tier-1 uses, where there is no SeaweedFS.
+    storage: s3
+    s3SecretRef: loki-s3-credentials
+    persistenceSize: 20Gi
+    ingress: {enabled: true, tlsSecretName: loki-tls}
+    # Vector on every edge pushes here with a bearer token. Loki itself runs
+    # auth_enabled: false, so the token is only meaningful if the Ingress
+    # actually checks it — see auth below.
+    push:
+      requireAuth: true
+      # Secret holding the htpasswd/token map the Ingress validates against.
+      authSecretRef: loki-push-auth
+
+  alerting:
+    smtpSecretRef: alertmanager-smtp    # keys: username, password
+    emailFrom: ""
+    emailTo: ""
+    smtpHost: ""
+    smtpPort: 587
+    smtpRequireTLS: true
+    slackWebhookSecretRef: ""           # optional
+
+
+# =============================================================================
+# cloud (parked)
+# =============================================================================
+# Kept as a values key so the templates stay ready, but not wired up: the
+# LoadBalancer path in the shell installer was broken anyway, and pre-creating
+# an Octavia LB is Terraform work rather than Helm work.
+cloud:
+  enabled: false
+  provider: openstack
+  cloudConfigSecretRef: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
