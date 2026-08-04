@@ -66,204 +66,289 @@ move sites one at a time, retire the shared bucket last. No flag day.
 
 ---
 
-## 1. Loki push path is dead on a default install 🔴
+## 1. Loki push authentication 🔴
 
-`observability.loki.push.requireAuth: true` renders an Ingress with
-`auth-type: basic` + `auth-secret: loki-push-auth`, but **nothing creates that
-Secret**, and `charts/edge` pushes with `strategy: bearer`. A default install
-therefore rejects every edge log push. Worse, the pre-existing behaviour was
-the opposite failure: the token was minted, shipped and sent but *never
-validated*, so `loki.<domain>:443` accepted unauthenticated writes from
-anything that could route to it.
+Today: the token is minted, shipped and sent but **never validated** — the
+push endpoint accepts unauthenticated writes from anything that can route to
+it. The chart's attempted fix renders basic auth against a Secret nothing
+creates, and the edge sends bearer, so a default install is dead instead.
 
-### Recommendation: switch the edge to basic auth and generate the htpasswd Secret
+### Do it properly: mTLS with per-edge client certificates
 
-nginx-ingress cannot validate a bearer token natively; it can do basic auth
-with an htpasswd Secret. Vector's Loki sink supports `strategy: basic`. So:
+I originally proposed basic auth on the grounds that mTLS "needs a new
+distribution path". **That was wrong.** `scripts/07b` already runs
+`kubectl create secret ... loki-push-credentials` and
+`kubectl create secret ... ca-bundle` against the edge cluster. Distributing a
+client certificate is the same mechanism with one more Secret. The objection
+that made basic auth look pragmatic does not exist.
 
-* `charts/edge` Vector sink → `strategy: basic`, user = the edge name,
-  password = the existing per-edge push token (no new secret material, no new
-  distribution path — the token Secret already reaches every edge).
-* `charts/mgmt` generates one `loki-push-auth` Secret containing an htpasswd
-  line per edge, from the same `edges[].lokiTokenRef` Secrets.
-* Per-site revocation stays: drop the edge from the list, upgrade, that
-  site's credential stops working.
+Design:
 
-**Alternative, stronger, more work: mTLS.** We already run an internal CA, so
-issuing a client certificate per edge is natural and nginx-ingress supports
-`auth-tls-secret`. It is the better long-term answer. It needs a per-edge
-client cert *distributed to the edge*, which is a new distribution path — the
-edges currently receive only the CA bundle, not a client identity. I would do
-basic auth now and treat mTLS as a follow-up, not block on it.
+* cert-manager issues `edge-<name>-client-tls` from the `ais-edge-ca` issuer,
+  `commonName: <edge-name>`. One `Certificate` per entry in `edges`, so adding
+  a site provisions its identity automatically.
+* The secret-distribution bootstrap step copies it to the edge alongside the
+  CA bundle it already copies.
+* Vector's Loki sink uses `tls.crt_file` / `tls.key_file`.
+* The Loki Ingress gets `auth-tls-secret` (the CA), `auth-tls-verify-client: on`,
+  and `auth-tls-match-cn` built from the `edges` list.
 
-**Do not** turn on Loki multi-tenancy to solve this: `auth_enabled: true`
-changes tenant IDs and orphans every chunk already in `logs-bucket`.
+What this buys over a shared token: **no shared secret material anywhere**,
+automatic rotation by cert-manager (a token rotates when someone remembers
+to), an identity that is cryptographically bound to the site rather than a
+string anyone holding it can replay, and revocation by removing the site from
+the list and upgrading — the CN no longer matches. It is also the same trust
+root the S3 path already uses, so there is one PKI to reason about instead of
+one PKI plus a bag of tokens.
 
----
-
-## 2. Every edge renders the same apiHost / konnectivityHost 🔴
-
-Two edges produce two Ingresses claiming one hostname. The multi-site
-capability this chart is supposed to deliver does not actually work, which is
-exactly the defect the port claimed to have fixed.
-
-Related: NodePorts are derived from the edge's **position in the list**
-(`add 30443 $i`). Reorder or delete an entry and a running site's cluster-wide
-NodePort silently moves to a different site — and because the Cluster CRs
-carry `resource-policy: keep`, the old Service is still holding the old port.
-
-### Recommendation: per-edge hostnames, and stop deriving ports from list order
-
-* `k0s-<edge>.<domain>` and `konnectivity-<edge>.<domain>`. A wildcard
-  resolver such as nip.io handles this with no DNS work; a real domain needs
-  one wildcard record.
-* Route by **SNI on :443** through the existing ssl-passthrough ingress, which
-  is what the management plane already does for SeaweedFS/Grafana/Loki. That
-  removes NodePorts from the design entirely — no port allocation to manage,
-  no collisions, nothing tied to list order.
-* If a site genuinely needs a NodePort, it becomes an **explicit field on that
-  edge's entry**, never a computed one. A running site's port must never be a
-  function of anything else's presence.
+**Deliberate non-goal: log READ isolation between sites.** Loki multi-tenancy
+(`auth_enabled: true`) would give it, and it is the obvious "do it properly"
+reflex — but it is the wrong call here and it is worth writing down why.
+Tenanted rules are evaluated per tenant, so every fleet-wide alert we have
+(`sum by (cluster) (...)` across sites) becomes impossible, and Grafana needs
+per-tenant datasources to see anything. We would trade working cross-site
+alerting for an isolation property nobody needs, since operations are
+fleet-wide by design and Grafana is already admin-authenticated. The push path
+is the boundary that matters, and mTLS is the right control for it.
 
 ---
 
-## 3. cert-manager namespace keys off the wrong thing 🔴
+## 2. Per-edge hostnames, and no computed ports 🔴
 
-`certManager.enabled` means "install the subchart", but the template uses it
-to decide *where cert-manager reads cluster-scoped resources from*. On this
-cluster cert-manager was installed with `kubectl apply` (no Helm labels,
-verified) and runs `--cluster-resource-namespace=$(POD_NAMESPACE)` =
-`cert-manager`. With the chart default, the CA Certificate lands in a
-namespace cert-manager does not read, and no certificate ever issues.
+Every edge renders the same `apiHost`/`konnectivityHost`, so two sites produce
+two Ingresses claiming one hostname. Separately, NodePorts are derived from an
+edge's **position in the list** (`add 30443 $i`), so reordering or deleting an
+entry silently moves a running site's port — while `resource-policy: keep`
+guarantees the old Service still holds it.
 
-### Recommendation
+### Do it properly: SNI routing, and delete NodePorts from the design
 
-* Add `certManager.clusterResourceNamespace` (default `cert-manager`),
-  independent of `enabled`.
-* Default `certManager.enabled: false`, because on every cluster we actually
-  have, cert-manager is already installed. Installing the subchart is the
-  greenfield case, not the common one.
-* Guard: if `enabled: false`, verify at render time that the namespace value
-  was set deliberately rather than defaulted.
+* Per-edge hostnames `k0s-<edge>.<domain>` / `konnectivity-<edge>.<domain>`.
+* k0smotron `Cluster` uses `spec.service.type: ClusterIP`, published through
+  the existing ssl-passthrough ingress on :443 by SNI — exactly what the
+  management plane already does for SeaweedFS, Grafana and Loki. One mechanism
+  for everything that faces the network.
+* **No NodePorts at all.** Not "explicit instead of computed" — gone. A
+  cluster-wide port allocation that has to be tracked per site is state
+  outside the chart, and state outside the chart is what produced this bug.
+  Sites that genuinely cannot do SNI are a separate, documented topology, not
+  a field.
+* Render-time guard: no two edges may resolve to the same hostname.
 
----
-
-## 4. The reclaimer can delete a partially-uploaded session 🟠 — the data-loss one
-
-XNAT creates the experiment as soon as the **first** resource is POSTed. An
-upload that dies after 3 of 400 scans leaves an experiment labelled
-`<visit>`. `xnat_has_session` then matches that label exactly, logs
-`reclaim_confirmed`, and deletes the staged copy — including the 397 scans
-that never arrived.
-
-This is the one component in either chart whose bugs destroy patient data, and
-its central check confirms the wrong property: **existence, not completeness.**
-
-### Recommendation: three independent conditions, all required
-
-1. **Count comparison, not existence.** Ask XNAT for the experiment's
-   scan/resource count and require it to be `>=` the staged object count.
-   This is the check that actually answers "did it all arrive".
-2. **A completion marker written by the uploader.** After a verified upload
-   the mgmt uploader writes `_COMPLETE` into the session prefix; the reclaimer
-   requires it. Cheap, and it makes "the uploader believes it finished" an
-   explicit fact rather than an inference.
-3. **minAge on top**, unchanged.
-
-Require all three. Any one missing → keep. The cost is one extra XNAT call per
-session and one PUT per upload; the benefit is that no single wrong answer can
-cause a delete.
-
-Until this is implemented, ship with **`verifyAgainstXnat: true` and
-`dataPolicy.enabled: false`** so the reclaimer only ever logs.
+**Production DNS.** nip.io works and is fine for dev, but a production fleet
+should have a real wildcard record (`*.edge.<org-domain>`). nip.io is a
+third-party dependency in the control path of every child cluster's API
+server, and it cannot be used with Let's Encrypt. Treat moving off it as part
+of going to production, not as an optional tidy-up.
 
 ---
 
-## 5. `aws --query 'length(...)'` returns one number per page 🟠
+## 3. PKI 🔴
 
-With `--output text`, the AWS CLI applies `--query` **per page**, so any
-session with more than 1000 objects yields a multi-line answer, fails the
-numeric check, and is kept forever as `listing_failed`. Fail-safe, so not
-dangerous — but it silently disables reclaiming for exactly the large sessions
-that matter most for disk.
+The immediate bug is that `certManager.enabled` ("install the subchart") is
+used to decide where cert-manager reads cluster-scoped resources from. On this
+cluster cert-manager was installed with `kubectl apply` and runs
+`--cluster-resource-namespace=cert-manager`, so the CA Certificate lands
+somewhere it will never be read.
 
-### Recommendation
+But fixing only that leaves a bigger problem in place, and this is the moment
+to deal with it.
 
-Count with `--output json` and parse it explicitly (the image has Python),
-failing hard if the JSON does not parse. Never derive a count from a pipeline
-whose left-hand side can fail — `aws ... | wc -l` returns `0` on failure,
-which reads as "empty, safe to delete".
+### Do it properly: a two-tier CA, with the root key held offline
 
----
+Today there is **one self-signed root CA whose private key lives in a
+Kubernetes Secret on the management node, and it signs everything**. If that
+node is compromised, or the Secret leaks, the attacker can mint a certificate
+for any hostname in the fleet, and the only remedy is to re-issue and
+redistribute trust to every edge site by hand. `rotate-ca.sh` exists precisely
+because that is painful — a two-phase rotation run weeks apart.
 
-## 6. `SeaweedFSDiskFull` still cannot fire 🟠
+The standard answer, and it costs very little here:
 
-The alert selects `kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*seaweedfs.*"}`.
-Wrapping a hostPath in a PV/PVC does **not** make kubelet emit those series —
-the hostPath volume plugin has no metrics provider. The port added a comment
-asserting this was fixed. It is not.
+* **Root CA**: generated once, long-lived, its key exported and stored
+  offline (password manager / HSM / sealed envelope), and **removed from the
+  cluster**. It signs exactly one thing: the intermediate.
+* **Intermediate CA**: lives in the cluster, is what cert-manager's
+  `ClusterIssuer` actually uses, and is rotatable on a normal schedule
+  *without touching any edge*, because edges trust the root.
+* Edges keep trusting the root, so intermediate rotation is invisible to them.
+  This is the whole point: it turns a fleet-wide redistribution event into a
+  routine in-cluster operation.
 
-### Recommendation: alert on SeaweedFS's own metrics, which is the right source anyway
+Also settle, rather than defer:
 
-SeaweedFS exports volume and disk statistics on `:9324`, already scraped by the
-ServiceMonitor. Alert on those rather than on kubelet PVC stats, which will
-never exist for this volume. Optionally also enable node-exporter on the
-management node only, for whole-disk headroom.
-
-Generalise the lesson: **an alert that cannot fire is worse than no alert**,
-because it reads as coverage. Worth a one-off audit that every rule has
-actually fired at least once in a test.
-
----
-
-## 7. Loki's PVC is deleted with the StatefulSet 🟠
-
-The rendered StatefulSet carries
-`persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete, whenScaled: Delete}`
-(the Loki chart's `enableStatefulSetAutoDeletePVC` default).
-`helm.sh/resource-policy: keep` does not protect against this — it governs
-Helm, not the StatefulSet controller.
-
-### Recommendation
-
-Set `loki.singleBinary.persistence.enableStatefulSetAutoDeletePVC: false`.
-Then audit every other StatefulSet in the release for the same field —
-`resource-policy: keep` gave a false sense of safety here and may elsewhere.
+* **Adopt the existing cert-manager into the release or explicitly do not.**
+  Leaving it ambiguous is how the namespace bug happened. Recommendation:
+  `certManager.enabled: false` by default and reference the existing install,
+  with `clusterResourceNamespace` an explicit required value — because on
+  every cluster we actually have, cert-manager is already there.
+* **Back up the root key as part of the install**, not as a runbook step
+  someone might skip. If it is only in a Secret, it is one `kubectl delete`
+  from a fleet rebuild.
+* Keep `commonName: "AIS Edge Root CA"` pinned to the live value, and add a
+  render-time guard so changing it is impossible by accident — it re-issues
+  the root and invalidates every distributed bundle.
 
 ---
 
-## 8. First install aborts on pre-existing objects 🟠
+## 4. Reclaimer completeness 🟠 — restructure it, do not patch it
 
-`Namespace/edge-dev` and `Cluster/edge-dev` already exist, created
-imperatively, with no `meta.helm.sh/release-name` or
-`app.kubernetes.io/managed-by: Helm`. Helm refuses to adopt them and the
-install fails before applying anything.
+XNAT creates the experiment on the **first** resource POST, so
+`xnat_has_session` confirms existence, not delivery. An upload that died after
+3 of 400 scans confirms, and the staged copy — including the 397 scans that
+never arrived — is deleted.
 
-### Recommendation: an explicit adoption step, not a force flag
+I proposed adding a count comparison and a completion marker. That is a
+better check bolted onto the wrong architecture, and it would leave the debt
+in place.
 
-A small `scripts/adopt-existing.sh` that labels and annotates the existing
-objects for the target release, run once, with a dry-run mode that lists what
-it would touch. This is the standard Helm adoption path and it is auditable.
+### Do it properly: the component that has the knowledge does the deletion
 
-The alternative — install into a fresh namespace and migrate sites one at a
-time — is cleaner but means a scheduled outage per site. Adoption is the
-right call for an existing cluster with live data.
+The uploader knows exactly what it sent, how many resources, and what XNAT
+answered. The reclaimer is a *different process, later, re-deriving that
+knowledge from two external systems* — which is why it needs a completeness
+heuristic at all. Move the responsibility:
+
+* **The mgmt uploader deletes its own staged session** immediately after it
+  has verified its upload, using knowledge it already holds. `xnat-ingest`
+  already auto-generates a per-session `MANIFEST.json`, so "did everything
+  arrive" is answerable against a real artifact rather than inferred.
+* **The reclaimer becomes a garbage collector for residue only** — orphaned
+  prefixes from a crashed uploader, empty directory entries, sessions whose
+  uploader pod died mid-run. It can then be far more conservative: a long
+  `minAge` (days, not `1d`), the two-consecutive-runs rule below, and it never
+  needs to decide whether a session was *delivered*, only whether it has been
+  *abandoned*.
+
+This removes an entire class of bug rather than adding a guard against one
+instance of it, and it makes the dangerous component boring.
+
+**The race I found and dropped.** In the empty-prefix branch, `count == 0` →
+delete, but a small single-part PUT can land between the count and the delete.
+The multipart probe does not catch it because a small object is not multipart.
+Fix: **require the prefix to have been empty on two consecutive runs**,
+persisted in a small state object. At an hourly schedule that closes the race
+completely without locking.
 
 ---
 
-## 9. k0smotron etcd size is immutable on a running site 🟠
+## 5. Counting objects 🟠
+
+`--output text` applies `--query` **per page**, so any session over 1000
+objects returns a multi-line answer, fails the numeric check and is kept
+forever. Fail-safe, but it silently disables reclaiming for exactly the large
+sessions that matter most.
+
+### Do it properly
+
+* Use `--output json` (fully buffered, one document) and parse it explicitly
+  in Python — the image ships it — failing hard on anything unexpected.
+* **Never derive a count from a pipeline whose left side can fail.**
+  `aws ... | wc -l` yields `0` when `aws` errors, and `0` reads as "empty,
+  safe to delete". This is the exact shape of the bug that deleted a session
+  during earlier testing.
+* Add a unit test with a mocked multi-page response, so the paging behaviour
+  is pinned rather than rediscovered.
+
+---
+
+## 6. Alerting correctness 🟠 — fix the class, not the instance
+
+`SeaweedFSDiskFull` selects `kubelet_volume_stats_*` for a hostPath volume.
+Those series do not exist and never will — the hostPath plugin has no metrics
+provider. The alert has been "green" its whole life.
+
+Three of the Prometheus rules were already known to be unable to fire
+(`EdgeWorkerDisconnected`, `KonnectivityTunnelFlapping`, `EdgePodCrashLoop`)
+because mgmt Prometheus cannot scrape across the one-way konnectivity tunnel.
+That is four out of ~21. **An alert that cannot fire is worse than no alert,
+because it reads as coverage.**
+
+### Do it properly
+
+* Point the disk alert at SeaweedFS's own `:9324` metrics, which is the
+  correct source regardless.
+* Re-express the three edge-cluster rules as Loki absence rules over Vector's
+  own log stream, which does cross the tunnel.
+* **Build an alert smoke-test harness**: for every rule, inject a synthetic
+  log line or metric and assert the rule fires. Run it in CI. This is the only
+  thing that stops the class of bug recurring, and it is the difference
+  between an alerting stack and a collection of hopeful YAML.
+
+---
+
+## 7. Data-retention guarantees 🟠 — audit the whole class
+
+Loki's StatefulSet carries `persistentVolumeClaimRetentionPolicy: Delete`.
+`helm.sh/resource-policy: keep` does **not** protect against it — that
+annotation governs Helm, not the StatefulSet controller. I had assumed the
+annotation was sufficient, and used it as the retention story throughout.
+
+### Do it properly
+
+* Set `enableStatefulSetAutoDeletePVC: false`.
+* **Audit every StatefulSet and every PVC in both releases** for the same
+  field, including inside subcharts, and assert it in CI: render the chart and
+  fail if any PVC that holds data can be auto-deleted. The annotation gave a
+  false sense of safety in one place, so it should be assumed to have done so
+  everywhere until checked.
+
+---
+
+## 8. Adopting the existing cluster 🟠
+
+`Namespace/edge-dev` and `Cluster/edge-dev` exist without Helm ownership
+metadata, so the first install aborts before applying anything.
+
+### Do it properly
+
+* `scripts/adopt-existing.sh` with a **dry-run default**, listing exactly what
+  it would label and annotate, and a written record of what was adopted.
+* CI must also prove the **greenfield** path: the chart installs cleanly into
+  an empty kind cluster with no adoption at all. Otherwise adoption quietly
+  becomes a prerequisite and a new site cannot be built from the chart alone.
+
+Not a force flag, and not `--replace`. Both hide exactly the collision that
+tells you the cluster is not in the state you think it is.
+
+---
+
+## 9. Sizing and immutable fields 🟠
 
 `k0smotron.persistence.size: 10Gi` renders against a live 1Gi
 `volumeClaimTemplate`. Those are immutable, so k0smotron's update is rejected
 and its reconcile loop wedges.
 
-### Recommendation
+### Do it properly
 
-* Default to the live **1Gi** so an upgrade is a no-op on existing sites.
-* Split the value: the control-plane volume and the etcd volume are
-  independent and should not share one key.
-* Document that changing it on a running site requires recreating the
-  StatefulSet — a deliberate, scheduled operation.
+* Separate keys for the control-plane volume and the etcd volume; they are
+  independent and one knob for two volumes is how this happened.
+* Default to the live 1Gi so an upgrade is a no-op on existing sites.
+* **A preflight check in the upgrade path** that compares every rendered
+  immutable field against what is live and refuses to proceed on a mismatch,
+  naming both values. Immutable-field conflicts fail *after* Helm has started
+  applying, which is the worst time to discover them.
+
+---
+
+## 10. Two more things worth doing while we are here
+
+Neither is in the findings list, but both are the same category of debt.
+
+**Per-site XNAT credentials.** One fleet-wide XNAT account writes every site's
+data. A compromised edge — or a bug in one site's routing map — can write into
+any project. XNAT supports per-project permissions, so each site should have
+its own account scoped to its own projects. This is the same argument as
+bucket-per-site, applied to the other end of the pipeline, and it is cheap to
+do now and expensive to retrofit once sites are live.
+
+**The edge S3 identity needs `Write`, which includes DELETE.** SeaweedFS folds
+object deletion into the `Write` action, so an edge can delete its own staged
+data. With bucket-per-site the blast radius is one site, and the edge holds
+the originals in its facility backup, so this is acceptable — but it should be
+recorded as a known property, not discovered later. The mitigation that
+matters is behavioural: the edge uploader never issues a delete, using a
+content-fingerprint state file instead.
 
 ---
 
@@ -340,10 +425,25 @@ production-grade.
 
 ## Recommended order of work
 
-1. Bucket per site (§0) — it changes the shape of the uploader and reclaimer,
-   so everything else should be built on top of it, not retrofitted.
-2. The four 🔴 items (§1–3) — nothing installs correctly until these are done.
-3. The reclaimer completeness check (§4) and the empty-prefix race — ship
-   `dataPolicy.enabled: false` until both land.
-4. The remaining 🟠 items.
-5. CI, then a real end-to-end install on this VM, then the documentation.
+Ordered so that nothing is built on something that is about to change shape.
+
+1. **Bucket per site (§0) and per-site XNAT credentials (§10).** Both change
+   the shape of the uploader and reclaimer, so everything else is built on top
+   rather than retrofitted onto them.
+2. **PKI (§3).** The root/intermediate split has to happen before more
+   certificates are issued from the current root, and the mTLS work in §1
+   depends on the issuer being settled.
+3. **mTLS on the Loki push path (§1)** and **per-edge hostnames + SNI (§2).**
+   Nothing installs correctly for more than one site until these land.
+4. **Restructure the deletion responsibility (§4)**: uploader deletes what it
+   delivered, reclaimer becomes a conservative GC, plus the two-consecutive-runs
+   rule for empty prefixes. Ship `dataPolicy.enabled: false` until this is done
+   and tested.
+5. **CI first, then the rest (§5–§9).** The alert smoke-test harness and the
+   PVC-retention assertion are what stop these classes of bug recurring, so
+   they should exist before the remaining fixes are made, not after.
+6. Adoption script, then a real end-to-end install on this VM, then the
+   documentation rewrite.
+
+Steps 1–4 are the ones that are expensive to retrofit once sites are live.
+Steps 5–6 are expensive to skip.
