@@ -1,0 +1,50 @@
+# =============================================================================
+# SOPS creation rules
+# =============================================================================
+# Which age recipients can decrypt which files. `sops -e` consults this
+# automatically, so nobody has to remember a key id at encrypt time.
+#
+# WHY age RATHER THAN A CLOUD KMS
+#   * Edge sites are on-prem and occasionally air-gapped. A KMS makes install
+#     depend on reaching a cloud endpoint at exactly the moment you are
+#     standing in a hospital basement.
+#   * There is no IAM to provision per site.
+#   * A key is one 60-character string that fits in a password manager.
+# Move to KMS only if you later need per-operator revocation with an audit
+# trail — that is the one thing age genuinely cannot do.
+#
+# KEY LAYOUT
+#   team key   every operator can decrypt every site. This is the key that
+#              lives in the team password manager.
+#   site key   held by that site's admin, so a site can decrypt and install
+#              its own secrets without holding the keys to the whole fleet.
+# Both are listed as recipients, so either can decrypt independently.
+#
+# ENCRYPTED VS NOT
+#   Only the VALUES are encrypted; keys stay readable (encrypted_regex below).
+#   That means `git diff` still shows WHICH secret changed, and a review can
+#   see structure without seeing content.
+#
+# SETUP
+#   scripts/site-secrets.sh init-key            create your age key
+#   scripts/site-secrets.sh add-recipient <pub> add a key to this file
+#   scripts/site-secrets.sh encrypt <site>      encrypt a site's secrets
+#   scripts/site-secrets.sh apply <site>        decrypt straight into the cluster
+#
+# REPLACE THE PLACEHOLDER BELOW before committing anything real. A file
+# encrypted to a placeholder recipient cannot be decrypted by anyone.
+# =============================================================================
+
+creation_rules:
+  # Per-site secrets: readable by the team key and by that site's own key.
+  # The regex captures the site name so a new site needs no new rule.
+  - path_regex: sites/[^/]+/secrets\.enc\.ya?ml$
+    encrypted_regex: '^(data|stringData)$'
+    age: >-
+      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY
+
+  # Anything else that ends up encrypted: team key only.
+  - path_regex: .*\.enc\.ya?ml$
+    encrypted_regex: '^(data|stringData)$'
+    age: >-
+      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY

@@ -6,6 +6,16 @@ config/edge-nodes.env
 *.token
 secrets/
 
+# SOPS. sites/*/secrets.enc.yaml IS committed — that is the point, it is
+# encrypted. These are the plaintext working forms that must never be:
+sites/*/secrets.yaml
+sites/*/secrets.plain.yaml
+sites/*/*.dec.yaml
+# age private keys, wherever someone leaves one
+*.agekey
+age-key*.txt
+keys.txt
+
 # Generated during install
 kubeconfig-*
 join-token-*
