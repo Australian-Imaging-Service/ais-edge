@@ -38,7 +38,11 @@ trap "rm -f $TMP_S3" EXIT
     }
 EOF
   for entry in "${EDGE_NODES[@]}"; do
-    IFS='|' read -r CLUSTER_NAME _ _ _ _ EDGE_ACCESS_KEY EDGE_SECRET_KEY <<< "$entry"
+    # Use the shared parser (scripts/00-common.sh). This used to be its own
+    # 7-field `IFS='|' read` while every other script used the 6-field one,
+    # which bound accessKey to the secret and left secretKey empty for every
+    # edge identity written into s3.json.
+    parse_edge_entry "$entry"
     cat <<EOF
     ,
     {

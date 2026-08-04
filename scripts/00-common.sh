@@ -68,10 +68,43 @@ render_with_topology() {
     fi
 }
 
-# Parse an EDGE_NODES entry into variables
+# Parse an EDGE_NODES entry into variables.
+#
+# THE canonical parser — every script must call this rather than running its
+# own `IFS='|' read`. scripts/03 used to carry a second, 7-field copy of this
+# line while this one read 6; against a 6-field entry that silently produced
+# accessKey=<the secret> / secretKey="" in the SeaweedFS identities file, so
+# the edge uploader and the S3 gateway ended up with different credentials.
+# The failure was invisible until step 03 was re-run. One parser, one shape.
+#
+# Layout (6 fields):
+#   CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|S3_ACCESS_KEY|S3_SECRET_KEY
+#
+# There is no PROJECT field. Older example lines in edge-nodes.env.template
+# carried one in position 5; project/subject/session are now derived from the
+# DICOM ClinicalTrial* tags, so a 7-field line is stale config and is rejected.
 parse_edge_entry() {
     local entry="$1"
+
+    # Fail loudly on the wrong shape rather than binding empty credentials.
+    local _n
+    _n=$(awk -F'|' '{print NF}' <<< "$entry")
+    if [ "$_n" -ne 6 ]; then
+        echo "ERROR: malformed EDGE_NODES entry — expected 6 pipe-separated fields, got ${_n}:" >&2
+        echo "         ${entry}" >&2
+        echo "       Expected: CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|S3_ACCESS_KEY|S3_SECRET_KEY" >&2
+        [ "$_n" -eq 7 ] && echo "       (7 fields = stale PROJECT field in position 5; delete it.)" >&2
+        exit 1
+    fi
+
     IFS='|' read -r CLUSTER_NAME NODE_IP SSH_USER SSH_KEY EDGE_ACCESS_KEY EDGE_SECRET_KEY <<< "$entry"
+
+    if [ -z "$CLUSTER_NAME" ] || [ -z "$EDGE_ACCESS_KEY" ] || [ -z "$EDGE_SECRET_KEY" ]; then
+        echo "ERROR: EDGE_NODES entry has an empty CLUSTER_NAME or S3 key:" >&2
+        echo "         ${entry}" >&2
+        exit 1
+    fi
+
     EDGE_SSH="${SSH_USER}@${NODE_IP}"
     SSH_KEY_OPT=""
     [ -n "${SSH_KEY}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"

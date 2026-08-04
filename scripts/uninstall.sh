@@ -5,8 +5,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${SCRIPT_DIR}/config/management.env"
-source "${SCRIPT_DIR}/config/edge-nodes.env"
+# 00-common.sh loads both config files and provides the single canonical
+# EDGE_NODES parser. Sourcing it here instead of re-reading the configs keeps
+# this script from drifting into its own field layout, which is what happened
+# to scripts/03 and install.sh.
+source "${SCRIPT_DIR}/scripts/00-common.sh"
 
 echo "============================================"
 echo "WARNING: This will destroy EVERYTHING:"
@@ -32,10 +35,7 @@ fi
 
 # --- Remove edge workers ---
 for entry in "${EDGE_NODES[@]}"; do
-    IFS='|' read -r CLUSTER_NAME NODE_IP SSH_USER SSH_KEY _ _ _ <<< "$entry"
-    SSH_KEY_OPT=""
-    [ -n "${SSH_KEY}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
-    EDGE_SSH="${SSH_USER}@${NODE_IP}"
+    parse_edge_entry "$entry"   # sets CLUSTER_NAME NODE_IP SSH_USER SSH_KEY_OPT EDGE_SSH
 
     echo ""
     echo "=== Removing edge: ${CLUSTER_NAME} (${NODE_IP}) ==="
