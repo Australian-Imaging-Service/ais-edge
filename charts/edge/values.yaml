@@ -376,14 +376,32 @@ upload:
     bucket: ingest-bucket
     prefix: staged
     region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
-    # SeaweedFS is served on a single hostname with a single-SAN certificate,
-    # so virtual-hosted addressing (<bucket>.<host>) fails both DNS and cert
-    # validation. Path-style is not optional here.
-    addressingStyle: path
+
+    # NOTE on addressing style: there is deliberately no value here.
+    # Setting AWS_ENDPOINT_URL to a custom endpoint makes botocore resolve
+    # with ForcePathStyle=True automatically — measured against SeaweedFS
+    # 3.99, the request URL comes out as
+    #   https://seaweedfs.aisedge.local/ingest-bucket
+    # which is what the single-SAN certificate needs. AWS_S3_ADDRESSING_STYLE
+    # is NOT a botocore environment variable (it is a config-file key), so a
+    # values entry for it would have been silently ignored. Nothing to set.
+
     existingSecret: s3-edge-credentials  # keys: access-key, secret-key
-    # PEM holding the CA that signed the SeaweedFS server certificate. The
-    # AWS CLI wants ONE file (AWS_CA_BUNDLE); mc wanted a directory. This is
-    # the easiest thing to get silently wrong during the client swap.
+
+    # PEM holding the CA that signed the SeaweedFS server certificate.
+    #
+    # The AWS CLI wants ONE file (AWS_CA_BUNDLE); mc wanted a directory of
+    # PEMs. That shape change is the easy thing to get wrong in the swap.
+    #
+    # SECURITY: AWS_CA_BUNDLE set to an EMPTY STRING does not fall back to
+    # the system trust store — it disables certificate verification
+    # altogether, silently:
+    #   urllib3 InsecureRequestWarning: Unverified HTTPS request is being
+    #   made to host 'seaweedfs.aisedge.local'
+    # (measured; a request to a hostname the cert does not cover then
+    # succeeded.) So the template must emit AWS_CA_BUNDLE only when it has a
+    # real value, and the chart refuses to render an https endpoint with no
+    # CA configured. Never let this render empty.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
     image:

@@ -396,3 +396,103 @@ Also drifting: `config/management.env.template:233` pins xnat-ingest `0.12.3` bu
 | R18 | **`StableAge: 30` is load-bearing and absent from James's ConfigMap.** `OnStableStudy` (`deidentify-and-forward.lua:197-211`) applies the `xnat-ingest-ready` label that `group-orthanc` filters on. Drop it in the merge and nothing is ever labelled — the pipeline stalls with data sitting in Orthanc and no error. | `config/orthanc/orthanc.json:13` vs `orthanc-configmap.yaml:9-26` | Add `stableAge` (default 30) to the templated ConfigMap; couple `--to-process-label` to `deid.enabled` so the label gate and the labeller are always both on or both off. |
 | R19 | **Samba over-exposure** (D3): the whole PVC at `/storage` includes `orthanc-storage/` (raw or de-identified DICOM depending on layout) and `LOGS/`, plus `hostPort 445` conflicting with any host `smbd`. | `samba-deployment.yaml:42-47,51-53` | `samba.enabled: false` default; mount `subPath: incoming` only; move `/data/LOGS` off any Samba-exposed subPath. |
 | R20 | **Unauthenticated Loki write endpoint** (Q4) and **unauthenticated Orthanc REST with delete rights** (`config/orthanc/orthanc.json:15-16` — mitigated today only by ClusterIP, but James's default is NodePort 30842). | as listed | Adopt James's `AuthenticationEnabled: true` + `orthanc-credentials`; add the Loki ingress auth annotation. Both are cheap; both become dangerous the moment the current mitigating accident (ClusterIP-only / route reachability) changes. |
+---
+
+# Appendix A — AWS CLI vs SeaweedFS 3.99: measured results
+
+Run 2026-08-04 against the live SeaweedFS on stream-2-ab-dev
+(`version 30GB 3.99 a80b5eea5`) using `amazon/aws-cli:2.31.19`, from a pod in
+the mgmt cluster. Scratch prefix `s3://ingest-bucket/__awscli-probe__`,
+outside `staged/` so the uploader could not see it. All artefacts removed
+afterwards; `staged/` untouched throughout and active alerts stayed at 0.
+
+## Result summary
+
+| # | Test | Result |
+|---|---|---|
+| 1 | `s3api head-bucket` (liveness probe) | PASS |
+| 2 | `s3 ls` | PASS |
+| 3 | `s3 sync` of a session, **default checksum behaviour** | PASS, exit 0 |
+| 4 | Round-trip md5 of a 1 MiB object | Identical |
+| 5 | **Multipart** 50 MiB over plain HTTP | PASS, md5 identical, 3.5 s |
+| 6 | Incremental re-`sync` | Transferred nothing |
+| 7 | Explicit `--checksum-algorithm CRC32` | Accepted, ETag returned |
+| 8 | HTTPS through nginx ingress + `AWS_CA_BUNDLE` | PASS |
+| 9 | **Multipart** 50 MiB over HTTPS through the ingress | PASS, md5 identical |
+
+**The feared blocker did not materialise.** AWS CLI v2's default integrity
+headers are accepted by SeaweedFS 3.99 for both single-part and multipart
+uploads. `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` is NOT needed.
+
+## Three findings that change the design
+
+### A1. Path-style addressing is automatic — and `AWS_S3_ADDRESSING_STYLE` is not a thing
+
+`--debug` shows botocore resolving with `'ForcePathStyle': True` purely
+because a custom `AWS_ENDPOINT_URL` is set:
+
+```
+botocore.regions - Calling endpoint provider with parameters:
+  {'Bucket': 'ingest-bucket', 'Endpoint': 'https://seaweedfs.aisedge.local',
+   'ForcePathStyle': True, ...}
+botocore.regions - Endpoint provider result:
+  https://seaweedfs.aisedge.local/ingest-bucket
+```
+
+`AWS_S3_ADDRESSING_STYLE` is a config-FILE key, not an environment variable —
+`aws configure list` never shows it and setting it changed nothing. A values
+key for it would have been silently ignored, so the chart has none.
+
+### A2. An empty `AWS_CA_BUNDLE` silently disables TLS verification
+
+This is the trap. Unset and empty behave differently:
+
+```
+env -u AWS_CA_BUNDLE   -> SSL: CERTIFICATE_VERIFY_FAILED
+                          unable to get local issuer certificate     (correct)
+AWS_CA_BUNDLE=''       -> urllib3 InsecureRequestWarning:
+                          Unverified HTTPS request is being made      (!!)
+```
+
+With the empty string, a request to `https://10.108.222.5` — a hostname the
+certificate does not cover — **succeeded**. With the real CA the same request
+correctly failed on SAN validation.
+
+A Helm template that renders `AWS_CA_BUNDLE: "{{ .Values...caBundle }}"` with
+an unset value therefore produces a pod that talks to the staging bucket with
+no certificate validation at all, and logs only a warning. Requirements:
+
+* emit `AWS_CA_BUNDLE` **only** when it has a real value;
+* `fail` at render time on an `https://` endpoint with no CA configured.
+
+### A3. The ghost-prefix bug is SeaweedFS, not `mc` — switching client does not fix it
+
+`aws s3 rm --recursive` leaves exactly the same 0-byte directory entries that
+`mc rm --recursive` did:
+
+```
+aws s3 rm s3://ingest-bucket/__awscli-probe__/SESSION1 --recursive   -> exit 0
+aws s3 ls --recursive .../SESSION1/     -> 0 objects
+aws s3 ls .../__awscli-probe__/         -> PRE SESSION1/      <-- still listed
+weed shell fs.ls .../__awscli-probe__/  -> SESSION1
+```
+
+Only `weed shell fs.rm -r` clears the entry. That prefix shape is what made
+the uploader log a bogus `Successfully uploaded all files in ...` every 60 s
+and re-fire `XNATUploadSuccess` for two days.
+
+Consequences:
+* `scripts/clear-staged-s3.sh` must keep `weed shell fs.rm -r` for deletion
+  after the client swap. Only its counting half moves to `aws s3 ls`.
+* It is an additional argument for `dataPolicy.derived.assigned.reclaim:
+  onUploaded` being implemented as a fingerprint/marker state file rather
+  than a delete — never creating the ghost prefix beats cleaning it up.
+
+## Migration consequence
+
+Step 3 of the S3 workstream ("run both clients in parallel and confirm
+checksum behaviour") loses its blocking question. The remaining risk in that
+workstream is entirely about **log-event compatibility** — the 11 Loki ruler
+rules and 2 dashboards key off the `jlog` event names our `mc` wrapper emits,
+and `aws s3 sync --only-show-errors` emits none of them. That port still has
+to be byte-for-byte.
