@@ -118,6 +118,19 @@ spec:
             - "ClinicalTrialSubjectID"
             - "--session"
             - "ClinicalTrialTimePointID"
+            # Remove each grouped session directory once it has been assigned
+            # into /data/staging. WITHOUT this, `assign` leaves the grouped
+            # dirs in place and — because it runs with --loop — re-assigns the
+            # SAME sessions every cycle forever: staging is repopulated,
+            # s3-uploader re-mirrors to S3, the mgmt upload pod re-uploads,
+            # and XNATUploadSuccess re-fires (duplicate alert emails).
+            # Safe: /data/grouped holds intermediate hardlinks/copies pulled
+            # from Orthanc; the originals remain in Orthanc storage and the
+            # facility backup. 'all' (not 'keep-metadata') because nothing
+            # downstream here uses the leftover metadata skeleton — and a
+            # surviving skeleton would keep feeding the same loop.
+            - "--unlink-source"
+            - "all"
             - "--loop"
             - "{{INGEST_LOOP_SECONDS}}"
           env:

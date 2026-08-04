@@ -97,8 +97,42 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
   local calledAet = origin.CalledAet or "UNKNOWN"
   local mapping   = routing.AETMap[calledAet]
   if mapping == nil then
-    print("REJECT: no project mapped for CalledAET " .. calledAet)
-    RestApiDelete("/instances/" .. instanceId)
+    -- QUARANTINE, don't destroy. The sending modality has already been given
+    -- a C-STORE SUCCESS, so it will never retry — discarding the instance
+    -- here would be permanent, silent data loss (a new scanner or a mistyped
+    -- AE title is enough to trigger it).
+    --
+    -- Instead we write the ORIGINAL bytes (identifiers intact — this is the
+    -- facility-side store, same trust boundary as the normal backup below)
+    -- into a dedicated quarantine tree:
+    --   <FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm
+    -- Once the AET is added to routing.json's AETMap the study can simply be
+    -- re-sent/re-imported from there.
+    --
+    -- The instance is removed from Orthanc ONLY if the quarantine write
+    -- succeeded; otherwise we keep it in Orthanc so nothing is ever lost.
+    local qDir = (routing.Defaults or {}).FacilityBackupDir
+    if qDir == nil then
+      print("ABORT: no FacilityBackupDir configured; keeping unmapped instance "
+            .. instanceId .. " in Orthanc (CalledAET " .. calledAet .. ")")
+      return
+    end
+    local qBytes = RestApiGet("/instances/" .. instanceId .. "/file")
+    local qPath  = qDir .. "/__unmapped_aet__/" .. calledAet .. "/" ..
+                   (tags.PatientID or "UNKNOWN") .. "/" ..
+                   (tags.StudyInstanceUID or "UNKNOWN") .. "/" ..
+                   (tags.SOPInstanceUID or instanceId) .. ".dcm"
+    if writeAtomic(qPath, qBytes) then
+      -- Keep the "REJECT: no project mapped for CalledAET <AET>" wording:
+      -- the DICOMRejectedUnmappedAET alert rule matches on it.
+      print("REJECT: no project mapped for CalledAET " .. calledAet ..
+            " — quarantined to " .. qPath)
+      RestApiDelete("/instances/" .. instanceId)
+    else
+      print("REJECT: no project mapped for CalledAET " .. calledAet ..
+            " — QUARANTINE WRITE FAILED, keeping instance " .. instanceId ..
+            " in Orthanc")
+    end
     return
   end
 

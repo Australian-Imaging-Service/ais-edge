@@ -113,6 +113,60 @@ data:
               summary: "XNAT upload backlog is growing"
               description: "Sessions are landing in SeaweedFS faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing — check `kubectl logs -n xnat-upload -l app=xnat-ingest-upload`."
 
+          - alert: DICOMRejectedUnmappedAET
+            # SILENT DATA LOSS — the highest-value alert in this pipeline.
+            #
+            # The Orthanc deid hook looks the calling AE title up in
+            # routing.json's AETMap. If it isn't there it logs
+            #   "REJECT: no project mapped for CalledAET <AET>"
+            # and RestApiDelete()s the instance (deidentify-and-forward.lua).
+            # The sending modality still gets a DICOM-level C-STORE SUCCESS,
+            # so the scanner believes the study was delivered while it is in
+            # fact discarded and never reaches XNAT.
+            #
+            # Real-world triggers: a newly commissioned scanner, a console
+            # re-imaged with a default AE title, or a typo in the AET — all
+            # routine events at an imaging facility. Without this alert
+            # nobody finds out until someone notices missing studies.
+            #
+            # Fires on a single occurrence (for: 0s): one rejected study is
+            # already lost data, so there is no "spike" threshold to wait for.
+            # Grouped by the offending AET so each mis-configured device is
+            # its own notification.
+            expr: |
+              sum by (cluster, aet) (
+                count_over_time(
+                  {namespace="xnat-ingest", app="orthanc"}
+                  |~ "REJECT: no project mapped for CalledAET"
+                  | regexp "CalledAET (?P<aet>[A-Za-z0-9._-]+)"
+                  [5m]
+                )
+              ) > 0
+            for: 0s
+            labels:
+              severity: warning
+              source: loki-ruler
+              category: dicom-routing
+            annotations:
+              summary: "DICOM REJECTED — unmapped scanner AE title '{{ $labels.aet }}' on {{ $labels.cluster }}"
+              description: |
+                Orthanc rejected one or more studies sent with AE title
+                '{{ $labels.aet }}', which is not present in routing.json's
+                AETMap. The studies did NOT reach XNAT, and the sending
+                modality received a C-STORE SUCCESS so it will not retry.
+
+                The data is NOT lost — the originals were quarantined to
+                  <FacilityBackupDir>/__unmapped_aet__/{{ $labels.aet }}/<PatientID>/<StudyUID>/
+                on the edge node (default host path
+                /data/facility-backup/__unmapped_aet__/).
+
+                Fix: add '{{ $labels.aet }}' to the AETMap in
+                config/orthanc/routing.json (mapped to the correct XNAT
+                project), re-run scripts/07c-deploy-edge-orthanc.sh, then
+                re-send the quarantined files, e.g.
+                  dcmsend <edge-ip> 4242 -aec AISEDGE \
+                    /data/facility-backup/__unmapped_aet__/{{ $labels.aet }}/**/*.dcm
+
           - alert: DICOMValidationFailureSpike
             expr: |
               sum by (cluster) (count_over_time(
@@ -145,10 +199,24 @@ data:
             # rate(...) converts the boolean match into events-per-second;
             # > 0 means at least one match in the past 30s. for: 0s fires
             # immediately on first match.
+            # We group by the SESSION, not just the cluster. upload_.py logs
+            # this line twice per session AND re-logs it on every --loop pass
+            # for as long as the session remains in the S3 staging prefix
+            # (xnat-ingest upload has no S3 retention). Grouping only by
+            # cluster therefore produced one flapping alert that re-notified
+            # forever. With `session` in the series labels, each session is
+            # its own alert identity: a NEW session notifies immediately,
+            # while an already-notified session is suppressed by the route's
+            # repeat_interval — i.e. exactly one email per session landing
+            # in XNAT.
             expr: |
-              sum by (cluster) (
-                rate({namespace="xnat-upload"}
-                     |~ "Successfully uploaded all files in" [30s])
+              sum by (cluster, session) (
+                count_over_time(
+                  {namespace="xnat-upload"}
+                  |~ "Successfully uploaded all files in"
+                  | regexp "Successfully uploaded all files in '(?P<session>[^']+)'"
+                  [1m]
+                )
               ) > 0
             for: 0s
             labels:
@@ -156,11 +224,11 @@ data:
               source: loki-ruler
               category: pipeline-success
             annotations:
-              summary: "XNAT upload completed"
+              summary: "XNAT upload completed — {{ $labels.session }}"
               description: |
-                xnat-ingest-upload successfully pushed at least one session
-                to XNAT in the last 30 seconds. Check the pod logs for the
-                exact session ID:
+                Session {{ $labels.session }} landed in XNAT (pushed by
+                xnat-ingest-upload on cluster {{ $labels.cluster }}).
+                Verify in the pod logs:
                   kubectl -n xnat-upload logs deploy/xnat-ingest-upload --tail=30
 
           - alert: XNATAuthFailure

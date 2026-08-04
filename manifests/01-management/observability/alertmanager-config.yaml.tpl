@@ -33,9 +33,30 @@ route:
     # want an email confirmation for every successful XNAT push for
     # audit / peace-of-mind reasons. Putting this matcher first
     # overrides the `severity=info → slack-only` route below.
+    # Quarantine alerts: send the FIRING mail, but never a "[RESOLVED]" one.
+    # The expression only measures "no new rejections in the last 5 minutes",
+    # which is NOT the same as the problem being fixed — the rejected studies
+    # are still sitting in <FacilityBackupDir>/__unmapped_aet__/<AET>/ until
+    # an operator maps the AET and re-sends them. A "Resolved" mail here
+    # would be false reassurance. (Resolving on "quarantine directory is
+    # empty" would need a component that reports that state; Alertmanager and
+    # the Loki ruler only ever see logs, never the filesystem.)
+    - matchers:
+        - alertname = "DICOMRejectedUnmappedAET"
+      receiver: email-no-resolved
+      continue: false
     - matchers:
         - alertname = "XNATUploadSuccess"
-      receiver: email-primary
+      receiver: email-upload-success
+      # Group by session so each session that lands in XNAT is its own
+      # notification group: a new session emails straight away, while the
+      # same session — which the uploader keeps re-logging every --loop pass
+      # while it remains in the S3 staging prefix — is held off by
+      # repeat_interval instead of emailing every cycle.
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 10s          # land in the inbox promptly after the upload
+      group_interval: 5m
+      repeat_interval: 24h     # one email per session, not one per loop
       continue: false
     - matchers:
         - severity = "info"
@@ -51,6 +72,24 @@ receivers:
     email_configs:
       - to: "{{ALERT_EMAIL_TO}}"
         send_resolved: true
+
+  # Upload-success is an EVENT ("this session landed in XNAT"), not a
+  # condition that clears. send_resolved: false stops the pointless
+  # "[RESOLVED]" follow-up ~5 min later (resolve_timeout) — the operator
+  # only wants the single "upload completed" mail.
+  # Firing-only email. For alerts whose "resolved" state would be misleading
+  # (see the DICOMRejectedUnmappedAET route above).
+  - name: email-no-resolved
+    email_configs:
+      - to: "{{ALERT_EMAIL_TO}}"
+        send_resolved: false
+
+  - name: email-upload-success
+    email_configs:
+      - to: "{{ALERT_EMAIL_TO}}"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge: XNAT upload completed — {{ .CommonLabels.session }}'
 
   - name: email-and-slack
     email_configs:

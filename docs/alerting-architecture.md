@@ -78,3 +78,80 @@ Prometheus does NOT need to scrape the edges.
 
 The result is one less metric pipeline, one less ingress hostname per edge
 that we'd otherwise need, and one source of truth for pipeline alerts.
+
+---
+
+## Troubleshooting: repeated "XNAT upload completed" emails
+
+**Symptom.** `XNATUploadSuccess` re-fires for the *same* session indefinitely
+and the inbox fills with identical "upload completed" mails — typically one
+every few minutes, continuing for days after the drop.
+
+**Cause.** `xnat-ingest upload` has **no S3 retention**. It rebuilds its work
+list from a live listing of `s3://<bucket>/staged` on every `--loop` pass and
+never deletes what it uploaded, so a session lingers and is re-processed
+forever. The failure becomes *permanent* if the staging prefix contains
+**empty directory entries**: the uploader lists each one as a session,
+"uploads" its zero resources, and still logs
+
+```
+Successfully uploaded all files in '<session>'
+```
+
+which is exactly the string the `XNATUploadSuccess` rule matches — so a
+0-byte prefix generates a fresh alert every 60 s forever.
+
+**Where the empty prefixes come from.** Cleaning up staging with the obvious
+command:
+
+```bash
+mc rm --recursive --force edge/ingest-bucket/staged/     # ← DO NOT
+```
+
+On SeaweedFS this deletes the **objects** but leaves the **directory entries**
+as 0-byte prefixes. `mc ls` then shows N prefixes with 0 files — the exact
+state that produces the bogus successes.
+
+**Fix / correct cleanup.** Remove the empty directory entries at the filer
+level (only the filer can delete a directory entry), then restart the uploader:
+
+```bash
+bash scripts/clear-staged-s3.sh          # SAFE: removes ONLY empty prefixes
+```
+
+> **Production safety.** The default mode deletes **only 0-byte prefixes** and
+> deliberately **keeps any session that still contains objects** — a staged
+> session may not have reached XNAT yet (XNAT down, bad credentials, backlog),
+> and deleting it would lose undelivered data. The script prints which
+> sessions it kept and why.
+>
+> `scripts/clear-staged-s3.sh --all` wipes the whole staging prefix including
+> undelivered sessions. It prompts for confirmation and is intended for
+> resetting demo/test environments only — never point it at production.
+
+**Verify it is quiet:**
+
+```bash
+kubectl -n xnat-upload logs deploy/xnat-ingest-upload --since=3m \
+  | grep -E 'Found [0-9]+ sessions'      # expect: Found 0 sessions
+kubectl -n xnat-ingest exec deploy/s3-uploader -- \
+  mc ls edge/ingest-bucket/staged/       # expect: no output
+```
+
+Any `Successfully uploaded all files in '<same session>'` repeating on a ~60 s
+cadence means staged sessions (or empty prefixes) are still present.
+
+**Related alert-suppression gotcha.** `XNATUploadSuccess` is grouped by
+`session` with `repeat_interval: 24h`, and Alertmanager records what it has
+already sent in `/alertmanager/nflog` — which lives on a **PVC and survives
+pod restarts**. Re-dropping a file that hashes to the *same* session ID within
+24 h therefore fires the alert but sends **no email**. To force a fresh
+notification (e.g. between demo takes) the nflog must be wiped:
+
+```bash
+kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=0
+kubectl -n observability delete pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 --wait=false
+kubectl -n observability patch pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 \
+  -p '{"metadata":{"finalizers":null}}' --type=merge     # plain delete hangs on pvc-protection
+kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=1
+```

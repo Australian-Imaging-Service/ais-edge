@@ -96,6 +96,12 @@ customConfig:
       type: loki
       inputs: [parse_json_messages]
       endpoint: http://loki.observability.svc.cluster.local:3100
+      # Newer Vector (>=0.49) requires label templates to have a literal
+      # prefix ("template confinement") or this explicit opt-out. Our labels
+      # are pure field refs ({{ kubernetes.pod_name }} etc.), so opt out to
+      # keep the old behaviour. (Symptom without this: sink build error
+      # "template references event fields but has no literal string prefix".)
+      dangerously_allow_unconfined_template_resolution: true
       # Slim down the JSON body before shipping. The `kubernetes_logs`
       # source enriches every event with a fat metadata block (file path,
       # container_id, image, node_labels, pod_ips, pod_uid, etc.) that
