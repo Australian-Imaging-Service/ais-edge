@@ -6,9 +6,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHART_DIR="$SCRIPT_DIR/edge"
-NAMESPACE=ais-edge
 RELEASE=edge
 VALUES_FILE="${1:-}"
+# NAMESPACE is derived from the chart + site values further down, not
+# hardcoded here: every template addresses .Values.namespace, so a site that
+# overrides it would otherwise get its Secrets created in one namespace while
+# its workloads render into another.
+NAMESPACE=
 
 info() { echo "[INFO] $*"; }
 error() { echo "[ERROR] $*" >&2; exit 1; }
@@ -53,6 +57,17 @@ read -r -p "Continue with this cluster? [y/N]: " confirm
 
 info "Using site values: $VALUES_FILE"
 
+# Ask the chart itself which namespace it renders into, so this script and the
+# templates can never disagree. templates/namespace.yaml is just
+# `name: {{ .Values.namespace }}`, which makes it the authoritative answer for
+# whatever the site values file happens to set.
+NAMESPACE=$(helm template "$RELEASE" "$CHART_DIR" \
+  --values "$VALUES_FILE" \
+  --show-only templates/namespace.yaml 2>/dev/null \
+  | awk '/^  name:/ {print $2; exit}')
+[[ -n "$NAMESPACE" ]] || error "Could not determine the namespace from $VALUES_FILE"
+info "Target namespace: $NAMESPACE"
+
 RENDERED_CHART=$(helm template "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   --values "$VALUES_FILE")
@@ -81,17 +96,22 @@ else
   info "Reusing existing orthanc-credentials secret"
 fi
 
-if ! kubectl get secret samba-credentials -n "$NAMESPACE" >/dev/null 2>&1; then
-  echo
-  echo "=== Samba credentials (stored in Kubernetes) ==="
-  prompt SAMBA_USER "Samba username" "ais-edge"
-  prompt_secret SAMBA_PASSWORD "Samba password"
-  kubectl create secret generic samba-credentials \
-    --from-literal="username=$SAMBA_USER" \
-    --from-literal="password=$SAMBA_PASSWORD" \
-    -n "$NAMESPACE"
-else
-  info "Reusing existing samba-credentials secret"
+# Only prompt when the rendered chart actually contains a samba Deployment
+# (samba.enabled). Same gate as the s3sync credentials below — no point asking
+# an operator for an SMB password on a site that has no share.
+if grep -q '^  name: samba$' <<< "$RENDERED_CHART"; then
+  if ! kubectl get secret samba-credentials -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo
+    echo "=== Samba credentials (stored in Kubernetes) ==="
+    prompt SAMBA_USER "Samba username" "ais-edge"
+    prompt_secret SAMBA_PASSWORD "Samba password"
+    kubectl create secret generic samba-credentials \
+      --from-literal="username=$SAMBA_USER" \
+      --from-literal="password=$SAMBA_PASSWORD" \
+      -n "$NAMESPACE"
+  else
+    info "Reusing existing samba-credentials secret"
+  fi
 fi
 
 if kubectl get secret xnat-credentials -n "$NAMESPACE" >/dev/null 2>&1; then
@@ -131,7 +151,7 @@ helm upgrade --install "$RELEASE" "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   --create-namespace \
   --values "$VALUES_FILE" \
-  --rollback-on-failure \
+  --atomic \
   --timeout 10m
 
 NODE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
@@ -140,8 +160,13 @@ DICOM_NODE_PORT=$(kubectl get service orthanc -n "$NAMESPACE" \
   -o jsonpath='{.spec.ports[?(@.name=="dicom")].nodePort}')
 HTTP_NODE_PORT=$(kubectl get service orthanc -n "$NAMESPACE" \
   -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}')
-SHARE_NAME=$(kubectl get deployment samba -n "$NAMESPACE" \
-  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="NAME")].value}')
+if SHARE_NAME=$(kubectl get deployment samba -n "$NAMESPACE" \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="NAME")].value}' 2>/dev/null) \
+  && [[ -n "$SHARE_NAME" ]]; then
+  SAMBA_STATUS="//$NODE_IP/$SHARE_NAME"
+else
+  SAMBA_STATUS="disabled"
+fi
 if UPLOAD_REPLICAS=$(kubectl get deployment upload -n "$NAMESPACE" \
   -o jsonpath='{.spec.replicas}' 2>/dev/null); then
   UPLOAD_STATUS="$UPLOAD_REPLICAS replica(s)"
@@ -159,7 +184,7 @@ info "AIS Edge is installed"
 echo "  Values file:    $VALUES_FILE"
 echo "  Orthanc DICOM:  $NODE_IP:$DICOM_NODE_PORT"
 echo "  Orthanc web:    http://$NODE_IP:$HTTP_NODE_PORT/ui/app/"
-echo "  Samba share:    //$NODE_IP/$SHARE_NAME"
+echo "  Samba share:    $SAMBA_STATUS"
 echo "  File drop:      /data/ais-edge/incoming"
 echo "  Upload:         $UPLOAD_STATUS"
 echo "  S3 sync:        $S3_STATUS"

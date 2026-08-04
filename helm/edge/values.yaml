@@ -46,8 +46,16 @@ orthanc:
       cpu: "1"
 
 samba:
+  # OFF by default. Samba binds hostPort 445 on the node and exports the
+  # pipeline volume over SMB, so it must be an explicit per-site opt-in
+  # rather than something every install gets. See subPath below.
+  enabled: false
   image: dockurr/samba:4.23.5
   shareName: edge
+  # Only this subdirectory of the pipeline volume is exported. Exporting the
+  # whole volume would put orthanc-storage/ (DICOM), grouped/, assigned/ and
+  # LOGS/ on the share; the drop-box only needs incoming/.
+  subPath: incoming
   resources:
     requests:
       memory: 256Mi
@@ -77,19 +85,35 @@ xnatIngest:
     groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc-group.log"
 
   fsIngest:
-    enabled: true
+    # OFF by default: the file-drop path has no Orthanc copy and no facility
+    # backup behind it, so /data/incoming is the ONLY copy of whatever an
+    # operator drops there. Enable per-site, deliberately.
+    enabled: false
     interval: 300
     inputGlob: "/data/incoming/**/*"
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
-    unlinkSource: all
+    # NEVER default this to "all". XINGEST_UNLINK_SOURCE=all makes `group`
+    # delete the files it just read — on this path that is the operator's
+    # only copy, with nothing to restore from. Leave empty; re-processing is
+    # prevented by the downstream state file, not by deleting the input.
+    unlinkSource: ""
     groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs-group.log"
 
   assign:
     interval: 300
     copyMode: hardlink_or_copy
-    unlinkSource: all
+    # Empty by default, consistent with the never-delete policy.
+    #
+    # Caveat worth knowing before you change it: `assign --loop` rebuilds its
+    # work list from a live listing of /data/grouped every pass, so with no
+    # unlink and no state file it re-assigns the same sessions forever —
+    # re-staging them and re-firing the upload-success alert each cycle.
+    # /data/grouped is a hardlink copy (originals stay in Orthanc storage and
+    # the facility backup), so setting this to "all" loses no data on the
+    # Orthanc path — but it DOES on the fsIngest path once that is enabled.
+    unlinkSource: ""
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-assign.log"
 
   upload:
@@ -106,6 +130,10 @@ xnatIngest:
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
 
   associate:
+    # OFF by default. This pod exists to attach Siemens side files (twix /
+    # rda / puls) to an already-assigned session; with no such files it sits
+    # in `sleep infinity` holding a mount on the pipeline volume.
+    enabled: false
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
     unlinkSource: ""
@@ -113,7 +141,10 @@ xnatIngest:
 
 s3Sync:
   enabled: false
-  image: amazon/aws-cli:latest
+  # Pinned, like every other image in this chart. `:latest` on the S3 client
+  # means an upstream release can change sync or checksum behaviour under a
+  # running site with no change on our side.
+  image: amazon/aws-cli:2.31.19
   imagePullPolicy: IfNotPresent
   dest: ""
   interval: 300

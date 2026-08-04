@@ -1,3 +1,4 @@
+{{- if .Values.samba.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,9 +46,14 @@ spec:
         volumeMounts:
         - name: storage
           mountPath: /storage  # dockurr/samba serves files from /storage
+          # Export ONLY the drop-box subdirectory. Mounting the volume root
+          # here would put orthanc-storage/ (DICOM, identifiable or not),
+          # grouped/, assigned/ and LOGS/ on the SMB share.
+          subPath: {{ .Values.samba.subPath }}
         resources:
           {{- toYaml .Values.samba.resources | nindent 10 }}
       volumes:
       - name: storage
         persistentVolumeClaim:
           claimName: {{ include "edge.pvcName" . }}
+{{- end }}
