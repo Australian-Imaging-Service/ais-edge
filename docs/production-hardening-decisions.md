@@ -447,3 +447,143 @@ Ordered so that nothing is built on something that is about to change shape.
 
 Steps 1–4 are the ones that are expensive to retrofit once sites are live.
 Steps 5–6 are expensive to skip.
+
+---
+
+# Re-critique of the recommendations above
+
+Done before implementing. Six of my own recommendations did not survive it.
+Measurements are from the live cluster.
+
+## R1. "The uploader deletes what it delivered" is not implementable — §4 revised
+
+The recommendation was architecturally right and practically wrong. The
+management uploader **is** `xnat-ingest upload`, an upstream binary. It does
+not delete from S3, and with `--loop` it processes every session in one
+invocation, so there is no per-session hook to attach a deletion to. Making
+"the component with the knowledge deletes" true would mean wrapping it and
+parsing its log output to infer per-session success — which is precisely the
+fragile coupling I rejected for the edge `assign` stage two days ago.
+
+**Revised §4.** Keep the reclaimer as a separate component, and fix the check
+rather than the architecture:
+
+* Compare **`MANIFEST.json` against XNAT's actual resource inventory** for the
+  session. `xnat-ingest` already writes that manifest, so this is a real
+  file-by-file completeness check, not a heuristic — it answers "is everything
+  that was staged now in XNAT", which is the question that matters.
+* Keep minAge, and keep the two-consecutive-runs rule for empty prefixes.
+* Separately, **open an upstream issue/PR on xnat-ingest for S3 retention**.
+  The absence of it is the root cause; everything here is a workaround, and it
+  should be labelled as one rather than quietly owned forever.
+
+I was wrong to present a restructure as obviously correct without checking
+whether the component I was restructuring was ours to change.
+
+## R2. mTLS introduces a rotation failure mode I did not account for — §1 amended
+
+cert-manager renews the client certificate **on the management cluster**. The
+edge holds a copy that the bootstrap script pushed once. Nothing re-pushes it.
+So a certificate that renews at two-thirds of its lifetime leaves the edge
+holding an expired one, and log shipping stops silently at a date nobody has
+in a calendar. A bearer token does not expire, so mTLS is strictly *worse*
+here unless renewal is handled.
+
+**Amended §1**, two additions, both required:
+
+* **A cert-sync CronJob on the management cluster** that pushes renewed
+  Secrets into each child cluster using the kubeconfigs it already holds. This
+  is not extra complexity — it **replaces** the manual `scripts/07b`
+  distribution step, and it can carry the CA bundle too. Net reduction in
+  moving parts.
+* **mTLS must not ship before the log-absence alert** (§6). Without it, the
+  failure mode is invisible. Sequencing matters more than either piece.
+
+## R3. Per-site uploaders have a measured ceiling — §0 amended
+
+Measured on the live uploader: **231Mi resident, 4m CPU**, and the Deployment
+has **no resource limits at all** (`resources: {}` — its own latent bug).
+The management node has 16Gi / 8 CPU allocatable.
+
+So N uploaders costs ~231Mi each: fine at 5 sites, tight at 15 alongside
+Prometheus, Loki, Grafana and SeaweedFS, and not viable at 30.
+
+**Amended §0.** Keep per-site uploaders — the isolation argument stands — but:
+
+* Size them from the measurement: 128Mi request / 512Mi limit, and set limits
+  everywhere, which the current deployment does not do.
+* **State the ceiling honestly in the docs: roughly 15 sites per management
+  node.** Beyond that the single-management-node design needs revisiting, and
+  pretending otherwise is how a fleet discovers a scaling wall in production.
+* I considered CronJob-per-site instead (cheaper at rest). Rejected: a large
+  session benefits from continuous progress, and a cold start plus scheduling
+  delay on every cycle is a worse trade than idle memory.
+
+## R4. SNI would change a working system — §2 amended
+
+`edge-dev` today runs `service.type: NodePort` with `apiPort: 30443`,
+`konnectivityPort: 30132` and `externalAddress: 203.101.224.240`, and it
+works. My recommendation deletes NodePorts "from the design", which on this
+cluster means changing the one thing that is currently proven.
+
+**Amended §2.** The destination is unchanged — per-edge hostnames and SNI —
+but:
+
+* Support **both** exposure modes per edge, with NodePort as the documented
+  legacy path, so existing sites are not forced through a change they did not
+  ask for.
+* **Verify ssl-passthrough works for the konnectivity gRPC stream** before any
+  site is migrated. I have not tested this, and konnectivity is the tunnel
+  every edge depends on. Asserting it works because SNI passthrough works for
+  HTTPS is exactly the kind of inference this document exists to stop.
+* Migrate one site, confirm, then the rest.
+
+## R5. The offline root must be optional — §3 amended
+
+An offline root requires an out-of-band signing ceremony that cannot live in
+`install.sh`. For a tier-1 single-site install that is pure friction for no
+benefit.
+
+Also worth being honest about the threat model: **if the management node is
+compromised the attacker already holds the staged imaging, the XNAT
+credentials and every child cluster kubeconfig.** The CA is not the crown
+jewel. What the two-tier split actually buys is *recoverability* — rotating a
+compromised intermediate without touching every edge, versus a fleet-wide
+trust redistribution by hand. That is still worth it, but it is a different
+and smaller claim than "the root is protected".
+
+**Amended §3:** `certManager.ca.mode: selfSigned | intermediate`. `selfSigned`
+stays the default for dev and tier-1; `intermediate` is required for a
+multi-site production fleet and documented with the ceremony.
+
+## R6. Alert testing splits into two very different problems — §6 amended
+
+I proposed one smoke-test harness. In practice:
+
+* **PrometheusRules have `promtool test rules`** — a real unit-test format,
+  no cluster, runs in seconds. There is no excuse for not having this, and it
+  would have caught `SeaweedFSDiskFull` immediately.
+* **LogQL rules have no equivalent.** Testing those genuinely needs a Loki
+  with the ruler running and time to evaluate.
+
+**Amended §6:** promtool unit tests in CI on every push; a heavier
+docker-compose Loki smoke test run nightly and before a release. Pretending
+one harness covers both would have produced a harness that covers neither.
+
+## What survived unchanged
+
+§5 (count with `--output json`, never through a failing pipe), §7 (PVC
+retention audit in CI), §8 (adoption script with dry-run, plus a greenfield CI
+path), §9 (preflight on immutable fields), §10 (per-site XNAT credentials).
+And §0's core: bucket per site, which is measured and not in question.
+
+## Net effect on sequencing
+
+The dependencies are tighter than the original order implied:
+
+* §1 (mTLS) now **depends on** the cert-sync job and on §6's absence alert.
+* §6 (promtool half) should come **first**, not fifth — it is cheap and it is
+  the thing that catches the rest.
+* §2 (SNI) needs a konnectivity passthrough test before it is committed to.
+
+Revised order: **§6-promtool → §0 → §3 → cert-sync → §1 → §4 → §2 → §5/§7/§8/§9 → §10**.
