@@ -128,9 +128,14 @@ if [ "$RECLAIM" != "onXnatConfirmed" ]; then
     exit 1
 fi
 
-for tool in aws curl date timeout; do
+# python3 is in this list on purpose. It parses the object-count JSON, and it
+# is present in amazon/aws-cli:2.31.19 (3.9.23, verified) — but if a future
+# base image drops it, every count would return ERR and the reclaimer would
+# quietly keep everything forever. That is safe, and it is also indis-
+# tinguishable from "there was nothing to reclaim". Fail loudly instead.
+for tool in aws curl date timeout python3; do
     command -v "$tool" >/dev/null 2>&1 || {
-        jlog reclaim_unavailable "" "required tool '${tool}' is not in this image — the reclaimer needs aws-cli (S3 listings) and curl (XNAT REST + the filer delete); nothing was examined and nothing was removed"
+        jlog reclaim_unavailable "" "required tool '${tool}' is not in this image — the reclaimer needs aws-cli (S3 listings), curl (XNAT REST + the filer delete) and python3 (parsing object counts); nothing was examined and nothing was removed"
         exit 1
     }
 done
@@ -236,11 +241,33 @@ s3_list_prefixes() {
     return 0
 }
 
+# --output json, NOT --output text.
+#
+# With `--output text` the AWS CLI applies --query PER PAGE, so any session
+# over 1000 objects returns one number per page — a multi-line answer that
+# fails numeric_or_err and keeps the session forever as `listing_failed`.
+# Fail-safe, but it silently disables reclaiming for exactly the large
+# sessions that matter most for disk. `--output json` is fully buffered and
+# returns one document, and the count is parsed explicitly so that anything
+# unexpected is ERR rather than a plausible-looking number.
 s3_object_count() {
     local out
     out=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/${1}/" \
-            --query 'length(Contents || `[]`)' --output text 2>/dev/null) || { echo ERR; return; }
-    numeric_or_err "$out"
+            --output json 2>/dev/null) || { echo ERR; return; }
+    printf '%s' "$out" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("ERR"); sys.exit()
+if d.get("IsTruncated"):
+    # Should not happen: list-objects-v2 through the CLI paginates for us and
+    # returns the assembled result. If it ever does, we do NOT know the true
+    # count, and guessing is how a session gets deleted early.
+    print("ERR"); sys.exit()
+c = d.get("Contents")
+print(len(c) if isinstance(c, list) else 0)
+' 2>/dev/null || echo ERR
 }
 
 # In-flight multipart uploads. A session whose first object is still being

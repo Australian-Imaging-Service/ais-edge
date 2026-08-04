@@ -143,7 +143,18 @@ k0smotron:
   # restart discards the child cluster's state, so this is a PVC.
   persistence:
     type: pvc
+    # The hosted control plane's own volume.
     size: 10Gi
+    storageClassName: ""
+  # etcd's volume is INDEPENDENT of the control-plane one, and it is sized
+  # separately because a StatefulSet volumeClaimTemplate is IMMUTABLE. The
+  # live edge-dev etcd claim is 1Gi; rendering 10Gi against it makes the API
+  # server reject k0smotron's update and wedges its reconcile loop. Defaulting
+  # to the live value keeps an upgrade a no-op on existing sites. Changing it
+  # requires recreating the StatefulSet — a scheduled operation, not a values
+  # edit. One key for two volumes is how this was missed.
+  etcdPersistence:
+    size: 1Gi
     storageClassName: ""
   # Cluster CRs carry helm.sh/resource-policy: keep, so removing a site from
   # `edges` above does NOT tear down its control plane. Teardown is a
@@ -632,6 +643,14 @@ loki:
       storageClass: local-path
       annotations:
         helm.sh/resource-policy: keep
+      # helm.sh/resource-policy: keep governs HELM. It does not stop the
+      # StatefulSet controller deleting the PVC, and the loki chart defaults
+      # this to true — which renders
+      #   persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete,
+      #                                          whenScaled: Delete}
+      # so scaling the StatefulSet to zero, or deleting it, takes the log
+      # store with it. The annotation above gave a false sense of safety.
+      enableStatefulSetAutoDeletePVC: false
     # Turns the S3 key into env vars without putting it in values.
     extraArgs:
       - -config.expand-env=true
