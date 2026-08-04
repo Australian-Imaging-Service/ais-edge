@@ -1,0 +1,54 @@
+{{- if or .Values.xnatIngest.orthancIngest.enabled .Values.xnatIngest.fsIngest.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest-assign
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ingest-assign
+  template:
+    metadata:
+      labels:
+        app: ingest-assign
+    spec:
+      containers:
+      - name: assign
+        image: {{ .Values.xnatIngest.image }}
+        imagePullPolicy: {{ .Values.xnatIngest.imagePullPolicy }}
+        env:
+        - name: XINGEST_LOGGERS
+          value: {{ .Values.xnatIngest.assign.loggers | quote }}
+        {{- with .Values.xnatIngest.assign.unlinkSource }}
+        - name: XINGEST_UNLINK_SOURCE
+          value: {{ . | quote }}
+        {{- end }}
+        {{- include "edge.xnatIngestCommonEnv" . | nindent 8 }}
+        command:
+        - xnat-ingest
+        - assign
+        args:
+        - /data/grouped
+        - /data/assigned
+        - --project
+        - {{ .Values.xnatIngest.dicomTagMapping.project | quote }}
+        - --subject
+        - {{ .Values.xnatIngest.dicomTagMapping.subject | quote }}
+        - --session
+        - {{ .Values.xnatIngest.dicomTagMapping.sessionLabel | quote }}
+        - --scan
+        - {{ .Values.xnatIngest.dicomTagMapping.scanDesc | quote }}
+        - --copy-mode
+        - {{ .Values.xnatIngest.assign.copyMode | quote }}
+        - --loop
+        - {{ .Values.xnatIngest.assign.interval | quote }}
+        volumeMounts:
+        {{- include "edge.xnatIngestVolumeMount" . | nindent 8 }}
+      {{- include "edge.xnatIngestVolumes" . | nindent 6 }}
+{{- end }}

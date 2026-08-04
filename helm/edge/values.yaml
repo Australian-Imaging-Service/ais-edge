@@ -1,33 +1,28 @@
 namespace: ais-edge
 
-# Name for the PV and PVC. Override if running multiple releases in the same cluster.
 pvcName: ais-edge
-
-# Storage class for the pipeline PV/PVC.
 storageClassName: hostpath-pipeline
 
 storageClass:
-  create: true  # set to false if the storage class already exists on the cluster
+  create: true
 
-# Shared pipeline storage (PV + PVC)
 storage:
   hostPath: /data/ais-edge
   capacity: 1500Gi
 
-# Orthanc DICOM server
 orthanc:
   image: jodogne/orthanc-plugins:1.12.11
   imagePullPolicy: IfNotPresent
-  aet: ORTHANC                          # Application Entity Title, used by scanners to address Orthanc
+  aet: ORTHANC
+  authenticationEnabled: true
   dicomPort: 4242
   httpPort: 8042
   nodePorts:
-    dicom: 30042                        # external port on VM for DICOM (scanner > Orthanc)
-    http: 30842                         # external port on VM for HTTP (web UI + REST API)
-  ingestTranscoding: "1.2.840.10008.1.2.1"  # decompress all incoming DICOMs to uncompressed
-  dicomScuTimeout: 60     # seconds to wait for a DICOM association response
-
-  plugins:                                # plugins for viewer etc, can be altered
+    dicom: 30042
+    http: 30842
+  ingestTranscoding: "1.2.840.10008.1.2.1"
+  dicomScuTimeout: 60
+  plugins:
     - /usr/local/share/orthanc/plugins/libOrthancExplorer2.so
     - /usr/local/share/orthanc/plugins/libStoneWebViewer.so
     - /usr/local/share/orthanc/plugins/libOrthancDicomWeb.so
@@ -40,58 +35,87 @@ orthanc:
   securityContext:
     capabilities:
       drop:
-      - ALL
+        - ALL
     allowPrivilegeEscalation: false
   resources:
     requests:
-      memory: "512Mi"
-      cpu: "200m"
+      memory: 512Mi
+      cpu: 200m
     limits:
-      memory: "2Gi"
-      cpu: "1000m"
+      memory: 2Gi
+      cpu: "1"
 
-# Samba file share. exposes pipeline storage on the local network
 samba:
   image: dockurr/samba:4.23.5
-  shareName: edge                       # SMB share name, connect via smb://user@<node-ip>/edge
+  shareName: edge
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "100m"
+      memory: 256Mi
+      cpu: 100m
     limits:
-      memory: "512Mi"
-      cpu: "500m"
+      memory: 512Mi
+      cpu: 500m
 
-# xnat-ingest settings. shared across sort, upload, and associate pods
 xnatIngest:
-  image: ghcr.io/australian-imaging-service/xnat-ingest:0.9.1
+  image: ghcr.io/australian-imaging-service/xnat-ingest:0.12.3
   imagePullPolicy: IfNotPresent
-  delete: "0"               # do not delete source files after processing
-  deidentify: "0"           # do not deidentify data
-  spacesToUnderscores: "0"  # do not replace spaces with underscores in output names
+  deidentify: "0"
+  spacesToUnderscores: "0"
 
-  # DICOM tag > XNAT field mapping, shared by all three pods
   dicomTagMapping:
-    project: StudyDescription   # DICOM StudyDescription: XNAT project ID
-    subject: PatientName        # DICOM PatientName: XNAT subject ID
-    visit: PatientID            # DICOM PatientID: XNAT visit/session label
-    session: StudyInstanceUID   # DICOM StudyInstanceUID: unique session identifier
+    project: StudyDescription
+    subject: PatientName
+    sessionLabel: PatientID
+    sessionUid: StudyInstanceUID
+    scanDesc: SeriesDescription
 
-  sort:
+  orthancIngest:
+    enabled: true
+    interval: 300
+    processedLabel: xnat-sorted
+    copyMode: hardlink_or_copy
+    groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-orthanc-group.log"
+
+  fsIngest:
+    enabled: true
+    interval: 300
+    inputGlob: "/data/incoming/**/*"
+    waitPeriod: 60
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
-    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-sort.log"
+    unlinkSource: all
+    groupLoggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-fs-group.log"
+
+  assign:
+    interval: 300
+    copyMode: hardlink_or_copy
+    unlinkSource: all
+    loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-assign.log"
 
   upload:
-    alwaysInclude: "medimage/dicom-series"
+    enabled: true
+    replicas: 1
+    alwaysInclude: "all"
     verifySsl: "1"
     useCurlJsession: "0"
-    requireManifest: "1"
-    loop: "-1"
+    requireManifest: "0"
+    checkChecksums: "0"
+    loop: 300
+    waitPeriod: 60
     tempdir: /data/tmp
     loggers: "stream debug stdout;file debug /data/LOGS/xnat-ingest-upload.log"
 
   associate:
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
+    unlinkSource: ""
     loggers: "stream info stdout;file debug /data/LOGS/xnat-ingest-associate.log"
+
+s3Sync:
+  enabled: false
+  image: amazon/aws-cli:latest
+  imagePullPolicy: IfNotPresent
+  dest: ""
+  interval: 300
+  settleMinutes: 5
+  credentialsSecret: s3-credentials

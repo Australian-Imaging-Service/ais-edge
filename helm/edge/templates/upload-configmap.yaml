@@ -1,9 +1,10 @@
-# Empty ConfigMap required by all xnat-ingest pods.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: proxy-config
+  name: upload-script
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "edge.labels" . | nindent 4 }}
-data: {}
+data:
+  upload.sh: |
+    {{- .Files.Get "files/upload.sh" | nindent 4 }}

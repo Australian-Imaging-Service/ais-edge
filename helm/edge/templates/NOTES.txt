@@ -1,48 +1,32 @@
-Edge pipeline deployed to namespace {{ .Values.namespace }}.
+AIS Edge deployed to namespace {{ .Values.namespace }}.
 
-== Orthanc ==
-  DICOM receiver:  {{ (index .Values.orthanc.nodePorts "dicom") }} (NodePort)
-  Web UI / REST:   {{ (index .Values.orthanc.nodePorts "http") }} (NodePort)
+Connections:
+  Orthanc DICOM: <node-ip>:{{ index .Values.orthanc.nodePorts "dicom" }}
+  Orthanc web:   http://<node-ip>:{{ index .Values.orthanc.nodePorts "http" }}/ui/app/
+  Samba share:   \\<node-ip>\{{ .Values.samba.shareName }}
+  File drop:     incoming/
 
-  Web UI:    http://<node-ip>:{{ (index .Values.orthanc.nodePorts "http") }}/app/explorer.html
-  Upload:    curl -u user:pass -X POST http://<node-ip>:{{ (index .Values.orthanc.nodePorts "http") }}/instances --data-binary @file.dcm
+Pipelines:
+  Orthanc ingest:  {{ if .Values.xnatIngest.orthancIngest.enabled }}enabled{{ else }}disabled{{ end }}
+  Filesystem ingest: {{ if .Values.xnatIngest.fsIngest.enabled }}enabled{{ else }}disabled{{ end }}
+  XNAT upload:     {{ if .Values.xnatIngest.upload.enabled }}configured ({{ .Values.xnatIngest.upload.replicas }} replicas){{ else }}disabled{{ end }}
+  S3 sync:         {{ if .Values.s3Sync.enabled }}enabled ({{ .Values.s3Sync.dest }}){{ else }}disabled{{ end }}
 
-  If the orthanc-credentials secret is not already set up, create it with:
-    kubectl create secret generic orthanc-credentials \
-      --from-literal=users.json='{"RegisteredUsers": {"admin": "changeme"}}' \
-      -n {{ .Values.namespace }}
+Review before upload:
+  kubectl exec deployment/ingest-assign -n {{ .Values.namespace }} -- \
+    find /data/assigned -mindepth 1 -maxdepth 2 -type d
 
-== Samba ==
-  Share name: {{ .Values.samba.shareName }}
-  Connect:    smb://<username>@<node-ip>/{{ .Values.samba.shareName }}
+Logs:
+  kubectl logs deployment/ingest-orthanc-group -n {{ .Values.namespace }} -f
+  kubectl logs deployment/ingest-fs-group -n {{ .Values.namespace }} -f
+  kubectl logs deployment/ingest-assign -n {{ .Values.namespace }} -f
+  kubectl logs deployment/upload -n {{ .Values.namespace }} -f
+  {{- if .Values.s3Sync.enabled }}
+  kubectl logs deployment/s3sync -n {{ .Values.namespace }} -f
+  {{- end }}
 
-  If the samba-credentials secret is not already set up, create it with:
-    kubectl create secret generic samba-credentials \
-      --from-literal=username=<user> \
-      --from-literal=password=<pass> \
-      -n {{ .Values.namespace }}
-
-== xnat-ingest (sort / upload / associate) ==
-  All three pods start with `sleep infinity`. Run manually with kubectl exec:
-
-  Sort:
-    kubectl exec -it xnat-ingest-sort -n {{ .Values.namespace }} -- \
-      xnat-ingest sort /data/orthanc-storage /data/staging/sorted --recursive
-
-  Upload:
-    kubectl exec -it xnat-ingest-upload -n {{ .Values.namespace }} -- \
-      xnat-ingest upload /data/staging/sorted $XINGEST_SERVER
-
-  Associate:
-    kubectl exec -it xnat-ingest-associate -n {{ .Values.namespace }} -- \
-      xnat-ingest associate /data/cima-export /data/staging/sorted \
-        --associated-files 'medimage/vnd.siemens.syngo-mr.xa.rda' \
-          '{PatientName}/**/*.rda' \
-          '.*\.(?P<id>\d+)\.\d+\.\d+\.(?P<resource>[^.]+)'
-
-  If the xnat-credentials secret is not already set up, create it with:
-    kubectl create secret generic xnat-credentials \
-      --from-literal=server=https://xnat.example.org \
-      --from-literal=username=<user> \
-      --from-literal=password=<pass> \
-      -n {{ .Values.namespace }}
+Secrets:
+  orthanc-credentials  users.json / orthanc-user / orthanc-password
+  samba-credentials    username / password
+  xnat-credentials     server / username / password (only required for upload)
+  s3-credentials       AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION (only required for S3 sync)

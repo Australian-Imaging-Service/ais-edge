@@ -1,0 +1,12 @@
+{{- if .Values.s3Sync.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s3sync-script
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  s3sync.sh: |
+    {{- .Files.Get "files/s3sync.sh" | nindent 4 }}
+{{- end }}
