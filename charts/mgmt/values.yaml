@@ -170,10 +170,19 @@ seaweedfs:
     ingest: ingest-bucket
     logs: logs-bucket
 
-  # Admin identity, used by the bucket-creation hook and by charts/mgmt's own
-  # uploader. Per-edge identities are generated from `edges` above and are
-  # scoped to the ingest bucket only, so losing one edge key exposes neither
-  # XNAT nor any other site's data.
+  # Admin identity, used by the bucket-creation hook.
+  #
+  # Per-edge identities are generated from `edges` above and scoped to the
+  # ingest bucket. BE PRECISE ABOUT WHAT THAT DOES AND DOES NOT BUY:
+  # SeaweedFS matches an identity's actions as "<action>:<bucket>", so
+  # `Read:ingest-bucket` / `Write:ingest-bucket/*` are BUCKET-WIDE. Every edge
+  # writes into one bucket under one staged/ prefix, so an edge key can read,
+  # list and delete ANY other site's staged sessions.
+  # What the scoping does buy: an edge key cannot reach XNAT, cannot reach the
+  # logs bucket, and has no administrative rights over the store.
+  # What it does not buy: cross-site isolation. Achieving that needs either a
+  # bucket per site or per-prefix policies, and it is an open decision — see
+  # docs/helm-consolidation-briefing.md.
   adminSecretRef: seaweedfs-admin
 
   # The generated s3.json goes into a SECRET, not a ConfigMap. The imperative
@@ -241,7 +250,15 @@ certManager:
 
   ca:
     secretName: ais-edge-ca-secret
-    commonName: ais-edge-ca
+    # MUST MATCH THE CA ALREADY DEPLOYED. On the existing management cluster
+    # the root CA is CN="AIS Edge Root CA" (openssl x509 -in ais-edge-ca.crt
+    # -subject), and cert-manager treats commonName as part of the desired
+    # state: change it and the FIRST `helm upgrade` re-issues the root CA.
+    # Every ca-bundle Secret already distributed to every edge then verifies
+    # against a CA that no longer signs anything, so every edge's S3 upload
+    # and Loki push fails TLS validation at once — a fleet-wide outage caused
+    # by a cosmetic-looking string.
+    commonName: AIS Edge Root CA
     durationHours: 87600      # 10y
   acme:
     email: ""
