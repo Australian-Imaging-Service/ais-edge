@@ -1,0 +1,479 @@
+# =============================================================================
+# AIS Edge — edge-site chart
+# =============================================================================
+# One chart, one edge site. It runs in whichever cluster you point it at: a
+# k0smotron-hosted child cluster (tier-2, upload.mode=s3) or a plain
+# single-node k0s box (tier-1, upload.mode=direct). Nothing in here assumes a
+# management plane exists; that lives in charts/mgmt.
+#
+# HOW TO READ THIS FILE
+#   1. dataPolicy    — what is kept and for how long. Read this first.
+#   2. storage       — where the bytes physically land.
+#   3. orthanc       — the DICOM receiver and de-identification.
+#   4. ingest        — group -> assign, and the optional file-drop path.
+#   5. upload        — how sessions reach XNAT (via S3, or directly).
+#   6. samba         — optional SMB drop-box.
+#   7. observability — optional log shipping to the management cluster.
+#
+# CREDENTIALS ARE NOT IN THIS FILE, BY DESIGN.
+# Every credential is referenced by Secret name only. Nothing here is secret,
+# so this file is safe to commit per-site. Secrets are created separately
+# (SOPS-encrypted under sites/<site>/secrets.enc.yaml) and referenced by the
+# existingSecret keys below. Never add a password, key or salt to this file.
+# =============================================================================
+
+namespace: xnat-ingest
+
+# onprem | cloud
+# Replaces the old {{#ONPREM_ONLY}} awk-stripping in scripts/00-common.sh.
+# onprem pins management hostnames via hostAliases; cloud resolves them via
+# real DNS and skips the aliases entirely.
+topology: onprem
+
+# Free-text label attached to every log line and metric from this site. It is
+# what Grafana's `cluster` variable filters on, so it must be unique per site.
+clusterLabel: ""
+
+
+# =============================================================================
+# 1. dataPolicy — THE one place that decides what is kept, where, how long
+# =============================================================================
+# Stores are split by what the data IS, not by which pod happens to write it:
+#
+#   originals  irreplaceable. If it is removed here it is gone for good.
+#              Defaults to forever. Change only against your site's records
+#              retention obligation — never just to free disk.
+#
+#   derived    reconstructible from an original above. Reclaiming these frees
+#              disk without losing data.
+#
+# Every derived rule is (condition AND minAge). BOTH must hold before anything
+# is reclaimed. That is deliberate:
+#   * a pure age rule would delete a session that never reached XNAT because
+#     the credentials were wrong;
+#   * a pure condition rule frees nothing the moment the confirmation signal
+#     breaks.
+# Requiring both means the worst case is "disk fills up and you get an alert",
+# never "data quietly disappeared".
+#
+# The same dataPolicy block is passed to charts/mgmt. Each chart acts on the
+# stores it owns; keep one copy in sites/<site>/values.yaml and hand it to
+# both releases so there is exactly one answer per site.
+# -----------------------------------------------------------------------------
+dataPolicy:
+
+  # Master switch. While false, NOTHING in this chart deletes or expires
+  # anything, whatever the rules below say. A fresh install therefore cannot
+  # surprise you. Turn it on deliberately, after dryRun has shown you a week
+  # of what it would have done.
+  enabled: false
+
+  # Log every reclaim decision and then do nothing. Leave true until the log
+  # matches what you expect.
+  dryRun: true
+
+  # ---------------------------------------------------------------------
+  # ORIGINALS
+  # ---------------------------------------------------------------------
+  originals:
+
+    # Identifiable DICOM exactly as it arrived off the wire. The Orthanc Lua
+    # hook writes this BEFORE de-identification and only removes the instance
+    # from Orthanc once the write has succeeded, so this is the archive of
+    # record for the site.
+    facilityBackup:
+      enabled: true
+      retain: forever            # forever | 30d | 90d | 7y
+      # Warn only. This never triggers a deletion — running low on disk is an
+      # operational problem, not a licence to discard originals.
+      minFreeDiskPercent: 10
+
+    # Studies received on an AE title that routing.json does not map to a
+    # project. They are originals too, and clearing them needs a HUMAN: an
+    # operator adds the AET to the map and re-sends. A time-based rule here
+    # would silently discard precisely the data nobody has dealt with yet,
+    # so the default is forever and we nag instead.
+    quarantine:
+      subPath: __unmapped_aet__
+      retain: forever
+      alertAfter: 24h
+
+    # Operator file drops. Only exists when ingest.fileDrop.enabled is true.
+    # NOTHING else holds a copy of these — there is no Orthanc copy and no
+    # facility backup on this path.
+    fileDrop:
+      reclaim: never             # never | onIngested
+      minAge: 30d                # additionally required when not 'never'
+
+  # ---------------------------------------------------------------------
+  # DERIVED
+  # ---------------------------------------------------------------------
+  derived:
+
+    # De-identified copy held inside Orthanc until group-orthanc has pulled
+    # it. onGrouped keys off the processed label that group-orthanc already
+    # applies, so this needs no new signal.
+    orthancStorage:
+      reclaim: onGrouped         # never | onGrouped
+      minAge: 7d
+      # Orthanc's own recycler, independent of the rules above. 0 disables
+      # it. Leave it off so this dataPolicy block is the only thing in the
+      # system that removes anything.
+      maximumStorageSizeMB: 0
+      maximumPatientCount: 0
+
+    # Hardlinks into Orthanc storage, produced by group-orthanc and consumed
+    # by assign. Reclaiming a hardlink does not touch the bytes while any
+    # other link survives.
+    #
+    # Why this matters: `assign --loop` rebuilds its work list from a live
+    # listing of /data/grouped every pass. With reclaim: never and no marker,
+    # it re-assigns the same sessions forever — re-staging them and re-firing
+    # the upload-success alert each cycle. onAssigned is implemented by a
+    # processed-marker state dir, so 'never' remains genuinely usable.
+    grouped:
+      reclaim: onAssigned        # never | onAssigned
+      minAge: 0
+
+    # Output of assign; input to whichever upload mode is enabled.
+    assigned:
+      reclaim: onUploaded        # never | onUploaded
+      minAge: 0
+
+    # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
+    # not on this node) but configured here so a site has ONE data policy.
+    #
+    # NOTE: onXnatConfirmed is not something xnat-ingest does for us — it has
+    # no S3 retention at all, which is why staged sessions accumulate and are
+    # re-listed every loop. charts/mgmt implements the reclaimer.
+    s3Staged:
+      reclaim: onXnatConfirmed   # never | onXnatConfirmed
+      minAge: 1d
+      # Re-query XNAT for the session before removing the staged copy rather
+      # than trusting the uploader's exit code. Slower, and correct.
+      verifyAgainstXnat: true
+
+  # ---------------------------------------------------------------------
+  # TELEMETRY — contains no patient data. Tune freely for disk.
+  # ---------------------------------------------------------------------
+  telemetry:
+    podLogFiles:
+      retain: 14d
+    # Applied by charts/mgmt; kept here so one file answers every retention
+    # question for the site.
+    loki:
+      retain: 30d
+    prometheus:
+      retain: 15d
+
+
+# =============================================================================
+# 2. storage
+# =============================================================================
+storage:
+  storageClass:
+    # false on k0smotron child clusters and anywhere a provisioner already
+    # exists. StorageClass is cluster-scoped, so two releases both creating
+    # it in one cluster will collide.
+    create: true
+    name: hostpath-pipeline
+
+  # The working volume: orthanc-storage/, grouped/, assigned/, incoming/,
+  # LOGS/, tmp/. All stages MUST share one filesystem or hardlink_or_copy
+  # silently degrades to a full copy (cross-device link -> EXDEV).
+  pipeline:
+    hostPath: /data/xnat-ingest
+    capacity: 1500Gi
+
+  # The archive of record, deliberately a SEPARATE volume from the pipeline
+  # one: a wedged or full pipeline volume must not be able to take the
+  # originals with it, and the two have completely different retention.
+  facilityBackup:
+    enabled: true
+    hostPath: /data/facility-backup
+    capacity: 2000Gi
+
+  # Both volumes are created with Retain + helm.sh/resource-policy: keep, so
+  # `helm uninstall` cannot remove received DICOM. Removing the data is a
+  # separate, deliberate operation.
+  reclaimPolicy: Retain
+
+
+# =============================================================================
+# 3. orthanc — DICOM receiver + de-identification
+# =============================================================================
+orthanc:
+  image:
+    repository: jodogne/orthanc-plugins
+    tag: "1.12.11"
+    pullPolicy: IfNotPresent
+
+  aet: AISEDGE
+  dicomPort: 4242
+  httpPort: 8042
+
+  # How long a study must be silent before OnStableStudy fires and the
+  # xnat-ingest-ready label is applied. LOAD-BEARING: with no StableAge the
+  # label is never applied, group-orthanc filters everything out, and the
+  # pipeline stalls with data sitting in Orthanc and no error anywhere.
+  stableAge: 30
+
+  # hostPort  — bind 4242 on the node IP. Standard DICOM port; modalities are
+  #             painful to repoint, so this is the default. Pins the pod to
+  #             one node, which is fine for a single-node edge.
+  # nodePort  — expose via NodePort instead.
+  # both      — both, for a migration window.
+  expose:
+    dicom: hostPort
+    nodePorts:
+      dicom: 30042
+      http: 30842
+    # ClusterIP keeps the REST API in-cluster only. Do not expose it without
+    # auth.enabled.
+    http: ClusterIP
+
+  auth:
+    # Orthanc's REST API can delete studies. Our old config ran with
+    # AuthenticationEnabled: false and was protected only by the accident of
+    # being ClusterIP-only.
+    enabled: true
+    existingSecret: orthanc-credentials   # keys: orthanc-user, orthanc-password
+
+  # Rewriting pixel data at receive time happens BEFORE the Lua hook runs, so
+  # the facility backup would hold the transcoded copy rather than the wire
+  # original. Leave empty whenever deid + facilityBackup are on.
+  ingestTranscoding: ""
+  dicomScuTimeout: 60
+
+  plugins:
+    - /usr/local/share/orthanc/plugins/libOrthancExplorer2.so
+    - /usr/local/share/orthanc/plugins/libStoneWebViewer.so
+    - /usr/local/share/orthanc/plugins/libOrthancDicomWeb.so
+    - /usr/local/share/orthanc/plugins/libOrthancGdcm.so
+
+  # ---------------------------------------------------------------------
+  # De-identification (our Lua hook — NOT xnat-ingest --deidentify, which is
+  # non-functional for DICOM in 0.12.x).
+  #
+  # On each stored instance the hook: writes the original to the facility
+  # backup, applies the profile via Orthanc /modify, deletes the original and
+  # keeps the de-identified copy. On a stable study it applies the
+  # xnat-ingest-ready label that group-orthanc filters on.
+  # ---------------------------------------------------------------------
+  deid:
+    enabled: true
+
+    # Refuse to start unless a human has confirmed the profile below matches
+    # the site's de-identification policy. Deliberately has no safe default.
+    policyReviewed: false
+
+    # Salt for the subject/session pseudonym hashes. Changing it re-links
+    # every pseudonym, so existing XNAT subjects stop matching new arrivals.
+    # Preserve it across reinstalls; never rotate casually.
+    existingSaltSecret: orthanc-deid-salt   # key: AIS_DEID_HMAC_SALT
+
+    # AE title -> XNAT project. THE routing table. An AE title that is not
+    # listed here is quarantined under the facility backup, not discarded.
+    # Keep project IDs within [A-Za-z0-9_]: assign normalises to that set.
+    aetMap: {}
+    #  SIEMENS_3T_AET: {project: MYSITE_RESEARCH}
+    #  BRUKER_PET_AET: {project: MYSITE_PET}
+
+    # Passed verbatim to Orthanc /modify. Copy from
+    # files/deidentification-profile.example.json and edit to your policy.
+    profile: {}
+
+  podSecurityContext:
+    fsGroup: 10001
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+  securityContext:
+    capabilities:
+      drop: [ALL]
+    allowPrivilegeEscalation: false
+  resources:
+    requests: {memory: 512Mi, cpu: 200m}
+    limits:   {memory: 2Gi,   cpu: "1"}
+  probes:
+    liveness:  {initialDelaySeconds: 30, periodSeconds: 10}
+    readiness: {initialDelaySeconds: 15, periodSeconds: 5}
+
+
+# =============================================================================
+# 4. ingest — group -> assign
+# =============================================================================
+ingest:
+  image:
+    repository: ghcr.io/australian-imaging-service/xnat-ingest
+    tag: "0.12.3"
+    pullPolicy: IfNotPresent
+
+  # One JSON object per log line. The alert rules and dashboards parse these
+  # fields directly; turning this off breaks monitoring, not just formatting.
+  logFormat: json
+
+  # Pull labelled studies out of Orthanc and group them into sessions.
+  orthancGroup:
+    enabled: true
+    interval: 60
+    # Only studies carrying this label are pulled. Applied by the Lua hook
+    # after de-identification, which is what makes the label the gate that
+    # stops identifiable data leaving Orthanc.
+    toProcessLabel: xnat-ingest-ready
+    processedLabel: xnat-ingest-processed
+    waitPeriod: 60
+    copyMode: hardlink_or_copy
+
+  # Second ingest path: a watched directory instead of a DICOM modality.
+  # OFF by default — see dataPolicy.originals.fileDrop for why this path
+  # deserves more care than the Orthanc one.
+  fileDrop:
+    enabled: false
+    interval: 300
+    inputGlob: "/data/incoming/**/*"
+    waitPeriod: 60
+    datatypes: "medimage/dicom-series"
+    copyMode: hardlink_or_copy
+
+  # Derive project/subject/session from the DICOM tags the Lua hook writes.
+  # routing.json's AETMap is the single source of truth for project; there is
+  # no hardcoded project ID anywhere.
+  assign:
+    interval: 60
+    copyMode: hardlink_or_copy
+    tagMapping:
+      project: ClinicalTrialProtocolID
+      subject: ClinicalTrialSubjectID
+      session: ClinicalTrialTimePointID
+
+  # Attach Siemens side files (twix / rda / puls) to an assigned session.
+  # Idle `sleep infinity` when there are none, so off unless needed.
+  associate:
+    enabled: false
+    datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
+    copyMode: hardlink_or_copy
+
+
+# =============================================================================
+# 5. upload — how sessions reach XNAT
+# =============================================================================
+# s3     edge -> central S3 (SeaweedFS) -> mgmt uploader -> XNAT.
+#        Central buffering and retry, one XNAT credential for the whole
+#        fleet, and the edge never needs to reach XNAT. Needs charts/mgmt.
+#
+# direct edge -> XNAT. No management plane, no S3, no CA plumbing. This is
+#        the tier-1 / standalone-site path.
+#
+# The two are mutually exclusive: both enabled means every session is
+# uploaded twice. The chart refuses to render if you set both.
+# -----------------------------------------------------------------------------
+upload:
+  mode: s3
+
+  s3:
+    endpoint: ""                       # https://seaweedfs.<domain>
+    bucket: ingest-bucket
+    prefix: staged
+    region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
+    # SeaweedFS is served on a single hostname with a single-SAN certificate,
+    # so virtual-hosted addressing (<bucket>.<host>) fails both DNS and cert
+    # validation. Path-style is not optional here.
+    addressingStyle: path
+    existingSecret: s3-edge-credentials  # keys: access-key, secret-key
+    # PEM holding the CA that signed the SeaweedFS server certificate. The
+    # AWS CLI wants ONE file (AWS_CA_BUNDLE); mc wanted a directory. This is
+    # the easiest thing to get silently wrong during the client swap.
+    caBundleSecret: ca-bundle
+    caBundleKey: ca.crt
+    image:
+      repository: amazon/aws-cli
+      tag: "2.31.19"
+      pullPolicy: IfNotPresent
+    interval: 60
+    # Don't touch a session until it has been quiet this long — assign may
+    # still be writing into it.
+    settleMinutes: 5
+    resources:
+      requests: {memory: 128Mi, cpu: 100m}
+      limits:   {memory: 512Mi, cpu: 500m}
+
+  direct:
+    replicas: 1
+    existingSecret: xnat-credentials    # keys: server, username, password
+    loop: 300
+    waitPeriod: 60
+    alwaysInclude: "all"
+    verifySsl: true
+    requireManifest: false
+    checkChecksums: false
+    tempDir: /data/tmp
+    resources:
+      requests: {memory: 256Mi, cpu: 100m}
+      limits:   {memory: 1Gi,   cpu: "1"}
+
+
+# =============================================================================
+# 6. samba — optional SMB drop-box
+# =============================================================================
+samba:
+  enabled: false
+  image:
+    repository: dockurr/samba
+    tag: "4.23.5"
+    pullPolicy: IfNotPresent
+  shareName: edge
+  # Only this subdirectory is exported. Sharing the volume root would put
+  # orthanc-storage/ (DICOM), grouped/, assigned/ and LOGS/ on the share.
+  subPath: incoming
+  existingSecret: samba-credentials     # keys: username, password
+  # Binds 445 on the node, so it conflicts with any smbd already running
+  # there. Check before enabling.
+  hostPort: 445
+  resources:
+    requests: {memory: 256Mi, cpu: 100m}
+    limits:   {memory: 512Mi, cpu: 500m}
+
+
+# =============================================================================
+# 7. observability — ship logs to the management cluster
+# =============================================================================
+# Off for standalone sites. On for tier-2, where the mgmt cluster runs Loki,
+# Grafana and Alertmanager.
+observability:
+  enabled: false
+  vector:
+    image:
+      repository: timberio/vector
+      tag: "0.49.0-distroless-libc"
+      pullPolicy: IfNotPresent
+    resources:
+      requests: {memory: 128Mi, cpu: 100m}
+      limits:   {memory: 512Mi, cpu: 500m}
+  loki:
+    endpoint: ""                        # https://loki.<domain>
+    existingTokenSecret: loki-push-token
+    caBundleSecret: ca-bundle
+    caBundleKey: ca.crt
+
+
+# =============================================================================
+# 8. platform
+# =============================================================================
+serviceAccounts:
+  create: true
+  # Nothing in this chart talks to the Kubernetes API except Vector, which
+  # gets its own ServiceAccount and RBAC.
+  automountToken: false
+
+# onprem only: pin management hostnames to the mgmt node IP inside pods,
+# because edge nodes generally cannot resolve them via site DNS.
+hostAliases:
+  enabled: true
+  mgmtNodeIP: ""
+  hostnames: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
