@@ -236,9 +236,29 @@ xnatUpload:
 # certManager + issuers
 # =============================================================================
 certManager:
-  # The subchart. Set false if cert-manager is already installed cluster-wide.
-  enabled: true
+  # Whether to INSTALL the cert-manager subchart. Nothing else.
+  #
+  # Default false, because on every cluster we actually have, cert-manager is
+  # already installed (by `kubectl apply`, with no Helm ownership). Defaulting
+  # to true would mean the common case is the one that needs overriding.
+  enabled: false
   installCRDs: true
+
+  # WHERE cert-manager reads cluster-scoped resources from — its
+  # --cluster-resource-namespace. This is deliberately INDEPENDENT of
+  # `enabled`: one is "do we install it", the other is "where does the running
+  # controller look". Conflating them put the CA Certificate in a namespace
+  # cert-manager never reads, so nothing issued and nothing errored.
+  # Verified on this cluster: the controller runs
+  # --cluster-resource-namespace=$(POD_NAMESPACE) in namespace cert-manager.
+  clusterResourceNamespace: cert-manager
+
+  monitoring:
+    # Creates a metrics Service + ServiceMonitor for the cert-manager
+    # controller. Without it, certmanager_certificate_expiration_timestamp_seconds
+    # has no series and the CA-expiry alerts cannot fire — which is how a CA
+    # reaches its expiry date unannounced.
+    enabled: true
 
   # ais-edge-ca      self-signed internal CA. The default, and what every
   #                  in-cluster client trusts via the ca-bundle Secret.

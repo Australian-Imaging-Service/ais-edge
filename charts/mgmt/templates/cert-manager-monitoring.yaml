@@ -1,0 +1,76 @@
+{{- if .Values.observability.enabled }}
+{{- if .Values.certManager.monitoring.enabled }}
+{{- /*
+Scrape cert-manager.
+
+WHY THIS EXISTS. Three alerts — CARotationDue, CertificateExpiringSoon and
+CertificateRenewed — select `certmanager_certificate_*_timestamp_seconds`.
+None of those series existed, because cert-manager was installed with
+`kubectl apply` and that manifest set ships no metrics Service and no
+ServiceMonitor. The alerts had never been able to fire.
+
+The consequence is the one that matters: **nothing would have warned us before
+the CA expired.** Every edge validates the SeaweedFS and Loki server
+certificates against that CA, and the rotation procedure is a two-phase
+operation run weeks apart — precisely the kind of thing you need months of
+warning for, not an outage.
+
+Found by scripts/check-alert-inputs.sh, which asks the live Prometheus whether
+each metric an alert depends on has any series. Verified afterwards by
+port-forwarding the controller: :9402/metrics serves 62 certmanager_* lines
+including the expiry timestamps for every Certificate in the cluster.
+
+The Service is created here rather than assumed, because on this cluster
+cert-manager is not Helm-managed and we cannot change how it was installed.
+Selecting on `app.kubernetes.io/name` + `component: controller` matches the
+controller only — the webhook and cainjector serve their own, different
+metrics and are not what these alerts read.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mgmt.fullname" . }}-cert-manager-metrics
+  namespace: {{ .Values.certManager.clusterResourceNamespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  # Headless-adjacent: no cluster IP is needed, Prometheus scrapes endpoints.
+  selector:
+    app.kubernetes.io/name: cert-manager
+    app.kubernetes.io/component: controller
+  ports:
+    - name: http-metrics
+      port: 9402
+      targetPort: 9402
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "mgmt.fullname" . }}-cert-manager
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    # Prometheus discovers rules and monitors BY THIS LABEL. See
+    # mgmt.prometheusReleaseLabel — a literal here would silently stop
+    # matching the moment the release is renamed.
+    release: {{ include "mgmt.prometheusReleaseLabel" . }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.certManager.clusterResourceNamespace }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mgmt.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: http-metrics
+      # Certificate expiry moves on the scale of months. Scraping it every 30s
+      # buys nothing and costs series churn.
+      interval: 60s
+      scrapeTimeout: 30s
+{{- end }}
+{{- end }}
