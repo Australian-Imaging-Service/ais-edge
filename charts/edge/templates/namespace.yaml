@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  annotations:
+    # Keep on uninstall. The namespace holds Secrets this chart does not own
+    # (created from SOPS, or distributed by the bootstrap scripts: ca-bundle,
+    # loki-push-token). Deleting the namespace would take them with it, and
+    # the PVCs that carry received DICOM along with them.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}

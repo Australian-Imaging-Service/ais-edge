@@ -24,6 +24,11 @@
 
 namespace: xnat-ingest
 
+# Resource names are prefixed with the Helm release name. Override only if you
+# need two independent installs to coexist in one cluster.
+nameOverride: ""
+fullnameOverride: ""
+
 # onprem | cloud
 # Replaces the old {{#ONPREM_ONLY}} awk-stripping in scripts/00-common.sh.
 # onprem pins management hostnames via hostAliases; cloud resolves them via

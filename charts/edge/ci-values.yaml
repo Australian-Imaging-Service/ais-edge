@@ -1,0 +1,24 @@
+clusterLabel: edge-dev
+namespace: xnat-ingest
+hostAliases:
+  enabled: true
+  mgmtNodeIP: "203.101.224.240"
+  hostnames: ["seaweedfs.aisedge.local", "loki.aisedge.local"]
+orthanc:
+  deid:
+    policyReviewed: true
+    aetMap:
+      AISEDGE: {project: TEST_PROJECT}
+      SIEMENS_3T: {project: MYSITE_RESEARCH}
+    profile:
+      DeidMode: "Basic"
+      Force: true
+      RemovePrivateTags: true
+      Keep: ["StudyInstanceUID", "SeriesInstanceUID"]
+      Replace:
+        PatientName: "ANON"
+upload:
+  mode: s3
+  s3:
+    endpoint: "https://seaweedfs.aisedge.local"
+    caBundleSecret: ca-bundle
