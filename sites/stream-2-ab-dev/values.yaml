@@ -24,6 +24,13 @@ hostnames:
 certManager:
   enabled: false
   clusterResourceNamespace: cert-manager
+  # Names the imperative installer used. They appear in the CA Certificate's
+  # issuerRef, so using the chart defaults here would rewrite it and make
+  # cert-manager re-issue the root CA — invalidating the ca-bundle on every
+  # edge. Verified against the live objects before adopting.
+  issuer: ais-edge-ca-issuer
+  ca:
+    bootstrapIssuerName: selfsigned-bootstrap
 ingressNginx:
   enabled: false
 

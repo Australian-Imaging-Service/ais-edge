@@ -410,6 +410,22 @@ certManager:
   issuer: ais-edge-ca
 
   ca:
+    # Name of the self-signed ClusterIssuer that signs the root CA.
+    #
+    # SET THIS ON A BROWNFIELD CLUSTER. It ends up in the CA Certificate's
+    # issuerRef, and issuerRef is part of the spec — so if the chart's name
+    # differs from the one already in the cluster, adopting the Certificate
+    # rewrites issuerRef and cert-manager RE-ISSUES the root CA. Every
+    # ca-bundle already distributed to every edge then verifies against a CA
+    # that no longer signs anything: a fleet-wide TLS outage caused by a
+    # rename.
+    #
+    # Empty means <release>-selfsigned-bootstrap, correct for a new cluster.
+    # stream-2-ab-dev has `selfsigned-bootstrap` from the imperative installer
+    # and sets it explicitly. Diff the live Certificate against the rendered
+    # one before adopting; that is how this was found.
+    bootstrapIssuerName: ""
+
     # -----------------------------------------------------------------------
     # ONE TIER OR TWO. selfSigned | intermediate
     #

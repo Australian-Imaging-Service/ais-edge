@@ -81,6 +81,19 @@ The out-of-band ceremony for intermediate mode is docs/ca-ceremony.md.
 {{- /* The CA ClusterIssuer takes the issuer name unless the operator picked
        Let's Encrypt, in which case the CA path still exists but under its
        own well-known name. */ -}}
+{{- /* The bootstrap issuer's NAME is configurable because it appears in the
+       CA Certificate's issuerRef, and issuerRef is part of the spec: changing
+       it makes cert-manager RE-ISSUE the root CA, which invalidates every
+       ca-bundle already distributed to every edge — a fleet-wide TLS outage
+       from a rename.
+
+       Default is release-prefixed, which is right for a new cluster. A
+       brownfield cluster sets it to whatever it already has. On
+       stream-2-ab-dev that is `selfsigned-bootstrap`, created by the
+       imperative installer; adopting the CA Certificate with the default name
+       would have rewritten its issuerRef. Caught by diffing the live object
+       against the rendered one before adopting. */ -}}
+{{- $bootstrapIssuer := .Values.certManager.ca.bootstrapIssuerName | default (printf "%s-selfsigned-bootstrap" (include "mgmt.fullname" .)) }}
 {{- $caIssuerName := ternary "ais-edge-ca" $issuer $isAcme -}}
 {{- $ca := .Values.certManager.ca -}}
 {{- $mode := $ca.mode -}}
@@ -150,7 +163,7 @@ The out-of-band ceremony for intermediate mode is docs/ca-ceremony.md.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
-  name: {{ include "mgmt.fullname" . }}-selfsigned-bootstrap
+  name: {{ $bootstrapIssuer }}
   annotations:
     # Bootstrap-only, but not disposable: the root Certificate is re-signed
     # through this Issuer at renewal, so it has to outlive an uninstall.
@@ -185,7 +198,7 @@ spec:
     algorithm: RSA
     size: 4096
   issuerRef:
-    name: {{ include "mgmt.fullname" . }}-selfsigned-bootstrap
+    name: {{ $bootstrapIssuer }}
     kind: ClusterIssuer
     group: cert-manager.io
 {{- else }}
