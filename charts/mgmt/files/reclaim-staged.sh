@@ -330,10 +330,19 @@ s3_newest_epoch() {
 # Returns 0 only on a positive confirmation. Everything else (any HTTP code
 # other than 200, an HTML login page, an empty result, a name that does not
 # decompose) returns non-zero and the caller keeps the session.
-# Number of files the STAGED session claims to contain, summed from every
-# __MANIFEST__.json under its prefix. Echoes ERR on any doubt.
-staged_manifest_count() {
-    local session="$1" keys out total=0 mf
+# The set of files the STAGED session claims to contain, as
+# "<name>\t<md5>" lines, summed from every __MANIFEST__.json under its prefix.
+# Echoes ERR on any doubt.
+#
+# NAMES, not just a count. A count says "XNAT holds 400 files"; it does not say
+# they are THESE 400. Two sessions of equal size, a partially-overwritten
+# upload, or a session whose files landed under the wrong scan would all
+# satisfy a count and fail a name comparison. The manifest keys are the exact
+# filenames XNAT reports back, verified against the live server:
+#     manifest key : 1.2.276.0.7230010.3.1.4.8323329.102804.1785120247.836886.dcm
+#     XNAT Name    : 1.2.276.0.7230010.3.1.4.8323329.102804.1785120247.836886.dcm
+staged_manifest_files() {
+    local session="$1" keys out mf
     keys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" \
              --prefix "${S3_PREFIX}/${session}/" --output json 2>/dev/null) || { echo ERR; return; }
     mf=$(printf '%s' "$keys" | python3 -c '
@@ -353,41 +362,43 @@ for o in d.get("Contents") or []:
     # No manifest at all means we cannot say what SHOULD be there. Keep.
     [ -n "$mf" ] || { echo ERR; return; }
 
+    local all=""
     while IFS= read -r key; do
         [ -n "$key" ] || continue
-        # `aws s3 cp - ` and NOT `s3api get-object /dev/stdout`: the latter
-        # writes the object body AND a JSON metadata blob to stdout, so the
-        # two get concatenated and every parse fails. Caught by running this
-        # against a real staged session.
-        out=$(aws s3 cp "s3://${S3_BUCKET}/${key}" - 2>/dev/null) \
-            || { echo ERR; return; }
-        n=$(printf '%s' "$out" | python3 -c '
+        out=$(aws s3 cp "s3://${S3_BUCKET}/${key}" - 2>/dev/null) || { echo ERR; return; }
+        local part
+        part=$(printf '%s' "$out" | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
 c = d.get("checksums")
-if not isinstance(c, dict):
+if not isinstance(c, dict) or not c:
     sys.exit(1)
-print(len(c))
+for name, md5 in sorted(c.items()):
+    print("%s\t%s" % (name, md5 or ""))
 ' 2>/dev/null) || { echo ERR; return; }
-        case "$n" in ''|*[!0-9]*) echo ERR; return ;; esac
-        total=$((total + n))
+        all="${all}${part}
+"
     done <<EOF
 $mf
 EOF
-    [ "$total" -gt 0 ] || { echo ERR; return; }
-    echo "$total"
+    all=$(printf '%s' "$all" | grep -v '^$' | sort -u)
+    [ -n "$all" ] || { echo ERR; return; }
+    printf '%s' "$all"
 }
 
-# How many files XNAT actually holds for this session.
+# The set of files XNAT actually holds for this session, as
+# "<name>\t<digest>" lines. Echoes ERR on ANY doubt: a non-200, an HTML login
+# page, an unparseable body, an experiment that is absent, a session name that
+# does not decompose. The caller treats ERR as KEEP.
 #
-# Path-addressed through project/subject/experiment so a 404 is unambiguous,
-# then the per-experiment file listing is counted. Echoes ERR on ANY doubt:
-# a non-200, an HTML login page, an unparseable body, a name that does not
-# decompose. The caller treats ERR as KEEP.
-xnat_file_count() {
+# `digest` is empty unless the XNAT catalog was built with checksums enabled —
+# it is empty on our server. It is carried through anyway so that a site which
+# does enable it gets checksum comparison for free rather than needing a code
+# change.
+xnat_files() {
     local session="$1" project subject visit body code expid
     case "$session" in
         *.*.*.*|*..*|.*|*.) echo ERR; return ;;
@@ -403,8 +414,6 @@ xnat_file_count() {
     code=$(printf '%s' "$body" | tail -n1)
     [ "$code" = "200" ] || { echo ERR; return; }
 
-    # EXACT match on a label derived from THIS session's own name, so it can
-    # never resolve to a different session.
     expid=$(printf '%s' "$body" | sed '$d' | python3 -c '
 import sys, json
 try:
@@ -419,16 +428,9 @@ for r in rows:
 ' "$visit" "${subject}_${visit}" 2>/dev/null) || { echo ERR; return; }
     [ -n "$expid" ] || { echo ERR; return; }
 
-    # /scans/ALL/files, NOT /files.
-    #
-    # Measured against the live XNAT for a session known to be complete:
-    #     /data/experiments/<id>/files            -> 0 rows
-    #     /data/experiments/<id>/scans/ALL/files  -> 1 row   (correct)
-    # The plain /files endpoint lists resources attached to the EXPERIMENT
-    # itself, not the files inside its scans, so it returns 0 for a perfectly
-    # complete imaging session. Using it made every session look incomplete —
-    # fail-safe, but it would have meant nothing was ever reclaimed and the
-    # staging bucket would grow forever while appearing to be managed.
+    # /scans/ALL/files, NOT /files. Measured against a session known to be
+    # complete: /files returns 0 rows because it lists resources attached to
+    # the EXPERIMENT, not the files inside its scans.
     body=$(xnat_get "${XNAT_SERVER}/data/experiments/${expid}/scans/ALL/files?format=json")
     code=$(printf '%s' "$body" | tail -n1)
     [ "$code" = "200" ] || { echo ERR; return; }
@@ -439,7 +441,13 @@ try:
 except Exception:
     sys.exit(1)
 rows = (d.get("ResultSet") or {}).get("Result") or []
-print(len(rows))
+if not rows:
+    sys.exit(1)
+for r in rows:
+    n = r.get("Name")
+    if not n:
+        sys.exit(1)
+    print("%s\t%s" % (n, (r.get("digest") or "").strip()))
 ' 2>/dev/null || echo ERR
 }
 
@@ -609,33 +617,94 @@ while IFS= read -r session; do
         # COUNT, do not merely look for existence. XNAT creates the experiment
         # on the first resource POST, so "the experiment is there" is true for
         # an upload that died after 3 of 400 scans.
-        want=$(staged_manifest_count "$session")
+        want=$(staged_manifest_files "$session")
         if [ "$want" = "ERR" ]; then
-            keep "$session" "manifest_unreadable" "could not determine how many files this session should contain (no readable __MANIFEST__.json) — cannot prove it arrived intact" \
+            keep "$session" "manifest_unreadable" "could not determine WHICH files this session should contain (no readable __MANIFEST__.json) — cannot prove it arrived intact" \
                  ",\"objects\":${count},\"age_s\":${age}"
             kept=$((kept + 1)); continue
         fi
 
-        have=$(xnat_file_count "$session")
+        have=$(xnat_files "$session")
         if [ "$have" = "ERR" ]; then
             # Covers: XNAT unreachable, non-200, unparseable body, experiment
-            # absent, session name that does not decompose. All of it means we
-            # do not know, and not knowing means keep.
-            keep "$session" "xnat_count_unavailable" "XNAT did not return a usable file count for this session" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want\":${want}"
+            # absent, a row with no Name, a session name that does not
+            # decompose. All of it means we do not know, and not knowing
+            # means keep.
+            keep "$session" "xnat_count_unavailable" "XNAT did not return a usable file list for this session" \
+                 ",\"objects\":${count},\"age_s\":${age}"
             kept=$((kept + 1)); continue
         fi
 
-        if [ "$have" -lt "$want" ]; then
-            # The partial-upload case. Deleting here would destroy exactly the
-            # files that never made it.
-            keep "$session" "incomplete_in_xnat" "XNAT holds fewer files than this session staged — treating it as a partial upload" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want\":${want},\"have\":${have}"
+        # SET COMPARISON, not a count.
+        #
+        # A count says "XNAT holds 400 files"; it does not say they are THESE
+        # 400. A partially-overwritten upload, files landed under the wrong
+        # scan, or two sessions of equal size would all satisfy a count and
+        # fail this. Names come straight from the manifest keys and from
+        # XNAT's `Name` field, which are the same strings — verified against
+        # the live server.
+        #
+        # `digest` is compared too, but only where BOTH sides have one: XNAT
+        # leaves it empty unless the catalog was built with checksums enabled
+        # (it is empty on ours). Where it is populated a mismatch means the
+        # bytes differ even though the name matches, which no count or name
+        # check could ever catch.
+        cmp_out=$(printf '%s\n---\n%s\n' "$want" "$have" | python3 -c '
+import sys
+raw = sys.stdin.read().split("\n---\n")
+if len(raw) != 2:
+    print("ERR"); sys.exit()
+def parse(block):
+    out = {}
+    for line in block.strip().splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        out[parts[0]] = parts[1] if len(parts) > 1 else ""
+    return out
+wantd, haved = parse(raw[0]), parse(raw[1])
+if not wantd:
+    print("ERR"); sys.exit()
+missing = sorted(set(wantd) - set(haved))
+mismatched = sorted(
+    n for n in wantd
+    if n in haved and wantd[n] and haved[n] and wantd[n].lower() != haved[n].lower()
+)
+print("%d\t%d\t%d\t%d\t%s\t%s" % (
+    len(wantd), len(haved), len(missing), len(mismatched),
+    ",".join(missing[:3]), ",".join(mismatched[:3])))
+' 2>/dev/null) || cmp_out="ERR"
+
+        if [ "$cmp_out" = "ERR" ] || [ -z "$cmp_out" ]; then
+            keep "$session" "comparison_failed" "could not compare the staged file list against XNAT" \
+                 ",\"objects\":${count},\"age_s\":${age}"
             kept=$((kept + 1)); continue
         fi
 
-        jlog reclaim_confirmed "$session" "XNAT holds at least every file this session staged" \
-            ",\"objects\":${count},\"age_s\":${age},\"want\":${want},\"have\":${have}"
+        n_want=$(printf '%s' "$cmp_out" | cut -f1)
+        n_have=$(printf '%s' "$cmp_out" | cut -f2)
+        n_missing=$(printf '%s' "$cmp_out" | cut -f3)
+        n_mismatch=$(printf '%s' "$cmp_out" | cut -f4)
+        eg_missing=$(printf '%s' "$cmp_out" | cut -f5)
+        eg_mismatch=$(printf '%s' "$cmp_out" | cut -f6)
+
+        if [ "${n_missing:-1}" != "0" ]; then
+            # The partial-upload case, and now also the wrong-files case.
+            keep "$session" "incomplete_in_xnat" "XNAT is missing ${n_missing} of the ${n_want} files this session staged (e.g. ${eg_missing}) — treating it as a partial upload" \
+                 ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":${n_have},\"missing\":${n_missing}"
+            kept=$((kept + 1)); continue
+        fi
+
+        if [ "${n_mismatch:-0}" != "0" ]; then
+            # Same names, different bytes. Only reachable where the XNAT
+            # catalog carries digests.
+            keep "$session" "checksum_mismatch" "${n_mismatch} file(s) present in XNAT with a DIFFERENT checksum (e.g. ${eg_mismatch}) — the names match but the bytes do not" \
+                 ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":${n_have},\"mismatched\":${n_mismatch}"
+            kept=$((kept + 1)); continue
+        fi
+
+        jlog reclaim_confirmed "$session" "XNAT holds every file this session staged, by name" \
+            ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":${n_have}"
     fi
 
     if [ "$DRY_RUN" = "true" ]; then

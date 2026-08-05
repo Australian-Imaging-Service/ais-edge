@@ -101,11 +101,13 @@ session_with() {   # <session> <nfiles>
         > "$CASE_DIR/get.staged_${s}_scan_DICOM___MANIFEST__.json"
 }
 
-xnat_has() {   # <subject> <expid> <label> <nfiles>
+xnat_has() {   # <subject> <expid> <label> <nfiles> [name-prefix] [digest]
     printf '{"ResultSet":{"Result":[{"ID":"%s","label":"%s"}]}}' "$2" "$3" \
         > "$CASE_DIR/xnat-exp.$1.json"
-    local rows="" i
-    for i in $(seq 1 "$4"); do rows="$rows{\"Name\":\"f$i.dcm\"},"; done
+    local rows="" i pfx="${5:-f}" dig="${6:-}"
+    for i in $(seq 1 "$4"); do
+        rows="$rows{\"Name\":\"${pfx}$i.dcm\",\"digest\":\"${dig}\"},"
+    done
     rows="${rows%,}"
     printf '{"ResultSet":{"Result":[%s]}}' "$rows" > "$CASE_DIR/xnat-files.$2.json"
 }
@@ -124,6 +126,25 @@ setup_xnat_has_more() { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_h
 setup_partial_upload() { prefixes "staged/$SESS/"; session_with "$SESS" 400; xnat_has subj EXP1 visit 3; }
 
 setup_xnat_absent()      { prefixes "staged/$SESS/"; session_with "$SESS" 2; }
+
+# THE CASE A COUNT CANNOT CATCH: XNAT holds the right NUMBER of files, but
+# they are different files. A count comparison would confirm and delete.
+setup_right_count_wrong_files() { prefixes "staged/$SESS/"; session_with "$SESS" 3
+                                  xnat_has subj EXP1 visit 3 other; }
+
+# One of three missing, the other two present — a count would say 2 != 3 and
+# also keep, but this proves the MISSING NAME is what is reported.
+setup_one_file_missing()  { prefixes "staged/$SESS/"; session_with "$SESS" 3
+                            xnat_has subj EXP1 visit 2; }
+
+# Names match, digests differ. Only reachable where the XNAT catalog carries
+# checksums; ours does not, so this proves the path works for sites that do.
+setup_checksum_mismatch() { prefixes "staged/$SESS/"; session_with "$SESS" 2
+                            xnat_has subj EXP1 visit 2 f deadbeef; }
+
+# Names match and digests match — must still remove.
+setup_checksum_match()    { prefixes "staged/$SESS/"; session_with "$SESS" 2
+                            xnat_has subj EXP1 visit 2 f abc; }
 setup_xnat_500()         { prefixes "staged/$SESS/"; session_with "$SESS" 2; : > "$CASE_DIR/xnat-exp.subj.fail"; }
 setup_xnat_files_500()   { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-files.EXP1.fail"; }
 setup_no_manifest()      { prefixes "staged/$SESS/"
@@ -167,6 +188,10 @@ run_case happy_path            yes reclaim_removed
 run_case xnat_has_more         yes reclaim_removed
 run_case partial_upload        no  reclaim_kept
 run_case xnat_absent           no  reclaim_kept
+run_case right_count_wrong_files no reclaim_kept
+run_case one_file_missing      no  reclaim_kept
+run_case checksum_mismatch     no  reclaim_kept
+run_case checksum_match        yes reclaim_removed
 run_case xnat_500              no  reclaim_kept
 run_case xnat_files_500        no  reclaim_kept
 run_case no_manifest           no  reclaim_kept
