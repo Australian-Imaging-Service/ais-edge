@@ -346,6 +346,25 @@ hostnames:
   k0sApi: k0s.ci.198-51-100-10.nip.io
 EOF
 
+# The vector subchart's customConfig is not templated by Helm, so the Loki
+# address in it is a literal nothing keeps in step with the release. Both
+# halves of the drift are covered: the namespace it names, and the Service.
+cat >"$V/neg-mgmt-vector-loki-wrong-ns.yaml" <<'EOF'
+vector:
+  customConfig:
+    sinks:
+      loki:
+        endpoint: http://mgmt-loki.observability.svc.cluster.local:3100
+EOF
+
+cat >"$V/neg-mgmt-vector-loki-wrong-svc.yaml" <<'EOF'
+vector:
+  customConfig:
+    sinks:
+      loki:
+        endpoint: http://loki:3100
+EOF
+
 cat >"$V/neg-mgmt-loki-s3-no-seaweedfs.yaml" <<'EOF'
 seaweedfs:
   enabled: false
@@ -639,6 +658,8 @@ neg-mgmt-bad-exposure	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-exposure.yaml	has 
 neg-mgmt-sni-with-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-sni-with-nodeport.yaml	is exposure: sni but also sets
 neg-mgmt-duplicate-hostname	charts/mgmt	mgmt-base.yaml neg-mgmt-duplicate-hostname.yaml	is claimed by both
 neg-mgmt-fleetwide-hostnames	charts/mgmt	mgmt-base.yaml neg-mgmt-fleetwide-hostnames.yaml	no longer read
+neg-mgmt-vector-loki-wrong-ns	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wrong-ns.yaml	but this release installs Loki into
+neg-mgmt-vector-loki-wrong-svc	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wrong-svc.yaml	but this release's Loki Service is
 neg-mgmt-loki-s3-no-seaweedfs	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-s3-no-seaweedfs.yaml	requires seaweedfs.enabled=true
 neg-mgmt-no-emailto	charts/mgmt	mgmt-base.yaml neg-mgmt-no-emailto.yaml	emailTo is empty
 neg-mgmt-no-smtphost	charts/mgmt	mgmt-base.yaml neg-mgmt-no-smtphost.yaml	smtpHost is empty

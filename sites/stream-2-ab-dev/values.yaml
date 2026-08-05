@@ -10,43 +10,79 @@ domain:
   internal: aisedge.local
   mgmtNodeIP: "203.101.224.240"
 
-# Existing hostnames on this node, kept as-is so the certificates and every
-# edge hostAlias continue to match what is already deployed.
+# k0sApi / konnectivity are deliberately ABSENT. They used to live here, which
+# gave every edge the same two hostnames, so a second site's Ingress claimed a
+# name the first already owned. They are per-edge now and are pinned on the
+# `edges` entry below. The chart rejects them here rather than ignoring them.
 hostnames:
   seaweedfs: seaweedfs.aisedge.local
   grafana: grafana.aisedge.local
   loki: loki.aisedge.local
-  k0sApi: k0s.aisedge.local
-  konnectivity: konnectivity.aisedge.local
 
-# Already installed on this node by the imperative installer, and NOT
-# Helm-managed. The chart references them rather than trying to own them.
+# This node was fully torn down and rebuilt from these charts, so the chart
+# owns cert-manager and ingress-nginx outright at their pinned versions. The
+# imperative installer's `/latest/` and `/stable/` URLs are gone with it.
+#
+# ADOPTING A NODE THAT ALREADY HAS THEM IS DIFFERENT — set `enabled: false`
+# and pin `issuer` / `ca.bootstrapIssuerName` to the names already in the
+# cluster, because issuerRef is part of the CA Certificate's spec and a rename
+# makes cert-manager re-issue the root. See scripts/adopt-existing.sh.
 certManager:
-  enabled: false
-  clusterResourceNamespace: cert-manager
-  # Names the imperative installer used. They appear in the CA Certificate's
-  # issuerRef, so using the chart defaults here would rewrite it and make
-  # cert-manager re-issue the root CA — invalidating the ca-bundle on every
-  # edge. Verified against the live objects before adopting.
-  issuer: ais-edge-ca-issuer
-  ca:
-    bootstrapIssuerName: selfsigned-bootstrap
+  enabled: true
+  # WITH enabled:true THIS MUST BE THE RELEASE NAMESPACE. The subchart installs
+  # cert-manager into the release namespace, and its controller runs
+  # --cluster-resource-namespace=$(POD_NAMESPACE) — so the CA Secret is written
+  # to ais-mgmt, not to a namespace called "cert-manager". The chart's default
+  # (cert-manager) is right for the brownfield case where cert-manager was
+  # installed out of band into its own namespace, and wrong here. Both
+  # cert-issuers.yaml and cert-sync.yaml refuse to render on a mismatch rather
+  # than let the CA be written where nothing looks for it.
+  clusterResourceNamespace: ais-mgmt
 ingressNginx:
-  enabled: false
+  enabled: true
 
-# The k0smotron control plane for edge-dev already exists and is running.
-# Leave it alone: re-creating it would tear down the child cluster.
+# Must track certManager.clusterResourceNamespace above — this is where the
+# per-edge ca-bundle is copied FROM.
+certSync:
+  secrets:
+    - source:
+        namespace: ais-mgmt
+        name: ais-edge-ca-secret
+        keys:
+          ca.crt: ca.crt
+      destination:
+        namespace: xnat-ingest
+        name: ca-bundle
+        type: Opaque
+    - source:
+        # Release namespace, not "observability". kube-prometheus-stack and
+        # Loki are subcharts now, so there is no separate observability
+        # namespace and the per-edge push token is created alongside them.
+        namespace: ais-mgmt
+        name: loki-push-token-<edge>
+        keys:
+          token: token
+      destination:
+        namespace: xnat-ingest
+        name: loki-push-credentials
+        type: Opaque
+
+# Hosted control planes for every entry in `edges` below.
+#
+# INSTALL ORDER: the k0smotron OPERATOR is not a subchart — it is applied out
+# of band (scripts/02-install-k0smotron.sh), and its CRDs must exist before
+# these Cluster objects can be created. On a greenfield node install once with
+# `--set k0smotron.enabled=false`, apply the operator, then upgrade with it
+# true. Brownfield nodes already have the CRDs and can go straight through.
 k0smotron:
-  enabled: false
+  enabled: true
 
 seaweedfs:
-  # Same hostPath the running SeaweedFS uses, so its 590M of data is picked up
-  # rather than starting empty.
   storage:
     hostPath: /data/seaweedfs
-  # Keep the shared bucket for this first pass. Per-site buckets are the right
-  # end state but migrating the running edge is a separate step.
-  perSiteBuckets: false
+  # One bucket per edge site. The shared-bucket layout only existed to migrate
+  # running sites one at a time; nothing here predates this install.
+  perSiteBuckets: true
 
 observability:
   alerting:
@@ -59,6 +95,11 @@ observability:
 edges:
   - name: edge-dev
     nodeIP: "203.101.230.171"
+    # Pinned to the names this site already ran, and the names
+    # config/management.env hands to scripts/06-join-edge-worker.sh.
+    # A new site omits these and takes <apiPrefix>-<name>.<domain>.
+    apiHost: k0s.aisedge.local
+    konnectivityHost: konnect.aisedge.local
     s3SecretRef: edge-dev-s3
     lokiTokenRef: loki-push-token-edge-dev
     uploadSecretRef: seaweedfs-upload

@@ -865,6 +865,14 @@ kube-prometheus-stack:
 
 
 loki:
+  # PINNED, and load-bearing. The vector block below is subchart values, which
+  # Helm never templates, so the Loki address in it is a literal that cannot
+  # follow `.Release.Name`. Without this override the Service is
+  # <release>-loki, and the literal is only correct for a release named "mgmt"
+  # — a rename would leave Vector retrying a name that does not resolve, with
+  # management logs silently never arriving. Pinning the name decouples the two
+  # instead of relying on everyone always using the same release name.
+  fullnameOverride: mgmt-loki
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false                 # gated at the Ingress instead
@@ -906,6 +914,39 @@ loki:
       retention_delete_delay: 2h
       retention_delete_worker_count: 150
       delete_request_store: s3
+
+    # THIS REPEATS storage.s3 ABOVE ON PURPOSE. IT IS NOT REDUNDANT.
+    #
+    # `loki.storage.s3` renders into `common.storage.s3`, which configures the
+    # chunk and index stores. The compactor's DELETE REQUEST STORE is built from
+    # a different path — `storage_config.aws` — and the Loki chart never
+    # populates that from `loki.storage`. So with `delete_request_store: s3` and
+    # retention enabled, the compactor resolves an EMPTY bucket name and Loki
+    # exits 1 at startup with:
+    #
+    #   init compactor: failed to init delete store: failed to get s3 object:
+    #   ... api error NoSuchBucket: The specified bucket does not exist
+    #
+    # The message names a bucket problem, and on a fresh install that is ALSO
+    # briefly true — the bucket-creation Job is a post-install hook — so it
+    # reads as a startup race and sends you after the wrong thing. It is not a
+    # race: the bucket exists, the credentials are correct, and
+    # `aws s3api get-object` using Loki's own key returns NoSuchKey against that
+    # same bucket while Loki keeps reporting NoSuchBucket. Confirmed by patching
+    # this block into the live ConfigMap: Loki then started with zero restarts.
+    #
+    # Keep the two blocks in step. Nothing enforces it.
+    storage_config:
+      aws:
+        # [tpl] same endpoint as storage.s3 above.
+        endpoint: http://{{ .Release.Name }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
+        bucketnames: logs-bucket
+        region: us-east-1
+        s3forcepathstyle: true
+        insecure: true
+        access_key_id: ${LOKI_S3_ACCESS_KEY}
+        secret_access_key: ${LOKI_S3_SECRET_KEY}
+
     commonConfig:
       replication_factor: 1
     # The ruler evaluates the LogQL alert rules and pushes firing alerts to
@@ -1027,7 +1068,20 @@ vector:
         inputs: [parse_json_messages]
         # Same-cluster push: plain http, no bearer token, unlike the edges
         # which arrive over the Ingress.
-        endpoint: http://mgmt-loki.observability.svc.cluster.local:3100
+        #
+        # BARE SERVICE NAME, NOT AN FQDN. This block is passed straight to the
+        # vector subchart, so Helm never templates it and `.Release.Namespace`
+        # cannot appear here. It previously read
+        # `mgmt-loki.observability.svc.cluster.local`, which was the namespace
+        # the imperative installer used; once Loki became a subchart it moved to
+        # the release namespace and this address stopped resolving. Vector
+        # buffers and retries, so the only symptom was management logs quietly
+        # never reaching Loki. The short name resolves via the pod's own search
+        # domain, which is the release namespace for both charts.
+        #
+        # mgmt.validate cross-checks this against <release>-loki in the release
+        # namespace and refuses to render on a mismatch.
+        endpoint: http://mgmt-loki:3100
         # Vector >=0.49 rejects a label template with no literal prefix
         # ("template confinement") without this. Symptom: sink build error
         # "template references event fields but has no literal string prefix".

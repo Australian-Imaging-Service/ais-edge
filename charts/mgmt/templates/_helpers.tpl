@@ -107,6 +107,33 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
     {{- end }}
   {{- end }}
 
+  {{- /* The vector subchart's customConfig is passed through verbatim — Helm
+         does not template subchart values, so the Loki address in it is a
+         literal that no `.Release` reference can keep honest. It drifted once
+         already: it named the namespace the imperative installer used, and
+         after Loki became a subchart in the release namespace the sink
+         resolved to nothing. Vector retries a failing sink forever without
+         exiting, so management logs simply stopped arriving and every
+         dashboard kept working off the edges' logs. Check it here. */ -}}
+  {{- if .Values.observability.enabled }}
+    {{- $ep := dig "customConfig" "sinks" "loki" "endpoint" "" .Values.vector }}
+    {{- if $ep }}
+      {{- $wantSvc := .Values.loki.fullnameOverride | default (printf "%s-loki" .Release.Name) }}
+      {{- $host := regexReplaceAll "^https?://" $ep "" | splitList ":" | first }}
+      {{- $parts := splitList "." $host }}
+      {{- $svc := index $parts 0 }}
+      {{- if ne $svc $wantSvc }}
+        {{- fail (printf "vector.customConfig.sinks.loki.endpoint is %q, but this release's Loki Service is %q. Vector would retry a name that does not resolve and management logs would never reach Loki, silently." $ep $wantSvc) }}
+      {{- end }}
+      {{- if gt (len $parts) 1 }}
+        {{- $ns := index $parts 1 }}
+        {{- if ne $ns .Release.Namespace }}
+          {{- fail (printf "vector.customConfig.sinks.loki.endpoint is %q, which names namespace %q, but this release installs Loki into %q. Use the bare service name %q so it resolves via the pod's search domain." $ep $ns .Release.Namespace $wantSvc) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+
   {{- if eq .Values.certManager.issuer "letsencrypt-prod" }}
     {{- if not .Values.certManager.acme.email }}
       {{- fail "certManager.issuer=letsencrypt-prod requires certManager.acme.email." }}

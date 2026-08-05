@@ -18,19 +18,35 @@ management node that puts a practical ceiling around 15 sites, which is
 documented rather than discovered.
 */ -}}
 {{- if .Values.xnatUpload.enabled }}
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ .Values.xnatUpload.namespace }}
-  annotations:
-    # Keep on uninstall. This namespace holds the XNAT and S3 Secrets, which
-    # this chart references but does not create (they arrive SOPS-encrypted,
-    # out of band). A `helm uninstall` that took the namespace with it would
-    # delete credentials the chart cannot recreate.
-    helm.sh/resource-policy: keep
-  labels:
-    {{- include "mgmt.labels" . | nindent 4 }}
----
+{{- /*
+THIS CHART DOES NOT CREATE THIS NAMESPACE, DELIBERATELY.
+
+It used to, with helm.sh/resource-policy: keep, so that `helm uninstall` could
+not delete the XNAT and S3 credentials living in it. Right intent, wrong
+mechanism — it made a greenfield install circular:
+
+  * the namespace does not exist until `helm install` creates it,
+  * so the operator cannot apply the Secrets before installing,
+  * so the uploader starts without them and sits in
+    CreateContainerConfigError,
+  * and pre-creating the namespace to fix that aborts the install with
+    "invalid ownership metadata ... missing key app.kubernetes.io/managed-by".
+
+Every other namespace this chart writes into (observability, each edge's) is
+already an operator-created prerequisite, so this one being special was the
+inconsistency. Now the rule is uniform and the ordering is the safe one:
+NAMESPACES AND SECRETS FIRST, WORKLOADS SECOND. A workload can never start
+before the credential it needs exists.
+
+`scripts/site-secrets.sh apply <site>` creates any namespace its Secrets name,
+so the documented flow does this for you:
+
+    scripts/site-secrets.sh apply <site>
+    helm upgrade --install mgmt charts/mgmt -n ais-mgmt --create-namespace ...
+
+Not creating it also gets the original property for free: helm cannot delete a
+namespace it does not own, so the credentials survive uninstall.
+*/ -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
