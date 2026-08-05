@@ -1,0 +1,137 @@
+{
+  "chart": "charts/mgmt",
+  "kube_context": "Default",
+  "kube_server": "https://203.101.224.240:6443",
+  "mode": "applied",
+  "objects": [
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "Namespace",
+      "name": "xnat-upload",
+      "namespace": "",
+      "outcome": "adopted",
+      "resource": "namespace",
+      "revert": [
+        "kubectl annotate namespace xnat-upload meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label namespace xnat-upload app.kubernetes.io/managed-by- --overwrite"
+      ]
+    },
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "Secret",
+      "name": "alertmanager-aisedge-config",
+      "namespace": "ais-mgmt",
+      "outcome": "adopted",
+      "resource": "secret",
+      "revert": [
+        "kubectl annotate secret alertmanager-aisedge-config -n ais-mgmt meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label secret alertmanager-aisedge-config -n ais-mgmt app.kubernetes.io/managed-by- --overwrite"
+      ]
+    },
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "Service",
+      "name": "mgmt-cert-manager-metrics",
+      "namespace": "cert-manager",
+      "outcome": "adopted",
+      "resource": "service",
+      "revert": [
+        "kubectl annotate service mgmt-cert-manager-metrics -n cert-manager meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label service mgmt-cert-manager-metrics -n cert-manager app.kubernetes.io/managed-by=Helm --overwrite"
+      ]
+    },
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "Certificate",
+      "name": "ais-edge-ca",
+      "namespace": "cert-manager",
+      "outcome": "adopted",
+      "resource": "certificate.v1.cert-manager.io",
+      "revert": [
+        "kubectl annotate certificate.v1.cert-manager.io ais-edge-ca -n cert-manager meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label certificate.v1.cert-manager.io ais-edge-ca -n cert-manager app.kubernetes.io/managed-by- --overwrite"
+      ]
+    },
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "ClusterIssuer",
+      "name": "selfsigned-bootstrap",
+      "namespace": "",
+      "outcome": "adopted",
+      "resource": "clusterissuer.v1.cert-manager.io",
+      "revert": [
+        "kubectl annotate clusterissuer.v1.cert-manager.io selfsigned-bootstrap meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label clusterissuer.v1.cert-manager.io selfsigned-bootstrap app.kubernetes.io/managed-by- --overwrite"
+      ]
+    },
+    {
+      "after": {
+        "app.kubernetes.io/managed-by": "Helm",
+        "meta.helm.sh/release-name": "mgmt",
+        "meta.helm.sh/release-namespace": "ais-mgmt"
+      },
+      "before": {
+        "app.kubernetes.io/managed-by": "",
+        "meta.helm.sh/release-name": "",
+        "meta.helm.sh/release-namespace": ""
+      },
+      "kind": "ClusterIssuer",
+      "name": "ais-edge-ca-issuer",
+      "namespace": "",
+      "outcome": "adopted",
+      "resource": "clusterissuer.v1.cert-manager.io",
+      "revert": [
+        "kubectl annotate clusterissuer.v1.cert-manager.io ais-edge-ca-issuer meta.helm.sh/release-name- meta.helm.sh/release-namespace- --overwrite",
+        "kubectl label clusterissuer.v1.cert-manager.io ais-edge-ca-issuer app.kubernetes.io/managed-by- --overwrite"
+      ]
+    }
+  ],
+  "release": "mgmt",
+  "release_namespace": "ais-mgmt",
+  "timestamp_utc": "20260805T031207Z"
+}

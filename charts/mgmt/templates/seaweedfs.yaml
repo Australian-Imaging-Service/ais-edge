@@ -175,9 +175,41 @@ spec:
               }
 
               sep=""
+              # Two identities may NOT share an accessKey. SeaweedFS treats
+              # that as fatal and dies with a Go stack trace:
+              #
+              #   F auth_credentials.go:154 fail to load config file
+              #     /etc/seaweedfs/s3.json: duplicate accessKey[X],
+              #     already configured in user[admin]
+              #
+              # which is a CrashLoopBackOff whose cause is buried 20 lines into
+              # a panic. It is an easy configuration to arrive at: point two
+              # xxxSecretRef values at the same Secret, or copy the admin key
+              # into the uploader's Secret because that is what the previous
+              # deployment used. Both were hit installing this on
+              # stream-2-ab-dev.
+              #
+              # The chart cannot catch it at render time — it never sees the
+              # secret VALUES, only their names — so it is caught here, where
+              # the values first exist, and reported as the configuration error
+              # it is.
+              _seen_keys=""
               emit() {
                 _ak=$(read_cred "$2/access-key") || exit 1
                 _sk=$(read_cred "$2/secret-key") || exit 1
+
+                case " $_seen_keys " in
+                  *" $_ak "*)
+                    echo "FATAL: identity '$1' uses an accessKey that another identity already uses." >&2
+                    echo "       SeaweedFS rejects duplicate accessKeys and will not start." >&2
+                    echo "       Each identity needs its OWN key: check that seaweedfs.adminSecretRef," >&2
+                    echo "       xnatUpload.s3SecretRef, each edges[].s3SecretRef / .uploadSecretRef and" >&2
+                    echo "       observability.loki.s3SecretRef all point at DIFFERENT Secrets with" >&2
+                    echo "       different access keys. (Secret for '$1': $2)" >&2
+                    exit 1 ;;
+                esac
+                _seen_keys="$_seen_keys $_ak"
+
                 printf '%s{"name":"%s","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":%s}' \
                   "$sep" "$1" "$_ak" "$_sk" "$3"
                 sep=","
