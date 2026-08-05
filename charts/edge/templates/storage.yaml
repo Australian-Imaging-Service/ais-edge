@@ -1,6 +1,8 @@
-{{- include "edge.validate" . -}}
 {{- /*
 Storage for an edge site.
+
+(The chart's render-time guards used to be invoked from here. They now live in
+templates/validate.yaml, which renders unconditionally — see that file.)
 
 TWO volumes, deliberately:
 

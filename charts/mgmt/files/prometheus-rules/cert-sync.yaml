@@ -1,0 +1,89 @@
+# =============================================================================
+# cert-sync alerts — "this edge has not had its Secrets refreshed recently"
+# =============================================================================
+# WHY THIS FILE EXISTS AT ALL. cert-manager renews certificates on the
+# management cluster; the edge holds a copy. The cert-sync CronJob is what
+# re-pushes it. A sync job that silently stops is therefore the same failure
+# as having no sync job: the edge keeps working right up until the certificate
+# it is still holding expires, and then log shipping (and, once §1 lands, the
+# whole mTLS push path) stops on a date nobody has in a calendar.
+#
+# WHY kube_cronjob_status_last_successful_time AND NOT THE LOGS.
+# templates/cert-sync.yaml renders ONE CronJob per edge, named
+# <release>-cert-sync-<edge>. kube-state-metrics labels these series with the
+# CronJob name, so staleness is per-site without parsing anything, and it is
+# unit-testable with promtool. The job's own JSON events (sync_updated /
+# sync_unchanged / sync_skipped / sync_failed, component "cert-sync") are the
+# explanation an operator reads AFTER the alert; they are not the trigger.
+#
+# THE EXIT-CODE COUPLING THAT MAKES THIS WORK. cert-sync.sh exits non-zero
+# when it did not complete a sync, INCLUDING when the edge was merely
+# unreachable. If it exited 0 after skipping, last_successful_time would stay
+# fresh and this alert would stay green through an outage of any length.
+#
+# INPUT AVAILABILITY — stated precisely, because the SeaweedFSDiskFull defect
+# was exactly a rule selecting a series that does not exist:
+#   * kube-state-metrics on the live management cluster is started with
+#     --resources=...,cronjobs,...,jobs,... and its ClusterRole grants
+#     list/watch on batch/cronjobs and batch/jobs. Both verified.
+#   * kube_cronjob_* is NOT in its /metrics output today. Also verified — and
+#     so are kube_job_*, kube_hpa_*, kube_poddisruptionbudget_* and
+#     kube_certificatesigningrequest_*, which are precisely the resource types
+#     that have zero objects in this cluster. There are no CronJobs in it yet.
+#   * What follows from that — that the family appears once a CronJob exists —
+#     is an inference, not a measurement: no CronJob was created on the live
+#     cluster to prove it. scripts/check-alert-inputs.sh will report this
+#     metric as missing until the chart is installed. Re-run it after the
+#     first install and treat a still-missing input as a real finding.
+# =============================================================================
+groups:
+  - name: ais-edge-cert-sync
+    interval: 30s
+    rules:
+      # The default schedule is every 6h, so 24h is four consecutive missed or
+      # failed runs. It is deliberately not tighter: certificate renewal has
+      # weeks of slack (cert-manager renews at two-thirds of the lifetime), so
+      # the thing worth paging about is a sync that has stopped, not one run
+      # that lost a race with a reboot.
+      #
+      # templates/cert-sync.yaml refuses to render a schedule coarser than
+      # daily, so this window cannot be made unreachable from the values side.
+      - alert: CertSyncStale
+        expr: |
+          (time() - kube_cronjob_status_last_successful_time{cronjob=~".+-cert-sync-.+"}) > 86400
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "cert-sync has not succeeded for {{ $labels.cronjob }} in over 24h"
+          description: |
+            The CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not
+            recorded a successful run for more than 24 hours, so that edge is
+            holding whatever certificate and credential material it was last
+            given. Nothing breaks until those expire, which is why this is
+            worth acting on now rather than at the expiry date.
+
+            Why it is not syncing:
+              kubectl -n {{ $labels.namespace }} logs job/<latest job of {{ $labels.cronjob }}>
+            or in Loki:
+              {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
+
+      # A CronJob that has NEVER succeeded produces no
+      # last_successful_time series at all, so the rule above cannot see it —
+      # the exact shape of "the alert was green from the day it was written".
+      # This is the case where mTLS is switched on and distribution has never
+      # once worked.
+      - alert: CertSyncNeverSucceeded
+        expr: |
+          kube_cronjob_info{cronjob=~".+-cert-sync-.+"}
+          unless on (namespace, cronjob) kube_cronjob_status_last_successful_time
+        for: 2h
+        labels: { severity: critical }
+        annotations:
+          summary: "cert-sync has never completed a run for {{ $labels.cronjob }}"
+          description: |
+            {{ $labels.namespace }}/{{ $labels.cronjob }} exists but has no
+            successful run on record. That edge has never received a synced
+            copy of the management Secrets, so anything depending on rotation
+            there is running on whatever was pushed at build time by hand.
+            Check RBAC on the edge namespace and whether the child API server
+            is reachable from the management cluster.

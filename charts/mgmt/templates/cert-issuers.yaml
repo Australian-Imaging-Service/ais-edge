@@ -1,6 +1,8 @@
-{{- include "mgmt.validate" . -}}
 {{- /*
 cert-manager issuers for the management plane.
+
+(Render-time guards now run from templates/validate.yaml, which is
+unconditional. Do not re-add an include here.)
 
 TWO CA MODES, selected by certManager.ca.mode.
 
@@ -66,9 +68,11 @@ NAMING, deliberately inconsistent and here is why:
                              it; the operator runbook and rotate-ca.sh use the
                              same name.
 
-The guards below live in this file rather than in mgmt.validate because they
-guard these resources specifically, and this template is unconditional — it
-renders on every install, so the guards cannot be skipped by a values change.
+The guards below live in this file rather than in templates/validate.yaml
+because they guard these resources specifically and read locals computed here.
+That is safe for the same reason validate.yaml is: this template is
+unconditional — it renders on every install, so no values change can skip it.
+If this file is ever made conditional, move the guards to validate.yaml first.
 
 The out-of-band ceremony for intermediate mode is docs/ca-ceremony.md.
 */ -}}

@@ -39,12 +39,19 @@ domain:
   mgmtNodeIP: ""
 
 # Hostnames published on :443. All resolve to mgmtNodeIP; nginx routes by SNI.
+#
+# THE CHILD-CLUSTER HOSTNAMES ARE NOT HERE ANY MORE — they are per edge site,
+# under k0smotron.hostnames below, with a per-edge override on the `edges[]`
+# entry. A fleet-wide k0sApi / konnectivity pair meant every edge rendered the
+# same apiHost and konnectivityHost, so a second site produced a second Ingress
+# claiming a hostname the first one already owned and the fleet could not
+# exceed one site. templates/edge-clusters.yaml refuses to render if either
+# old key is still set, rather than reading it from a site values file and
+# ignoring it.
 hostnames:
   seaweedfs: ""        # seaweedfs.<domain.internal>
   grafana: ""          # grafana.<domain.internal>
   loki: ""             # loki.<domain.internal>
-  k0sApi: ""           # k0s.<domain.internal>          — child cluster API
-  konnectivity: ""     # konnectivity.<domain.internal> — reverse tunnel
 ingressPort: 443
 
 
@@ -139,6 +146,105 @@ k0smotron:
   # curl | sh the latest k0s independently on the management node and on each
   # worker, so the two could drift apart silently.
   k0sVersion: "v1.35.2+k0s.0"
+
+  # ---------------------------------------------------------------------
+  # How each edge's hosted control plane is reached
+  # ---------------------------------------------------------------------
+  # Everything here is PER EDGE SITE. The fields below are the fleet-wide
+  # defaults; each entry in `edges` may carry:
+  #
+  #   exposure: nodePort | sni    default: exposure.default below
+  #   apiHost:                    default: <apiPrefix>-<name>.<domain>
+  #   konnectivityHost:           default: <konnectivityPrefix>-<name>.<domain>
+  #   apiNodePort:                REQUIRED when exposure is nodePort
+  #   konnectivityNodePort:       REQUIRED when exposure is nodePort
+  #   extraSans: []               extra SANs on the child API server cert.
+  #                               Needed for a hostname migration: the cert
+  #                               covers apiHost, so the moment apiHost
+  #                               changes it stops covering the old name and
+  #                               any worker not yet re-pointed fails TLS
+  #                               verification with the site looking healthy
+  #                               from here.
+  #
+  # A worked two-site example:
+  #
+  #   edges:
+  #     # An EXISTING site pins the names and ports it already runs.
+  #     - name: edge-dev
+  #       exposure: nodePort
+  #       apiHost: k0s.aisedge.local
+  #       konnectivityHost: konnect.aisedge.local
+  #       apiNodePort: 30443
+  #       konnectivityNodePort: 30132
+  #     # A NEW site takes the generated hostnames and picks its own ports.
+  #     - name: edge-syd
+  #       exposure: nodePort
+  #       apiNodePort: 30444
+  #       konnectivityNodePort: 30133
+  exposure:
+    # nodePort  spec.service.type: NodePort, with the two ports written out
+    #           per edge. This is what edge-dev runs today (apiPort 30443,
+    #           konnectivityPort 30132, externalAddress 203.101.224.240), so
+    #           it is the default and an upgrade migrates nobody.
+    #
+    #           The ports are EXPLICIT, never derived from the edge's position
+    #           in the list. A derived port moves when an entry is reordered or
+    #           removed, and since the Cluster CR carries
+    #           helm.sh/resource-policy: keep, the old Service is still holding
+    #           the old number — so the new render cannot allocate and that
+    #           site's control plane does not come up. NodePorts are allocated
+    #           cluster-wide, which is also why edge-clusters.yaml fails the
+    #           render when two edges ask for the same one instead of letting
+    #           the second Service fail to allocate at apply time.
+    #
+    # sni       spec.service.type: ClusterIP, reached only through the
+    #           ssl-passthrough Ingress on :443 — the same mechanism the
+    #           management plane already uses for SeaweedFS, Grafana and Loki,
+    #           and no cluster-wide port to track per site.
+    #
+    #           NOT VERIFIED. TEST IT ON ONE SITE BEFORE MIGRATING ANY FLEET.
+    #           Measured on the live cluster, so not in question: k0smotron
+    #           publishes both hostnames through the nginx ssl-passthrough
+    #           Ingress in NodePort mode as well, that Ingress's backend is the
+    #           SERVICE port (30443/30132, not a node port), edge-dev's
+    #           konnectivity-agent runs with
+    #           --proxy-server-host=konnect.aisedge.local --proxy-server-port=443,
+    #           and `kubectl logs` against a child-cluster pod — API server ->
+    #           konnectivity tunnel -> kubelet — returns log lines.
+    #           NOT measured: k0smotron with service.type ClusterIP, i.e. with
+    #           the NodePort listener gone. Konnectivity is a long-lived gRPC
+    #           stream rather than request/response HTTPS, so the fact that
+    #           passthrough works for the S3 and Grafana Ingresses says nothing
+    #           about it. Migrate one site, confirm the worker stays Ready and
+    #           `kubectl logs` still works against it, then the rest.
+    default: nodePort
+    # The cluster's --service-node-port-range. A port outside it renders
+    # cleanly and is then rejected by the API server partway through the apply,
+    # which is the worst moment to find out; checking here fails at
+    # `helm template` instead. 30000-32767 is k0s's default — change this if
+    # the API server was started with a different range.
+    nodePortRange: [30000, 32767]
+
+  # Per-edge hostnames: <apiPrefix>-<name>.<domain> and
+  # <konnectivityPrefix>-<name>.<domain>, e.g. k0s-edge-dev.aisedge.local and
+  # konnectivity-edge-dev.aisedge.local.
+  hostnames:
+    # Empty means domain.internal. Kept separate from it because the child
+    # cluster hostnames may need a wildcard record (*.edge.<org-domain>) that
+    # the management services do not use.
+    domain: ""
+    apiPrefix: k0s
+    konnectivityPrefix: konnectivity
+    # AN EXISTING SITE MUST PIN THE NAMES IT ALREADY USES, via apiHost /
+    # konnectivityHost on its own edges[] entry. Measured on edge-dev:
+    # k0smotron derives k0sConfig.spec.api.externalAddress
+    # ("k0s.aisedge.local:443") and the edge-dev-kubeconfig Secret
+    # ("server: https://k0s.aisedge.local:443") from spec.ingress.apiHost, and
+    # the joined worker's konnectivity-agent dials konnect.aisedge.local.
+    # Neither name is what the pattern above generates, so accepting the
+    # generated names on a site that already has workers changes the API
+    # server's advertised address and the agent's target host at the same time.
+
   # The hosted control plane's datastore. emptyDir means a control-plane pod
   # restart discards the child cluster's state, so this is a PVC.
   persistence:
@@ -379,11 +485,116 @@ certManager:
       # Pending while the Ingresses serve nginx's default self-signed cert,
       # which reads as a browser warning rather than a misconfiguration.
       secretRef: ""
+
   acme:
     email: ""
     server: https://acme-v02.api.letsencrypt.org/directory
     # Provider-specific solver block, passed through verbatim.
     dns01Solver: {}
+
+
+# =============================================================================
+# certSync — keep each edge's copy of the management Secrets current
+# =============================================================================
+# THE FAILURE THIS PREVENTS. cert-manager renews certificates on the
+# MANAGEMENT cluster. Edge clusters hold copies that scripts/07b pushed ONCE,
+# and nothing re-pushes them, so a certificate that renews at two-thirds of
+# its lifetime leaves the edge holding an expired one and whatever used it
+# stops working on a date nobody has in a calendar. A bearer token does not
+# expire, so mTLS on the Loki push path is strictly WORSE than the token it
+# replaces until this job exists — which is why it ships first.
+#
+# This REPLACES the manual distribution in scripts/07b (the ca-bundle and the
+# Loki push credential), rather than adding to it.
+#
+# One CronJob per entry in `edges`, so one site being unreachable cannot stop
+# any other site's rotation, and so "this edge has not synced" is a per-edge
+# Prometheus series — see files/prometheus-rules/cert-sync.yaml.
+certSync:
+  enabled: true
+
+  # Every 6h. CertSyncStale fires after 24h without a successful run, so this
+  # gets four attempts inside the alert window. The chart REFUSES to render a
+  # schedule coarser than daily: below that, the alert fires on a healthy
+  # fleet and a renewal can land inside a gap where nothing is watching.
+  schedule: "23 */6 * * *"
+
+  # How the job reaches the child API server.
+  #
+  # inCluster   find k0smotron's control-plane Service by label in the edge's
+  #             namespace and talk to it over ClusterIP. Measured on the live
+  #             cluster: the child API server's certificate carries
+  #             kmc-<edge>-nodeport.<ns>.svc.cluster.local as a SAN, so
+  #             verification against the kubeconfig's CA succeeds on that
+  #             address. Discovery is by label, so this survives a site moving
+  #             from NodePort to ClusterIP+SNI.
+  # kubeconfig  use the address k0smotron published in the kubeconfig, which
+  #             is the EXTERNAL ingress hostname (measured:
+  #             https://k0s.<domain>:443). Cluster DNS does not resolve that,
+  #             so it depends on the hostAliases the CronJob renders and on
+  #             the request hairpinning back in through the ingress. That path
+  #             has not been tested from inside a pod.
+  #
+  # inCluster falls back to the kubeconfig address by itself if discovery
+  # finds no Service, and logs which one it used.
+  apiEndpoint: inCluster
+
+  # Per-call kubectl timeout. A wedged API server must not hold the Job open
+  # until activeDeadlineSeconds, because concurrencyPolicy: Forbid would then
+  # skip the following runs silently.
+  requestTimeoutSeconds: 30
+
+  # kubectl is genuinely needed here: this job talks to ANOTHER cluster's API
+  # server, which is not something the aws-cli image used elsewhere can do.
+  # Pinned like every other image. alpine/kubectl carries a busybox shell,
+  # base64 and sed, which is all cert-sync.sh uses — verified by running the
+  # image. There is no bash in it, so the script is POSIX sh.
+  image:
+    repository: alpine/kubectl
+    tag: "1.35.4"
+    pullPolicy: IfNotPresent
+
+  # WHAT GETS COPIED, mgmt -> edge. Names only; no value is ever templated.
+  #
+  #   source.namespace   "" means this release's namespace.
+  #   source.name        "<edge>" is replaced with the edge's name, so one
+  #                      entry covers a fleet of per-site Secrets.
+  #   source.keys        srcKey: dstKey. REQUIRED, and there is deliberately
+  #                      no "copy the whole Secret" option:
+  #                      ais-edge-ca-secret contains tls.key, the private key
+  #                      of the CA that signs the entire fleet, and a
+  #                      whole-Secret copy would put it on every edge. The
+  #                      chart refuses to render tls.key out of the CA Secret
+  #                      at all.
+  #   destination.type   defaults to Opaque.
+  #
+  # The two entries below are exactly what scripts/07b pushes by hand today.
+  secrets:
+    - source:
+        # Must match certManager.clusterResourceNamespace — cert-manager
+        # resolves the CA into its own cluster-resource namespace, and the
+        # chart checks the two agree rather than logging sync_failed forever
+        # for a Secret that exists one namespace away.
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys:
+          ca.crt: ca.crt
+      destination:
+        namespace: logging
+        name: ca-bundle
+        type: Opaque
+    - source:
+        # scripts/02d creates loki-push-token-<edge> in the observability
+        # namespace. When §1's mTLS lands, this entry becomes the per-edge
+        # client certificate and the token entry goes away.
+        namespace: ""
+        name: loki-push-token-<edge>
+        keys:
+          token: token
+      destination:
+        namespace: logging
+        name: loki-push-credentials
+        type: Opaque
 
 
 # =============================================================================

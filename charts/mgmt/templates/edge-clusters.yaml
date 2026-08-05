@@ -1,3 +1,46 @@
+{{/* =====================================================================
+Per-edge control-plane hostnames.
+
+Every edge used to render the SAME apiHost and konnectivityHost, taken from
+the fleet-wide hostnames.k0sApi / hostnames.konnectivity. Two sites therefore
+produced two Ingresses claiming one hostname, and nginx routes by SNI, so the
+second site's workers reached the first site's API server. The fleet could not
+exceed one site.
+
+Default: <apiPrefix>-<name>.<domain> / <konnectivityPrefix>-<name>.<domain>.
+Either can be overridden on the edge entry, which is how a site that already
+has joined workers keeps the names those workers were given.
+===================================================================== */}}
+{{- define "mgmt.edgeHostDomain" -}}
+{{- $ctx := index . 0 -}}
+{{- default $ctx.Values.domain.internal $ctx.Values.k0smotron.hostnames.domain -}}
+{{- end }}
+
+{{- define "mgmt.edgeApiHost" -}}
+{{- $ctx := index . 0 -}}{{- $edge := index . 1 -}}
+{{- if $edge.apiHost -}}
+{{- $edge.apiHost -}}
+{{- else -}}
+{{- printf "%s-%s.%s" $ctx.Values.k0smotron.hostnames.apiPrefix $edge.name (include "mgmt.edgeHostDomain" (list $ctx)) -}}
+{{- end -}}
+{{- end }}
+
+{{- define "mgmt.edgeKonnectivityHost" -}}
+{{- $ctx := index . 0 -}}{{- $edge := index . 1 -}}
+{{- if $edge.konnectivityHost -}}
+{{- $edge.konnectivityHost -}}
+{{- else -}}
+{{- printf "%s-%s.%s" $ctx.Values.k0smotron.hostnames.konnectivityPrefix $edge.name (include "mgmt.edgeHostDomain" (list $ctx)) -}}
+{{- end -}}
+{{- end }}
+
+{{/* nodePort | sni, per edge, falling back to k0smotron.exposure.default. */}}
+{{- define "mgmt.edgeExposure" -}}
+{{- $ctx := index . 0 -}}{{- $edge := index . 1 -}}
+{{- default $ctx.Values.k0smotron.exposure.default $edge.exposure -}}
+{{- end }}
+
+
 {{- if and .Values.k0smotron.enabled .Values.edges }}
 {{- /*
 One k0smotron hosted control plane per edge site.
@@ -29,7 +72,84 @@ be a deliberate `kubectl delete cluster.k0smotron.io/<name> -n <name>`.
 {{- if and .Values.ingressNginx.enabled (not .Values.ingressNginx.sslPassthrough) }}
   {{- fail "ingressNginx.sslPassthrough=false while k0smotron hosted control planes are enabled. The k0s API and konnectivity are mTLS end-to-end; terminating TLS at the ingress leaves the management side looking healthy and breaks only the edge workers' join, which surfaces as an x509 error on the edge VM rather than here." }}
 {{- end }}
-{{- range $i, $edge := .Values.edges }}
+
+{{- /* ===================================================================
+       Render-time guards.
+
+       Every one of these is a misconfiguration that produces no error here
+       and no obvious error on the cluster either: a duplicate hostname just
+       routes one site's workers to another site's API server, and a duplicate
+       NodePort just leaves the second Service unallocated with the site's
+       control plane never starting. Fail the render instead.
+       =================================================================== */ -}}
+{{- if or (index .Values.hostnames "k0sApi") (index .Values.hostnames "konnectivity") }}
+  {{- fail "hostnames.k0sApi / hostnames.konnectivity are set, and they are no longer read. They were fleet-wide, so every edge got the SAME apiHost and konnectivityHost and the second site's Ingress claimed a hostname the first one already owned. Move the values onto that site's entry in `edges` as apiHost / konnectivityHost, or delete them and take the generated <apiPrefix>-<name>.<domain>." }}
+{{- end }}
+
+{{- $hosts := dict }}
+{{- if .Values.domain.internal }}
+  {{- /* Seeded with the management hostnames because they share this nginx
+         and the same :443 SNI table: an edge that resolves to the Grafana or
+         SeaweedFS hostname takes that Ingress over. */ -}}
+  {{- $_ := set $hosts (include "mgmt.seaweedfsHost" .) "the SeaweedFS Ingress" }}
+  {{- $_ := set $hosts (include "mgmt.grafanaHost" .) "the Grafana Ingress" }}
+  {{- $_ := set $hosts (include "mgmt.lokiHost" .) "the Loki Ingress" }}
+{{- end }}
+{{- $ports := dict }}
+{{- /* Checked rather than indexed blind: a one-element list here produces a
+       Go reflect panic from `index`, which says nothing about which value is
+       wrong. */ -}}
+{{- if ne (len .Values.k0smotron.exposure.nodePortRange) 2 }}
+  {{- fail (printf "k0smotron.exposure.nodePortRange must be exactly [min, max]; got %v. It mirrors the API server's --service-node-port-range." .Values.k0smotron.exposure.nodePortRange) }}
+{{- end }}
+{{- $portMin := int (index .Values.k0smotron.exposure.nodePortRange 0) }}
+{{- $portMax := int (index .Values.k0smotron.exposure.nodePortRange 1) }}
+{{- range $edge := .Values.edges }}
+  {{- $mode := include "mgmt.edgeExposure" (list $ $edge) }}
+  {{- if not (has $mode (list "nodePort" "sni")) }}
+    {{- fail (printf "edge %q has exposure %q. Valid values are \"nodePort\" (spec.service.type NodePort with explicit apiNodePort/konnectivityNodePort) and \"sni\" (ClusterIP behind the ssl-passthrough Ingress on :443)." $edge.name $mode) }}
+  {{- end }}
+
+  {{- $api := include "mgmt.edgeApiHost" (list $ $edge) }}
+  {{- $kon := include "mgmt.edgeKonnectivityHost" (list $ $edge) }}
+  {{- range $pair := (list (list $api "api") (list $kon "konnectivity")) }}
+    {{- $host := index $pair 0 }}
+    {{- $which := printf "edge %s (%s)" $edge.name (index $pair 1) }}
+    {{- if hasKey $hosts $host }}
+      {{- fail (printf "hostname %q is claimed by both %s and %s. Both would become Ingress rules on the same nginx, which routes by SNI, so one site's workers would reach the other site's control plane. Set apiHost / konnectivityHost on the edge entry, or rename the site." $host (index $hosts $host) $which) }}
+    {{- end }}
+    {{- $_ := set $hosts $host $which }}
+  {{- end }}
+
+  {{- if eq $mode "nodePort" }}
+    {{- if not $edge.apiNodePort }}
+      {{- fail (printf "edge %q is exposure: nodePort but has no apiNodePort. The port is not derived from the edge's position in `edges` any more — a derived port silently moves to another site's number when the list is reordered, while helm.sh/resource-policy: keep leaves the old Service holding the old one. Write the port the site actually uses (edge-dev runs 30443)." $edge.name) }}
+    {{- end }}
+    {{- if not $edge.konnectivityNodePort }}
+      {{- fail (printf "edge %q is exposure: nodePort but has no konnectivityNodePort. See apiNodePort — the same applies (edge-dev runs 30132)." $edge.name) }}
+    {{- end }}
+    {{- range $pair := (list (list $edge.apiNodePort "apiNodePort") (list $edge.konnectivityNodePort "konnectivityNodePort")) }}
+      {{- $port := int (index $pair 0) }}
+      {{- $which := printf "edge %s %s" $edge.name (index $pair 1) }}
+      {{- if or (lt $port $portMin) (gt $port $portMax) }}
+        {{- fail (printf "%s is %d, outside the cluster's NodePort range %d-%d. The API server rejects it partway through the apply; if this cluster really runs a different --service-node-port-range, set k0smotron.exposure.nodePortRange." $which $port $portMin $portMax) }}
+      {{- end }}
+      {{- if hasKey $ports (toString $port) }}
+        {{- fail (printf "NodePort %d is requested by both %s and %s. NodePorts are allocated cluster-wide, so the second Service would fail to allocate and that site's control plane would never start." $port (index $ports (toString $port)) $which) }}
+      {{- end }}
+      {{- $_ := set $ports (toString $port) $which }}
+    {{- end }}
+  {{- else }}
+    {{- if or $edge.apiNodePort $edge.konnectivityNodePort }}
+      {{- fail (printf "edge %q is exposure: sni but also sets apiNodePort/konnectivityNodePort. In sni mode the Service is ClusterIP and no node port is allocated, so those numbers would be silently ignored and the next person would read them as the ports in use. Remove them, or set exposure: nodePort." $edge.name) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- range $edge := .Values.edges }}
+{{- $mode := include "mgmt.edgeExposure" (list $ $edge) }}
+{{- $apiHost := include "mgmt.edgeApiHost" (list $ $edge) }}
+{{- $konHost := include "mgmt.edgeKonnectivityHost" (list $ $edge) }}
 ---
 apiVersion: v1
 kind: Namespace
@@ -61,6 +181,7 @@ metadata:
   labels:
     {{- include "mgmt.labels" $ | nindent 4 }}
     ais-edge.org/edge: {{ $edge.name }}
+    ais-edge.org/exposure: {{ $mode }}
 spec:
   # Not a values key: replicas > 1 requires an external kine datasource
   # (spec.kineDataSourceURL), so raising it here alone yields a control plane
@@ -73,30 +194,49 @@ spec:
   # shows up as a kubelet that registers and then misbehaves in ways that
   # look like anything but a version skew. One value, both ends.
   version: {{ $.Values.k0smotron.k0sVersion | quote }}
+  # Unchanged by the exposure mode, and deliberately so. What the child API
+  # server advertises, and what lands in the <name>-kubeconfig Secret, is
+  # derived by k0smotron from spec.ingress.apiHost and spec.ingress.port
+  # instead — measured on edge-dev, whose spec.externalAddress is the node IP
+  # while its k0sConfig.spec.api.externalAddress is "k0s.aisedge.local:443"
+  # and its kubeconfig reads "server: https://k0s.aisedge.local:443".
   externalAddress: {{ $.Values.domain.mgmtNodeIP | quote }}
   service:
-    # Kept from the imperative manifest for in-cluster reachability of the
-    # child's kubernetes Service (10.96.0.1:443) — kube-router, kube-proxy
-    # and metrics-server use that path. Edges themselves join over the
-    # Ingress below, so their outbound firewall stays single-port 443.
+    {{- if eq $mode "nodePort" }}
+    # THE PORTS ARE THE SITE'S OWN, WRITTEN OUT, NEVER DERIVED FROM LIST
+    # POSITION. `add 30443 $i` moved a running site's port whenever an entry
+    # above it was reordered or removed, and because the Cluster CR is
+    # annotated keep, the old Service kept holding the old number: the site
+    # that moved could not allocate, and its control plane did not come back.
     #
-    # DEFECT FIXED IN THE PORT: the template hardcoded 30443/30132 for every
-    # site. NodePorts are cluster-wide, so the second edge's Service failed
-    # to allocate ("provided port is already allocated") and its control
-    # plane never came up — invisible while the fleet was exactly one site.
-    # Offsetting by list index keeps the first entry on the ports the running
-    # edge-dev already uses, so this is not a migration for existing sites.
+    # Kept as NodePort for in-cluster reachability of the child's kubernetes
+    # Service (10.96.0.1:443) — kube-router, kube-proxy and metrics-server use
+    # that path. Edges themselves join over the Ingress below, so their
+    # outbound firewall stays single-port 443.
     type: NodePort
-    apiPort: {{ add 30443 $i }}
-    konnectivityPort: {{ add 30132 $i }}
+    apiPort: {{ $edge.apiNodePort }}
+    konnectivityPort: {{ $edge.konnectivityNodePort }}
+    {{- else }}
+    # exposure: sni — no node port, reachable only through the ssl-passthrough
+    # Ingress below. apiPort/konnectivityPort are left at the CRD defaults
+    # (30443/30132); on a ClusterIP Service those are Service ports, which are
+    # per-Service rather than cluster-wide, so no two sites can collide.
+    #
+    # UNVERIFIED PATH — see k0smotron.exposure in values.yaml for exactly what
+    # has and has not been measured. Do not migrate a fleet on it.
+    type: ClusterIP
+    {{- end }}
   ingress:
     # k0smotron creates the API and konnectivity Ingresses itself; both are
     # SNI-routed on :443 with passthrough, which is what keeps an edge site
-    # to a single outbound port.
+    # to a single outbound port. Rendered in both exposure modes: in nodePort
+    # mode this is the path the edge workers already use, and in sni mode it
+    # is the only path. Measured on the live edge-dev Ingress: each host is
+    # backed by the SERVICE port (30443 / 30132), not by a node port.
     deploy: true
     className: nginx
-    apiHost: {{ include "mgmt.k0sApiHost" $ | quote }}
-    konnectivityHost: {{ include "mgmt.konnectivityHost" $ | quote }}
+    apiHost: {{ $apiHost | quote }}
+    konnectivityHost: {{ $konHost | quote }}
     port: {{ $.Values.ingressPort }}
     annotations:
       nginx.ingress.kubernetes.io/ssl-passthrough: "true"
@@ -137,8 +277,8 @@ spec:
     # it; a plain `helm upgrade` is rejected by the API server.
     autoDeletePVCs: false
     persistence:
-      size: {{ $.Values.k0smotron.persistence.size }}
-      {{- with $.Values.k0smotron.persistence.storageClassName }}
+      size: {{ $.Values.k0smotron.etcdPersistence.size }}
+      {{- with $.Values.k0smotron.etcdPersistence.storageClassName }}
       storageClass: {{ . | quote }}
       {{- end }}
   k0sConfig:
@@ -149,10 +289,18 @@ spec:
         # Workers verify the API server certificate against the hostname in
         # the (rewritten) join token, not against the node IP. Without these
         # SANs the join fails TLS verification on the edge and succeeds
-        # nowhere visible from here.
+        # nowhere visible from here. THE PER-EDGE HOSTNAMES MUST BE HERE: the
+        # cert is issued for what this list contains, so a hostname that is
+        # only in spec.ingress produces a working Ingress serving a
+        # certificate the worker refuses.
         sans:
-          - {{ include "mgmt.k0sApiHost" $ | quote }}
-          - {{ include "mgmt.konnectivityHost" $ | quote }}
+          - {{ $apiHost | quote }}
+          - {{ $konHost | quote }}
           - {{ $.Values.domain.mgmtNodeIP | quote }}
+          {{- /* Extra SANs exist for hostname migrations: while workers are
+                 being re-pointed, the old name has to stay on the cert. */ -}}
+          {{- range $san := ($edge.extraSans | default list) }}
+          - {{ $san | quote }}
+          {{- end }}
 {{- end }}
 {{- end }}

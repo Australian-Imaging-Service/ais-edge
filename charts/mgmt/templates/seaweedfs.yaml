@@ -1,4 +1,5 @@
-{{- include "mgmt.validate" . -}}
+{{- /* Render-time guards now run from templates/validate.yaml, which is
+       unconditional. Do not re-add an include here. */ -}}
 {{- if .Values.seaweedfs.enabled }}
 {{- /*
 SeaweedFS — the S3 staging store every edge site uploads into.
