@@ -1,0 +1,112 @@
+# =============================================================================
+# promtool unit tests — critical rules
+# =============================================================================
+# These three page someone. A rule that pages nobody because its selector
+# stopped matching is the worst outcome in this repo, so each is proven to
+# fire on the condition it claims to detect AND to stay quiet otherwise.
+#
+# SeaweedFSDown in particular: it used to select
+# `deployment="seaweedfs",namespace="seaweedfs"`, which is what the imperative
+# installer created. The chart creates <release>-seaweedfs in the release
+# namespace, so the exact matcher would have stopped matching the moment this
+# was installed from the chart — silently. The regex-match test below is what
+# stops that regressing.
+# =============================================================================
+rule_files:
+  - ../critical.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # ---------------------------------------------------------------------
+  - interval: 30s
+    name: ManagementClusterDown fires when the apiserver scrape fails
+    input_series:
+      - series: 'up{job="apiserver",instance="10.0.0.1:6443"}'
+        values: "1+0x10 0+0x30"      # up for 5m, then down
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ManagementClusterDown
+        exp_alerts: []
+      # down at 5m, `for: 5m`, so not yet
+      - eval_time: 8m
+        alertname: ManagementClusterDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ManagementClusterDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: apiserver
+              instance: "10.0.0.1:6443"
+            exp_annotations:
+              summary: "Management API server unreachable"
+              description: "kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane is down or partitioned."
+
+  # ---------------------------------------------------------------------
+  # The regression test for the rename. BOTH names must fire.
+  - interval: 30s
+    name: SeaweedFSDown fires for the chart's <release>-seaweedfs name
+    input_series:
+      - series: 'kube_deployment_status_replicas_ready{namespace="ais",deployment="mgmt-seaweedfs"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SeaweedFSDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: ais
+              deployment: mgmt-seaweedfs
+            exp_annotations:
+              summary: "SeaweedFS pod has been NotReady for 2+ minutes"
+              description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+
+  - interval: 30s
+    name: SeaweedFSDown still fires for the pre-chart flat name
+    input_series:
+      - series: 'kube_deployment_status_replicas_ready{namespace="seaweedfs",deployment="seaweedfs"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SeaweedFSDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: seaweedfs
+              deployment: seaweedfs
+            exp_annotations:
+              summary: "SeaweedFS pod has been NotReady for 2+ minutes"
+              description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+
+  - interval: 30s
+    name: SeaweedFSDown stays quiet while replicas are ready
+    input_series:
+      - series: 'kube_deployment_status_replicas_ready{namespace="ais",deployment="mgmt-seaweedfs"}'
+        values: "1+0x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SeaweedFSDown
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------
+  - interval: 30s
+    name: EdgeWorkerDisconnected fires when a node stops being Ready
+    input_series:
+      - series: 'kube_node_status_condition{condition="Ready",status="true",node="k0s-edge-worker-dev"}'
+        values: "1+0x10 0+0x30"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: EdgeWorkerDisconnected
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: EdgeWorkerDisconnected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              condition: Ready
+              status: "true"
+              node: k0s-edge-worker-dev
+            exp_annotations:
+              summary: "Edge worker k0s-edge-worker-dev NotReady for 5+ minutes"
+              description: "kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged sessions cannot upload."

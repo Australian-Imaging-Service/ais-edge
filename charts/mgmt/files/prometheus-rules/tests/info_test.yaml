@@ -1,0 +1,114 @@
+# =============================================================================
+# promtool unit tests — info rules
+# =============================================================================
+# All three of these depend on cert-manager or kube-state-metrics series that
+# were NOT being scraped until recently: cert-manager here was installed with
+# `kubectl apply`, which ships no metrics Service and no ServiceMonitor, so
+# CARotationDue and CertificateRenewed had never been able to fire. Nothing
+# would have warned before the CA expired.
+#
+# The scrape is fixed (charts/mgmt/templates/cert-manager-monitoring.yaml) and
+# scripts/check-alert-inputs.sh guards the inputs against a live Prometheus.
+# These tests guard the LOGIC — that given the series, the rules actually fire.
+#
+# `ais-edge-ca` currently expires 2036-07-05, so CARotationDue is ~2900 days
+# from its threshold. Without a test, nobody would find out it was broken
+# until roughly 2035.
+# =============================================================================
+rule_files:
+  - ../info.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------------
+  - interval: 1m
+    name: CARotationDue fires inside one year and not before
+    input_series:
+      # Expiry fixed at ~200 days out. promtool's clock starts at 0, so an
+      # absolute timestamp of 200d makes (expiry - time()) fall below the
+      # 365-day threshold immediately.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="ais-edge-ca",namespace="cert-manager"}'
+        values: "17280000+0x200"
+    alert_rule_test:
+      # `for: 1h` — not yet at 30m.
+      - eval_time: 30m
+        alertname: CARotationDue
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CARotationDue
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              name: ais-edge-ca
+              namespace: cert-manager
+            exp_annotations:
+              summary: "Root CA ais-edge-ca expires within 1 year"
+              description: "Plan a rotation cycle. Use scripts/rotate-ca.sh --phase=1 to issue a successor and distribute the bundle."
+
+  - interval: 1m
+    name: CARotationDue stays quiet with a decade of life left
+    input_series:
+      # ~3600 days out, which is where ais-edge-ca actually sits today.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="ais-edge-ca",namespace="cert-manager"}'
+        values: "311040000+0x200"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CARotationDue
+        exp_alerts: []
+
+  - interval: 1m
+    name: CARotationDue ignores certificates that are not the root CA
+    input_series:
+      # A leaf expiring soon must NOT raise the ROOT rotation alert — that
+      # would send someone into a two-phase CA rotation for a cert
+      # cert-manager renews by itself.
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{name="grafana-tls",namespace="observability"}'
+        values: "17280000+0x200"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CARotationDue
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------
+  - interval: 1m
+    name: CertificateRenewed fires when the renewal timestamp moves
+    input_series:
+      # Constant for an hour, then a step: that is what a renewal looks like.
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{name="loki-tls",namespace="observability"}'
+        values: "1000+0x60 2000+0x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CertificateRenewed
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: CertificateRenewed
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              name: loki-tls
+              namespace: observability
+            exp_annotations:
+              summary: "Certificate observability/loki-tls was renewed"
+              description: "cert-manager auto-renewed the certificate. No action required."
+
+  # ---------------------------------------------------------------------
+  - interval: 1m
+    name: NewEdgeJoined fires when kube_node_info changes
+    input_series:
+      - series: 'kube_node_info{node="k0s-edge-worker-new",cluster="edge-dev"}'
+        values: "1+0x20 2+0x20"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NewEdgeJoined
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: NewEdgeJoined
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              node: k0s-edge-worker-new
+              cluster: edge-dev
+            exp_annotations:
+              summary: "A new node joined a child cluster"
+              description: "kube_node_info changed for edge-dev. If this was unplanned, investigate."

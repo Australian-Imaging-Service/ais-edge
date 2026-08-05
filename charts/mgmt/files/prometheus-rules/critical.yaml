@@ -19,8 +19,18 @@ groups:
           description: "kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane is down or partitioned."
 
       - alert: SeaweedFSDown
+        # Matched by REGEX, not by an exact name.
+        #
+        # The imperative installer created Deployment/seaweedfs in namespace
+        # seaweedfs. The chart creates <release>-seaweedfs in the release
+        # namespace, so an exact `deployment="seaweedfs"` matcher stops
+        # matching the moment this is installed from the chart — the alert
+        # would never fire again and nothing would say so. This file is
+        # loaded with .Files.Get (it carries {{ $labels }} that Helm must not
+        # touch), so it cannot be templated with the release name; a regex is
+        # the way to make one rule cover both layouts.
         expr: |
-          kube_deployment_status_replicas_ready{namespace="seaweedfs",deployment="seaweedfs"} == 0
+          kube_deployment_status_replicas_ready{deployment=~".*seaweedfs.*"} == 0
         for: 2m
         labels: { severity: critical }
         annotations:
