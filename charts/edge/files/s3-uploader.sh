@@ -142,11 +142,17 @@ while true; do
             continue
         fi
 
-        if [ "$DRY_RUN" = "true" ]; then
-            jlog upload_skipped "$session_name" "dataPolicy.dryRun=true — would have uploaded and reclaimed"
-            continue
-        fi
-
+        # NOTE: DRY_RUN does NOT gate the upload.
+        #
+        # It used to. That was wrong in a way that only shows up when someone
+        # does the careful thing: dataPolicy is about what is KEPT and what is
+        # RECLAIMED, and uploading is neither — it is the pipeline's whole job.
+        # With the upload behind this flag, setting
+        #     dataPolicy: {enabled: true, dryRun: true}
+        # to preview reclaim decisions stopped the edge shipping to S3
+        # altogether. Turning on the safety mode silently halted delivery.
+        # Only the reclaim below is a data-policy action, so only the reclaim
+        # is gated.
         if aws s3 sync "$session_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/${session_name}/" --only-show-errors; then
             duration=$(( $(date +%s) - start_ts ))
             jlog upload_completed "$session_name" "" \
@@ -157,7 +163,11 @@ while true; do
             # zero-exit sync. The bytes also exist in Orthanc storage and the
             # facility backup, both governed by the `originals` rules.
             if [ "$RECLAIM" = "onUploaded" ]; then
-                rm -rf "$session_dir"
+                if [ "$DRY_RUN" = "true" ]; then
+                    jlog reclaim_skipped "$session_name" "dataPolicy dryRun/disabled — uploaded, but leaving the local copy in place"
+                else
+                    rm -rf "$session_dir"
+                fi
             fi
         else
             duration=$(( $(date +%s) - start_ts ))

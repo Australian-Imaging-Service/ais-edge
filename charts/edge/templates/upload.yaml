@@ -82,8 +82,14 @@ spec:
               value: {{ .Values.upload.s3.settleMinutes | quote }}
             - name: RECLAIM
               value: {{ .Values.dataPolicy.derived.assigned.reclaim | quote }}
+            # dryRun OR disabled — either one means "upload, but do not
+            # reclaim the local copy". Was `and .enabled .dryRun`, which with
+            # the default dataPolicy.enabled=false yields DRY_RUN=false: a
+            # switched-off data policy that deletes anyway. Nothing that
+            # removes data should read a disabled policy as permission.
+            # Matches charts/mgmt s3-staged-reclaimer.yaml.
             - name: DRY_RUN
-              value: {{ and .Values.dataPolicy.enabled .Values.dataPolicy.dryRun | quote }}
+              value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
 
             # --- AWS CLI configuration -------------------------------------
             - name: AWS_ENDPOINT_URL
