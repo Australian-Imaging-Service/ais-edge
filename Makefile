@@ -38,7 +38,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names
+FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer
 ALL_STAGES  := $(FAST_STAGES) greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -104,6 +104,9 @@ promtool: $(RENDER_DEP)
 
 pvc-retention: $(RENDER_DEP)
 	@scripts/ci-pvc-retention.sh
+
+reclaimer:
+	@tests/reclaimer/run-tests.sh
 
 duplicate-names: $(RENDER_DEP)
 	@scripts/ci-duplicate-names.sh
