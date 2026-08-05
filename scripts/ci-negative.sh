@@ -72,7 +72,7 @@ expected_census() {
   cat <<'EOF'
 charts/mgmt/templates/_helpers.tpl	12
 charts/mgmt/templates/cert-issuers.yaml	8
-charts/mgmt/templates/cert-sync.yaml	12
+charts/mgmt/templates/cert-sync.yaml	11
 charts/mgmt/templates/edge-clusters.yaml	10
 charts/mgmt/templates/observability.yaml	8
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2

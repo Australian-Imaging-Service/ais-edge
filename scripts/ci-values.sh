@@ -458,7 +458,10 @@ EOF
 # two of them (the CA namespace and the tls.key refusal) are the difference
 # between "syncs nothing forever" and "distributes the fleet CA private key".
 
-printf 'k0smotron:\n  enabled: false\n'                   >"$V/neg-mgmt-certsync-no-k0smotron.yaml"
+
+# POSITIVE counterpart: Clusters managed outside the chart is a supported and
+# correct configuration, and it is the one stream-2-ab-dev actually runs.
+printf 'k0smotron:\n  enabled: false\n'                   >"$V/mgmt-k0smotron-external.yaml"
 printf 'certSync:\n  secrets: null\n'                     >"$V/neg-mgmt-certsync-no-secrets.yaml"
 printf 'certSync:\n  schedule: "@daily"\n'                >"$V/neg-mgmt-certsync-schedule-macro.yaml"
 printf 'certSync:\n  schedule: "23 3 * * 1"\n'            >"$V/neg-mgmt-certsync-schedule-weekly.yaml"
@@ -600,6 +603,7 @@ printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clust
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
+mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
@@ -655,7 +659,6 @@ neg-mgmt-am-smtp-not-mounted	charts/mgmt	mgmt-base.yaml neg-mgmt-am-smtp-not-mou
 neg-mgmt-grafana-secret-mismatch	charts/mgmt	mgmt-base.yaml neg-mgmt-grafana-secret-mismatch.yaml	generated random password
 neg-mgmt-loki-ruler-not-mounted	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-ruler-not-mounted.yaml	extraVolumes must mount
 neg-mgmt-prom-release-label	charts/mgmt	mgmt-base.yaml neg-mgmt-prom-release-label.yaml	would load none
-neg-mgmt-certsync-no-k0smotron	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-no-k0smotron.yaml	k0smotron.enabled=false
 neg-mgmt-certsync-no-secrets	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-no-secrets.yaml	certSync.secrets is empty
 neg-mgmt-certsync-schedule-macro	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-schedule-macro.yaml	must be a 5-field cron expression
 neg-mgmt-certsync-schedule-weekly	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-schedule-weekly.yaml	runs less often than daily

@@ -55,12 +55,33 @@ mostly theatre and it should not read as more than it is:
 {{- $root := . }}
 {{- $fullname := include "mgmt.fullname" . }}
 
-{{- /* The kubeconfig Secret only exists because k0smotron created it. With
-       k0smotron off, every run would fail on a Secret that is never going to
-       appear, which is a crashlooping CronJob rather than an explanation. */ -}}
-{{- if not .Values.k0smotron.enabled }}
-  {{- fail "certSync.enabled=true but k0smotron.enabled=false. cert-sync reads the child-cluster kubeconfig k0smotron publishes as Secret <cluster>-kubeconfig in the cluster's namespace; without k0smotron that Secret never exists and every run fails on a missing object. Set certSync.enabled=false, or enable k0smotron." }}
-{{- end }}
+{{- /* DELIBERATELY NOT GATED ON k0smotron.enabled.
+
+       That value means "THIS CHART creates the Cluster CRs" — it does not mean
+       "k0smotron exists". On a cluster where k0smotron was installed
+       imperatively and the Cluster CRs already exist, enabled=false is the
+       CORRECT setting (re-creating a Cluster CR would tear down a running
+       child cluster), and the kubeconfig Secret is present regardless.
+       Verified on stream-2-ab-dev: k0smotron-controller-manager 1/1,
+       Cluster edge-dev present, Secret edge-dev-kubeconfig present, with the
+       chart's k0smotron.enabled set to false.
+
+       An earlier guard here conflated the two and refused to render on
+       exactly that configuration. It is the same mistake certManager.enabled
+       made — "do we install it" and "does it exist" are different questions
+       and a chart can only answer the first.
+
+       The real precondition is that the kubeconfig Secret exists, which no
+       template can know at render time. cert-sync already handles it
+       precisely at runtime: it logs sync_failed naming the namespace and
+       Secret, and exits non-zero so CertSyncStale fires. That is a better
+       answer than a render-time refusal that is wrong half the time.
+
+       (There is deliberately no guard for an empty `edges` either. The
+       enclosing `if and $cs.enabled .Values.edges` above already renders
+       nothing in that case, which is the correct outcome — no sites means
+       nothing to sync, not a misconfiguration. A `fail` there would be
+       unreachable code pretending to be a safety check.) */ -}}
 {{- if not $cs.secrets }}
   {{- fail "certSync.enabled=true but certSync.secrets is empty. A cert-sync job with nothing to sync succeeds on every run and keeps the CertSyncStale alert quiet, which is exactly the appearance of a working rotation with no rotation happening. List the Secrets to distribute, or set certSync.enabled=false." }}
 {{- end }}

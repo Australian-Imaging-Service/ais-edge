@@ -1,0 +1,65 @@
+# =============================================================================
+# stream-2-ab-dev — the development management node
+# =============================================================================
+# Non-secret site configuration. Passed to BOTH charts so the dataPolicy block
+# has one answer per site. Secrets live in secrets.enc.yaml alongside this.
+# =============================================================================
+clusterLabel: mgmt
+
+domain:
+  internal: aisedge.local
+  mgmtNodeIP: "203.101.224.240"
+
+# Existing hostnames on this node, kept as-is so the certificates and every
+# edge hostAlias continue to match what is already deployed.
+hostnames:
+  seaweedfs: seaweedfs.aisedge.local
+  grafana: grafana.aisedge.local
+  loki: loki.aisedge.local
+  k0sApi: k0s.aisedge.local
+  konnectivity: konnectivity.aisedge.local
+
+# Already installed on this node by the imperative installer, and NOT
+# Helm-managed. The chart references them rather than trying to own them.
+certManager:
+  enabled: false
+  clusterResourceNamespace: cert-manager
+ingressNginx:
+  enabled: false
+
+# The k0smotron control plane for edge-dev already exists and is running.
+# Leave it alone: re-creating it would tear down the child cluster.
+k0smotron:
+  enabled: false
+
+seaweedfs:
+  # Same hostPath the running SeaweedFS uses, so its 590M of data is picked up
+  # rather than starting empty.
+  storage:
+    hostPath: /data/seaweedfs
+  # Keep the shared bucket for this first pass. Per-site buckets are the right
+  # end state but migrating the running edge is a separate step.
+  perSiteBuckets: false
+
+observability:
+  alerting:
+    emailTo: akshitbeniwal26@gmail.com
+    emailFrom: backupsync7@gmail.com
+    smtpHost: smtp.gmail.com
+    smtpPort: 587
+    smtpUsername: backupsync7@gmail.com
+
+edges:
+  - name: edge-dev
+    nodeIP: "203.101.230.171"
+    s3SecretRef: edge-dev-s3
+    lokiTokenRef: loki-push-token-edge-dev
+    uploadSecretRef: seaweedfs-upload
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+
+# Nothing expires on a fresh install. Watch dryRun decisions first.
+dataPolicy:
+  enabled: false
+  dryRun: true
