@@ -7,7 +7,7 @@
 #   make tools       fetch the pinned helm / promtool / kind into ~/.cache
 #
 # Individual stages, for iterating on one thing:
-#   make render negative promtool shell-syntax pvc-retention runtime-templates
+#   make render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names
 #   make greenfield
 #
 # THE STAGES ARE ORDERED, NOT INDEPENDENT. `render` writes every rendered
@@ -38,7 +38,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates
+FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names
 ALL_STAGES  := $(FAST_STAGES) greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -104,6 +104,9 @@ promtool: $(RENDER_DEP)
 
 pvc-retention: $(RENDER_DEP)
 	@scripts/ci-pvc-retention.sh
+
+duplicate-names: $(RENDER_DEP)
+	@scripts/ci-duplicate-names.sh
 
 runtime-templates: $(RENDER_DEP)
 	@scripts/ci-runtime-templates.sh
