@@ -108,7 +108,7 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 ```
 
 The `dicoms` vs `files` split exists because xnat-ingest assign
-auto-generates a `MANIFEST.json` per session and the s3-uploader writes
+auto-generates a `__MANIFEST__.json` per RESOURCE (not per session) and the s3-uploader writes
 it to S3 alongside the DICOMs. Dashboards / alerts that want a true
 DICOM count must read `dicoms`; ones that want "S3 PUT count" or
 "objects written" use `files`. Both fields are computed in busybox-only

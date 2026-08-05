@@ -20,7 +20,7 @@
 #     upload_failed     EdgeUploadsFailing, EdgeUploadRetrying
 #
 # The numeric fields (bytes, files, dicoms, duration_s) feed the dashboards.
-# `files` counts every object uploaded (DICOMs + MANIFEST.json + metadata);
+# `files` counts every object uploaded (DICOMs + __MANIFEST__.json + __METADATA__.json);
 # `dicoms` counts only the image files. Both are reported so a panel author
 # can pick the right one.
 #

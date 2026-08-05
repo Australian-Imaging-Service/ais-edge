@@ -304,7 +304,44 @@ certManager:
   issuer: ais-edge-ca
 
   ca:
+    # -----------------------------------------------------------------------
+    # ONE TIER OR TWO. selfSigned | intermediate
+    #
+    # selfSigned    (DEFAULT) cert-manager generates a self-signed root in the
+    #               cluster and that root signs every leaf certificate. One
+    #               key, held in a Secret on the management node. This is the
+    #               right answer for dev and for a tier-1 single-site install:
+    #               an out-of-band signing ceremony there is friction for no
+    #               benefit, and it cannot live in install.sh anyway.
+    #
+    # intermediate  the root is generated OUT OF BAND and its key is kept
+    #               offline. The cluster holds only an intermediate, supplied
+    #               as an existing Secret (intermediate.secretRef below), and
+    #               cert-manager issues from that. The chart does NOT generate
+    #               the root in this mode — it cannot, the key is deliberately
+    #               not here — so it renders no bootstrap Issuer and no CA
+    #               Certificate. Recommended for a multi-site fleet.
+    #               Ceremony: docs/ca-ceremony.md.
+    #
+    # BE PRECISE ABOUT WHAT THE SPLIT BUYS. If the management node is
+    # compromised, the attacker already holds the staged imaging, the XNAT
+    # credentials and every child cluster kubeconfig. The CA is not the crown
+    # jewel, and moving the root offline protects none of that. What it buys
+    # is RECOVERABILITY: edges pin the ROOT, so replacing a compromised or
+    # expiring intermediate is an in-cluster operation they never notice,
+    # rather than hand-carrying a new trust anchor to every site — which is
+    # what scripts/rotate-ca.sh exists to do and why it is a two-phase
+    # procedure run weeks apart. That is a smaller claim than "the root is
+    # protected", and it is the only one being made.
+    mode: selfSigned
+
+    # The Secret cert-manager GENERATES the root into, in selfSigned mode.
+    # Unused as an issuing source in intermediate mode — see intermediate
+    # below — and the chart refuses to render if the two names collide, since
+    # sharing them means a later switch back to selfSigned overwrites the
+    # offline-signed intermediate with a fresh self-signed root.
     secretName: ais-edge-ca-secret
+
     # MUST MATCH THE CA ALREADY DEPLOYED. On the existing management cluster
     # the root CA is CN="AIS Edge Root CA" (openssl x509 -in ais-edge-ca.crt
     # -subject), and cert-manager treats commonName as part of the desired
@@ -313,8 +350,35 @@ certManager:
     # against a CA that no longer signs anything, so every edge's S3 upload
     # and Loki push fails TLS validation at once — a fleet-wide outage caused
     # by a cosmetic-looking string.
+    # In intermediate mode this is the CN the offline ceremony must use for
+    # the root, for exactly the same reason.
     commonName: AIS Edge Root CA
+    # Render-time guard: the chart refuses to render if commonName is anything
+    # other than the deployed value. Set true ONLY when building a new fleet
+    # that has never distributed a ca-bundle to anything. It exists because
+    # the failure above is invisible until every site breaks at once.
+    allowCommonNameChange: false
+
     durationHours: 87600      # 10y
+
+    # -----------------------------------------------------------------------
+    # intermediate mode only.
+    # -----------------------------------------------------------------------
+    intermediate:
+      # Name of an EXISTING Secret holding the offline-signed intermediate.
+      # Created by hand from docs/ca-ceremony.md, never templated, never in
+      # git, and not owned by Helm — `helm uninstall` cannot remove it.
+      # It must live in certManager.clusterResourceNamespace above, because
+      # that is the only namespace a ClusterIssuer's spec.ca.secretName is
+      # resolved from, and it must carry:
+      #   tls.crt  the intermediate certificate
+      #   tls.key  the intermediate's private key
+      #   ca.crt   the ROOT certificate — what edges pin
+      # Empty in intermediate mode is a render-time failure: a ClusterIssuer
+      # pointing at no Secret stays NotReady and every Certificate sits
+      # Pending while the Ingresses serve nginx's default self-signed cert,
+      # which reads as a browser warning rather than a misconfiguration.
+      secretRef: ""
   acme:
     email: ""
     server: https://acme-v02.api.letsencrypt.org/directory

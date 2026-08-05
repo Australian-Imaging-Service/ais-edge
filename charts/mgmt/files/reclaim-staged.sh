@@ -24,6 +24,22 @@
 #   * An uploader exit code is NOT confirmation. `xnat-ingest upload` logs
 #     "Successfully uploaded all files in '<session>'" for an EMPTY prefix.
 #     Only a positive answer from the XNAT REST API counts.
+#   * NOR is the EXISTENCE of the experiment in XNAT confirmation. XNAT creates
+#     the experiment as soon as the FIRST resource is POSTed, so an upload that
+#     died after 3 of 400 scans leaves a correctly-labelled experiment behind.
+#     An earlier version of this script matched on that label and would have
+#     deleted the 397 scans that never arrived. Confirmation means COUNTING:
+#     every file the staged session says it contains must be present in XNAT.
+#
+#     The count comes from the __MANIFEST__.json files xnat-ingest writes into
+#     each resource directory. Real example, captured from a staged session on
+#     this cluster:
+#         {"datatype": "medimage/dicom-series",
+#          "checksums": {"1.2.276...836886.dcm": "d991520d4335ae70d09e85c28f20296a"}}
+#     One entry per file, so summing `checksums` across a session's manifests
+#     gives exactly what should be in XNAT. (Note the name: __MANIFEST__.json,
+#     double underscores, per RESOURCE — not the per-session "MANIFEST.json"
+#     our docs used to describe.)
 #   * Deletion goes through the FILER, never `aws s3 rm`. Measured on
 #     SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it) removes
 #     the OBJECTS but leaves a 0-byte directory ENTRY, which `aws s3 ls` still
@@ -76,6 +92,16 @@ set -uo pipefail
 : "${FILER_ENDPOINT:?FILER_ENDPOINT required}"
 
 S3_PREFIX="${S3_PREFIX:-staged}"
+
+# Where the two-consecutive-runs markers live. DELIBERATELY OUTSIDE S3_PREFIX.
+#
+# `xnat-ingest upload` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
+# it finds as a session. A state directory under staged/ would therefore be
+# picked up as a session, "uploaded" with zero resources, and would re-fire
+# XNATUploadSuccess every loop — recreating precisely the bug this reclaimer
+# exists to fix, using the mechanism built to prevent it. Keep it as a sibling
+# of staged/, never a child.
+STATE_PREFIX="${STATE_PREFIX:-.reclaim-state}"
 # dataPolicy.derived.s3Staged.reclaim. `never` should never reach this script
 # (the template renders nothing at all in that case); the check is defence in
 # depth against a CronJob left behind by a partial upgrade.
@@ -304,40 +330,117 @@ s3_newest_epoch() {
 # Returns 0 only on a positive confirmation. Everything else (any HTTP code
 # other than 200, an HTML login page, an empty result, a name that does not
 # decompose) returns non-zero and the caller keeps the session.
-xnat_has_session() {
-    local session="$1" project subject visit body code labels
-    # Exactly three dot-separated non-empty fields, or we do not know what we
-    # are looking at and must not touch it.
+# Number of files the STAGED session claims to contain, summed from every
+# __MANIFEST__.json under its prefix. Echoes ERR on any doubt.
+staged_manifest_count() {
+    local session="$1" keys out total=0 mf
+    keys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" \
+             --prefix "${S3_PREFIX}/${session}/" --output json 2>/dev/null) || { echo ERR; return; }
+    mf=$(printf '%s' "$keys" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if d.get("IsTruncated"):
+    sys.exit(1)
+for o in d.get("Contents") or []:
+    k = o.get("Key","")
+    if k.endswith("/__MANIFEST__.json"):
+        print(k)
+' 2>/dev/null) || { echo ERR; return; }
+
+    # No manifest at all means we cannot say what SHOULD be there. Keep.
+    [ -n "$mf" ] || { echo ERR; return; }
+
+    while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        # `aws s3 cp - ` and NOT `s3api get-object /dev/stdout`: the latter
+        # writes the object body AND a JSON metadata blob to stdout, so the
+        # two get concatenated and every parse fails. Caught by running this
+        # against a real staged session.
+        out=$(aws s3 cp "s3://${S3_BUCKET}/${key}" - 2>/dev/null) \
+            || { echo ERR; return; }
+        n=$(printf '%s' "$out" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+c = d.get("checksums")
+if not isinstance(c, dict):
+    sys.exit(1)
+print(len(c))
+' 2>/dev/null) || { echo ERR; return; }
+        case "$n" in ''|*[!0-9]*) echo ERR; return ;; esac
+        total=$((total + n))
+    done <<EOF
+$mf
+EOF
+    [ "$total" -gt 0 ] || { echo ERR; return; }
+    echo "$total"
+}
+
+# How many files XNAT actually holds for this session.
+#
+# Path-addressed through project/subject/experiment so a 404 is unambiguous,
+# then the per-experiment file listing is counted. Echoes ERR on ANY doubt:
+# a non-200, an HTML login page, an unparseable body, a name that does not
+# decompose. The caller treats ERR as KEEP.
+xnat_file_count() {
+    local session="$1" project subject visit body code expid
     case "$session" in
-        *.*.*.*|*..*|.*|*.) return 1 ;;
+        *.*.*.*|*..*|.*|*.) echo ERR; return ;;
         *.*.*) : ;;
-        *) return 1 ;;
+        *) echo ERR; return ;;
     esac
     project="${session%%.*}"
     visit="${session##*.}"
     subject="${session#*.}"; subject="${subject%.*}"
-    [ -n "$project" ] && [ -n "$subject" ] && [ -n "$visit" ] || return 1
+    [ -n "$project" ] && [ -n "$subject" ] && [ -n "$visit" ] || { echo ERR; return; }
 
     body=$(xnat_get "${XNAT_SERVER}/data/projects/${project}/subjects/${subject}/experiments?format=json")
     code=$(printf '%s' "$body" | tail -n1)
-    [ "$code" = "200" ] || return 1
+    [ "$code" = "200" ] || { echo ERR; return; }
 
-    # Flat extraction of the label/ID fields only. The response is scoped to
-    # one subject already, so an exact string match cannot cross sessions.
-    labels=$(printf '%s' "$body" | sed '$d' \
-             | grep -o '"\(label\|ID\)":"[^"]*"' | sed 's/^"[^"]*":"//; s/"$//')
-    [ -n "$labels" ] || return 1
+    # EXACT match on a label derived from THIS session's own name, so it can
+    # never resolve to a different session.
+    expid=$(printf '%s' "$body" | sed '$d' | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+rows = (d.get("ResultSet") or {}).get("Result") or []
+want = set(sys.argv[1:])
+for r in rows:
+    if r.get("label") in want or r.get("ID") in want:
+        print(r.get("ID","")); break
+' "$visit" "${subject}_${visit}" 2>/dev/null) || { echo ERR; return; }
+    [ -n "$expid" ] || { echo ERR; return; }
 
-    # xnat-ingest has named the experiment after the visit, and some sites
-    # prefix it with the subject. Both candidates are derived from THIS
-    # session's own name, so neither can match a different session.
-    while IFS= read -r l; do
-        [ "$l" = "$visit" ] && return 0
-        [ "$l" = "${subject}_${visit}" ] && return 0
-    done <<EOF
-$labels
-EOF
-    return 1
+    # /scans/ALL/files, NOT /files.
+    #
+    # Measured against the live XNAT for a session known to be complete:
+    #     /data/experiments/<id>/files            -> 0 rows
+    #     /data/experiments/<id>/scans/ALL/files  -> 1 row   (correct)
+    # The plain /files endpoint lists resources attached to the EXPERIMENT
+    # itself, not the files inside its scans, so it returns 0 for a perfectly
+    # complete imaging session. Using it made every session look incomplete —
+    # fail-safe, but it would have meant nothing was ever reclaimed and the
+    # staging bucket would grow forever while appearing to be managed.
+    body=$(xnat_get "${XNAT_SERVER}/data/experiments/${expid}/scans/ALL/files?format=json")
+    code=$(printf '%s' "$body" | tail -n1)
+    [ "$code" = "200" ] || { echo ERR; return; }
+    printf '%s' "$body" | sed '$d' | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+rows = (d.get("ResultSet") or {}).get("Result") or []
+print(len(rows))
+' 2>/dev/null || echo ERR
 }
 
 # -----------------------------------------------------------------------------
@@ -398,6 +501,13 @@ while IFS= read -r session; do
     [ -n "$session" ] || continue
     examined=$((examined + 1))
 
+    # Our own state prefix, not a session. Skipped explicitly rather than
+    # being caught by the charset guard below, which would log a spurious
+    # "kept" for it on every single run and train people to ignore that event.
+    case "$session" in
+        .reclaim-state) continue ;;
+    esac
+
     # The session name is interpolated into a remote `sh -c` a few lines below.
     # Anything outside this charset is rejected rather than quoted: a prefix
     # containing a quote or a semicolon would be a shell injection into a
@@ -437,6 +547,30 @@ while IFS= read -r session; do
             keep "$session" "upload_in_flight" "0 objects but ${mp} multipart upload(s) in progress — an edge is writing this session now"
             kept=$((kept + 1)); continue
         fi
+        # TWO-CONSECUTIVE-RUNS RULE.
+        #
+        # `count == 0` and the delete are not atomic: a small single-part PUT
+        # can land in between, and the multipart probe above does not catch it
+        # because a small object is never multipart. Requiring the prefix to
+        # have been empty on the PREVIOUS run too closes that window without
+        # any locking — at an hourly schedule the object would have to arrive
+        # and be gone again inside the same hour to slip through, and an
+        # arriving object does not vanish.
+        #
+        # The marker lives in the bucket next to the data, so it survives pod
+        # restarts and needs no extra storage.
+        marker="${STATE_PREFIX}/${session}.empty"
+        if aws s3api head-object --bucket "$S3_BUCKET" --key "$marker" >/dev/null 2>&1; then
+            : # seen empty before — safe to proceed
+        else
+            if [ "$DRY_RUN" != "true" ]; then
+                printf 'seen-empty %s\n' "$(date -Iseconds)" \
+                    | aws s3 cp - "s3://${S3_BUCKET}/${marker}" --only-show-errors 2>/dev/null || true
+            fi
+            jlog reclaim_skipped "$session" "empty prefix seen for the FIRST time — deferring removal to the next run so a just-started upload cannot be deleted between the count and the delete" ",\"objects\":0"
+            skipped=$((skipped + 1)); continue
+        fi
+
         if [ "$DRY_RUN" = "true" ]; then
             jlog reclaim_skipped "$session" "dataPolicy dryRun/disabled — would have removed this empty prefix" ",\"objects\":0"
             skipped=$((skipped + 1)); continue
@@ -453,6 +587,12 @@ while IFS= read -r session; do
         continue
     fi
 
+    # This prefix has objects, so any "seen empty" marker for it is stale and
+    # must go — otherwise a session that was briefly empty and then filled
+    # would carry a marker that authorises deletion on a later run.
+    aws s3 rm "s3://${S3_BUCKET}/${STATE_PREFIX}/${session}.empty" \
+        --only-show-errors >/dev/null 2>&1 || true
+
     newest=$(s3_newest_epoch "$session")
     if [ "$newest" = "ERR" ]; then
         keep "$session" "age_unknown" "${count} object(s) but no usable LastModified — cannot prove it is older than ${MIN_AGE}"
@@ -466,17 +606,36 @@ while IFS= read -r session; do
     fi
 
     if [ "$VERIFY_XNAT" = "true" ]; then
-        if xnat_has_session "$session"; then
-            jlog reclaim_confirmed "$session" "XNAT reports it holds this session" \
-                ",\"objects\":${count},\"age_s\":${age}"
-        else
-            # The overwhelmingly common cause is a session that has not been
-            # uploaded yet (XNAT down, credentials, backlog) — undelivered
-            # data, which is precisely what must never be deleted.
-            keep "$session" "not_confirmed_in_xnat" "XNAT did not positively confirm this session — treating it as undelivered" \
+        # COUNT, do not merely look for existence. XNAT creates the experiment
+        # on the first resource POST, so "the experiment is there" is true for
+        # an upload that died after 3 of 400 scans.
+        want=$(staged_manifest_count "$session")
+        if [ "$want" = "ERR" ]; then
+            keep "$session" "manifest_unreadable" "could not determine how many files this session should contain (no readable __MANIFEST__.json) — cannot prove it arrived intact" \
                  ",\"objects\":${count},\"age_s\":${age}"
             kept=$((kept + 1)); continue
         fi
+
+        have=$(xnat_file_count "$session")
+        if [ "$have" = "ERR" ]; then
+            # Covers: XNAT unreachable, non-200, unparseable body, experiment
+            # absent, session name that does not decompose. All of it means we
+            # do not know, and not knowing means keep.
+            keep "$session" "xnat_count_unavailable" "XNAT did not return a usable file count for this session" \
+                 ",\"objects\":${count},\"age_s\":${age},\"want\":${want}"
+            kept=$((kept + 1)); continue
+        fi
+
+        if [ "$have" -lt "$want" ]; then
+            # The partial-upload case. Deleting here would destroy exactly the
+            # files that never made it.
+            keep "$session" "incomplete_in_xnat" "XNAT holds fewer files than this session staged — treating it as a partial upload" \
+                 ",\"objects\":${count},\"age_s\":${age},\"want\":${want},\"have\":${have}"
+            kept=$((kept + 1)); continue
+        fi
+
+        jlog reclaim_confirmed "$session" "XNAT holds at least every file this session staged" \
+            ",\"objects\":${count},\"age_s\":${age},\"want\":${want},\"have\":${have}"
     fi
 
     if [ "$DRY_RUN" = "true" ]; then
