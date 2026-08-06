@@ -106,7 +106,7 @@ never shells out to `aws s3 rm`.
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
 | `s3-config` ConfigMap drift | Auth fails | Re-running script 03 regenerates it; config-hash annotation rolls the pod |
 | Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
-| aws-cli checksum headers verified only against 3.99 | Uploads rejected | `x-amz-checksum-*` acceptance was measured against 3.99's S3 gateway only. 4.34's `auth_credentials.go` is roughly three times the size of 3.99's; the identity/action semantics we depend on are unchanged, but the checksum path was not re-measured. **Re-measure against 4.34 before trusting it** |
+| ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | — | Was only ever measured against 3.99. Re-measured live against 4.34's real S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
 
 ## Replacements / future
 
