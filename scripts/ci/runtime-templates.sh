@@ -37,14 +37,14 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-lib.sh
-. "$HERE/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$HERE/lib.sh"
 
 ci_heading "runtime templates survive rendering"
 
 # case <TAB> kind <TAB> object name <TAB> literal that must be present
 #
-# Object names use the release names ci-render.sh installs with: mgmt and edge.
+# Object names use the release names render.sh installs with: mgmt and edge.
 #
 # NO COMMENTS OR BLANK-FIELD LINES INSIDE THE HEREDOC — the reader below splits
 # on tabs and does not skip '#', so a comment becomes a case named '#'.
@@ -80,7 +80,7 @@ while IFS=$'\t' read -r case_name kind objname literal; do
   [ -n "$case_name" ] || continue
   render="$CI_RENDER_DIR/$case_name.yaml"
   if [ ! -s "$render" ]; then
-    ci_fail "no render at $render — run scripts/ci-render.sh first (make ci does)"
+    ci_fail "no render at $render — run scripts/ci/render.sh first (make ci does)"
     continue
   fi
 

@@ -23,7 +23,7 @@
 #      API server now that the subchart CRDs exist: schema, defaulting,
 #      admission. Also the upgrade path.
 #   5. `helm uninstall`, then assert the PVCs and PVs are STILL THERE. This
-#      measures the retention that ci-pvc-retention.sh only reads off the
+#      measures the retention that pvc-retention.sh only reads off the
 #      manifest.
 #
 # WHAT IT DOES NOT COVER, stated rather than implied:
@@ -42,8 +42,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-values.sh
-. "$HERE/ci-values.sh"
+# shellcheck source=scripts/ci/values.sh
+. "$HERE/values.sh"
 
 CLUSTER_NAME="${CI_KIND_CLUSTER:-ais-edge-greenfield}"
 KEEP_CLUSTER="${CI_KIND_KEEP:-0}"
@@ -65,9 +65,9 @@ unavailable() {
 command -v docker >/dev/null 2>&1 || unavailable "docker is not installed"
 docker info >/dev/null 2>&1        || unavailable "the docker daemon is not reachable"
 KUBECTL="$(ci_kubectl 2>/dev/null || true)"
-[ -n "$KUBECTL" ] || unavailable "kubectl is not installed (scripts/ci-tools.sh kind)"
+[ -n "$KUBECTL" ] || unavailable "kubectl is not installed (scripts/ci/tools.sh kind)"
 KIND="$(ci_kind 2>/dev/null || true)"
-[ -n "$KIND" ] || unavailable "kind $CI_PIN_KIND_VERSION is not installed (scripts/ci-tools.sh kind)"
+[ -n "$KIND" ] || unavailable "kind $CI_PIN_KIND_VERSION is not installed (scripts/ci/tools.sh kind)"
 HELM="$(ci_helm)"
 
 # Which kubectl, said out loud. ci_kubectl accepts a non-pinned one so the job

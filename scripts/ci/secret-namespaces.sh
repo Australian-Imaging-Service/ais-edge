@@ -2,7 +2,7 @@
 # =============================================================================
 # Secret contract check
 # =============================================================================
-#   scripts/ci-secret-namespaces.sh
+#   scripts/ci/secret-namespaces.sh
 #
 # Renders both charts and proves that every Secret they MOUNT is either
 #   (a) created by the chart itself,
@@ -29,9 +29,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=/dev/null
-[ -f "$HERE/ci-lib.sh" ] && . "$HERE/ci-lib.sh"
+[ -f "$HERE/lib.sh" ] && . "$HERE/lib.sh"
 
 HELM="${HELM:-helm}"
 # TWO templates, because a deployment has two kinds of site and each applies its

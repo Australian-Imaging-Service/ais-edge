@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Shared plumbing for the scripts/ci-*.sh checks.
+# Shared plumbing for the scripts/ci/*.sh checks.
 # =============================================================================
 # Sourced, never executed. Provides:
 #   * paths      REPO_ROOT, CI_WORK_DIR, CI_TOOL_DIR
@@ -16,7 +16,7 @@
 
 # shellcheck disable=SC2034  # several of these are consumed by the callers.
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Work directory is deliberately OUTSIDE the repository. Build artefacts inside
 # the tree are one `git add -A` away from being committed, and .gitignore is
@@ -24,7 +24,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 #
 # IT IS ALSO KEYED TO THIS CHECKOUT, and that is not cosmetic. The path used to
 # be a single fixed directory, so two copies of the repo running CI at the same
-# time silently destroyed each other's work: the second run's ci-render.sh
+# time silently destroyed each other's work: the second run's render.sh
 # cleared and rewrote the render directory the first run was still reading.
 #
 # The symptom is baffling rather than obvious. `render` reports 40 passed, and
@@ -177,7 +177,7 @@ ci_helm() {
       CI_HELM_BIN="$candidate"; echo "$CI_HELM_BIN"; return 0
     fi
   done
-  echo "helm $CI_PIN_HELM_VERSION not found; run scripts/ci-tools.sh" >&2
+  echo "helm $CI_PIN_HELM_VERSION not found; run scripts/ci/tools.sh" >&2
   return 1
 }
 
@@ -190,7 +190,7 @@ ci_promtool() {
       CI_PROMTOOL_BIN="$candidate"; echo "$CI_PROMTOOL_BIN"; return 0
     fi
   done
-  echo "promtool $CI_PIN_PROMETHEUS_VERSION not found; run scripts/ci-tools.sh" >&2
+  echo "promtool $CI_PIN_PROMETHEUS_VERSION not found; run scripts/ci/tools.sh" >&2
   return 1
 }
 
@@ -203,7 +203,7 @@ ci_kind() {
       CI_KIND_BIN="$candidate"; echo "$CI_KIND_BIN"; return 0
     fi
   done
-  echo "kind $CI_PIN_KIND_VERSION not found; run scripts/ci-tools.sh" >&2
+  echo "kind $CI_PIN_KIND_VERSION not found; run scripts/ci/tools.sh" >&2
   return 1
 }
 
@@ -220,6 +220,6 @@ ci_kubectl() {
     [ -n "$candidate" ] && [ -x "$candidate" ] || continue
     CI_KUBECTL_BIN="$candidate"; echo "$CI_KUBECTL_BIN"; return 0
   done
-  echo "kubectl not found; run scripts/ci-tools.sh kind" >&2
+  echo "kubectl not found; run scripts/ci/tools.sh kind" >&2
   return 1
 }

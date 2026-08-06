@@ -113,7 +113,7 @@ sed -n '1,40p' charts/mgmt/files/loki-ruler-rules.yaml
 ```
 
 Rendered into a `PrometheusRule` object; the operator picks it up via CRD
-watch, no restart needed. `scripts/ci-promtool.sh` runs `promtool check
+watch, no restart needed. `scripts/ci/promtool.sh` runs `promtool check
 rules` and any test in `charts/mgmt/files/prometheus-rules/tests/` against
 this file — add a test alongside a new rule.
 
@@ -147,7 +147,7 @@ LogQL primer:
 > **CAUTION — absence needs `unless`, not `== 0`.** An empty LogQL result is
 > EMPTY, not a series carrying `0`. `X and (Y == 0)` is silent in exactly the
 > case it should fire. Use `X unless on (cluster) Y` — see
-> `XNATUploadFailingForAllSessions` for the pattern. `scripts/ci-promtool.sh`
+> `XNATUploadFailingForAllSessions` for the pattern. `scripts/ci/promtool.sh`
 > rejects `== 0` and unlabelled `ignoring(...)` joins in this file.
 
 > **CAUTION — pin every join to `on (cluster[, session])`.** `ignoring

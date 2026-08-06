@@ -23,8 +23,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-lib.sh
-. "$HERE/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$HERE/lib.sh"
 
 PROMTOOL="$(ci_promtool)"
 RULES_DIR="$REPO_ROOT/charts/mgmt/files/prometheus-rules"
@@ -84,7 +84,7 @@ done
 ci_heading "promtool check rules (as rendered into PrometheusRule objects)"
 render="$CI_RENDER_DIR/mgmt-defaults.yaml"
 if [ ! -s "$render" ]; then
-  ci_fail "no render at $render — run scripts/ci-render.sh first (make ci does)"
+  ci_fail "no render at $render — run scripts/ci/render.sh first (make ci does)"
 else
   extract_dir="$CI_WORK_DIR/rendered-rules"
   rm -rf "$extract_dir"; mkdir -p "$extract_dir"

@@ -2,10 +2,10 @@
 # =============================================================================
 # Fetch the pinned CI tools into $CI_TOOL_DIR.
 # =============================================================================
-#   scripts/ci-tools.sh            helm + promtool   (everything `make ci` needs)
-#   scripts/ci-tools.sh kind       additionally kind (greenfield job only)
+#   scripts/ci/tools.sh            helm + promtool   (everything `make ci` needs)
+#   scripts/ci/tools.sh kind       additionally kind (greenfield job only)
 #
-# Every download is checked against a sha256 recorded in scripts/ci-lib.sh, so
+# Every download is checked against a sha256 recorded in scripts/ci/lib.sh, so
 # the pin is on the bytes rather than on a tag that can be moved. A mismatch is
 # a hard failure — it is not retried and not warned about.
 #
@@ -14,8 +14,8 @@
 # =============================================================================
 set -euo pipefail
 
-# shellcheck source=scripts/ci-lib.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 WANT_KIND=0
 for arg in "$@"; do
@@ -33,7 +33,7 @@ case "$ARCH" in
 esac
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 
-# The sha256 pins in ci-lib.sh are for linux/amd64 only. On any other platform
+# The sha256 pins in lib.sh are for linux/amd64 only. On any other platform
 # the download still happens but the checksum cannot be asserted, and that is
 # said out loud rather than skipped quietly.
 PIN_PLATFORM="linux-amd64"
@@ -47,7 +47,7 @@ verify() { # verify <file> <sha256>
   if [ "$CAN_VERIFY" = 1 ]; then
     _ci_verify_sha256 "$1" "$2"
   else
-    echo "  NOTE: sha256 not asserted — pins in ci-lib.sh are for $PIN_PLATFORM, this host is $OS-$GOARCH" >&2
+    echo "  NOTE: sha256 not asserted — pins in lib.sh are for $PIN_PLATFORM, this host is $OS-$GOARCH" >&2
   fi
 }
 

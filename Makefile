@@ -34,7 +34,7 @@ SHELL := /usr/bin/env bash
 # from being committed.
 # Keyed to THIS checkout so two copies of the repo can run CI at the same time
 # without destroying each other's renders. Must stay byte-identical to the
-# fallback in scripts/ci-lib.sh, or a stage invoked directly would look in a
+# fallback in scripts/ci/lib.sh, or a stage invoked directly would look in a
 # different directory from one invoked through make. See the long note there.
 export CI_WORK_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/ais-edge-ci-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
 export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
@@ -81,58 +81,58 @@ run-stages:
 	fi
 
 # -----------------------------------------------------------------------------
-# Tools, at the versions pinned in scripts/ci-lib.sh with a sha256 on the bytes.
+# Tools, at the versions pinned in scripts/ci/lib.sh with a sha256 on the bytes.
 tools:
-	@scripts/ci-tools.sh
+	@scripts/ci/tools.sh
 
 # kind as well. Only the greenfield stage needs it, and that stage skips
 # loudly when docker is unavailable — but fetching it is cheap and a developer
 # who has docker should get the full suite from `make ci` without a second
 # command.
 tools-all:
-	@scripts/ci-tools.sh kind
+	@scripts/ci/tools.sh kind
 
 # -----------------------------------------------------------------------------
 # Stages.
 render:
-	@scripts/ci-render.sh
+	@scripts/ci/render.sh
 
 negative:
-	@scripts/ci-negative.sh
+	@scripts/ci/negative.sh
 
 # See the header: these read $(CI_RENDER_DIR), so they cannot be run against
 # nothing. Depending on `render` is what makes `make pvc-retention` on its own
 # mean the same thing as the stage inside `make ci`.
 promtool: $(RENDER_DEP)
-	@scripts/ci-promtool.sh
+	@scripts/ci/promtool.sh
 
 pvc-retention: $(RENDER_DEP)
-	@scripts/ci-pvc-retention.sh
+	@scripts/ci/pvc-retention.sh
 
 reclaimer:
 	@tests/reclaimer/run-tests.sh
 
 duplicate-names: $(RENDER_DEP)
-	@scripts/ci-duplicate-names.sh
+	@scripts/ci/duplicate-names.sh
 
 runtime-templates: $(RENDER_DEP)
-	@scripts/ci-runtime-templates.sh
+	@scripts/ci/runtime-templates.sh
 
 # The only stage that needs no render.
 shell-syntax:
-	@scripts/ci-shell-syntax.sh
+	@scripts/ci/shell-syntax.sh
 
 # Renders both charts itself (with the EXAMPLE site values, which is the point)
 # so it does not read $(CI_RENDER_DIR) and has no render dependency.
 secret-contract:
-	@scripts/ci-secret-namespaces.sh
+	@scripts/ci/secret-namespaces.sh
 
 # Needs docker + kubectl + kind. Skips, loudly, if any is missing — a skip is
 # reported separately from a pass so a run without docker never reads as
 # "the charts are installable". CI_REQUIRE_GREENFIELD=1 turns that skip into a
 # failure, which is what the GitHub workflow sets.
 greenfield:
-	@scripts/ci-greenfield-kind.sh
+	@scripts/ci/greenfield-kind.sh
 
 # -----------------------------------------------------------------------------
 clean:

@@ -24,8 +24,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-values.sh
-. "$HERE/ci-values.sh"
+# shellcheck source=scripts/ci/values.sh
+. "$HERE/values.sh"
 
 HELM="$(ci_helm)"
 
@@ -64,7 +64,7 @@ done < <(ci_negative_cases)
 # has to watch for.
 #
 # When it fires: add the negative case to ci_negative_cases in
-# scripts/ci-values.sh, then update the number here in the same commit.
+# scripts/ci/values.sh, then update the number here in the same commit.
 ci_heading "guard census"
 
 # file<TAB>expected fail-call-sites
@@ -106,7 +106,7 @@ while IFS= read -r f; do
   n="$(grep -c '{{-\? *fail ' "$f" || true)"
   want="${EXPECTED[$rel]:-0}"
   if [ "$n" != "$want" ]; then
-    ci_fail "guard census: $rel has $n fail() call sites, expected $want — add a negative case to ci_negative_cases in scripts/ci-values.sh, then update expected_census in this file"
+    ci_fail "guard census: $rel has $n fail() call sites, expected $want — add a negative case to ci_negative_cases in scripts/ci/values.sh, then update expected_census in this file"
     census_bad=1
   fi
 done < <(find "$REPO_ROOT/charts/mgmt/templates" "$REPO_ROOT/charts/edge/templates" -type f | sort)

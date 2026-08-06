@@ -42,7 +42,7 @@ rather than assumed:
   `changes()`, `delta()`, `rate()` and friends over one of them are
   identically 0. `NewEdgeJoined` was `changes(kube_node_info[10m]) > 0` and
   never produced a sample in its life; it has been removed, and
-  `scripts/ci-promtool.sh` now rejects the shape. To say anything about a join
+  `scripts/ci/promtool.sh` now rejects the shape. To say anything about a join
   metric, work on the SERIES SET rather than the value: `unless on (...)`
   against another metric, as `CertSyncNeverSucceeded` does
   (`kube_cronjob_info{...} unless on (namespace, cronjob)

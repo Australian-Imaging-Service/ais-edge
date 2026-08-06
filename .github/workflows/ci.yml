@@ -14,7 +14,7 @@
 # EVERY TOOL AND ACTION IS PINNED. Actions are pinned to a COMMIT SHA, not a
 # tag: a tag is a mutable pointer, and `@v4` re-points whenever the publisher
 # moves it. The helm / promtool / kind / kubectl versions live in
-# scripts/ci-lib.sh with a sha256 on the downloaded bytes, so the pin is on the
+# scripts/ci/lib.sh with a sha256 on the downloaded bytes, so the pin is on the
 # artefact rather than on a name.
 #
 # THE SAME THING RUNS LOCALLY. Each step below is a `make` target, and
@@ -69,14 +69,14 @@ jobs:
       - name: PyYAML
         run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
 
-      # Keyed on ci-lib.sh because that is where the version pins and their
+      # Keyed on ci/lib.sh because that is where the version pins and their
       # sha256s live, so changing a pin misses the cache by construction and
       # cannot be served a binary from the previous pin.
       - name: Cache pinned tools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.CI_TOOL_DIR }}
-          key: ais-edge-ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci-lib.sh') }}
+          key: ais-edge-ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/lib.sh') }}
 
       - name: Fetch pinned tools
         run: make tools
@@ -163,7 +163,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.CI_TOOL_DIR }}
-          key: ais-edge-ci-tools-kind-${{ runner.os }}-${{ hashFiles('scripts/ci-lib.sh') }}
+          key: ais-edge-ci-tools-kind-${{ runner.os }}-${{ hashFiles('scripts/ci/lib.sh') }}
 
       # helm, promtool, kind AND kubectl, all pinned. kubectl is fetched rather
       # than taken from the runner image so that what this job proves does not

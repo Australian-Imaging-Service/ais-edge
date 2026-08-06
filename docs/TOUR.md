@@ -280,7 +280,7 @@ credentials onto a hospital machine.
 | Holds | S3 admin + upload identities, the XNAT account, Grafana, Loki's storage identity, SMTP, one `<edge>-s3` per edge | the de-identification salt, and its S3 identity |
 | Roughly | eight Secrets | two |
 
-`scripts/ci-secret-namespaces.sh` renders both charts and fails if a mounted
+`scripts/ci/secret-namespaces.sh` renders both charts and fails if a mounted
 Secret is missing, in the wrong namespace, or declared in the wrong template.
 
 ### Two secrets you must NOT create by hand on an edge
@@ -640,7 +640,7 @@ forever.
 
 This matters to anything that keys on it. `XNATUploadSuccess` uses a `[10m]`
 range for exactly this reason — see the comment on that rule, and the range
-floor `scripts/ci-promtool.sh` enforces.
+floor `scripts/ci/promtool.sh` enforces.
 
 **2. The uploader caches XNAT state across a `--loop` lifetime.** `xnat-ingest
 upload --loop` opens one XNAT connection and xnatpy caches the
@@ -735,7 +735,7 @@ Deliberately NOT bumped, so nobody re-litigates them: **k0smotron v2.0.3**
 that CVE is an authorization bypass in grpc's authz interceptors and
 k0smotron runs no gRPC server that uses them, so it buys nothing and costs a
 control-plane operator upgrade under a live pipeline); **helm v3.20.1** in
-`scripts/ci-lib.sh` (CVE-2026-35206 is specifically `helm pull --untar`, which
+`scripts/ci/lib.sh` (CVE-2026-35206 is specifically `helm pull --untar`, which
 this repo never runs — if you bump it anyway the sha256 for v3.20.2 linux-amd64
 is `258e830a9e613c8a7a302d6059b4bb3b9758f2f3e1bb8ea0d707ce10a9a72fea`); and
 **busybox:1.36** in the Orthanc init container (its known CVEs are in awk,

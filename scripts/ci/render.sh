@@ -2,7 +2,7 @@
 # =============================================================================
 # 1. helm lint + helm template across the values matrix, for BOTH charts.
 # =============================================================================
-# Every case in scripts/ci-values.sh must lint clean and render. The rendered
+# Every case in scripts/ci/values.sh must lint clean and render. The rendered
 # output is kept in $CI_RENDER_DIR/<case>.yaml and is the input to the
 # PVC-retention and runtime-template checks, so those assert against exactly
 # what CI rendered rather than re-rendering with slightly different values.
@@ -14,8 +14,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-values.sh
-. "$HERE/ci-values.sh"
+# shellcheck source=scripts/ci/values.sh
+. "$HERE/values.sh"
 
 HELM="$(ci_helm)"
 rm -rf "$CI_RENDER_DIR"

@@ -16,8 +16,8 @@
 # =============================================================================
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=ci-lib.sh
-. "$HERE/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$HERE/lib.sh"
 
 ci_heading "duplicate object names"
 

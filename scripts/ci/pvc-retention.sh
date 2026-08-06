@@ -42,15 +42,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci-lib.sh
-. "$HERE/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$HERE/lib.sh"
 
 ci_heading "PVC retention"
 
 shopt -s nullglob
 renders=("$CI_RENDER_DIR"/*.yaml)
 if [ "${#renders[@]}" -eq 0 ]; then
-  ci_fail "no renders in $CI_RENDER_DIR — run scripts/ci-render.sh first (make ci does)"
+  ci_fail "no renders in $CI_RENDER_DIR — run scripts/ci/render.sh first (make ci does)"
   ci_summary "pvc-retention" || true
   exit 1
 fi

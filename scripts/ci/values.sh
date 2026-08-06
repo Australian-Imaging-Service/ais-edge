@@ -2,11 +2,11 @@
 # =============================================================================
 # The values matrix — the single definition of every case CI renders.
 # =============================================================================
-# Sourced by scripts/ci-render.sh and scripts/ci-negative.sh. Running it
+# Sourced by scripts/ci/render.sh and scripts/ci/negative.sh. Running it
 # directly just writes the values files and lists the cases, which is useful
 # for reproducing one case by hand:
 #
-#   scripts/ci-values.sh
+#   scripts/ci/values.sh
 #   helm template mgmt charts/mgmt -f $CI_VALUES_DIR/mgmt-base.yaml \
 #                                  -f $CI_VALUES_DIR/mgmt-two-edges.yaml
 #
@@ -20,8 +20,8 @@
 # =============================================================================
 set -euo pipefail
 
-# shellcheck source=scripts/ci-lib.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ci-lib.sh"
+# shellcheck source=scripts/ci/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 V="$CI_VALUES_DIR"
 mkdir -p "$V"
