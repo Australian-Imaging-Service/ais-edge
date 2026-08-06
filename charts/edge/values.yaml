@@ -38,17 +38,14 @@ topology: onprem
 # =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
 # =============================================================================
-# Pass the management site's values file to the edge release as well:
-#
+# GUIDING: pass both values files to the edge release —
 #   helm upgrade --install edge charts/edge \
 #       -f sites/<mgmt>/values.yaml -f sites/<edge>/values.yaml
-#
-# and the S3 endpoint, the staging bucket, the Loki endpoint and the
-# hostAliases all resolve from these. Setting any of them in the edge file
-# still wins, but every one you set is a value that must now be kept in step
-# with the management side by hand — and every mismatch in this group fails
-# silently (the uploader retries forever, the management side sees an absence
-# it is not watching for). See the derivation helpers in _helpers.tpl.
+# S3 endpoint, staging bucket, Loki endpoint and hostAliases derive from the
+# mgmt file (see _helpers.tpl). CAUTION: setting any of these here still
+# wins, but now must be kept in step with mgmt by hand — every mismatch here
+# fails silently (uploader retries forever; mgmt sees an absence it is not
+# watching for).
 domain:
   internal: ""
   mgmtNodeIP: ""
@@ -68,28 +65,18 @@ clusterLabel: ""
 # =============================================================================
 # 1. dataPolicy — THE one place that decides what is kept, where, how long
 # =============================================================================
-# Stores are split by what the data IS, not by which pod happens to write it:
+# originals: irreplaceable, removed here means gone for good — defaults to
+# forever, change only against a records-retention obligation, never to free
+# disk. derived: reconstructible from an original — safe to reclaim.
 #
-#   originals  irreplaceable. If it is removed here it is gone for good.
-#              Defaults to forever. Change only against your site's records
-#              retention obligation — never just to free disk.
+# CAUTION: every derived rule is (condition AND minAge), both required. A
+# pure age rule would delete a session that never reached XNAT because a
+# credential was wrong; a pure condition rule frees nothing the moment the
+# confirmation signal breaks. Worst case with both: disk fills and you get an
+# alert. Never: data quietly disappears.
 #
-#   derived    reconstructible from an original above. Reclaiming these frees
-#              disk without losing data.
-#
-# Every derived rule is (condition AND minAge). BOTH must hold before anything
-# is reclaimed. That is deliberate:
-#   * a pure age rule would delete a session that never reached XNAT because
-#     the credentials were wrong;
-#   * a pure condition rule frees nothing the moment the confirmation signal
-#     breaks.
-# Requiring both means the worst case is "disk fills up and you get an alert",
-# never "data quietly disappeared".
-#
-# The same dataPolicy block is passed to charts/mgmt. Each chart acts on the
-# stores it owns; keep one copy in sites/<site>/values.yaml and hand it to
-# both releases so there is exactly one answer per site.
-# -----------------------------------------------------------------------------
+# Same block passed to charts/mgmt — one copy in sites/<site>/values.yaml,
+# each chart acts only on the stores it owns.
 dataPolicy:
 
   # Master switch. While false, NOTHING in this chart deletes or expires
@@ -152,15 +139,12 @@ dataPolicy:
       maximumStorageSizeMB: 0
       maximumPatientCount: 0
 
-    # Hardlinks into Orthanc storage, produced by group-orthanc and consumed
-    # by assign. Reclaiming a hardlink does not touch the bytes while any
-    # other link survives.
-    #
-    # Why this matters: `assign --loop` rebuilds its work list from a live
-    # listing of /data/grouped every pass. With reclaim: never and no marker,
-    # it re-assigns the same sessions forever — re-staging them and re-firing
-    # the upload-success alert each cycle. onAssigned is implemented by a
-    # processed-marker state dir, so 'never' remains genuinely usable.
+    # Hardlinks into Orthanc storage; reclaiming one leaves the bytes intact
+    # while any other link survives.
+    # CAUTION: `assign --loop` rebuilds its work list from a live directory
+    # listing every pass — reclaim: never with no marker means it re-assigns
+    # the same sessions forever. onAssigned uses a processed-marker state
+    # dir, so 'never' stays genuinely usable.
     grouped:
       reclaim: onAssigned        # never | onAssigned
       minAge: 0
@@ -413,31 +397,20 @@ upload:
     prefix: staged
     region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
 
-    # NOTE on addressing style: there is deliberately no value here.
-    # Setting AWS_ENDPOINT_URL to a custom endpoint makes botocore resolve
-    # with ForcePathStyle=True automatically — measured against SeaweedFS
-    # 3.99, the request URL comes out as
-    #   https://seaweedfs.aisedge.local/ingest-bucket
-    # which is what the single-SAN certificate needs. AWS_S3_ADDRESSING_STYLE
-    # is NOT a botocore environment variable (it is a config-file key), so a
-    # values entry for it would have been silently ignored. Nothing to set.
+    # No addressing-style key here on purpose: AWS_ENDPOINT_URL alone makes
+    # botocore resolve with ForcePathStyle=True — measured against SeaweedFS
+    # 3.99, the request URL comes out path-style, which the single-SAN cert
+    # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not a botocore env
+    # var, so a values entry for it would be silently ignored.
 
     existingSecret: s3-edge-credentials  # keys: access-key, secret-key
 
     # PEM holding the CA that signed the SeaweedFS server certificate.
-    #
-    # The AWS CLI wants ONE file (AWS_CA_BUNDLE); mc wanted a directory of
-    # PEMs. That shape change is the easy thing to get wrong in the swap.
-    #
-    # SECURITY: AWS_CA_BUNDLE set to an EMPTY STRING does not fall back to
-    # the system trust store — it disables certificate verification
-    # altogether, silently:
-    #   urllib3 InsecureRequestWarning: Unverified HTTPS request is being
-    #   made to host 'seaweedfs.aisedge.local'
-    # (measured; a request to a hostname the cert does not cover then
-    # succeeded.) So the template must emit AWS_CA_BUNDLE only when it has a
-    # real value, and the chart refuses to render an https endpoint with no
-    # CA configured. Never let this render empty.
+    # CAUTION: an EMPTY AWS_CA_BUNDLE does not fall back to the system trust
+    # store — it disables certificate verification entirely, silently
+    # (measured: a request to a hostname the cert does not cover succeeded
+    # anyway). The chart refuses to render an https endpoint with no CA
+    # configured; never let this render empty.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
     image:
@@ -474,18 +447,11 @@ samba:
   enabled: false
   image:
     repository: dockurr/samba
-    # 4.23.5 missed two Samba security releases. The ones that reach a
-    # standalone smbd like this one (the AD/DC-only fixes in those releases do
-    # not apply — no domain controller here):
-    #   4.23.8   CVE-2026-4480  unauthenticated RCE in the printing subsystem
-    #            CVE-2026-4408  unauthenticated RCE in the DCE/RPC SAMR server
-    #            CVE-2026-1933  reparse-point xattrs writable on a read-only share
-    #            CVE-2026-2340  the WORM module did not block overwrite-by-rename
-    #   4.23.10  CVE-2026-58224 CTDB protocol bounds checks
-    # Nothing enables this today (see `enabled: false` above and no site turns
-    # it on), so this is a latent default rather than live exposure — but the
-    # site that does turn it on binds 445 on an edge node inside a hospital
-    # network, which is the worst place to meet an unauthenticated smbd RCE.
+    # 4.23.10, not 4.23.5: closes two unauthenticated RCEs that reach a
+    # standalone smbd (CVE-2026-4480 printing, CVE-2026-4408 DCE/RPC SAMR)
+    # plus CVE-2026-1933/2340/58224. Latent while enabled:false above, but
+    # the site that flips it on binds 445 on a hospital network — the worst
+    # place to meet an unauthenticated smbd RCE.
     tag: "4.23.10"
     pullPolicy: IfNotPresent
   shareName: edge
@@ -518,22 +484,13 @@ observability:
       limits:   {memory: 512Mi, cpu: 500m}
   loki:
     endpoint: ""                        # https://loki.<domain>
-    # This edge's CLIENT CERTIFICATE for the management Loki push endpoint.
-    # kubernetes.io/tls, so the keys are tls.crt / tls.key and there is no key
-    # name to configure. Written into this namespace by the management side's
-    # cert-sync CronJob, from a cert-manager Certificate named after this edge;
-    # you do not create it here, and the certificate rotates without anyone
-    # touching the site.
-    #
-    # THE NAME MUST MATCH the certSync destination in the MANAGEMENT site
-    # values. A mismatch leaves Vector in CreateContainerConfigError — loud on
-    # the edge, invisible from the management node.
-    #
-    # This replaced `existingAuthSecret`, a shared Basic-auth password that
-    # never authenticated a single push: nginx does not read bare passwords out
-    # of an ingress-nginx auth-map, so every push 401'd and, because the
-    # log-derived alerts are built from the logs that never arrived, nothing
-    # said so for months. docs/hardening-decisions.md §1.
+    # This edge's CLIENT CERTIFICATE for the management Loki push endpoint —
+    # kubernetes.io/tls (tls.crt/tls.key), written here by the management
+    # cert-sync CronJob. Not created here; rotates without touching the site.
+    # CAUTION: must match the certSync destination in the MANAGEMENT site
+    # values, or Vector sits in CreateContainerConfigError (loud on the edge,
+    # invisible from mgmt). Replaces a Basic-auth path that never actually
+    # authenticated anything — docs/hardening-decisions.md §1.
     clientCertSecret: loki-push-client-tls
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
