@@ -47,6 +47,42 @@ severity=info     ─► slack-only            (lowest noise; skip email)
                      └─ slack: ${ALERT_SLACK_WEBHOOK}
 ```
 
+**Slack is optional, and the tree above is the Slack-configured shape.** With
+`observability.alerting.slackWebhookSecretRef` empty, the Helm chart does not
+render the two Slack receivers at all and re-points both routes at email:
+
+```
+severity=critical ─► email-primary
+severity=info     ─► info-email            (send_resolved: false,
+                     └─ to: ${ALERT_EMAIL_TO}     repeat_interval: 720h)
+```
+
+This is not cosmetic. Until it was fixed, the Slack receivers were rendered
+unconditionally with `api_url_file` pointing at a Secret nothing creates.
+Alertmanager reads that file at send time and treats ENOENT as *unrecoverable*
+— one attempt, no retry, no fallback — so on a site without Slack every
+`severity=info` alert (`CARotationDue`, `CertificateRenewed`, `NewEdgeJoined`)
+was discarded, leaving only an `ERROR` line in the Alertmanager pod log:
+
+```
+msg="Notify for alerts failed" err="slack-only/slack[0]: notify retry canceled
+due to unrecoverable error after 1 attempts: open
+/etc/alertmanager/secrets/slack-not-configured/webhook-url: no such file or
+directory"
+```
+
+`severity=critical` kept working because integrations within a receiver fan out
+independently, so the email half still sent — but every critical notification
+was also recorded as failed, which is the wrong reading for
+`alertmanager_notifications_failed_total`.
+
+The rule the config now holds to: **no route may name a receiver that cannot
+deliver.** Falling back to email rather than to a null receiver is chosen
+because losing a CA-rotation warning is not recoverable and an extra message a
+month is; the volume that motivated splitting info off email is handled by the
+fallback receiver's shape (no resolved mail, 720h repeat) rather than by
+dropping the alert.
+
 Inhibit rules: when `ManagementClusterDown` fires, downstream
 warning/info alerts on the same cluster are suppressed (no point
 paging about pods being NotReady when the whole cluster is gone).

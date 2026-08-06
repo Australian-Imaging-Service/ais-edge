@@ -21,6 +21,35 @@ our alerts depend on it:
 - `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment="seaweedfs"}`
 - `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
 
+Two caveats on that list, both measured on the live management Prometheus
+rather than assumed:
+
+- **KSM runs on the management cluster only**, and nothing federates or
+  remote-writes child-cluster metrics back to it (see
+  `docs/alerting-architecture.md` for why that path was rejected — edge
+  signals arrive as logs through Loki instead). `kube_node_info` has exactly
+  one series and it is the management node. So the two alerts above that name
+  child-cluster objects cannot observe an edge: `EdgePodCrashLoop` selects
+  `namespace="xnat-ingest"`, which has no series here at all, and
+  `EdgeWorkerDisconnected` does have `kube_node_status_condition` series but
+  only for the management node — it is really a management-node alert wearing
+  an edge name. Neither is touched here; each needs its own decision. Treat
+  `scripts/check-alert-inputs.sh` as the authority on which inputs exist.
+
+- **`*_info`, `*_labels` and `*_annotations` are join metrics, not gauges.**
+  Their value is the constant 1 and every fact lives in a label. A new object
+  appears as a **new series** at 1 — it never moves an existing value — so
+  `changes()`, `delta()`, `rate()` and friends over one of them are
+  identically 0. `NewEdgeJoined` was `changes(kube_node_info[10m]) > 0` and
+  never produced a sample in its life; it has been removed, and
+  `scripts/ci-promtool.sh` now rejects the shape. To say anything about a join
+  metric, work on the SERIES SET rather than the value: `unless on (...)`
+  against another metric, as `CertSyncNeverSucceeded` does
+  (`kube_cronjob_info{...} unless on (namespace, cronjob)
+  kube_cronjob_status_last_successful_time` — "a cronjob exists with no
+  success recorded"), or against the same metric at an `offset` to spot one
+  that has just appeared. Never look for a change in the value.
+
 ## What kube-state-metrics has access to
 
 - **Cluster API** read-only via its ServiceAccount + ClusterRole

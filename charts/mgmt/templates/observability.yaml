@@ -207,6 +207,155 @@ spec:
 {{- end }}
 
 {{/* ===================================================================== */}}
+{{/* mTLS on the Loki push path — the client identities and the anchor     */}}
+{{/* ===================================================================== */}}
+{{- /*
+WHY THIS EXISTS. Loki runs auth_enabled: false and accepts any push it
+receives, so the Ingress is the only place an edge is authenticated at all.
+That check used to be HTTP Basic against a shared password map, and it never
+once worked: the password map is an ingress-nginx `auth-map`, whose values
+nginx feeds to auth_basic_user_file — which does not accept a bare plaintext
+password — so the repo's plaintext template and the hand-hashed Secret on the
+live cluster had already drifted apart, and every edge got 401 forever.
+docs/hardening-decisions.md §1 records basic auth as the wrong call and mTLS
+as the decision; it was held back only until cert-sync existed to renew what
+it distributes (R2). It does.
+
+WHAT THIS BUYS OVER A SHARED PASSWORD. No shared secret material anywhere;
+cert-manager rotates the identity on its own schedule; the identity is bound
+to the site cryptographically instead of being a string anyone holding it can
+replay; and revocation is "remove the site from `edges` and upgrade", after
+which its CN no longer matches. It is also the same trust root the S3 path
+already uses, so there is one PKI to reason about.
+*/ -}}
+{{- $lokiIngress := .Values.observability.loki.ingress }}
+{{- $lokiPush := .Values.observability.loki.push }}
+{{- $clientCASecret := printf "%s-loki-client-ca" (include "mgmt.fullname" .) }}
+{{- if and $lokiIngress.enabled $lokiPush.requireAuth .Values.edges }}
+  {{- /* mTLS has two halves in two charts, and the second one is only reachable
+         through cert-sync. With certSync off, cert-manager issues every client
+         certificate here and nothing carries any of them to a site: every push
+         fails the TLS handshake, and because the log-derived alerts are built
+         FROM the logs that stopped arriving, nothing says so. The per-edge
+         version of this check is in cert-sync.yaml, which is where the entries
+         being judged are read. */ -}}
+  {{- if not .Values.certSync.enabled }}
+    {{- fail "observability.loki.push.requireAuth=true makes the Loki push Ingress demand a client certificate from every edge, but certSync.enabled=false, so nothing ever delivers one. Every site's log push would fail the TLS handshake, and its log-derived alerts would go quiet with it — silence that looks exactly like a healthy fleet. Enable certSync, or set observability.loki.push.requireAuth=false and rely on the network path." }}
+  {{- end }}
+{{- end }}
+{{- if and $lokiIngress.enabled $lokiPush.requireAuth }}
+{{- /*
+THE TRUST ANCHOR THE INGRESS VERIFIES AGAINST.
+
+nginx.ingress.kubernetes.io/auth-tls-secret needs a Secret carrying `ca.crt`,
+and it has to be readable in the Ingress's own namespace: ingress-nginx gates
+cross-namespace annotation references behind allow-cross-namespace-resources,
+and the CA Secret lives in cert-manager's --cluster-resource-namespace, which
+is a DIFFERENT namespace on any brownfield node (cert-manager on the live
+management cluster runs in `cert-manager`, the release is in `ais-mgmt`).
+Pointing the annotation at the CA Secret directly would also hand the
+ingress controller tls.key — the private key of the CA that signs the entire
+fleet — for no reason, since nginx only ever reads ca.crt.
+
+cert-manager has no object whose job is "write this CA's public half into a
+Secret". What it does guarantee is that EVERY Certificate it issues from a CA
+issuer carries the issuing CA in ca.crt. So this is a leaf certificate that is
+never presented anywhere; it exists to materialise ca.crt in the release
+namespace. trust-manager is the purpose-built answer and is not installed
+here, and adding a second controller to distribute one public certificate is a
+larger change than this one object.
+
+REUSING THE LOKI SERVER CERTIFICATE'S SECRET WAS THE OBVIOUS SHORTCUT AND IS
+WRONG. Its ca.crt is whatever signed the SERVER cert, which is
+certManager.issuer — and when that is Let's Encrypt (a supported and
+CI-rendered configuration) ca.crt becomes an ACME chain that has never signed
+an edge client certificate. Every push would then be rejected at the
+handshake. This one is pinned to the internal CA in both cases.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $clientCASecret }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $clientCASecret }}
+  # Not a hostname and not a client identity — it must not collide with an
+  # edge name, or auth-tls-match-cn below would accept this certificate as a
+  # site. Nothing presents it; only its ca.crt is read.
+  commonName: loki-push-client-ca-anchor
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    name: {{ include "mgmt.caIssuerName" . }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+{{- end }}
+{{- /*
+ONE CLIENT IDENTITY PER EDGE, issued from the same CA. cert-sync copies
+tls.crt + tls.key into the site (certSync.secrets in the site values;
+templates/cert-sync.yaml refuses to render if that entry is missing while the
+Ingress demands a certificate).
+
+The Secret name is NOT release-prefixed — see mgmt.lokiClientCertSecret for
+why. commonName is the edge name and nothing else, so the subject DN is
+exactly "CN=<edge>", which is what auth-tls-match-cn matches on.
+
+DELIBERATELY NOT GATED ON observability.loki.push.requireAuth, unlike the
+anchor above. charts/edge mounts loki-push-client-tls unconditionally and
+NOT optional (see charts/edge/templates/vector.yaml for why), and the
+certSync entry that carries it is unconditional too. Gating the issuance on
+requireAuth therefore turns requireAuth=false — which the guards above
+actively offer as the way out — into "cert-sync has no source, the Secret
+never lands, and Vector cannot start at ANY site". The knob that is supposed
+to relax enforcement would take the whole fleet's logging down instead. An
+unused certificate costs one object per edge; that is the cheap side of this
+trade.
+*/ -}}
+{{- range $edge := .Values.edges }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "mgmt.lokiClientCertSecret" $edge.name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  secretName: {{ include "mgmt.lokiClientCertSecret" $edge.name }}
+  commonName: {{ $edge.name | quote }}
+  # 90 days, renewed at 30. Deliberately much shorter than the server certs:
+  # this is the one certificate whose renewal is exercised end to end by
+  # cert-sync, and a yearly cadence means the distribution path is proven once
+  # a year — which is the same as not proven. CertSyncStale covers the gap.
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    # Renewal must produce a NEW key, otherwise a leaked key stays valid for
+    # the life of the fleet.
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - key encipherment
+    # client auth only. This certificate authenticates a site to the push
+    # endpoint; it is never a server, and leaving server auth on would let a
+    # copy of it terminate TLS for any name it happens to carry.
+    - client auth
+  issuerRef:
+    name: {{ include "mgmt.caIssuerName" $ }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+{{- end }}
+
+{{/* ===================================================================== */}}
 {{/* Ingresses — two more SNI routes on the existing :443 listener         */}}
 {{/* ===================================================================== */}}
 {{- if .Values.observability.grafana.ingress.enabled }}
@@ -257,27 +406,59 @@ metadata:
     # Stream push bodies straight through instead of spooling them to disk on
     # the ingress node.
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
-    {{- if .Values.observability.loki.push.requireAuth }}
+    {{- if $lokiPush.requireAuth }}
     {{- /*
     Loki runs auth_enabled: false, so it accepts ANY push it receives. The
-    Ingress is the only place a per-edge credential is checked; without these
+    Ingress is the only place an edge is authenticated; without these
     annotations `observability.loki.push.requireAuth: true` is decorative and
     the push endpoint is open to anything that can reach :443.
 
-    KNOWN CONTRACT BREAK — read before enabling on a live fleet.
-    ingress-nginx can only validate Basic credentials from an annotation
-    (snippet annotations, which is what a bearer check would need, are
-    rejected by default since ingress-nginx 1.9). charts/edge ships Vector
-    with `auth: {strategy: bearer}`, which sends `Authorization: Bearer <tok>`
-    and will get a 401 here. The one-line fix belongs on the edge side —
-    charts/edge/files/vector.yaml, `strategy: basic` with user/password —
-    and both ends must be changed together. Until then, either coordinate
-    that change or run with requireAuth: false and rely on the network path.
+    ssl_verify_client is a SERVER-block directive, so it applies to this
+    hostname and only this hostname. Grafana and the SeaweedFS S3 endpoint are
+    separate server blocks on the same listener and are unaffected — which is
+    why the push endpoint has to keep its own hostname.
+
+    ANNOTATION SUPPORT, CHECKED RATHER THAN ASSUMED. Chart.yaml pins
+    ingress-nginx 4.15.1 = controller v1.15.1. In that release
+    auth-tls-match-cn is classified AnnotationRiskHigh, the controller's
+    default annotations-risk-level is "High", and the comparison rejects only
+    risks strictly GREATER than the configured level — so it is accepted with
+    the settings this chart ships (extraArgs carries no annotation flags).
+    Its validator requires the literal prefix "CN=" followed by a compilable
+    regex, which is the form built below. CVE-2025-1097 was an injection
+    through this annotation and is fixed in v1.11.5 / v1.12.1 and later.
     */}}
-    nginx.ingress.kubernetes.io/auth-type: basic
-    nginx.ingress.kubernetes.io/auth-secret: {{ .Values.observability.loki.push.authSecretRef }}
-    nginx.ingress.kubernetes.io/auth-secret-type: auth-map
-    nginx.ingress.kubernetes.io/auth-realm: "AIS Edge Loki push"
+    # The CA half of the fleet PKI, in this namespace. See the anchor
+    # Certificate above for why it is not the CA Secret itself.
+    nginx.ingress.kubernetes.io/auth-tls-secret: "{{ $ns }}/{{ $clientCASecret }}"
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    # 2, not the ingress-nginx default of 1. selfSigned mode signs the client
+    # certificates directly from the root and needs 1; intermediate mode
+    # (certManager.ca.mode, docs/ca-ceremony.md) puts an intermediate between
+    # the root and the leaf and needs 2. Both modes ship, the chain can be no
+    # longer than that in either, and a depth of 1 in intermediate mode fails
+    # the handshake for every edge at once.
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "2"
+    {{- if .Values.edges }}
+    {{- /*
+    Pin the accepted subjects to the sites we actually issued certificates
+    for. Without this, ANY certificate the fleet CA has ever signed is
+    accepted here — the SeaweedFS and Grafana server certs included.
+
+    STATED HONESTLY: this does NOT stop one edge impersonating another. All
+    sites push to one hostname through one Ingress, so the regex has to admit
+    every site, and Loki has no per-tenant separation to violate anyway
+    (auth_enabled: false; the `cluster` label comes from the payload). What it
+    does buy is that only a certificate minted for pushing is accepted, and
+    that removing a site from `edges` and upgrading revokes it.
+
+    nginx matches this against the whole subject DN, unanchored. Our
+    Certificates set commonName and nothing else, so the DN is exactly
+    "CN=<edge>", and mgmt.validate has already refused any edge name that
+    could act as a regex metacharacter.
+    */}}
+    nginx.ingress.kubernetes.io/auth-tls-match-cn: "CN=({{ range $i, $e := .Values.edges }}{{ if $i }}|{{ end }}{{ $e.name }}{{ end }})"
+    {{- end }}
     {{- end }}
 spec:
   ingressClassName: nginx
@@ -354,11 +535,62 @@ from alertmanagerSpec.secrets. That is what keeps those Secrets SOPS-encrypted
 and out of the rendered manifest.
 */ -}}
 {{- $secretsDir := "/etc/alertmanager/secrets" }}
-{{- $slackFile := printf "%s/slack-not-configured/webhook-url" $secretsDir }}
+
+{{- /* SLACK IS OPTIONAL, AND "OPTIONAL" HAS TO MEAN THE ROUTING TREE CHANGES.
+
+       It previously meant only that the webhook path was a placeholder:
+       $slackFile defaulted to <secretsDir>/slack-not-configured/webhook-url,
+       a Secret nothing creates, and both Slack receivers were rendered
+       regardless. The reasoning recorded here was that api_url_file is read at
+       SEND time, so the config still loads and email keeps working.
+
+       That is true and it is not the whole story. `severity = "info"` routed to
+       slack-only, whose ONLY integration was that dead path, and Alertmanager
+       classes a missing api_url_file as UNRECOVERABLE — one attempt, no retry,
+       no fallback. So on every site without Slack (which is all of them:
+       slackWebhookSecretRef has never been set anywhere in this repo) every
+       info alert was destroyed. Confirmed on the live cluster with a probe
+       alert:
+
+         level=ERROR msg="Notify for alerts failed" ...
+         err="slack-only/slack[0]: notify retry canceled due to unrecoverable
+              error after 1 attempts: open /etc/alertmanager/secrets/
+              slack-not-configured/webhook-url: no such file or directory"
+
+       CARotationDue is severity=info. A site could lose the only warning that
+       its 10-year root CA is inside its last year and never see a symptom.
+
+       So the three values below move together, from one condition. With Slack:
+       the receivers file is spliced in and the routes name it. Without: the
+       Slack receivers are not rendered AT ALL — no receiver in the config can
+       fail to deliver — and both routes fall back to email. Deriving the route
+       receiver NAMES and the receiver DEFINITIONS from the same `if` is the
+       point: a route naming an absent receiver is rejected by Alertmanager at
+       config load, so they must not be able to drift.
+
+       Why email rather than a null receiver: dropping is what the bug already
+       did. The volume objection to emailing info alerts is answered in
+       files/alertmanager-config.yaml by the fallback receiver's shape
+       (send_resolved: false) and its route's repeat_interval, which is a
+       cheaper price than an operator missing a CA rotation. */ -}}
+{{- $slackFile := "" }}
+{{- $slackReceivers := "" }}
+{{- $infoReceiver := "info-email" }}
+{{- $criticalReceiver := "email-primary" }}
 {{- if $slackRef }}
   {{- $slackFile = printf "%s/%s/webhook-url" $secretsDir $slackRef }}
+  {{- $slackReceivers = .Files.Get "files/alertmanager-slack-receivers.yaml" }}
+  {{- $infoReceiver = "slack-only" }}
+  {{- $criticalReceiver = "email-and-slack" }}
 {{- end }}
+
 {{- $am := .Files.Get "files/alertmanager-config.yaml" }}
+{{- /* Spliced FIRST so the __ALERT_EMAIL_TO__ / __ALERT_SLACK_WEBHOOK_FILE__
+       tokens inside the fragment are covered by the same replace chain below
+       and need no second copy of it. */ -}}
+{{- $am = $am | replace "__ALERT_SLACK_RECEIVERS__" $slackReceivers }}
+{{- $am = $am | replace "__ALERT_INFO_RECEIVER__"      $infoReceiver }}
+{{- $am = $am | replace "__ALERT_CRITICAL_RECEIVER__"  $criticalReceiver }}
 {{- $am = $am | replace "__ALERT_EMAIL_TO__"          $alerting.emailTo }}
 {{- $am = $am | replace "__ALERT_EMAIL_FROM__"        ($alerting.emailFrom | default $alerting.emailTo) }}
 {{- $am = $am | replace "__ALERT_SMTP_HOST__"         $alerting.smtpHost }}
@@ -369,12 +601,12 @@ and out of the rendered manifest.
        unset ALERT_SMTP_USERNAME did in the shell installer. */ -}}
 {{- $am = $am | replace "__ALERT_SMTP_USERNAME__"     (default "" $alerting.smtpUsername) }}
 {{- $am = $am | replace "__ALERT_SMTP_PASSWORD_FILE__" (printf "%s/%s/password" $secretsDir $smtpRef) }}
-{{- /* When no Slack Secret is configured this points at a path that does not
-       exist. Alertmanager reads api_url_file at SEND time, so the config
-       still loads and email keeps working — only Slack notifications error.
-       This mirrors the shell installer's https://hooks.slack.com/disabled
-       placeholder, and is deliberate: an empty api_url_file would make
-       Alertmanager reject the whole config and stop delivering everything. */ -}}
+{{- /* A no-op when Slack is unconfigured: the only occurrences of this token
+       live in files/alertmanager-slack-receivers.yaml, which was not spliced
+       in. If one is ever added to the unconditional config file instead, it
+       becomes `api_url_file: ""` on Slack-less sites and Alertmanager rejects
+       the config at load — loud, and far better than the undeliverable
+       receiver that behaviour replaced. */ -}}
 {{- $am = $am | replace "__ALERT_SLACK_WEBHOOK_FILE__" $slackFile }}
 apiVersion: v1
 kind: Secret

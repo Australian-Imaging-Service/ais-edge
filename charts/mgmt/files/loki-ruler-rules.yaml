@@ -32,14 +32,42 @@ groups:
       - alert: XNATUploadFailingForAllSessions
         # Failures appearing while no completed uploads in the same
         # window — i.e. the pipeline has stopped delivering to S3.
+        #
+        # THIS RULE COULD NEVER FIRE UNTIL IT WAS REWRITTEN, AND IT IS THE ONLY
+        # CRITICAL ALERT ON THE EDGE UPLOAD PATH. Two independent defects, both
+        # of which fail in the direction of silence:
+        #
+        # 1. `count_over_time(...) == 0` CANNOT EXPRESS ABSENCE. When the
+        #    selector matches nothing there is no series to compare, so the
+        #    result is EMPTY — not a series carrying the value 0. `X and (Y == 0)`
+        #    is therefore empty exactly when Y is absent, which is the very case
+        #    the rule was written to catch. Measured against live Loki: the
+        #    `== 0` half returns NO SERIES, and it still returns none over a
+        #    22,343-line stream, so this is not an artefact of a quiet window.
+        #
+        # 2. `and ignoring (cluster)` DROPPED THE ONE LABEL THAT MATTERS. It
+        #    matches every left series against every right series regardless of
+        #    which site produced them, so one edge's failures paired with a
+        #    DIFFERENT edge's completions. Measured with the two real clusters
+        #    in this deployment: LHS {cluster=edge-dev}=68 and {cluster=mgmt}
+        #    =22264 against an RHS holding mgmt only, `and ignoring (cluster)`
+        #    returned BOTH series — edge-dev survived purely on mgmt's data.
+        #    A healthy site would have paged for a broken one, and vice versa.
+        #
+        # `unless on (cluster)` fixes both at once, and is the idiom
+        # SessionUploadStalled below already uses correctly: keep a cluster's
+        # failures UNLESS that same cluster also completed an upload in the
+        # window. Absence is expressed by the set operation rather than by
+        # comparing a missing series to a number, and the join is pinned to
+        # `cluster` so sites cannot cross-talk.
         expr: |
           (sum by (cluster) (count_over_time(
             {namespace="xnat-ingest", component="s3-uploader"}
             | json | event="upload_failed" [15m])) > 0)
-          and ignoring (cluster)
+          unless on (cluster)
           (sum by (cluster) (count_over_time(
             {namespace="xnat-ingest", component="s3-uploader"}
-            | json | event="upload_completed" [15m])) == 0)
+            | json | event="upload_completed" [15m])) > 0)
         for: 15m
         labels:
           severity: critical
@@ -85,6 +113,188 @@ groups:
         annotations:
           summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes"
           description: "mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry."
+
+      - alert: SessionStagedNotConfirmedInXNAT
+        # THE ONLY ABSENCE ALERT IN THIS FILE, AND THE MOST IMPORTANT ONE.
+        #
+        # Everything else here is PRESENCE-based: it fires because something
+        # happened. This fires because something DID NOT happen — a session left
+        # the edge and reached staging, and was never confirmed to be in XNAT.
+        #
+        # That is the failure this system is actually exposed to. A silent no-op
+        # upstream, an expired XNAT credential, a renamed project, a new modality
+        # nobody mapped: in every one of those the uploader keeps reporting
+        # success and the staged data simply accumulates. There is no error to
+        # alert on, which is exactly why an absence alert is the only thing that
+        # catches it.
+        #
+        # Observed for real: xnat-ingest's all_uploaded() inspects only
+        # session-level resources and misses scan-level ones, so it skipped a
+        # session while logging "all the resources already exist on XNAT" — about
+        # an EMPTY XNAT. It ran that way for two days looking like success. This
+        # rule would have fired on day one.
+        #
+        # THE CONFIRMATION SIGNAL IS DELIBERATELY THE RECLAIMER'S.
+        # reclaim_confirmed is emitted only after independently re-querying XNAT
+        # and matching every filename and checksum against the staged manifest.
+        # It is the one event in the system that is proof of delivery rather than
+        # a report of an attempt.
+        #
+        # `offset` IS WHAT MAKES THIS CORRECT, AND IT IS EASY TO GET WRONG.
+        #
+        # A plain [48h] range does NOT mean "staged more than 48h ago" — it
+        # means "staged at any point in the last 48h", which is true the moment
+        # a session is staged. Written that way, this alert fires after every
+        # healthy upload, because reclaim_confirmed legitimately does not exist
+        # yet: minAge is 1d, so confirmation cannot arrive for ~25h. Caught on
+        # a live session that was 18h old and already safely in XNAT.
+        #
+        # `[24h] offset 48h` selects sessions the reclaimer SAW between 48h and
+        # 72h ago — old enough that confirmation should have happened. The
+        # confirmation lookback is [72h] so it spans staging through to now.
+        #
+        # BOTH HALVES ARE MANAGEMENT-SIDE, DELIBERATELY. The obvious "staged"
+        # signal is the edge's own upload_completed, and it is the wrong one:
+        # the edge cannot observe XNAT (it holds no credential and never
+        # contacts it), and its logs reach Loki only while the push path is
+        # healthy — so an outage of that path would SILENCE the very alert
+        # meant to catch silent failure. The reclaimer runs on the management
+        # plane, walks every staged session each run, and emits a per-session
+        # event for each, which makes it a staging signal that cannot go quiet
+        # for the same reason the delivery did.
+        #
+        # RAISE BOTH IF YOU RAISE minAge: the offset must stay comfortably above
+        # minAge plus one reclaim schedule interval, or healthy sessions land
+        # inside the window before they can possibly be confirmed.
+        #
+        # `event=~"reclaim_.*"` IN THE FIRST HALF IS NOT A CONVENIENCE, AND IT
+        # MUST NOT BE NARROWED TO A LIST OF THE "INTERESTING" OUTCOMES.
+        #
+        # It is what lets a run that ABORTED still count as evidence that the
+        # session is staged. Until 2026-08-06 a failed pre-flight logged one
+        # reclaim_unavailable with session="" and exited, and `session != ""`
+        # dropped it, so that run contributed nothing to this half.
+        #
+        # SCOPE THAT HONESTLY. The two aborts observed on 2026-08-05/06 (HTTP
+        # 000 from XNAT) did NOT silence this alert: the range below is a count
+        # over 24h and the ~22 healthy runs either side kept it supplied —
+        # checked in Loki, the window never emptied. The exposure is a
+        # pre-flight that stays broken across a whole 24h window, after which
+        # every session staged in that window is invisible here until the
+        # window slides past the outage: 48h after recovery, never without one.
+        #
+        # The reclaimer now fans reclaim_unavailable out per staged session for
+        # exactly this expression to pick up (charts/mgmt/files/reclaim-staged.sh,
+        # `unavailable`), so a reclaimer that can never confirm anything makes
+        # this fire rather than making it quiet.
+        #
+        # reclaim_unavailable can never be mistaken for delivery: the second
+        # half matches event="reclaim_confirmed" exactly, and only a positive,
+        # file-by-file XNAT match emits that.
+        #
+        # This still reports 48h late by design. ReclaimerRunUnavailable below
+        # is the same failure caught within the hour; both are wanted, because
+        # a pre-flight that recovers on its own leaves this one to notice the
+        # sessions that went unconfirmed while it was down.
+        expr: |
+          (sum by (cluster, session) (count_over_time(
+            {namespace="xnat-upload", component="s3-reclaimer"}
+            | json | event=~"reclaim_.*" | session != "" [24h] offset 48h)) > 0)
+          unless on (cluster, session)
+          (sum by (cluster, session) (count_over_time(
+            {namespace="xnat-upload", component="s3-reclaimer"}
+            | json | event="reclaim_confirmed" [72h])) > 0)
+        for: 30m
+        labels:
+          severity: critical
+          source: loki-ruler
+          category: delivery-absence
+        annotations:
+          summary: "Session {{ $labels.session }} staged >48h ago and is NOT confirmed in XNAT"
+          description: |
+            {{ $labels.session }} from {{ $labels.cluster }} reached S3 staging more
+            than 48 hours ago, and the reclaimer has never confirmed XNAT holds its
+            files. Nothing will have errored. Check, in order:
+              1. Is it still staged?
+                 aws s3 ls s3://ingest-{{ $labels.cluster }}/staged/
+              2. What does the uploader say?
+                 kubectl -n xnat-upload logs deploy/mgmt-upload-{{ $labels.cluster }} | grep {{ $labels.session }}
+                 "Skipping ... all the resources already exist on XNAT" against an
+                 empty XNAT means the upstream all_uploaded() bug.
+              3. Does XNAT actually hold it?
+              4. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
+                 means a partial upload. reclaim_unavailable means the reclaimer
+                 could not decide at all — see ReclaimerRunUnavailable.
+
+      - alert: ReclaimerRunUnavailable
+        # THE RECLAIMER FAILING IS NOT A DATA-LOSS EVENT. IT IS A BLINDNESS
+        # EVENT, WHICH IN THIS PIPELINE IS WORSE.
+        #
+        # An aborted reclaim run deletes nothing, so on the surface it is the
+        # safe outcome. What it actually costs is the one independent check
+        # that XNAT holds what was staged. While it is down nothing confirms
+        # deliveries, staging grows, and the operator is told nothing —
+        # observed twice on 2026-08-05/06 (18:17Z and 01:17Z), both an XNAT
+        # auth probe returning HTTP 000, both entirely silent. THIS is the rule
+        # those two aborts needed; the per-session fan-out feeding
+        # SessionStagedNotConfirmedInXNAT above covers the longer outage that
+        # has not happened yet.
+        #
+        # `session = ""` COUNTS RUNS, NOT SESSIONS. The reclaimer emits one
+        # session-less reclaim_unavailable for the run and then one per staged
+        # session (that fan-out is what keeps SessionStagedNotConfirmedInXNAT
+        # above supplied). Without this filter a single aborted run against a
+        # hundred staged sessions would read as a hundred failures.
+        # (Strictly it counts run-level LINES: a run that hits
+        # UNAVAILABLE_SESSION_CAP emits a session-less truncation line too, so
+        # such a run contributes 2. Immaterial against `> 0` — do not "fix" it
+        # by dropping the filter.)
+        #
+        # Grouped by `reason` — the machine-readable slug the script attaches,
+        # e.g. xnat_probe_failed, filer_unreachable, bucket_unreachable,
+        # missing_tool — so the notification names the broken dependency
+        # instead of just saying the job failed.
+        #
+        # [3h] against an hourly CronJob: one aborted run is enough to fire,
+        # and the alert clears about three hours after the reclaimer starts
+        # completing again. A range at or below the schedule interval would
+        # resolve and re-fire between runs and mail on every cycle.
+        #
+        # severity=warning, NOT critical, deliberately. Nothing is lost and the
+        # observed failures were transient and self-healing; a twice-a-day
+        # critical is how an alert gets filtered into a folder nobody reads,
+        # which would put us back where we started. The critical for this
+        # failure mode is SessionStagedNotConfirmedInXNAT, which now still
+        # fires 48h later because of the per-session fan-out.
+        expr: |
+          sum by (cluster, reason) (count_over_time(
+            {namespace="xnat-upload", component="s3-reclaimer"}
+            | json | event="reclaim_unavailable" | session = "" [3h])) > 0
+        for: 0s
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: delivery-absence
+        annotations:
+          summary: "Reclaimer on {{ $labels.cluster }} aborted before deciding anything ({{ $labels.reason }})"
+          description: |
+            The S3 staging reclaimer failed its pre-flight and examined nothing.
+            Nothing was deleted — but nothing was CONFIRMED either, so for as long
+            as this is firing no session is being independently checked against
+            XNAT and staging is not being reclaimed.
+              1. What did it say? (the pod of a FAILED job is usually already
+                 garbage-collected, so prefer Loki over kubectl logs)
+                 kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+              2. reason={{ $labels.reason }} names the failed dependency:
+                 xnat_probe_failed / xnat_credentials_missing → XNAT or its Secret
+                 filer_unreachable / filer_unhealthy          → SeaweedFS filer
+                 bucket_unreachable / staging_list_failed     → S3 gateway or creds
+                 minage_unparseable / reclaim_disabled        → dataPolicy values
+                 missing_tool                                 → the job image
+              3. Sessions staged while this was firing are still tracked:
+                 the reclaimer logs reclaim_unavailable per session, so
+                 SessionStagedNotConfirmedInXNAT will fire on them in ~48h if
+                 they are never confirmed.
 
       - alert: XNATBacklogGrowing
         # Sessions arriving in S3 faster than they're consumed by
@@ -183,32 +393,58 @@ groups:
     interval: 30s
     rules:
       - alert: XNATUploadSuccess
-        # Fires the moment xnat-ingest-upload logs "Successfully uploaded
-        # all files in '<session>'". The same log line is emitted twice
-        # per session (once after resource upload, once after metadata
-        # extraction). Alertmanager's group_by + group_interval coalesces
-        # those into a single notification per session.
+        # MUST BE A MANAGEMENT-SIDE SIGNAL. THE EDGE CANNOT KNOW.
         #
-        # rate(...) converts the boolean match into events-per-second;
-        # > 0 means at least one match in the past 30s. for: 0s fires
-        # immediately on first match.
-        # We group by the SESSION, not just the cluster. upload_.py logs
-        # this line twice per session AND re-logs it on every --loop pass
-        # for as long as the session remains in the S3 staging prefix
-        # (xnat-ingest upload has no S3 retention). Grouping only by
-        # cluster therefore produced one flapping alert that re-notified
-        # forever. With `session` in the series labels, each session is
-        # its own alert identity: a NEW session notifies immediately,
-        # while an already-notified session is suppressed by the route's
-        # repeat_interval — i.e. exactly one email per session landing
-        # in XNAT.
+        # This alert means "the session is in XNAT". Only the management plane can
+        # observe that: the edge holds no XNAT credential and never contacts XNAT —
+        # that separation is the entire point of upload.mode: s3.
+        #
+        # It was briefly re-pointed at the edge's own `upload_completed` event to
+        # stop duplicate mail. That was wrong: upload_completed means "reached S3
+        # staging", NOT "reached XNAT", so the alert would have claimed delivery
+        # for sessions that never landed.
+        #
+        # THE RANGE MUST EXCEED THE UPLOADER'S LOOP PERIOD. This is the reason
+        # duplicate mail happened, and it is not obvious.
+        #
+        # The uploader re-scans staging every ~62s and logs "Successfully
+        # uploaded all files in '<session>'" on EVERY pass — including the pass
+        # where it finds the session already in XNAT and skips it (the same log
+        # run shows 14x "already exists" and 14x "Skipping" beside 30 of these
+        # lines). So this string is not an event that happens once; it is a
+        # LEVEL that is re-asserted for as long as the session sits in staging,
+        # which with dataPolicy.enabled=false is forever.
+        #
+        # With a [1m] range and a ~62s emission gap, the series went empty
+        # between passes: the alert RESOLVED and then re-FIRED on the next loop,
+        # once a minute. Each re-fire is a new alert instance, and grouping
+        # cannot suppress those — group_by only collapses alerts that are firing
+        # AT THE SAME TIME. Adding `session` to group_by (files/alertmanager-
+        # config.yaml) was necessary but on its own not sufficient; a live drop
+        # still produced three mails for one session.
+        #
+        # 10m gives ~10x headroom over the observed loop, so the series stays
+        # continuous and Alertmanager sends once and then honours
+        # repeat_interval. It costs nothing at the front: count_over_time > 0 is
+        # true on the FIRST matching line, and `for: 0s` means the first mail is
+        # not delayed. The alert clears ~10m after the uploader goes quiet.
+        #
+        # If you change this range, it must stay well above the uploader's loop
+        # interval or the flapping returns. scripts/ci-promtool.sh asserts it.
+        #
+        # Keying on a third-party log string is a real weakness — an upstream
+        # rewording disables this silently. It is accepted here because the only
+        # alternative that is genuinely PROOF of delivery is the reclaimer's
+        # reclaim_confirmed, which is gated on minAge and so arrives a day late.
+        # SessionStagedNotConfirmedInXNAT below is the backstop for exactly the
+        # case where this string stops matching: staged, and never confirmed.
         expr: |
           sum by (cluster, session) (
             count_over_time(
               {namespace="xnat-upload"}
               |~ "Successfully uploaded all files in"
               | regexp "Successfully uploaded all files in '(?P<session>[^']+)'"
-              [1m]
+              [10m]
             )
           ) > 0
         for: 0s
@@ -229,10 +465,30 @@ groups:
         # lockout, or XNAT-side proxy misconfig (e.g. the https→http
         # downgrade we caught earlier). Warning rather than critical
         # because retries may still succeed within the loop window.
+        # THE BARE NUMBERS NEED HTTP CONTEXT, AND PROGRESS BARS MUST BE
+        # EXCLUDED. This used to be \b(401|403|unauthorized|forbidden)\b,
+        # which fires on ANY log line containing 401 or 403 as a word — and
+        # xnat-ingest writes tqdm progress bars into this namespace:
+        #
+        #   Processing staged sessions found in 's3://.../staged':
+        #     0%|          | 0/1 [00:00<?, ?it/s]100%|####| 1/1 [00:01<00:00...
+        #
+        # Those frames are full of digits, so the alert fired on a healthy
+        # upload run. Observed live: XNATAuthFailure notified while the
+        # uploader was authenticating to XNAT perfectly well.
+        #
+        # A false auth alert is worse than none. It trains you to ignore the
+        # one alert that means your fleet has stopped delivering, and it fires
+        # precisely when things are working — during an upload.
+        #
+        # `!= "it/s"` drops tqdm lines before the regex runs (cheap, and no
+        # legitimate auth error contains it). The regex then requires the
+        # status code to sit next to HTTP context rather than float free.
         expr: |
           sum by (cluster) (count_over_time(
             {namespace="xnat-upload"}
-            |~ "(?i)\\b(401|403|unauthorized|forbidden)\\b" [5m])) > 0
+            != "it/s"
+            |~ "(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\b|HTTP[^0-9]{0,10}40[13]\\b|\\b40[13][^0-9]{0,3}(unauthorized|forbidden))" [5m])) > 0
         for: 1m
         labels:
           severity: warning

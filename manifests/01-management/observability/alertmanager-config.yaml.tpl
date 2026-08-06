@@ -10,6 +10,20 @@
 #   severity=warning   →  email only
 #   severity=info      →  slack only (or dropped if no Slack)
 #
+# "(or dropped if no Slack)" IS A BUG, NOT A DESIGN, and it is fixed in the
+# chart rather than here. On a site with no webhook this file routes every
+# severity=info alert — CARotationDue among them — to a receiver that cannot
+# deliver, so the alert is destroyed and the only trace is an error line in
+# the Alertmanager pod log. charts/mgmt/files/alertmanager-config.yaml drops
+# the Slack receivers entirely when no webhook Secret is configured and sends
+# info to email instead; see docs/components/alertmanager.md.
+#
+# It is deliberately NOT patched here. This tree is the imperative installer's
+# copy, rendered by scripts/02d-install-observability.sh with a different
+# substitution mechanism and exercised by none of the CI in scripts/ci-*.sh. A
+# second, untested implementation of the fix is worth less than an accurate
+# pointer to the one that is tested. Deploy the chart.
+#
 # All values come from config/management.env so site IT can change the
 # inbox or webhook without touching YAML.
 # =============================================================================

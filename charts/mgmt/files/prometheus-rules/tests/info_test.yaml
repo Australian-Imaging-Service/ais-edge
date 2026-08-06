@@ -1,8 +1,8 @@
 # =============================================================================
 # promtool unit tests — info rules
 # =============================================================================
-# All three of these depend on cert-manager or kube-state-metrics series that
-# were NOT being scraped until recently: cert-manager here was installed with
+# Both of these depend on cert-manager series that were NOT being scraped
+# until recently: cert-manager here was installed with
 # `kubectl apply`, which ships no metrics Service and no ServiceMonitor, so
 # CARotationDue and CertificateRenewed had never been able to fire. Nothing
 # would have warned before the CA expired.
@@ -93,22 +93,25 @@ tests:
               description: "cert-manager auto-renewed the certificate. No action required."
 
   # ---------------------------------------------------------------------
-  - interval: 1m
-    name: NewEdgeJoined fires when kube_node_info changes
-    input_series:
-      - series: 'kube_node_info{node="k0s-edge-worker-new",cluster="edge-dev"}'
-        values: "1+0x20 2+0x20"
-    alert_rule_test:
-      - eval_time: 5m
-        alertname: NewEdgeJoined
-        exp_alerts: []
-      - eval_time: 25m
-        alertname: NewEdgeJoined
-        exp_alerts:
-          - exp_labels:
-              severity: info
-              node: k0s-edge-worker-new
-              cluster: edge-dev
-            exp_annotations:
-              summary: "A new node joined a child cluster"
-              description: "kube_node_info changed for edge-dev. If this was unplanned, investigate."
+  # THE NewEdgeJoined CASE THAT USED TO BE HERE IS GONE WITH ITS RULE, AND IT
+  # IS WORTH KNOWING WHY, BECAUSE IT IS THE ONE FAILURE MODE THIS WHOLE FILE
+  # CANNOT CATCH.
+  #
+  # The rule was `changes(kube_node_info[10m]) > 0`. kube_node_info is a
+  # kube-state-metrics join metric pinned at the constant 1, so changes() over
+  # it is identically 0 and the alert never fired once in the cluster's life.
+  # The test passed anyway — it drove the series "1+0x20 2+0x20", and
+  # kube-state-metrics never emits a 2. A unit test can supply a series that
+  # reality cannot, which makes promtool the wrong tool for "does this input
+  # exist, in this shape". scripts/check-alert-inputs.sh answers the first half
+  # of that question against the live Prometheus, and it could not have caught
+  # this one either: kube_node_info is present and scraped, just never varying.
+  #
+  # Nor can a test pin the removal. `exp_alerts: []` for a deleted alert passes
+  # trivially, and it would go on passing the moment somebody pasted the broken
+  # rule back, because the broken rule also produces no alerts. So the guard is
+  # in scripts/ci-promtool.sh instead: it rejects change-detecting functions
+  # over any *_info / *_labels / *_annotations metric in any rule file, which
+  # is a property of the EXPRESSION and therefore checkable without inventing
+  # series. The full reasoning for the removal is in ../info.yaml.
+  # ---------------------------------------------------------------------

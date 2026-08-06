@@ -31,6 +31,12 @@ PASS=0; FAIL=0; FAILED=()
 _R=$'\033[31m'; _G=$'\033[32m'; _B=$'\033[1m'; _O=$'\033[0m'
 
 # run_case <name> <expect_deleted: yes|no> <expect_event> [env assignments...]
+#
+# A case may also define `assert_<name>`, called with the path to the captured
+# output. It prints why it is unhappy and returns non-zero. That exists because
+# `deleted` plus one event name cannot express the property the pre-flight
+# cases are about: not "which event" but "which SESSIONS were named, and which
+# events were deliberately NOT emitted".
 run_case() {
     local name="$1" expect_del="$2" expect_event="$3"; shift 3
     local S="$WORK/$name"
@@ -59,6 +65,8 @@ run_case() {
         "$@" \
         bash "$SCRIPT" 2>&1)
 
+    printf '%s\n' "$out" > "$S/out.log"
+
     local deleted="no"
     [ -s "$S/deletes.log" ] && deleted="yes"
 
@@ -68,6 +76,11 @@ run_case() {
         [ -s "$S/deletes.log" ] && why="$why (deleted: $(tr '\n' ' ' < "$S/deletes.log"))"
     elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
         ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+    elif declare -F "assert_$name" >/dev/null 2>&1; then
+        local extra
+        if ! extra=$("assert_$name" "$S/out.log" 2>&1); then
+            ok=0; why="$extra"
+        fi
     fi
 
     if [ "$ok" = "1" ]; then
@@ -183,6 +196,80 @@ setup_filer_refuses()    { prefixes "staged/$SESS/"; session_with "$SESS" 2; xna
 setup_state_dir_skipped() { prefixes "staged/.reclaim-state/ staged/$SESS/"
                             session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
 
+# =============================================================================
+# Silence cases: a run that COULD NOT DECIDE vs a run that decided there was
+# nothing to do.
+# =============================================================================
+# Every case above asserts on deletes. These three assert on the opposite —
+# what the run SAID — because the defect they pin down produced no delete and
+# no error, only silence.
+#
+# The reclaimer aborted its pre-flight on 2026-08-05T18:17:11Z and again on
+# 2026-08-06T01:17:11Z (XNAT auth probe, HTTP 000). Each run logged one
+# reclaim_unavailable with session="" and exited, and nothing alerted.
+# SessionStagedNotConfirmedInXNAT builds its "staged" half from
+# `event=~"reclaim_.*" | session != ""`, so those lines contributed nothing to
+# it. Two isolated aborts were absorbed by that alert's 24h count window — the
+# case that is NOT absorbed, and that the fan-out asserted below exists for, is
+# a pre-flight that stays broken across a whole window.
+#
+# `deleted=no` was already true of that run, and always will be — which is why
+# it needed an assertion of a different kind.
+
+# grep on the event AND the session together. "a reclaim_unavailable was
+# logged" and "a reclaim_unavailable was logged FOR THIS SESSION" are different
+# claims, and only the second is what the alert consumes. jlog emits `event`
+# immediately before `session`, so they are adjacent.
+ev_for() { grep -q "\"event\":\"$2\",\"session\":\"$3\"" "$1"; }
+
+# Pre-flight fails, two sessions are staged: both must be named.
+setup_preflight_xnat_fanout() { prefixes "staged/$SESS/ staged/proj.subj2.visit/"
+                                : > "$CASE_DIR/xnat-auth.fail"; }
+assert_preflight_xnat_fanout() {
+    local log="$1" why="" s
+    grep '"event":"reclaim_unavailable","session":""' "$log" | grep -q '"reason":"xnat_probe_failed"' \
+        || why="$why no run-level reclaim_unavailable carrying reason=xnat_probe_failed (ReclaimerRunUnavailable keys on it);"
+    for s in "$SESS" proj.subj2.visit; do
+        ev_for "$log" reclaim_unavailable "$s" \
+            || why="$why no per-session reclaim_unavailable for $s — the staged half of SessionStagedNotConfirmedInXNAT would see nothing for it;"
+    done
+    grep -q '"event":"reclaim_finished"' "$log" \
+        && why="$why logged reclaim_finished on an aborted run — that is what a nothing-to-do run logs, and the two must stay distinguishable;"
+    grep -q '"event":"reclaim_confirmed"' "$log" \
+        && why="$why logged reclaim_confirmed without a positive answer from XNAT;"
+    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
+}
+
+# The other side of the invariant: a healthy run over empty staging must NOT
+# look like an aborted one. `None` is what the real CLI prints for a null
+# JMESPath result, so this is also the only case that walks that branch.
+setup_nothing_to_do() { printf 'None' > "$CASE_DIR/list-prefixes.json"; }
+assert_nothing_to_do() {
+    local log="$1" why=""
+    grep -q '"examined":0' "$log" \
+        || why="$why reclaim_finished did not report examined=0;"
+    grep -q '"event":"reclaim_unavailable"' "$log" \
+        && why="$why a healthy run over empty staging logged reclaim_unavailable — that is the abort signal and it would raise ReclaimerRunUnavailable;"
+    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
+}
+
+# The fan-out is BEST-EFFORT. When the bucket itself is what is broken there is
+# nothing to enumerate, and the run must degrade to the run-level line rather
+# than hang, retry forever, or invent session names.
+setup_preflight_no_listing() { prefixes "staged/$SESS/"
+                               : > "$CASE_DIR/head-bucket.fail"
+                               : > "$CASE_DIR/list-prefixes.fail"; }
+assert_preflight_no_listing() {
+    local log="$1" why=""
+    grep '"event":"reclaim_unavailable","session":""' "$log" | grep -q '"reason":"bucket_unreachable"' \
+        || why="$why no run-level reclaim_unavailable carrying reason=bucket_unreachable;"
+    ev_for "$log" reclaim_unavailable "$SESS" \
+        && why="$why named a session it could not have listed;"
+    grep -q '"event":"reclaim_finished"' "$log" \
+        && why="$why logged reclaim_finished on an aborted run;"
+    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
+}
+
 printf '\n%s== reclaimer decision paths ==%s\n' "$_B" "$_O"
 run_case happy_path            yes reclaim_removed
 run_case xnat_has_more         yes reclaim_removed
@@ -212,6 +299,11 @@ run_case dry_run               no  reclaim_skipped     DRY_RUN=true
 run_case wrong_reclaim         no  reclaim_unavailable RECLAIM=never
 run_case filer_refuses         no  reclaim_failed
 run_case state_dir_skipped     yes reclaim_removed
+
+printf '\n%s== could-not-decide vs nothing-to-do ==%s\n' "$_B" "$_O"
+run_case preflight_xnat_fanout no  reclaim_unavailable
+run_case nothing_to_do         no  reclaim_finished
+run_case preflight_no_listing  no  reclaim_unavailable
 
 printf '\n%sreclaimer: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then

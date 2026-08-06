@@ -7,9 +7,12 @@
 # Suitable for single-node MVP. For multi-node scale-out, split into separate
 # StatefulSets (see README "Scaling SeaweedFS" section).
 #
-# Image pinned to 3.99 (last 3.x stable) — avoids the 4.18/4.19 filer memory
-# regression (issue #9035) and gives us a known-good baseline. Bump to 4.x
-# only after that issue is verified resolved.
+# Image pinned to 4.34, in step with charts/mgmt/values.yaml. This used to say
+# "pinned to 3.99 ... bump to 4.x only after issue #9035 is resolved". #9035
+# (the 4.18/4.19 filer memory regression) is closed, and staying on 3.99 was no
+# longer the safer choice: 3.99 carries three S3 path traversals that defeat
+# per-bucket isolation. See the long note on seaweedfs.image.tag in
+# charts/mgmt/values.yaml — that note is the one that gets maintained.
 #
 # The ConfigMap "s3-config" is created separately by 03-deploy-seaweedfs.sh
 # (it generates the S3 identities from management.env + edge-nodes.env).
@@ -45,7 +48,13 @@ spec:
     spec:
       containers:
         - name: seaweedfs
-          image: chrislusf/seaweedfs:3.99
+          # Kept in step with charts/mgmt/values.yaml seaweedfs.image.tag.
+          # 3.99 is vulnerable to CVE-2026-54917, CVE-2026-58372 and
+          # CVE-2026-55874: three S3 path traversals that let a key scoped to
+          # one bucket read, copy and delete across any other bucket. See the
+          # long note on that value for why the target is 4.34 and not 4.30 —
+          # 4.30 fixes only the first of the three.
+          image: chrislusf/seaweedfs:4.34
           # `weed server -s3` starts master + volume + filer + S3 in one process
           # -dir         data directory (master/volume/filer all under here)
           # -s3          enable S3 gateway
@@ -63,6 +72,12 @@ spec:
             - "-s3"
             - "-s3.config=/etc/seaweedfs/s3.json"
             - "-s3.port=8333"
+            # 4.x defaults an Iceberg REST Catalog on to port 8181 and 3.99 had
+            # no such server. Turning it off keeps this path to the same shape
+            # it had on 3.99, and removes the subsystem two of the advisories
+            # behind the 4.34 bump are about. Same flag, same reasoning, as
+            # charts/mgmt/templates/seaweedfs.yaml — read the WHY there.
+            - "-s3.port.iceberg=0"
             # Built-in Prometheus exposition. Each subsystem exposes its own
             # /metrics endpoint on a dedicated port — Prometheus scrapes all
             # four via the metrics-only ClusterIP Service (defined below).

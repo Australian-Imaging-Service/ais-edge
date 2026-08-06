@@ -78,7 +78,13 @@
 #     reclaim_removed    fs.rm -r returned 0 for this prefix
 #     reclaim_kept       deliberately NOT removed — undelivered, or uncertain
 #     reclaim_failed     removal ran but the prefix is still listed
-#     reclaim_unavailable  pre-flight failed; nothing was examined
+#     reclaim_unavailable  pre-flight failed; nothing was DECIDED. Emitted once
+#                        with session="" for the run, then once per staged
+#                        session — see the pre-flight note below for why the
+#                        per-session copies are not redundant.
+#     reclaim_finished   the run walked staging to the end. NEVER emitted by an
+#                        aborted run: "could not decide" and "decided there was
+#                        nothing to do" must not look alike in the log.
 # =============================================================================
 set -uo pipefail
 
@@ -143,6 +149,117 @@ jlog() {
 # $1=session $2=reason $3=message $4=extra JSON (leading comma, optional)
 keep() { jlog reclaim_kept "$1" "$3" ",\"reason\":\"$2\"${4:-}"; }
 
+# Session prefixes, exactly as the uploader sees them: one delimited listing of
+# staging. This includes 0-byte ghost entries, which is the point.
+#
+# Defined UP HERE, above the pre-flight, rather than with the other S3 helpers
+# further down: `unavailable` below calls it, and a bash function must exist by
+# the time it is called, not merely somewhere in the file.
+s3_list_prefixes() {
+    local raw
+    raw=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/" \
+            --delimiter / --query 'CommonPrefixes[].Prefix' --output text 2>/dev/null) || return 1
+    # No prefixes at all: the CLI prints "None" for a null JMESPath result.
+    [ "$raw" = "None" ] && return 0
+    printf '%s' "$raw" | tr '\t' '\n' | sed "s#^${S3_PREFIX}/##; s#/\$##" | grep -v '^$'
+    return 0
+}
+
+# -----------------------------------------------------------------------------
+# Aborting the run. WHY THIS IS NOT JUST `jlog ... ; exit 1`.
+# -----------------------------------------------------------------------------
+# Observed twice in 24h on the mgmt cluster — 2026-08-05T18:17:11Z and
+# 2026-08-06T01:17:11Z, both "XNAT auth probe returned HTTP 000". Each run
+# logged ONE reclaim_unavailable with session="" and exited. That is a
+# silent failure dressed as a safe one: nothing was deleted, and nothing was
+# said either.
+#
+# The second cost is structural. SessionStagedNotConfirmedInXNAT (see
+# files/loki-ruler-rules.yaml) builds its "this session is staged" half from
+#     {component="s3-reclaimer"} | json | event=~"reclaim_.*" | session != ""
+# because the reclaimer is the one component that walks every staged session
+# from the management plane. A line with session="" is dropped by that filter,
+# so an aborted run contributes NOTHING to it.
+#
+# BE PRECISE ABOUT HOW BAD THAT IS — the two observed failures did NOT silence
+# that alert, and claiming they did would be the fourth wrong diagnosis in this
+# repo. Its staged half is a count over a 24h window, and 22 of the 24 runs
+# either side of each failure were healthy: measured in Loki afterwards, the
+# window never emptied (10 / 16 / 22 events for the one staged session at
+# 19:00Z, 02:00Z and 10:00Z). An ISOLATED aborted run is absorbed.
+#
+# What the fan-out below actually buys is the SUSTAINED case: a pre-flight that
+# stays broken — an expired XNAT credential, a filer that does not come back —
+# across a whole 24h window. Then every session staged in that window is
+# invisible to the absence alert, and stays invisible until the window slides
+# over hours where the reclaimer worked again: 48h after recovery, and never if
+# it does not recover. That is precisely the state in which "staged and never
+# confirmed in XNAT" most needs to fire, so it is the state it must not be
+# blind in.
+#
+# So aborting does two things instead of one:
+#   1. logs the run-level reclaim_unavailable, now carrying a machine-readable
+#      `reason` slug. ReclaimerRunUnavailable alerts on that within the hour,
+#      which is what turns a pre-flight failure into a page instead of a gap.
+#   2. best-effort lists staging and logs one reclaim_unavailable PER SESSION,
+#      so the absence logic keeps getting the staged signal it depends on
+#      through an outage of any length. This is the belt-and-braces half: (1)
+#      is what an operator actually acts on, and (2) is what still fires ~48h
+#      later if nobody did.
+#
+# Best-effort, deliberately: if `aws` is the missing tool or the bucket is what
+# is unreachable, there is nothing to list and the run-level line stands alone.
+# That is also why the staging-listing failure in the main pass comes through
+# here — a listing that failed once may succeed on the retry, and if it does we
+# get the per-session events for free.
+#
+# What it must NOT do is emit reclaim_finished. A nothing-to-do run ends with
+# reclaim_finished examined=0; if an aborted run ended the same way, the two
+# would be indistinguishable in the log, which is the whole defect.
+
+# Cap on the per-session fan-out. A pre-flight that fails every hour against a
+# large staging prefix would otherwise push tens of thousands of lines a day at
+# Loki, and a stream that trips an ingestion limit is DROPPED — restoring the
+# silence this exists to prevent. Truncation is reported rather than implied.
+# Env-overridable but not a chart value: nothing in the chart should need it.
+UNAVAILABLE_SESSION_CAP="${UNAVAILABLE_SESSION_CAP:-500}"
+
+# $1=reason slug (machine-readable, stable)  $2=operator-facing message
+unavailable() {
+    local slug="$1" msg="$2" listed session n=0
+    jlog reclaim_unavailable "" "$msg" ",\"reason\":\"${slug}\""
+
+    if listed=$(s3_list_prefixes 2>/dev/null); then
+        while IFS= read -r session; do
+            [ -n "$session" ] || continue
+            # Our own state prefix is not a session. The main pass matches the
+            # literal `.reclaim-state` only (its charset guard catches any
+            # other dot-prefix and logs a reclaim_kept for it); this path has
+            # no charset guard because it names rather than deletes, so it
+            # matches $STATE_PREFIX too and is deliberately the stricter of
+            # the two. Erring towards naming one prefix too few here costs a
+            # missing alert on a directory that is not a session anyway.
+            case "$session" in
+                "$STATE_PREFIX"|.reclaim-state) continue ;;
+            esac
+            if [ "$n" -ge "$UNAVAILABLE_SESSION_CAP" ]; then
+                jlog reclaim_unavailable "" "reported ${n} staged sessions and stopped at the cap — staging holds more than are named above" \
+                    ",\"reason\":\"${slug}\",\"truncated\":true"
+                break
+            fi
+            n=$((n + 1))
+            # No shell interpolation of $session happens anywhere on this path
+            # (the filer is never called), so an unsafe prefix name is safe to
+            # NAME here; jsan strips control characters and escapes quotes.
+            jlog reclaim_unavailable "$session" "staged, and this run could not decide anything about it: ${msg}" \
+                ",\"reason\":\"${slug}\""
+        done <<EOF
+${listed}
+EOF
+    fi
+    exit 1
+}
+
 # -----------------------------------------------------------------------------
 # Pre-flight. Every failure below aborts the WHOLE run before a single
 # decision is taken, rather than degrading into a run that keeps everything:
@@ -150,8 +267,7 @@ keep() { jlog reclaim_kept "$1" "$3" ",\"reason\":\"$2\"${4:-}"; }
 # with nothing to do.
 # -----------------------------------------------------------------------------
 if [ "$RECLAIM" != "onXnatConfirmed" ]; then
-    jlog reclaim_unavailable "" "reclaim=${RECLAIM} is not onXnatConfirmed — refusing to remove anything"
-    exit 1
+    unavailable reclaim_disabled "reclaim=${RECLAIM} is not onXnatConfirmed — refusing to remove anything"
 fi
 
 # python3 is in this list on purpose. It parses the object-count JSON, and it
@@ -161,8 +277,10 @@ fi
 # tinguishable from "there was nothing to reclaim". Fail loudly instead.
 for tool in aws curl date timeout python3; do
     command -v "$tool" >/dev/null 2>&1 || {
-        jlog reclaim_unavailable "" "required tool '${tool}' is not in this image — the reclaimer needs aws-cli (S3 listings), curl (XNAT REST + the filer delete) and python3 (parsing object counts); nothing was examined and nothing was removed"
-        exit 1
+        # If `aws` itself is what is missing, the fan-out inside `unavailable`
+        # finds nothing to list and the run-level line stands alone. Nothing to
+        # do about that from in here; it is why the run-level line exists.
+        unavailable missing_tool "required tool '${tool}' is not in this image — the reclaimer needs aws-cli (S3 listings), curl (XNAT REST + the filer delete) and python3 (parsing object counts); nothing was examined and nothing was removed"
     }
 done
 
@@ -171,12 +289,11 @@ done
 # confirmations have already been spent.
 if ! filer_code=$(timeout "$HTTP_TIMEOUT" curl -sS -o /dev/null -w '%{http_code}' \
         "${FILER_ENDPOINT%/}/buckets/?limit=1" 2>&1); then
-    jlog reclaim_unavailable "" "filer at ${FILER_ENDPOINT} is unreachable: ${filer_code}"
-    exit 1
+    unavailable filer_unreachable "filer at ${FILER_ENDPOINT} is unreachable: ${filer_code}"
 fi
 case "$filer_code" in
     2*|3*) : ;;
-    *) jlog reclaim_unavailable "" "filer at ${FILER_ENDPOINT} answered HTTP ${filer_code} — refusing to run"; exit 1 ;;
+    *) unavailable filer_unhealthy "filer at ${FILER_ENDPOINT} answered HTTP ${filer_code} — refusing to run" ;;
 esac
 
 # minAge -> seconds. An unparseable value must NOT collapse to 0: that would
@@ -196,13 +313,11 @@ to_seconds() {
 }
 MIN_AGE_S=$(to_seconds "$MIN_AGE")
 if [ "$MIN_AGE_S" = "ERR" ]; then
-    jlog reclaim_unavailable "" "dataPolicy.derived.s3Staged.minAge=${MIN_AGE} is not a duration I can parse (expected e.g. 0, 90m, 12h, 1d, 2w) — refusing to run rather than treating it as 0"
-    exit 1
+    unavailable minage_unparseable "dataPolicy.derived.s3Staged.minAge=${MIN_AGE} is not a duration I can parse (expected e.g. 0, 90m, 12h, 1d, 2w) — refusing to run rather than treating it as 0"
 fi
 
 if ! err=$(aws s3api head-bucket --bucket "$S3_BUCKET" 2>&1); then
-    jlog reclaim_unavailable "" "head-bucket ${S3_BUCKET} failed: ${err}"
-    exit 1
+    unavailable bucket_unreachable "head-bucket ${S3_BUCKET} failed: ${err}"
 fi
 
 # --- XNAT ---------------------------------------------------------------------
@@ -224,16 +339,19 @@ xnat_get() {
 
 if [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
-        jlog reclaim_unavailable "" "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
-        exit 1
+        unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
     fi
     probe=$(xnat_get "${XNAT_SERVER}/data/projects?format=json")
     code=$(printf '%s' "$probe" | tail -n1)
     if [ "$code" != "200" ]; then
         # Not a data-loss condition — but every session would come back
         # unconfirmed, so the run would be a very expensive no-op.
-        jlog reclaim_unavailable "" "XNAT auth probe returned HTTP ${code} — cannot confirm any session, so nothing is eligible; nothing removed"
-        exit 1
+        #
+        # THIS IS THE ONE THAT WAS OBSERVED (HTTP 000 twice in 24h, see the
+        # abort note above). Going through `unavailable` is what keeps
+        # SessionStagedNotConfirmedInXNAT supplied with staged sessions while
+        # XNAT is unanswerable, instead of muting it.
+        unavailable xnat_probe_failed "XNAT auth probe returned HTTP ${code} — cannot confirm any session, so nothing is eligible; nothing removed"
     fi
 else
     # dataPolicy.derived.s3Staged.verifyAgainstXnat=false. Deletion then rests
@@ -255,17 +373,8 @@ numeric_or_err() {
     case "${1:-}" in ''|*[!0-9]*) echo ERR ;; *) echo "$1" ;; esac
 }
 
-# Session prefixes, exactly as the uploader sees them: one delimited listing of
-# staging. This includes 0-byte ghost entries, which is the point.
-s3_list_prefixes() {
-    local raw
-    raw=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/" \
-            --delimiter / --query 'CommonPrefixes[].Prefix' --output text 2>/dev/null) || return 1
-    # No prefixes at all: the CLI prints "None" for a null JMESPath result.
-    [ "$raw" = "None" ] && return 0
-    printf '%s' "$raw" | tr '\t' '\n' | sed "s#^${S3_PREFIX}/##; s#/\$##" | grep -v '^$'
-    return 0
-}
+# s3_list_prefixes lives ABOVE the pre-flight, not here with its siblings:
+# `unavailable` calls it, and the pre-flight runs before this point in the file.
 
 # --output json, NOT --output text.
 #
@@ -491,8 +600,11 @@ filer_rm() {
 # Main pass
 # =============================================================================
 if ! prefixes=$(s3_list_prefixes); then
-    jlog reclaim_unavailable "" "listing s3://${S3_BUCKET}/${S3_PREFIX}/ failed — nothing examined"
-    exit 1
+    # The one abort where the fan-out probably cannot help: we could not list
+    # staging, so we do not know what is in it. It still goes through
+    # `unavailable` because the retry in there is free and a transient listing
+    # failure that succeeds on the second attempt gets the per-session events.
+    unavailable staging_list_failed "listing s3://${S3_BUCKET}/${S3_PREFIX}/ failed — nothing examined"
 fi
 
 now=$(date +%s)
