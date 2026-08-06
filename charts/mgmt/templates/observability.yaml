@@ -49,8 +49,7 @@ __SENTINEL__ tokens, which is plain string surgery and cannot touch a
        `{{ .Release.Name }}-something`. Both names below are written into
        kube-prometheus-stack / loki subchart values as plain strings, so they
        must be plain strings here too. The consistency block underneath is
-       what stops the two sides drifting apart silently. See
-       charts/mgmt/SUBCHART-VALUES.md. */ -}}
+       what stops the two sides drifting apart silently. */ -}}
 {{- $amConfigSecretName := "alertmanager-aisedge-config" }}
 {{- $rulerConfigMapName := "loki-ruler-rules" }}
 
@@ -596,9 +595,8 @@ and out of the rendered manifest.
 {{- $am = $am | replace "__ALERT_SMTP_HOST__"         $alerting.smtpHost }}
 {{- $am = $am | replace "__ALERT_SMTP_PORT__"         (toString $alerting.smtpPort) }}
 {{- $am = $am | replace "__ALERT_SMTP_REQUIRE_TLS__"  (toString $alerting.smtpRequireTLS) }}
-{{- /* NOTE: observability.alerting has no smtpUsername key yet — see
-       SUBCHART-VALUES.md. Empty means "no SMTP auth", which is what an
-       unset ALERT_SMTP_USERNAME did in the shell installer. */ -}}
+{{- /* Empty smtpUsername means "no SMTP auth", matching an unset
+       ALERT_SMTP_USERNAME in the old shell installer. */ -}}
 {{- $am = $am | replace "__ALERT_SMTP_USERNAME__"     (default "" $alerting.smtpUsername) }}
 {{- $am = $am | replace "__ALERT_SMTP_PASSWORD_FILE__" (printf "%s/%s/password" $secretsDir $smtpRef) }}
 {{- /* A no-op when Slack is unconfigured: the only occurrences of this token

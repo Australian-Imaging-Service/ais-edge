@@ -16,8 +16,6 @@ etc.
 The source of truth for "is this thing in the right state?" Most of
 our alerts depend on it:
 - `EdgeWorkerDisconnected` — `kube_node_status_condition{condition="Ready"}`
-- `EdgePodCrashLoop` — `kube_pod_container_status_restarts_total`
-- `KonnectivityTunnelFlapping` — same metric, scoped to konnectivity
 - `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment="seaweedfs"}`
 - `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
 
@@ -28,12 +26,19 @@ rather than assumed:
   remote-writes child-cluster metrics back to it (see
   `docs/alerting-architecture.md` for why that path was rejected — edge
   signals arrive as logs through Loki instead). `kube_node_info` has exactly
-  one series and it is the management node. So the two alerts above that name
-  child-cluster objects cannot observe an edge: `EdgePodCrashLoop` selects
-  `namespace="xnat-ingest"`, which has no series here at all, and
-  `EdgeWorkerDisconnected` does have `kube_node_status_condition` series but
-  only for the management node — it is really a management-node alert wearing
-  an edge name. Neither is touched here; each needs its own decision. Treat
+  one series and it is the management node.
+
+  Two alerts that named child-cluster objects were deleted for exactly this
+  reason, confirmed with zero series each: `EdgePodCrashLoop`
+  (`namespace="xnat-ingest"`, a namespace that does not exist on this
+  cluster at all) and `KonnectivityTunnelFlapping`
+  (`pod=~"konnectivity-agent-.*"`, which runs on the edge's own kube-system,
+  not the management one). `docs/TOUR.md` §9 has the measurement.
+
+  `EdgeWorkerDisconnected` is a DIFFERENT case, still open: it does have
+  `kube_node_status_condition` series, but only for the management node — it
+  fires, just not on the edge's behalf, so it is a management-node alert
+  wearing an edge name rather than a dead one. Treat
   `scripts/check-alert-inputs.sh` as the authority on which inputs exist.
 
 - **`*_info`, `*_labels` and `*_annotations` are join metrics, not gauges.**

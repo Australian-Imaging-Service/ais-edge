@@ -754,7 +754,7 @@ each re-fire is a new alert instance. The second change was giving
 flapping. Verified live — with the uploader still re-emitting the success line
 every ~62s, the notification count stayed flat.
 
-**9. Two alert rules were removed, not fixed, because a fix would have
+**9. Four alert rules were removed, not fixed, because a fix would have
 shipped false coverage.**
 
 `OrthancStorageGrowing` matched `"new stored instance"` in the Orthanc log
@@ -781,8 +781,37 @@ subtraction more negative, exactly the wrong direction for a `> 3` alert.
 Deleted rather than shipped as an alert that reads as backlog coverage and
 provides the opposite.
 
-Both are recorded in `docs/alerting-architecture.md` and
-`docs/components/xnat-ingest.md` rather than silently dropped. Neither gap
-is currently covered by another rule: `SessionStagedNotConfirmedInXNAT` is
+The other two, `EdgePodCrashLoop` and `KonnectivityTunnelFlapping`, were
+Prometheus rules that named child-cluster objects — `namespace="xnat-ingest"`
+and `pod=~"konnectivity-agent-.*"` in `kube-system` — that mgmt Prometheus
+cannot see: `EdgePodCrashLoop`'s namespace has zero series on mgmt because it
+does not exist there at all, and konnectivity-agent runs on the edge's own
+kube-system, not mgmt's. Confirmed live: `count(kube_pod_info) by (namespace)`
+on mgmt Prometheus lists `k0smotron`, `ais-mgmt`, `cert-manager`, `edge-dev`
+(the k0smotron CONTROL-PLANE namespace on mgmt, not the child cluster's own
+namespaces), `kube-system`, `local-path-storage`, `xnat-upload` — no
+`xnat-ingest`, ever. Same root cause as the two Loki-side removals had before
+mTLS: this class of signal cannot cross the one-way konnectivity tunnel, only
+now it is metrics rather than logs, and there is no remote-write path to fix
+it with.
+
+While investigating `KonnectivityTunnelFlapping`, edge Vector's own log
+stream showed the live tunnel actively cycling — `"no servers connected"`,
+`"authentication handshake failed: EOF"`, roughly every 10s — while the
+container's own restart count stayed at 0 (the process reconnects
+internally rather than crashing, which is also why the deleted metric-based
+rule could never have caught this even if mgmt could see it). Every
+`kubectl` command in this session against that same edge worked throughout,
+so this reads as background reconnection churn rather than an outage, but
+it was not investigated further given the volume of other work in progress.
+If it recurs: `kubectl -n kube-system logs -l k8s-app=konnectivity-agent`
+on the edge child cluster, and consider a Loki-side rule — those logs
+already reach Loki with a correct `cluster` label via Vector, unlike the
+dead Prometheus approach.
+
+All four are recorded in `docs/alerting-architecture.md` and
+`docs/components/xnat-ingest.md` rather than silently dropped. None of the
+gaps are currently covered by another rule: `SessionStagedNotConfirmedInXNAT`
+is 
 the closest existing backstop for the XNATBacklogGrowing case, but fires only
 after `minAge` + the confirmation offset, not on rate.

@@ -288,15 +288,19 @@ sessions that matter most.
 
 ## 6. Alerting correctness 🟠 — fix the class, not the instance
 
-`SeaweedFSDiskFull` selects `kubelet_volume_stats_*` for a hostPath volume.
-Those series do not exist and never will — the hostPath plugin has no metrics
-provider. The alert has been "green" its whole life.
+`SeaweedFSDiskFull` originally selected `kubelet_volume_stats_*` for a
+hostPath volume — those series never existed, the hostPath plugin has no
+metrics provider, and the alert was "green" its whole life. Since fixed to
+read `SeaweedFS_volumeServer_resource` instead (SeaweedFS's own exporter);
+confirmed live with real series and a computable used/all ratio.
 
-Three of the Prometheus rules were already known to be unable to fire
-(`EdgeWorkerDisconnected`, `KonnectivityTunnelFlapping`, `EdgePodCrashLoop`)
-because mgmt Prometheus cannot scrape across the one-way konnectivity tunnel.
-That is four out of ~21. **An alert that cannot fire is worse than no alert,
-because it reads as coverage.**
+Three more Prometheus rules were unable to fire because mgmt Prometheus
+cannot scrape across the one-way konnectivity tunnel: `EdgePodCrashLoop` and
+`KonnectivityTunnelFlapping` named child-cluster objects that have zero
+series on mgmt and have since been deleted (`docs/TOUR.md` §9);
+`EdgeWorkerDisconnected` is a different case — it fires, just for the
+management node rather than any edge, and is still open. **An alert that
+cannot fire is worse than no alert, because it reads as coverage.**
 
 ### Do it properly
 

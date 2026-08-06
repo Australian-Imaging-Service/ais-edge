@@ -743,7 +743,7 @@ kube-prometheus-stack:
   prometheus-node-exporter: {enabled: false}
   nodeExporter: {enabled: false}
 
-  kubeStateMetrics: {enabled: true}      # required by SeaweedFSDown / EdgePodCrashLoop
+  kubeStateMetrics: {enabled: true}      # required by SeaweedFSDown / EdgeWorkerDisconnected
   kube-state-metrics:
     resources:
       requests: {cpu: 50m,  memory: 128Mi}

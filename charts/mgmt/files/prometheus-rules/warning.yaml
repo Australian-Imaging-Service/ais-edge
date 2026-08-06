@@ -57,21 +57,3 @@ groups:
           summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in <60 days"
           description: "cert-manager normally auto-renews 30 days before expiry. If this fires, renewal has failed — investigate cert-manager logs."
 
-      - alert: KonnectivityTunnelFlapping
-        expr: |
-          increase(kube_pod_container_status_restarts_total{namespace="kube-system",
-              pod=~"konnectivity-agent-.*"}[1h]) > 3
-        for: 5m
-        labels: { severity: warning }
-        annotations:
-          summary: "Konnectivity agent on {{ $labels.cluster }} restarted >3 times in last hour"
-          description: "The reverse tunnel keeps dying. Check the network path between edge and mgmt:443. Could be a middlebox killing long-lived HTTP/2 streams."
-
-      - alert: EdgePodCrashLoop
-        expr: |
-          increase(kube_pod_container_status_restarts_total{namespace="xnat-ingest"}[1h]) > 3
-        for: 5m
-        labels: { severity: warning }
-        annotations:
-          summary: "Edge ingest pod {{ $labels.pod }} crashlooping"
-          description: "{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour. New DICOMs may not be staged or uploaded."

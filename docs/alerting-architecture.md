@@ -50,16 +50,18 @@ expressions sit close to the dashboard queries that operators already trust.
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
 | `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
-| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — kube-state-metrics on each edge child. |
+| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
-
-`OrthancStorageGrowing` and `XNATBacklogGrowing` are not in this table —
-both were removed after measurement showed neither could ever fire. Why,
-and what a real fix would need: `docs/TOUR.md` §9.
-| `KonnectivityTunnelFlapping` | Prometheus | Container restart count, KSM. |
-| `EdgePodCrashLoop` | Prometheus | Container restart count, KSM. |
-| `SeaweedFSDiskFull` | Prometheus | `kubelet_volume_stats_*` from mgmt kubelet scrape. |
+| `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter. |
 | `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_*` from mgmt cert-manager. |
+
+Four alerts that used to be in this table are not, all removed after
+measurement showed they could never fire — `docs/TOUR.md` §9 has the
+evidence for each: `OrthancStorageGrowing` and `XNATBacklogGrowing` (Loki,
+matched a log string that either does not exist or cannot distinguish new
+arrivals from static backlog), `EdgePodCrashLoop` and
+`KonnectivityTunnelFlapping` (Prometheus, named child-cluster objects mgmt
+cannot scrape — zero series, confirmed live).
 
 If we ever need a pipeline-event metric *as a metric* (e.g. for a Grafana
 panel that needs ms-resolution sliding windows that LogQL can't deliver),
