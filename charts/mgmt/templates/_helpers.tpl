@@ -23,6 +23,37 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
+The same labels MINUS everything that changes when the chart is released.
+
+USE THIS ON ANY OBJECT WHOSE LABELS BECOME SOMEBODY ELSE'S SELECTOR.
+
+k0smotron copies a Cluster's labels onto the Services it generates AND uses
+them as those Services' selectors. mgmt.labels carries helm.sh/chart, which
+embeds .Chart.Version, and app.kubernetes.io/version, which embeds
+.Chart.AppVersion. Both change on release — and a selector that changes stops
+matching the pods it already created, because a StatefulSet's pod template
+labels are fixed at creation and its selector is immutable.
+
+This is not hypothetical. Bumping the chart 0.1.0 -> 0.1.1 for an image CVE
+took the edge offline: the regenerated Service selected
+helm.sh/chart=ais-mgmt-0.1.1 while kmc-edge-dev-0 still carried
+helm.sh/chart=ais-mgmt-0.1.0, so the Service had zero endpoints, the child API
+became unreachable, and cert-sync failed with "Unable to connect to the
+server: context deadline exceeded". Nothing restarted and nothing logged an
+error — a routine version bump silently disconnected a site.
+
+A SELECTOR IS IDENTITY. Chart and app versions are metadata about a release,
+not about the workload, so they must never appear in one. The same reasoning
+already moved ais-edge.org/exposure from a label to an annotation; see the
+long note in templates/edge-clusters.yaml.
+*/}}
+{{- define "mgmt.selectorSafeLabels" -}}
+app.kubernetes.io/name: {{ include "mgmt.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
 The label Prometheus uses to DISCOVER PrometheusRule and ServiceMonitor
 objects. Every rule and monitor this chart creates must carry it, and it must
 match what the kube-prometheus-stack subchart is configured to select.
@@ -57,6 +88,36 @@ never fires again.
 http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
 {{- end }}
 
+{{/* The ClusterIssuer that fronts the INTERNAL CA.
+
+     Normally it is named from certManager.issuer, but when the operator
+     selects Let's Encrypt that name belongs to the ACME issuer and the CA path
+     — which still exists, because the edge trust anchor is distributed from it
+     — falls back to the fixed name `ais-edge-ca`. templates/cert-issuers.yaml
+     computed this inline; it is a define now because observability.yaml has to
+     issue the Loki push client certificates from the SAME issuer, and two
+     copies of a ternary is exactly how the client certs would end up signed by
+     a CA the push Ingress does not verify against. */}}
+{{- define "mgmt.caIssuerName" -}}
+{{- ternary "ais-edge-ca" .Values.certManager.issuer (hasPrefix "letsencrypt-" .Values.certManager.issuer) -}}
+{{- end }}
+
+{{/* The management-side Secret holding ONE edge's Loki push client
+     certificate, as issued by cert-manager and as read by cert-sync.
+
+     Argument is the edge NAME, not the context.
+
+     NOT release-prefixed, deliberately. This name is written a second time, by
+     hand, in each site's certSync.secrets[].source.name as the literal
+     "<edge>-loki-client" — the site file cannot know the release name, and a
+     name that moved with the release would leave cert-sync reading a Secret
+     that does not exist and every edge without a client certificate. Same
+     reasoning as loki-tls / grafana-tls / ais-edge-ca. cert-sync.yaml checks
+     the two spellings still agree, and refuses to render if they do not. */}}
+{{- define "mgmt.lokiClientCertSecret" -}}
+{{- printf "%s-loki-client" . -}}
+{{- end }}
+
 
 {{/* ===================================================================== */}}
 {{/* Validation — all of these fail silently at runtime if wrong           */}}
@@ -81,7 +142,28 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
     {{- if not .s3SecretRef }}
       {{- fail (printf "edge %q has no s3SecretRef — the chart references S3 credentials by Secret name and never inlines them" .name) }}
     {{- end }}
+    {{- /* The name becomes the commonName of that edge's Loki push client
+           certificate AND one branch of the auth-tls-match-cn regex on the
+           push Ingress (templates/observability.yaml). A regex metacharacter
+           in it would widen what the Ingress accepts rather than error — `.`
+           alone turns one site's branch into a wildcard. A DNS-1123 label is
+           already required of this string by Kubernetes (it is the Cluster
+           name and the namespace), so this rejects nothing that could ever
+           have been installed; it just rejects it at render time, where the
+           consequence is visible. */ -}}
+    {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" .name) }}
+      {{- fail (printf "edge name %q is not a DNS-1123 label (lowercase alphanumerics and '-'). It is used verbatim as the k0smotron Cluster name and the namespace, and it is embedded in the auth-tls-match-cn regex on the Loki push Ingress — a regex metacharacter there silently WIDENS which client certificates are accepted instead of failing." .name) }}
+    {{- end }}
   {{- end }}
+
+  {{- /* The other two halves of the mTLS push contract are guarded WHERE THEY
+         ARE RENDERED, not here: "certSync is switched off entirely" in
+         observability.yaml next to the client Certificates, and "certSync
+         carries no client certificate for this edge" in cert-sync.yaml after
+         that file's own per-entry checks. Putting either here made every
+         certSync negative case fail with THIS message instead of the specific
+         one, because a guard in validate.yaml runs before the file whose
+         values it is judging. */ -}}
 
   {{- if .Values.observability.enabled }}
     {{- if and (eq .Values.observability.loki.storage "s3") (not .Values.seaweedfs.enabled) }}
