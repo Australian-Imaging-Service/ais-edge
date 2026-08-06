@@ -50,3 +50,7 @@ docs/zip-metadata-extraction-xnat-plan.md
 
 # Personal review notes — not part of the deliverable.
 docs/BEHAVIOUR-CHANGES.md
+
+# Run artefacts from scripts/adopt-existing.sh: a record of what one specific
+# live cluster adopted, timestamped per run. Output, not source.
+adoption-records/

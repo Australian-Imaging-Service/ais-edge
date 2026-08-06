@@ -140,7 +140,9 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 - **DICOM parsing already handles our edge cases** — (missing
   AccessionNumber, multi-frame, multi-series) that we don't want to
   re-implement
-- **Idempotent** — re-running upload skips sessions already in XNAT
+- **Idempotent** — re-running upload skips sessions already in XNAT. It really
+  does skip the transfer; it just does not *say* so. See "Known upstream
+  defects" below before building anything on its log output.
 - **Loop mode with label tracking** — group-orthanc marks each pulled
   study `xnat-ingest-processed`, so subsequent loops skip it → no
   double-ingest
@@ -157,6 +159,65 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
+
+## Known upstream defects (candidate reports)
+
+Both were found by measurement on the dev deployment, both are in the uploader,
+and both are in the same file as the de-identification issue already raised with
+kirsty-UoN. Neither is dangerous — no data is lost or duplicated in XNAT — but
+each makes the uploader's output lie about what it did, and anything monitoring
+that output inherits the lie.
+
+### 1. The success line is logged on the SKIP path
+
+`Successfully uploaded all files in '<session>'` is emitted on **every** `--loop`
+pass, including the passes where the uploader checks XNAT, finds the session
+already present, and correctly skips the transfer.
+
+Measured over 30 minutes on a single already-uploaded session:
+
+```
+30  "Successfully uploaded all files in 'test_project.65DDEFA8D833.8607324A38C9'"
+14  "already exists"
+14  "Skipping"
+```
+
+Emission gaps: `1, 61, 1, 62, 1, 61, ...` — two lines per loop, one loop every
+~62s, continuing for as long as the session remains in S3 staging. With
+retention disabled that is forever.
+
+So the line is a **level, not an event**: it means "this session is in XNAT",
+re-asserted indefinitely, not "this session was just uploaded".
+
+**What it cost us.** An alert keyed on that string with a `[1m]` range against a
+~62s emission period had its series go empty between passes, so it resolved and
+re-fired every minute — one notification per loop, forever. Diagnosing it took
+three wrong attempts. Our fix was to widen the range past the loop period
+(`charts/mgmt/files/loki-ruler-rules.yaml`), which works but is a workaround for
+a message that should not be there.
+
+**Suggested upstream fix.** Emit a distinct message on the skip path — e.g.
+`Session '<session>' already in XNAT, skipping` — or drop the success line to
+debug when nothing was transferred. Either makes the successful-upload line an
+event again, which is what every consumer assumes it is.
+
+### 2. The XNAT listing is cached for the lifetime of a `--loop` run
+
+`xnat-ingest upload --loop` opens one XNAT connection and xnatpy caches the
+project/experiment listing on it. A connection opened while a session does not
+yet exist keeps returning that stale view for the life of the process, so the
+uploader cannot see its own writes.
+
+It is a **state** bug, not a logic bug: restarting the pod clears it, and with a
+fresh connection the deduplication is correct.
+
+**Operational consequence, worth knowing even if upstream never changes it:** if
+you ever clear XNAT by hand, **restart the uploader**. Otherwise it keeps
+deciding against a snapshot that no longer matches reality — it will skip
+everything staged, and report success while doing it.
+
+**Suggested upstream fix.** Refresh the listing once per loop iteration, or
+expose the cache TTL as a flag.
 
 ## Replacements / future
 
