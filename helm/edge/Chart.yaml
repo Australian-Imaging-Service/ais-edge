@@ -1,6 +1,0 @@
-apiVersion: v2
-name: edge
-description: Edge data pipeline - DICOM ingestion and XNAT upload pipeline
-type: application
-version: 0.2.0
-appVersion: "0.12.3"
