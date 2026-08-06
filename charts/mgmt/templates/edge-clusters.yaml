@@ -165,44 +165,21 @@ metadata:
     # StorageClass has reclaimPolicy Delete, so the child cluster's datastore
     # is gone before the Cluster CR has noticed.
     helm.sh/resource-policy: keep
-  # selectorSafeLabels, NOT mgmt.labels — k0smotron copies these onto the
-  # Services it generates and uses them as those Services' SELECTORS. mgmt.labels
-  # carries helm.sh/chart and app.kubernetes.io/version, both of which change on
-  # every release; a selector that changes stops matching pods a StatefulSet has
-  # already created, and its selector cannot be edited to catch up.
-  #
-  # Bumping the chart 0.1.0 -> 0.1.1 for an image CVE did exactly this and took
-  # this site offline: zero endpoints, child API unreachable, cert-sync failing
-  # with a connection timeout, nothing restarted and nothing logged an error.
-  # See the full note on mgmt.selectorSafeLabels in _helpers.tpl.
+  # selectorSafeLabels, NOT mgmt.labels — k0smotron turns these into a
+  # Service selector. See _helpers.tpl for why, and the incident it caused.
   labels:
     {{- include "mgmt.selectorSafeLabels" $ | nindent 4 }}
     ais-edge.org/edge: {{ $edge.name }}
 ---
 {{/*
-  ais-edge.org/exposure IS AN ANNOTATION, NOT A LABEL. THIS MATTERS.
-
-  It used to be a label. k0smotron copies the Cluster's labels onto the
-  Services AND the control-plane StatefulSet it creates, and a Service's
-  selector is built from them — so the exposure MODE ended up inside a
-  selector. Changing exposure then produced a Service selecting
-  `exposure: sni` while the running pods still carried `exposure: nodePort`:
-
-      new svc kmc-edge-dev  selector ais-edge.org/exposure: sni
-      pod kmc-edge-dev-0    label    ais-edge.org/exposure: nodePort
-      endpoints                       <none>
-
-  The new Service got zero endpoints, the child API became unreachable
-  ("Unable to connect to the server: EOF"), and because StatefulSet selectors
-  are IMMUTABLE the operator could not repair it either — it logged
-  `Reconciler error` on every pass. Reproduced on this cluster; the edge was
-  restored by reverting to nodePort.
-
-  A selector is IDENTITY. Putting a configuration value in one means every
-  change to that value orphans the workload it is supposed to select. Identity
-  here is the edge name, which does not change. The mode is metadata about how
-  the site is reached, so it belongs in an annotation where nothing selects on
-  it.
+  ais-edge.org/exposure IS AN ANNOTATION, NOT A LABEL — CAUTION: putting it
+  back would repeat a real outage. k0smotron copies a Cluster's labels onto
+  the Services AND StatefulSet it creates and selects on them, so exposure as
+  a label meant changing it left the new Service selecting `sni` while
+  running pods still carried `nodePort` — zero endpoints, unrepairable
+  because StatefulSet selectors are immutable, "Reconciler error" on every
+  pass. A selector is identity (the edge name); exposure is metadata about
+  how the site is reached, so nothing may select on it.
 */}}
 apiVersion: k0smotron.io/v1beta1
 kind: Cluster
@@ -214,20 +191,9 @@ metadata:
     helm.sh/resource-policy: keep
     {{- end }}
     ais-edge.org/exposure: {{ $mode }}
-  # selectorSafeLabels, NOT mgmt.labels. THIS IS THE OBJECT THAT MATTERS:
-  # k0smotron copies THIS Cluster's labels onto the Services it generates and
-  # uses them as those Services' SELECTORS.
-  #
-  # mgmt.labels carries helm.sh/chart and app.kubernetes.io/version, both of
-  # which change on every chart release. A selector that changes stops matching
-  # the pods a StatefulSet already created, and a StatefulSet's selector is
-  # immutable so it can never catch up.
-  #
-  # Bumping the chart 0.1.0 -> 0.1.1 for an image CVE did exactly that and took
-  # this site offline: the Service selected helm.sh/chart=ais-mgmt-0.1.1 while
-  # kmc-edge-dev-0 still carried 0.1.0, endpoints went to zero, the child API
-  # became unreachable and cert-sync failed with a connection timeout. Nothing
-  # restarted and nothing logged an error.
+  # THIS IS THE OBJECT THAT MATTERS for the selector-label hazard — k0smotron
+  # copies THIS Cluster's labels onto the Services it generates. See
+  # _helpers.tpl / mgmt.selectorSafeLabels for the incident.
   labels:
     {{- include "mgmt.selectorSafeLabels" $ | nindent 4 }}
     ais-edge.org/edge: {{ $edge.name }}

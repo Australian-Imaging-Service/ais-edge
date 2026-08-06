@@ -117,7 +117,7 @@ route:
   # Adding `session` here cut the mail down but a live drop still produced
   # three. The other half is in files/loki-ruler-rules.yaml, where that rule's
   # range now comfortably exceeds the uploader's loop period so the series
-  # stays continuous; scripts/ci-promtool.sh keeps it that way.
+  # stays continuous; scripts/ci/promtool.sh keeps it that way.
   #
   # Keep both. This grouping means the NEXT chatty rule cannot flood the inbox,
   # and the range floor means a looping emitter cannot flap in the first place.

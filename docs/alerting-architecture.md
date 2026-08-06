@@ -141,12 +141,26 @@ kubectl -n xnat-ingest exec deploy/s3-uploader -- \
 Any `Successfully uploaded all files in '<same session>'` repeating on a ~60 s
 cadence means staged sessions (or empty prefixes) are still present.
 
+**A second, independent cause of duplicate mail: range shorter than the
+emitter's loop period.** The uploader re-scans staging every ~62s and logs
+the success string on EVERY pass — including passes where it finds the
+session already delivered and skips it. That string is a LEVEL re-asserted
+for as long as the session sits in staging, not a one-off event. A rule
+range shorter than that ~62s loop lets the series go empty between passes:
+the alert resolves and re-fires every loop, and `group_by` cannot suppress
+that because it only collapses alerts firing at the same time, not a
+resolve/re-fire cycle. Fixed by widening the range past the loop period
+(`XNATUploadSuccess` now uses `[10m]`); `scripts/ci/promtool.sh` asserts any
+rule matching a looping process's output keeps enough headroom.
+
 **Related alert-suppression gotcha.** `XNATUploadSuccess` is grouped by
-`session` with `repeat_interval: 24h`, and Alertmanager records what it has
-already sent in `/alertmanager/nflog` — which lives on a **PVC and survives
-pod restarts**. Re-dropping a file that hashes to the *same* session ID within
-24 h therefore fires the alert but sends **no email**. To force a fresh
-notification (e.g. between demo takes) the nflog must be wiped:
+`session`, and Alertmanager records what it has already sent in
+`/alertmanager/nflog` — which lives on a **PVC and survives pod restarts**.
+Its route sets `repeat_interval: 720h` deliberately: a success notification
+carries no new information on repeat, so re-dropping a file that hashes to
+the same session ID fires the alert but sends **no email** for a long time.
+To force a fresh notification (e.g. between demo takes) the nflog must be
+wiped:
 
 ```bash
 kubectl -n ais-mgmt scale statefulset/alertmanager-mgmt-kube-prometheus-stack-alertmanager --replicas=0

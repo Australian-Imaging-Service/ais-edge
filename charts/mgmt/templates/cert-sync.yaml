@@ -183,7 +183,7 @@ mostly theatre and it should not read as more than it is:
        them for any malformed list.
 
        The reverse direction — an edge mounting a Secret nothing delivers — is
-       covered by scripts/ci-secret-namespaces.sh. This is the direction that
+       covered by scripts/ci/secret-namespaces.sh. This is the direction that
        check cannot see, because it derives what is delivered from these very
        entries. */ -}}
 {{- if and .Values.observability.enabled .Values.observability.loki.ingress.enabled .Values.observability.loki.push.requireAuth }}

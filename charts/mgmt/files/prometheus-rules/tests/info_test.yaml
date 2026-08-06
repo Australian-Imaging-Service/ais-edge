@@ -110,7 +110,7 @@ tests:
   # Nor can a test pin the removal. `exp_alerts: []` for a deleted alert passes
   # trivially, and it would go on passing the moment somebody pasted the broken
   # rule back, because the broken rule also produces no alerts. So the guard is
-  # in scripts/ci-promtool.sh instead: it rejects change-detecting functions
+  # in scripts/ci/promtool.sh instead: it rejects change-detecting functions
   # over any *_info / *_labels / *_annotations metric in any rule file, which
   # is a property of the EXPRESSION and therefore checkable without inventing
   # series. The full reasoning for the removal is in ../info.yaml.

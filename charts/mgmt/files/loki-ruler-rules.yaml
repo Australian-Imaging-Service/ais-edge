@@ -393,51 +393,26 @@ groups:
     interval: 30s
     rules:
       - alert: XNATUploadSuccess
-        # MUST BE A MANAGEMENT-SIDE SIGNAL. THE EDGE CANNOT KNOW.
+        # GUIDING: must stay a MANAGEMENT-side signal — the edge holds no
+        # XNAT credential and never contacts XNAT, so it cannot know. Full
+        # incident and the duplicate-mail root cause:
+        # docs/alerting-architecture.md, "Troubleshooting: repeated XNAT
+        # upload completed emails".
         #
-        # This alert means "the session is in XNAT". Only the management plane can
-        # observe that: the edge holds no XNAT credential and never contacts XNAT —
-        # that separation is the entire point of upload.mode: s3.
+        # CAUTION — RANGE MUST EXCEED THE UPLOADER'S ~62s LOOP PERIOD, or
+        # duplicate mail returns. The matched string is re-emitted every
+        # pass (a LEVEL, not an event — see docs/components/xnat-ingest.md,
+        # "Known upstream defects"), so too short a range lets the series go
+        # empty between passes and the alert flaps once per loop. 10m gives
+        # ~10x headroom; scripts/ci/promtool.sh asserts it stays that way.
+        # `group_by: session` (files/alertmanager-config.yaml) is necessary
+        # but not sufficient on its own — it only collapses alerts firing at
+        # the same time, not a resolve/re-fire cycle.
         #
-        # It was briefly re-pointed at the edge's own `upload_completed` event to
-        # stop duplicate mail. That was wrong: upload_completed means "reached S3
-        # staging", NOT "reached XNAT", so the alert would have claimed delivery
-        # for sessions that never landed.
-        #
-        # THE RANGE MUST EXCEED THE UPLOADER'S LOOP PERIOD. This is the reason
-        # duplicate mail happened, and it is not obvious.
-        #
-        # The uploader re-scans staging every ~62s and logs "Successfully
-        # uploaded all files in '<session>'" on EVERY pass — including the pass
-        # where it finds the session already in XNAT and skips it (the same log
-        # run shows 14x "already exists" and 14x "Skipping" beside 30 of these
-        # lines). So this string is not an event that happens once; it is a
-        # LEVEL that is re-asserted for as long as the session sits in staging,
-        # which with dataPolicy.enabled=false is forever.
-        #
-        # With a [1m] range and a ~62s emission gap, the series went empty
-        # between passes: the alert RESOLVED and then re-FIRED on the next loop,
-        # once a minute. Each re-fire is a new alert instance, and grouping
-        # cannot suppress those — group_by only collapses alerts that are firing
-        # AT THE SAME TIME. Adding `session` to group_by (files/alertmanager-
-        # config.yaml) was necessary but on its own not sufficient; a live drop
-        # still produced three mails for one session.
-        #
-        # 10m gives ~10x headroom over the observed loop, so the series stays
-        # continuous and Alertmanager sends once and then honours
-        # repeat_interval. It costs nothing at the front: count_over_time > 0 is
-        # true on the FIRST matching line, and `for: 0s` means the first mail is
-        # not delayed. The alert clears ~10m after the uploader goes quiet.
-        #
-        # If you change this range, it must stay well above the uploader's loop
-        # interval or the flapping returns. scripts/ci-promtool.sh asserts it.
-        #
-        # Keying on a third-party log string is a real weakness — an upstream
-        # rewording disables this silently. It is accepted here because the only
-        # alternative that is genuinely PROOF of delivery is the reclaimer's
-        # reclaim_confirmed, which is gated on minAge and so arrives a day late.
-        # SessionStagedNotConfirmedInXNAT below is the backstop for exactly the
-        # case where this string stops matching: staged, and never confirmed.
+        # Keying on a third-party log string is a real weakness — an
+        # upstream rewording disables this silently.
+        # SessionStagedNotConfirmedInXNAT below is the backstop for exactly
+        # that failure: staged, and never confirmed.
         expr: |
           sum by (cluster, session) (
             count_over_time(

@@ -88,7 +88,7 @@ groups:
       # CertSyncNeverSucceeded in cert-sync.yaml fires when a site's Secrets
       # have never once been delivered.
       #
-      # scripts/ci-promtool.sh now rejects change-detecting functions over any
+      # scripts/ci/promtool.sh now rejects change-detecting functions over any
       # *_info / *_labels / *_annotations metric, so this shape cannot come
       # back unnoticed. promtool cannot pin an absence — a test asserting "no
       # alert fires" passes just as happily once the broken rule is back — so

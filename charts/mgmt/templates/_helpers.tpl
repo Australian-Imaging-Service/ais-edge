@@ -23,29 +23,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
-The same labels MINUS everything that changes when the chart is released.
+mgmt.labels minus everything that changes on release (helm.sh/chart,
+app.kubernetes.io/version).
 
-USE THIS ON ANY OBJECT WHOSE LABELS BECOME SOMEBODY ELSE'S SELECTOR.
-
-k0smotron copies a Cluster's labels onto the Services it generates AND uses
-them as those Services' selectors. mgmt.labels carries helm.sh/chart, which
-embeds .Chart.Version, and app.kubernetes.io/version, which embeds
-.Chart.AppVersion. Both change on release — and a selector that changes stops
-matching the pods it already created, because a StatefulSet's pod template
-labels are fixed at creation and its selector is immutable.
-
-This is not hypothetical. Bumping the chart 0.1.0 -> 0.1.1 for an image CVE
-took the edge offline: the regenerated Service selected
-helm.sh/chart=ais-mgmt-0.1.1 while kmc-edge-dev-0 still carried
-helm.sh/chart=ais-mgmt-0.1.0, so the Service had zero endpoints, the child API
-became unreachable, and cert-sync failed with "Unable to connect to the
-server: context deadline exceeded". Nothing restarted and nothing logged an
-error — a routine version bump silently disconnected a site.
-
-A SELECTOR IS IDENTITY. Chart and app versions are metadata about a release,
-not about the workload, so they must never appear in one. The same reasoning
-already moved ais-edge.org/exposure from a label to an annotation; see the
-long note in templates/edge-clusters.yaml.
+USE ON ANY OBJECT WHOSE LABELS BECOME SOMEBODY ELSE'S SELECTOR — a version
+bump then stops a Service matching pods it already created, and a
+StatefulSet's selector is immutable so it can never catch up. This took the
+edge offline once (a chart bump silently disconnected a site, nothing
+restarted or logged an error); full incident + the CI guard against it:
+scripts/ci/render.sh, "no version-bearing label reaches a selector".
+Same reasoning moved ais-edge.org/exposure to an annotation — see
+templates/edge-clusters.yaml.
 */}}
 {{- define "mgmt.selectorSafeLabels" -}}
 app.kubernetes.io/name: {{ include "mgmt.name" . }}
