@@ -450,6 +450,20 @@ paranoid:
 This is the normal growth path, and it is deliberately boring: **edit one file,
 re-run one command.**
 
+Steps 2's S3 key pair and step 2's edge-side scaffold are mechanical enough
+to script, so `scripts/site-secrets.sh add-edge <management-site> <new-site>`
+does both: it generates the key pair, appends the `<site>-s3` Secret to the
+management site's `secrets.enc.yaml` (re-encrypting it if it is already
+sealed), and scaffolds `sites/<new-site>/` from `sites/example-edge`. It
+deliberately does not touch the management site's `values.yaml` — that file
+is the most heavily hand-annotated one in the repo, and a generated rewrite
+would silently drop every caution comment in it — so it prints the `edges:`
+block from step 1 below for you to paste in by hand, and still leaves you to
+fill in `sites/<new-site>/values.yaml` (AE map, de-identification profile)
+before encrypting it. The walkthrough below is what that command automates;
+read it once even if you use the shortcut, since step 3 (re-running the
+installer) is unavoidably manual either way.
+
 ### 1. Add the entry
 
 `sites/<site>/values.yaml`:
@@ -502,8 +516,10 @@ provisions it: cert-manager issues `edge-syd-loki-client` from the fleet CA with
 
 Then create the edge's own two files — `sites/edge-syd/values.yaml` (AE map,
 de-identification profile, storage paths) and `sites/edge-syd/secrets.enc.yaml`
-(`orthanc-deid-salt`, and `s3-edge-credentials` holding the same key pair you
-just generated) — and encrypt both:
+(`orthanc-deid-salt` only — **not** `s3-edge-credentials`: cert-sync delivers
+that from the `edge-syd-s3` Secret above the same way it delivers the CA
+bundle and the Loki client cert, so writing it by hand on the edge just gets
+overwritten on the next sync) — and encrypt both:
 
 ```bash
 scripts/site-secrets.sh encrypt <site>
@@ -815,3 +831,23 @@ gaps are currently covered by another rule: `SessionStagedNotConfirmedInXNAT`
 is 
 the closest existing backstop for the XNATBacklogGrowing case, but fires only
 after `minAge` + the confirmation offset, not on rate.
+
+**10. cert-sync has failed one scheduled run out of three observed, on a TLS
+error, and self-healed on the next one without intervention.** Its job
+history for `edge-dev`: succeeded 14h ago, failed 8h ago, succeeded again
+146m ago — no hand-created job in between. The failure was
+`x509: certificate is valid for kubernetes, ..., kmc-edge-dev-nodeport...`
+while dialing `https://kmc-edge-dev.edge-dev.svc.cluster.local:30443` — the
+control-plane API's serving certificate did not carry that in-cluster
+Service DNS name as a SAN at that moment. The following run, same URL, same
+pod, connected and reported `sync_unchanged` for all three secrets, meaning
+the SAN was present again. Read as a transient window around k0smotron
+reconciling the API server's serving certificate rather than a standing
+misconfiguration — nothing here forces the SAN list, so a reconcile pass
+that briefly regenerates it without the Service name would look exactly like
+this. Not chased further: it self-corrects on the existing 6-hour cadence,
+and `CreateContainerConfigError` on the edge (§5b, "Check it landed") is the
+symptom if it ever does not. If it recurs on every run rather than one in
+three, check whether the k0smotron `Cluster` spec's API server
+`extraArgs`/SAN configuration actually includes the in-cluster Service DNS
+name, rather than assuming it always will.
