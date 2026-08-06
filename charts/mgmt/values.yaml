@@ -647,6 +647,12 @@ kube-prometheus-stack:
     enabled: true
     alertmanagerSpec:
       configSecret: alertmanager-aisedge-config
+      # CAUTION: must exceed the longest repeat_interval in
+      # files/alertmanager-config.yaml (720h) or Alertmanager warns at
+      # startup — its notification log can be pruned before a long-repeat
+      # route's next scheduled resend, which risks an early re-send rather
+      # than honouring the interval. Subchart default is 120h.
+      retention: 744h
       # Mounted at /etc/alertmanager/secrets/<name>/<key> — how the SMTP
       # password reaches Alertmanager without being templated into a
       # manifest (config uses smtp_auth_password_file).
