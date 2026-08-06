@@ -71,6 +71,23 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 # (idempotent — recomputes the config-hash annotation, rolls the pod)
 ```
 
+### Deletion must go through the filer, never `aws s3 rm`
+
+Measured on SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it)
+removes the objects but leaves a 0-byte directory entry, which `aws s3 ls`
+still reports as `PRE <session>/`. An empty prefix is exactly what makes the
+uploader log a bogus success every cycle — switching S3 client does not fix
+it, only the filer can remove a directory entry:
+
+```
+DELETE http://<filer>:8888/buckets/<bucket>/<prefix>/<session>?recursive=true
+```
+
+Measured: returns 204 and the entry is genuinely gone, where the same session
+deleted with `aws s3 rm --recursive` still lists. This is why
+`charts/mgmt/files/reclaim-staged.sh` deletes through the filer HTTP API and
+never shells out to `aws s3 rm`.
+
 ## Benefits
 
 - **All-in-one** — master + volume + filer + S3 in a single pod for
@@ -89,7 +106,7 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
 | `s3-config` ConfigMap drift | Auth fails | Re-running script 03 regenerates it; config-hash annotation rolls the pod |
 | Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
-| aws-cli checksum headers verified only against 3.99 | Uploads rejected | Appendix A of `helm-consolidation-briefing.md` measured `x-amz-checksum-*` acceptance against 3.99's S3 gateway. 4.34's `auth_credentials.go` is roughly three times the size of 3.99's; the identity/action semantics we depend on are unchanged, but the checksum path was not re-measured. **Re-run Appendix A against 4.34 before trusting it** |
+| aws-cli checksum headers verified only against 3.99 | Uploads rejected | `x-amz-checksum-*` acceptance was measured against 3.99's S3 gateway only. 4.34's `auth_credentials.go` is roughly three times the size of 3.99's; the identity/action semantics we depend on are unchanged, but the checksum path was not re-measured. **Re-measure against 4.34 before trusting it** |
 
 ## Replacements / future
 

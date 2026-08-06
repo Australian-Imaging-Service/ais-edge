@@ -17,54 +17,48 @@
 # CREDENTIALS ARE NOT IN THIS FILE, BY DESIGN.
 # Everything secret is referenced by Secret name. This file is safe to commit
 # per-site; the Secrets are created separately, SOPS-encrypted.
+#
+# Full write-up of every design decision below: docs/TOUR.md, docs/hardening-
+# decisions.md, docs/ca-ceremony.md, docs/components/*.md.
 # =============================================================================
 
-# Free-text name for this management plane. Appears as the `cluster` label on
-# its own logs and metrics, so it must not collide with any edge clusterLabel.
+# Appears as the `cluster` label on this plane's own logs/metrics.
+# CAUTION: must not collide with any edge's clusterLabel.
 clusterLabel: mgmt
 
 nameOverride: ""
 fullnameOverride: ""
 
-# onprem | cloud
-topology: onprem
+topology: onprem   # onprem | cloud
 
 domain:
-  # Base domain the management services are published under. With no real DNS,
-  # a wildcard-resolver domain such as nip.io works:
-  #   dev-cai.203-101-224-211.nip.io
+  # Base domain the management services are published under.
+  # No real DNS? A wildcard resolver works: dev-cai.203-101-224-211.nip.io
   internal: ""
-  # Public IP of the management node. Used for the LoadBalancer address and,
-  # on edges, for the hostAliases that pin these hostnames.
+  # Public IP of the management node — the LoadBalancer address, and what
+  # edges pin via hostAliases.
   mgmtNodeIP: ""
 
 # Hostnames published on :443. All resolve to mgmtNodeIP; nginx routes by SNI.
-#
-# THE CHILD-CLUSTER HOSTNAMES ARE NOT HERE ANY MORE — they are per edge site,
-# under k0smotron.hostnames below, with a per-edge override on the `edges[]`
-# entry. A fleet-wide k0sApi / konnectivity pair meant every edge rendered the
-# same apiHost and konnectivityHost, so a second site produced a second Ingress
-# claiming a hostname the first one already owned and the fleet could not
-# exceed one site. templates/edge-clusters.yaml refuses to render if either
-# old key is still set, rather than reading it from a site values file and
-# ignoring it.
 hostnames:
   seaweedfs: ""        # seaweedfs.<domain.internal>
   grafana: ""          # grafana.<domain.internal>
   loki: ""             # loki.<domain.internal>
 ingressPort: 443
+# CAUTION: k0s API / konnectivity hostnames do NOT belong here — they are
+# per-edge, under k0smotron.hostnames below. A fleet-wide pair here meant
+# every edge fought over one Ingress hostname; the chart refuses to render if
+# either old key reappears. See docs/TOUR.md §1.
 
 
 # =============================================================================
 # dataPolicy
 # =============================================================================
-# THE SAME BLOCK AS charts/edge. Keep one copy in sites/<site>/values.yaml and
-# pass it to both releases, so a site has exactly one answer to "what is kept
-# and for how long". This chart acts only on the stores it owns:
-#   derived.s3Staged   the staging prefix in SeaweedFS
-#   telemetry          Loki and Prometheus retention
-# The rest is present so the file validates identically against both charts.
-# -----------------------------------------------------------------------------
+# THE SAME BLOCK AS charts/edge. Keep one copy in sites/<site>/values.yaml,
+# pass it to both releases — one answer to "what is kept, for how long".
+# This chart acts only on: derived.s3Staged (the SeaweedFS staging prefix)
+# and telemetry (Loki/Prometheus retention). Everything else is present only
+# so the file validates identically against both charts.
 dataPolicy:
   enabled: false
   dryRun: true
@@ -79,31 +73,22 @@ dataPolicy:
     grouped:        {reclaim: onAssigned, minAge: 0}
     assigned:       {reclaim: onUploaded, minAge: 0}
 
-    # Owned by THIS chart.
-    #
-    # `xnat-ingest upload` has no S3 retention of its own: it rebuilds its
-    # work list from a live listing of the staging prefix every loop, so a
-    # session that has been uploaded stays there and is re-listed, re-uploaded
-    # and re-alerted forever. The reclaimer below is what closes that gap.
-    #
-    # onXnatConfirmed re-queries XNAT for the session before removing
-    # anything, rather than trusting the uploader's exit code — an exit code
-    # tells you the upload call returned, not that the data is in XNAT.
+    # Owned by THIS chart. xnat-ingest upload has no S3 retention of its own —
+    # it rebuilds its work list from a live S3 listing every loop, so an
+    # already-uploaded session stays there and is re-listed/re-uploaded/
+    # re-alerted forever without this reclaimer.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
       minAge: 1d
+      # GUIDING: re-queries XNAT before deleting anything — an uploader exit
+      # code only means the call returned, not that the data landed.
       verifyAgainstXnat: true
-      # How often the reclaimer runs.
-      schedule: "17 * * * *"
-      # Cap on how many sessions one run may remove. A bug that decided
-      # "delete everything" is bounded to this many per run, leaving the rest
-      # for someone to notice first. At the hourly schedule this still drains
-      # ~1200 sessions/day.
+      schedule: "17 * * * *"     # how often the reclaimer runs
+      # Cap per run. CAUTION: bounds a "delete everything" bug to this many
+      # sessions; at hourly this still drains ~1200/day if truly needed.
       maxRemovals: 50
-      # amazon/aws-cli carries everything the reclaimer needs: `aws` for the
-      # authoritative S3 listing and `curl` for both the XNAT confirmation and
-      # the filer delete. Pinned like every other image — an unpinned tag would
-      # be worst of all on the one job that deletes patient data.
+      # Needs `aws` (S3 listing) and `curl` (XNAT + filer delete) in one
+      # image. Pinned — an unpinned tag is worst on the job that deletes data.
       image:
         repository: amazon/aws-cli
         tag: "2.31.19"
@@ -118,33 +103,18 @@ dataPolicy:
 # =============================================================================
 # edges — one entry per edge site
 # =============================================================================
-# A TYPED LIST, replacing the pipe-separated EDGE_NODES strings the shell
-# installer parsed. Four scripts each parsed those strings with their own
-# field layout and two of them disagreed about the field count, which silently
-# produced broken S3 identities. A list of objects cannot drift like that.
+# A typed list. Each entry produces a k0smotron hosted control plane, a
+# scoped SeaweedFS S3 identity (write+list on the staging bucket only), and a
+# Loki mTLS client certificate.
 #
-# Each entry produces:
-#   * a k0smotron hosted control plane (Cluster CR)
-#   * a scoped SeaweedFS S3 identity — write+list on the staging bucket only
-#   * a Loki push token
+# No per-edge Loki-credential field: the Secret name is derived from
+# certSync.secrets[].source.name ("<edge>" expands to the edge name), so one
+# certSync entry covers the whole fleet.
 #
-# Secrets are referenced, never inlined:
-#   s3SecretRef   Secret with keys access-key / secret-key
-#
-# There is deliberately no per-edge field for the Loki push credential. Its
-# Secret name comes from certSync.secrets[].source.name, where "<edge>" expands
-# to the edge name, so one entry covers the whole fleet. A `lokiTokenRef` field
-# used to be documented here and was read by no template at all: setting it
-# looked like configuration and did nothing.
-#
-# And, for install.sh only — the charts never read them:
-#   nodeIP        the worker's address
-#   sshUser       account install.sh joins the worker as
-#   sshKey        private key for that account
-# The join has to be SSH: there is no API server on an edge until it has
-# happened. They live on this entry so a site has ONE config file rather than
-# a values.yaml plus a parallel edge-nodes.env that could disagree about which
-# host `edge-dev` actually is.
+# nodeIP / sshUser / sshKey are read by install.sh ONLY — the charts never
+# read them. The worker join has to be SSH (no API server exists on an edge
+# until it has joined), and they live here so a site is one file, not a
+# values.yaml plus a parallel env file that could disagree.
 #
 # edges:
 #   - name: edge-dev
@@ -152,132 +122,80 @@ dataPolicy:
 #     s3SecretRef: edge-dev-s3
 edges: []
 
-# k0smotron hosted control planes.
 k0smotron:
   enabled: true
-  # Must match the k0s version on the edge WORKERS. The installer used to
-  # curl | sh the latest k0s independently on the management node and on each
-  # worker, so the two could drift apart silently.
+  # CAUTION: must match the k0s version on the edge WORKERS. Drifting here
+  # was previously possible because install used to `curl | sh` the latest
+  # k0s independently on mgmt and on each worker.
   k0sVersion: "v1.35.2+k0s.0"
 
   # ---------------------------------------------------------------------
-  # How each edge's hosted control plane is reached
-  # ---------------------------------------------------------------------
-  # Everything here is PER EDGE SITE. The fields below are the fleet-wide
-  # defaults; each entry in `edges` may carry:
-  #
+  # How each edge's hosted control plane is reached — fleet-wide defaults.
+  # Per-edge overrides live on the matching `edges[]` entry:
   #   exposure: nodePort | sni    default: exposure.default below
   #   apiHost:                    default: <apiPrefix>-<name>.<domain>
   #   konnectivityHost:           default: <konnectivityPrefix>-<name>.<domain>
-  #   apiNodePort:                REQUIRED when exposure is nodePort
-  #   konnectivityNodePort:       REQUIRED when exposure is nodePort
-  #   extraSans: []               extra SANs on the child API server cert.
-  #                               Needed for a hostname migration: the cert
-  #                               covers apiHost, so the moment apiHost
-  #                               changes it stops covering the old name and
-  #                               any worker not yet re-pointed fails TLS
-  #                               verification with the site looking healthy
-  #                               from here.
+  #   apiNodePort / konnectivityNodePort:  REQUIRED when exposure is nodePort
+  #   extraSans: []                extra SANs for a hostname migration window
+  # ---------------------------------------------------------------------
   #
-  # A worked two-site example:
-  #
+  # Worked two-site example:
   #   edges:
-  #     # An EXISTING site pins the names and ports it already runs.
-  #     - name: edge-dev
+  #     - name: edge-dev            # EXISTING site: pin what it already runs
   #       exposure: nodePort
   #       apiHost: k0s.aisedge.local
   #       konnectivityHost: konnect.aisedge.local
   #       apiNodePort: 30443
   #       konnectivityNodePort: 30132
-  #     # A NEW site takes the generated hostnames and picks its own ports.
-  #     - name: edge-syd
+  #     - name: edge-syd             # NEW site: generated hostnames, own ports
   #       exposure: nodePort
   #       apiNodePort: 30444
   #       konnectivityNodePort: 30133
   exposure:
-    # nodePort  spec.service.type: NodePort, with the two ports written out
-    #           per edge. This is what edge-dev runs today (apiPort 30443,
-    #           konnectivityPort 30132, externalAddress 203.101.224.240), so
-    #           it is the default and an upgrade migrates nobody.
-    #
-    #           The ports are EXPLICIT, never derived from the edge's position
-    #           in the list. A derived port moves when an entry is reordered or
-    #           removed, and since the Cluster CR carries
-    #           helm.sh/resource-policy: keep, the old Service is still holding
-    #           the old number — so the new render cannot allocate and that
-    #           site's control plane does not come up. NodePorts are allocated
-    #           cluster-wide, which is also why edge-clusters.yaml fails the
-    #           render when two edges ask for the same one instead of letting
-    #           the second Service fail to allocate at apply time.
-    #
-    # sni       spec.service.type: ClusterIP, reached only through the
-    #           ssl-passthrough Ingress on :443 — the same mechanism the
-    #           management plane already uses for SeaweedFS, Grafana and Loki,
-    #           and no cluster-wide port to track per site.
-    #
-    #           NOT VERIFIED. TEST IT ON ONE SITE BEFORE MIGRATING ANY FLEET.
-    #           Measured on the live cluster, so not in question: k0smotron
-    #           publishes both hostnames through the nginx ssl-passthrough
-    #           Ingress in NodePort mode as well, that Ingress's backend is the
-    #           SERVICE port (30443/30132, not a node port), edge-dev's
-    #           konnectivity-agent runs with
-    #           --proxy-server-host=konnect.aisedge.local --proxy-server-port=443,
-    #           and `kubectl logs` against a child-cluster pod — API server ->
-    #           konnectivity tunnel -> kubelet — returns log lines.
-    #           NOT measured: k0smotron with service.type ClusterIP, i.e. with
-    #           the NodePort listener gone. Konnectivity is a long-lived gRPC
-    #           stream rather than request/response HTTPS, so the fact that
-    #           passthrough works for the S3 and Grafana Ingresses says nothing
-    #           about it. Migrate one site, confirm the worker stays Ready and
-    #           `kubectl logs` still works against it, then the rest.
+    # nodePort  explicit port per edge (never derived from list position — a
+    #           derived port moves on reorder, and the old Service, kept by
+    #           resource-policy, still holds the number). Cluster-wide
+    #           allocation; the chart refuses to render if two edges collide.
+    # sni       ClusterIP behind the ssl-passthrough Ingress on :443 — same
+    #           mechanism SeaweedFS/Grafana/Loki already use. No cluster-wide
+    #           port to track per site.
+    # CAUTION: test sni on one site before migrating a fleet. See
+    # docs/TOUR.md §2.2 for what has and has not been measured, and for the
+    # migration procedure (a leftover NodePort Service must be deleted once
+    # the ClusterIP one has endpoints).
     default: nodePort
-    # The cluster's --service-node-port-range. A port outside it renders
-    # cleanly and is then rejected by the API server partway through the apply,
-    # which is the worst moment to find out; checking here fails at
-    # `helm template` instead. 30000-32767 is k0s's default — change this if
-    # the API server was started with a different range.
+    # --service-node-port-range. Wrong here fails at `helm template` instead
+    # of mid-apply. 30000-32767 is k0s's default.
     nodePortRange: [30000, 32767]
 
-  # Per-edge hostnames: <apiPrefix>-<name>.<domain> and
-  # <konnectivityPrefix>-<name>.<domain>, e.g. k0s-edge-dev.aisedge.local and
-  # konnectivity-edge-dev.aisedge.local.
   hostnames:
-    # Empty means domain.internal. Kept separate from it because the child
-    # cluster hostnames may need a wildcard record (*.edge.<org-domain>) that
-    # the management services do not use.
+    # Empty means domain.internal. Kept separate because the child-cluster
+    # hostnames may need a wildcard record the management services do not.
     domain: ""
     apiPrefix: k0s
     konnectivityPrefix: konnectivity
-    # AN EXISTING SITE MUST PIN THE NAMES IT ALREADY USES, via apiHost /
-    # konnectivityHost on its own edges[] entry. Measured on edge-dev:
-    # k0smotron derives k0sConfig.spec.api.externalAddress
-    # ("k0s.aisedge.local:443") and the edge-dev-kubeconfig Secret
-    # ("server: https://k0s.aisedge.local:443") from spec.ingress.apiHost, and
-    # the joined worker's konnectivity-agent dials konnect.aisedge.local.
-    # Neither name is what the pattern above generates, so accepting the
-    # generated names on a site that already has workers changes the API
-    # server's advertised address and the agent's target host at the same time.
+    # CAUTION: an EXISTING site must pin its real names via apiHost /
+    # konnectivityHost on its own edges[] entry — the generated pattern will
+    # not match what a live worker was joined with, and changing the API
+    # server's advertised address breaks that worker silently.
 
-  # The hosted control plane's datastore. emptyDir means a control-plane pod
-  # restart discards the child cluster's state, so this is a PVC.
+  # The hosted control plane's own datastore (not emptyDir — a pod restart
+  # must not discard the child cluster's state).
   persistence:
     type: pvc
-    # The hosted control plane's own volume.
     size: 10Gi
     storageClassName: ""
-  # etcd's volume is INDEPENDENT of the control-plane one, and it is sized
-  # separately because a StatefulSet volumeClaimTemplate is IMMUTABLE. The
-  # live edge-dev etcd claim is 1Gi; rendering 10Gi against it makes the API
-  # server reject k0smotron's update and wedges its reconcile loop. Defaulting
-  # to the live value keeps an upgrade a no-op on existing sites. Changing it
-  # requires recreating the StatefulSet — a scheduled operation, not a values
-  # edit. One key for two volumes is how this was missed.
+  # etcd's volume is a SEPARATE key because its StatefulSet
+  # volumeClaimTemplate is immutable. CAUTION: a live edge's etcd claim may
+  # already be a different size (1Gi observed) — rendering a larger default
+  # against it makes the API server reject the update. Changing this needs
+  # recreating the StatefulSet, not a values edit.
   etcdPersistence:
     size: 1Gi
     storageClassName: ""
-  # Cluster CRs carry helm.sh/resource-policy: keep, so removing a site from
-  # `edges` above does NOT tear down its control plane. Teardown is a
-  # deliberate `kubectl delete`, not a side effect of a fleet-wide upgrade.
+  # Cluster CRs carry helm.sh/resource-policy: keep, so removing an edge from
+  # `edges` does NOT tear down its control plane — teardown is a deliberate
+  # `kubectl delete`, never a side effect of a fleet upgrade.
   resourcePolicyKeep: true
 
 
@@ -288,55 +206,14 @@ seaweedfs:
   enabled: true
   image:
     repository: chrislusf/seaweedfs
-    # 4.34, NOT 3.99, and NOT the 4.30 the first advisory points at.
-    #
-    # Everything below this line about "the bucket IS the boundary" was false
-    # on 3.99. THREE published S3 path traversals cross that boundary, and no
-    # single version below 4.34 closes all of them:
-    #   CVE-2026-54917  CVSS 10.0, fixed 4.30. `GET /bucket-A/../bucket-B/key`
-    #     — the router matched bucket=bucket-A so the identity check passed,
-    #     then the path was collapsed and the read landed in bucket-B.
-    #   CVE-2026-58372  CVSS 8.1, fixed 4.34 — the same trick in
-    #     DeleteMultipleObjectsHandler, i.e. cross-bucket DELETE. This is the
-    #     one that matters most on a store holding staged patient imaging: the
-    #     other two leak, this one destroys. 4.30 does NOT fix it.
-    #   CVE-2026-55874  CVSS 7.7, fixed 4.34 — again via the X-Amz-Copy-Source
-    #     header on CopyObject/UploadPartCopy. Read-only (C:H/I:N) and needs a
-    #     valid key, but any key: one site's credential reads every site.
-    # So 4.30 would look patched while leaving cross-bucket delete and
-    # cross-bucket copy-read wide open. Also fixed on the way past: 4.30's
-    # CVE-2026-58371 (JSONP reflection, LOW).
-    #
-    # 4.34 is the LOWEST version with no published advisory against it — NVD
-    # lists six SeaweedFS CVEs in total and 4.34 clears every one. It is here
-    # rather than the newest release because SeaweedFS numbers sequentially
-    # (4.00 is just what came after 3.99, not a semver major), so every extra
-    # release is untested change for no security gain.
-    #
-    # NOT a reason to go to 4.34: CVE-2026-55873. It is scored 4.3 and only
-    # lets a low-privileged key ENUMERATE S3Tables buckets — and the template
-    # disables the Iceberg/S3Tables server outright, so it does not apply here
-    # either way. Do not let it be cited as load-bearing later.
-    #
-    # Checked against the 4.34 sources before bumping, because a flag or format
-    # change here is a silent outage rather than a crash:
-    #   * every flag `weed server` is given exists unchanged in 4.34 — but 4.x
-    #     also ADDS one that defaults ON, see -s3.port.iceberg in the template
-    #   * the image still has no USER, so the data PVC's ownership is
-    #     unaffected
-    #   * s3.json keeps the {"identities":[...]} shape and the
-    #     "<action>:<bucket>" matching that the identity block below relies on
-    #     (auth_credentials.go renamed canDo -> CanDo; the logic is the same)
-    #   * the filer HTTP API the reclaimer deletes through is unchanged:
-    #     DELETE ...?recursive=true still returns 204, and the JWT gate still
-    #     allows everything while no signing key is configured. That contract
-    #     is load-bearing — see charts/mgmt/files/reclaim-staged.sh.
-    #   * SeaweedFS_volumeServer_{resource,total_disk_size,volumes} — the only
-    #     SeaweedFS metrics the alert rules and dashboards read — still exist
-    #
-    # STILL UNVERIFIED, and it needs a live check: Appendix A of
-    # docs/helm-consolidation-briefing.md measured aws-cli's x-amz-checksum-*
-    # headers against 3.99's S3 gateway only. Re-run it after this rolls out.
+    # 4.34, not 3.99, not 4.30. 3.99 has three published S3 path-traversal
+    # CVEs (CVSS 10.0 / 8.1 / 7.7) that cross the per-bucket isolation this
+    # whole design depends on; 4.30 fixes only the first. 4.34 is the lowest
+    # version clean of all six published SeaweedFS advisories.
+    # CAUTION: do not "helpfully" bump further without checking — 4.x also
+    # turns on an Iceberg REST server (-s3.port.iceberg) that 3.99 never had.
+    # Full CVE breakdown and what was re-verified before this bump:
+    # docs/components/seaweedfs.md, docs/TOUR.md §9.
     tag: "4.34"
     pullPolicy: IfNotPresent
 
@@ -345,54 +222,33 @@ seaweedfs:
     capacity: 500Gi
     volumeSizeLimitMB: 1024
 
-  # ONE STAGING BUCKET PER EDGE SITE.
-  #
-  # SeaweedFS enforces identity actions as "<action>:<bucket>", so
-  # `Write:<bucket>/*` covers the whole bucket — there is no prefix-level
-  # scoping. Measured on the live cluster: an edge key lists its own bucket
-  # and gets AccessDenied on another. The bucket IS the boundary, so while
-  # every site shared one, any edge key could read, list and delete every
-  # other site's staged imaging.
-  #
-  # Per-site buckets are named <bucketPrefix>-<edge name>, or set `bucket:`
-  # on an individual edge entry to override.
-  #
-  # Set false to keep every site in buckets.ingest below — the pre-existing
-  # shared-bucket layout. That exists so sites can be migrated one at a time,
-  # not because it is a reasonable end state.
+  # ONE STAGING BUCKET PER EDGE. SeaweedFS scopes identities as
+  # "<action>:<bucket>" with no prefix-level split, so a shared bucket lets
+  # any edge key read/list/delete every other site's staged imaging — the
+  # bucket IS the isolation boundary. See docs/components/seaweedfs.md.
   perSiteBuckets: true
-  bucketPrefix: ingest
+  bucketPrefix: ingest       # bucket named <bucketPrefix>-<edge name>
+  # CAUTION: false keeps every site on the single shared bucket below — only
+  # for migrating sites off it one at a time, not a reasonable end state.
 
   buckets:
-    # Only used when perSiteBuckets is false, or by sites not yet migrated.
-    ingest: ingest-bucket
-    # Loki's chunks. Deliberately its own bucket and its own identity, so a
-    # Loki compromise cannot reach staged patient data.
+    ingest: ingest-bucket    # only used when perSiteBuckets is false
+    # Loki's chunks. Own bucket, own identity — a Loki compromise cannot
+    # reach staged patient data.
     logs: logs-bucket
 
-  # Admin identity, used by the bucket-creation hook.
-  #
-  # Per-edge identities are generated from `edges` above and scoped to the
-  # ingest bucket. BE PRECISE ABOUT WHAT THAT DOES AND DOES NOT BUY:
-  # SeaweedFS matches an identity's actions as "<action>:<bucket>", so
-  # `Read:ingest-bucket` / `Write:ingest-bucket/*` are BUCKET-WIDE. Every edge
-  # writes into one bucket under one staged/ prefix, so an edge key can read,
-  # list and delete ANY other site's staged sessions.
-  # What the scoping does buy: an edge key cannot reach XNAT, cannot reach the
-  # logs bucket, and has no administrative rights over the store.
-  # What it does not buy: cross-site isolation. Achieving that needs either a
-  # bucket per site or per-prefix policies, and it is an open decision — see
-  # docs/helm-consolidation-briefing.md.
+  # Admin identity for the bucket-creation hook. Per-edge identities come
+  # from `edges` above and are scoped to their own bucket only — no XNAT
+  # access, no logs-bucket access, no admin rights over the store.
   adminSecretRef: seaweedfs-admin
 
-  # The generated s3.json goes into a SECRET, not a ConfigMap. The imperative
-  # installer wrote every site's S3 keys into a ConfigMap in plaintext.
+  # Generated s3.json goes into a Secret, never a ConfigMap (the imperative
+  # installer wrote every site's S3 keys into a plaintext ConfigMap).
   identitiesSecretName: seaweedfs-identities
 
   ingress:
     enabled: true
-    # mc multipart / large session uploads.
-    proxyBodySize: 50g
+    proxyBodySize: 50g        # mc multipart / large session uploads
     tlsSecretName: seaweedfs-tls
 
   resources:
@@ -414,10 +270,9 @@ xnatUpload:
   xnatSecretRef: xnat-credentials     # keys: server, username, password
   s3SecretRef: seaweedfs-upload       # keys: access-key, secret-key
 
-  # No `bucket` key: with perSiteBuckets the uploader is rendered once per
-  # edge, each against that site's own bucket via the mgmt.edgeBucket helper.
-  # A single fleet-wide bucket value here is what made one uploader a
-  # fleet-wide single point of failure.
+  # No `bucket` key here: with perSiteBuckets the uploader renders once per
+  # edge against that site's own bucket. A single fleet-wide value would make
+  # one uploader a fleet-wide single point of failure.
   prefix: staged
   region: us-east-1
 
@@ -426,8 +281,8 @@ xnatUpload:
   requireManifest: false
   verifySsl: false
 
-  # Recreate, not RollingUpdate: two uploaders running --loop against the same
-  # staging prefix would process the same sessions concurrently.
+  # CAUTION: Recreate, not RollingUpdate — two uploaders running --loop
+  # against the same staging prefix would process sessions concurrently.
   strategy: Recreate
 
   resources:
@@ -439,222 +294,140 @@ xnatUpload:
 # certManager + issuers
 # =============================================================================
 certManager:
-  # Whether to INSTALL the cert-manager subchart. Nothing else.
-  #
-  # Default false, because on every cluster we actually have, cert-manager is
-  # already installed (by `kubectl apply`, with no Helm ownership). Defaulting
-  # to true would mean the common case is the one that needs overriding.
+  # Whether to INSTALL the cert-manager subchart — nothing else. Default
+  # false because every cluster we run this on already has cert-manager
+  # installed out of band.
   enabled: false
   installCRDs: true
 
-  # WHERE cert-manager reads cluster-scoped resources from — its
-  # --cluster-resource-namespace. This is deliberately INDEPENDENT of
-  # `enabled`: one is "do we install it", the other is "where does the running
-  # controller look". Conflating them put the CA Certificate in a namespace
-  # cert-manager never reads, so nothing issued and nothing errored.
-  # Verified on this cluster: the controller runs
-  # --cluster-resource-namespace=$(POD_NAMESPACE) in namespace cert-manager.
+  # Where the RUNNING cert-manager controller looks for cluster-scoped
+  # resources (--cluster-resource-namespace). Independent of `enabled` on
+  # purpose — conflating the two once put the CA Certificate somewhere
+  # cert-manager never reads, and nothing errored.
   clusterResourceNamespace: cert-manager
 
   monitoring:
-    # Creates a metrics Service + ServiceMonitor for the cert-manager
-    # controller. Without it, certmanager_certificate_expiration_timestamp_seconds
-    # has no series and the CA-expiry alerts cannot fire — which is how a CA
-    # reaches its expiry date unannounced.
+    # Without this, certmanager_certificate_expiration_timestamp_seconds has
+    # no series and the CA-expiry alerts cannot fire.
     enabled: true
 
-  # ais-edge-ca      self-signed internal CA. The default, and what every
-  #                  in-cluster client trusts via the ca-bundle Secret.
-  # letsencrypt-*    public certificates. Requires a real, publicly resolvable
-  #                  domain AND a DNS-01 solver — nip.io cannot satisfy
-  #                  HTTP-01 or DNS-01, which is why the internal CA is the
+  # ais-edge-ca      self-signed internal CA (default). Every in-cluster
+  #                  client trusts it via the ca-bundle Secret.
+  # letsencrypt-*    public certs. Needs a real resolvable domain + DNS-01;
+  #                  nip.io cannot satisfy either, hence the internal-CA
   #                  default rather than a fallback.
   issuer: ais-edge-ca
 
   ca:
     # Name of the self-signed ClusterIssuer that signs the root CA.
-    #
-    # SET THIS ON A BROWNFIELD CLUSTER. It ends up in the CA Certificate's
-    # issuerRef, and issuerRef is part of the spec — so if the chart's name
-    # differs from the one already in the cluster, adopting the Certificate
-    # rewrites issuerRef and cert-manager RE-ISSUES the root CA. Every
-    # ca-bundle already distributed to every edge then verifies against a CA
-    # that no longer signs anything: a fleet-wide TLS outage caused by a
-    # rename.
-    #
-    # Empty means <release>-selfsigned-bootstrap, correct for a new cluster.
-    # stream-2-ab-dev has `selfsigned-bootstrap` from the imperative installer
-    # and sets it explicitly. Diff the live Certificate against the rendered
-    # one before adopting; that is how this was found.
+    # CAUTION — BROWNFIELD CLUSTERS MUST SET THIS. It is part of the CA
+    # Certificate's issuerRef; a name mismatch on adoption makes cert-manager
+    # RE-ISSUE the root, and every already-distributed ca-bundle stops
+    # verifying — a fleet-wide TLS outage from a rename. Empty means
+    # <release>-selfsigned-bootstrap, correct for a brand-new cluster.
     bootstrapIssuerName: ""
 
     # -----------------------------------------------------------------------
-    # ONE TIER OR TWO. selfSigned | intermediate
-    #
-    # selfSigned    (DEFAULT) cert-manager generates a self-signed root in the
-    #               cluster and that root signs every leaf certificate. One
-    #               key, held in a Secret on the management node. This is the
-    #               right answer for dev and for a tier-1 single-site install:
-    #               an out-of-band signing ceremony there is friction for no
-    #               benefit, and it cannot live in install.sh anyway.
-    #
-    # intermediate  the root is generated OUT OF BAND and its key is kept
-    #               offline. The cluster holds only an intermediate, supplied
-    #               as an existing Secret (intermediate.secretRef below), and
-    #               cert-manager issues from that. The chart does NOT generate
-    #               the root in this mode — it cannot, the key is deliberately
-    #               not here — so it renders no bootstrap Issuer and no CA
-    #               Certificate. Recommended for a multi-site fleet.
-    #               Ceremony: docs/ca-ceremony.md.
-    #
-    # BE PRECISE ABOUT WHAT THE SPLIT BUYS. If the management node is
-    # compromised, the attacker already holds the staged imaging, the XNAT
-    # credentials and every child cluster kubeconfig. The CA is not the crown
-    # jewel, and moving the root offline protects none of that. What it buys
-    # is RECOVERABILITY: edges pin the ROOT, so replacing a compromised or
-    # expiring intermediate is an in-cluster operation they never notice,
-    # rather than hand-carrying a new trust anchor to every site — which is
-    # what scripts/rotate-ca.sh exists to do and why it is a two-phase
-    # procedure run weeks apart. That is a smaller claim than "the root is
-    # protected", and it is the only one being made.
+    # selfSigned | intermediate
+    # selfSigned    (DEFAULT) cert-manager generates and holds the root
+    #               in-cluster. Right for dev and single-site tier-1.
+    # intermediate  root is generated OUT OF BAND, key kept offline; the
+    #               cluster holds only an intermediate (intermediate.secretRef
+    #               below). No bootstrap Issuer or CA Certificate is rendered
+    #               in this mode. Recommended for a multi-site fleet.
+    #               Ceremony + what this mode does and does not buy:
+    #               docs/ca-ceremony.md.
+    # -----------------------------------------------------------------------
     mode: selfSigned
 
-    # The Secret cert-manager GENERATES the root into, in selfSigned mode.
-    # Unused as an issuing source in intermediate mode — see intermediate
-    # below — and the chart refuses to render if the two names collide, since
-    # sharing them means a later switch back to selfSigned overwrites the
-    # offline-signed intermediate with a fresh self-signed root.
+    # Secret cert-manager GENERATES the root into, in selfSigned mode only.
+    # CAUTION: sharing this name with an offline-signed intermediate means a
+    # later switch back to selfSigned overwrites it with a fresh root — the
+    # chart refuses to render if the two collide.
     secretName: ais-edge-ca-secret
 
-    # MUST MATCH THE CA ALREADY DEPLOYED. On the existing management cluster
-    # the root CA is CN="AIS Edge Root CA" (openssl x509 -in ais-edge-ca.crt
-    # -subject), and cert-manager treats commonName as part of the desired
-    # state: change it and the FIRST `helm upgrade` re-issues the root CA.
-    # Every ca-bundle Secret already distributed to every edge then verifies
-    # against a CA that no longer signs anything, so every edge's S3 upload
-    # and Loki push fails TLS validation at once — a fleet-wide outage caused
-    # by a cosmetic-looking string.
-    # In intermediate mode this is the CN the offline ceremony must use for
-    # the root, for exactly the same reason.
+    # CAUTION — MUST MATCH THE DEPLOYED CA'S COMMON NAME. cert-manager treats
+    # commonName as part of desired state: change it and the next
+    # `helm upgrade` re-issues the root, breaking every edge's TLS at once.
+    # In intermediate mode this is the CN the offline ceremony must use.
     commonName: AIS Edge Root CA
-    # Render-time guard: the chart refuses to render if commonName is anything
-    # other than the deployed value. Set true ONLY when building a new fleet
-    # that has never distributed a ca-bundle to anything. It exists because
-    # the failure above is invisible until every site breaks at once.
+    # Render-time guard against the above. true ONLY when building a fleet
+    # that has never distributed a ca-bundle to anything.
     allowCommonNameChange: false
 
     durationHours: 87600      # 10y
 
-    # -----------------------------------------------------------------------
-    # intermediate mode only.
-    # -----------------------------------------------------------------------
     intermediate:
-      # Name of an EXISTING Secret holding the offline-signed intermediate.
-      # Created by hand from docs/ca-ceremony.md, never templated, never in
-      # git, and not owned by Helm — `helm uninstall` cannot remove it.
-      # It must live in certManager.clusterResourceNamespace above, because
-      # that is the only namespace a ClusterIssuer's spec.ca.secretName is
-      # resolved from, and it must carry:
+      # Name of an EXISTING Secret holding the offline-signed intermediate —
+      # created by hand per docs/ca-ceremony.md, never templated, never in
+      # git, not Helm-owned. Must live in
+      # certManager.clusterResourceNamespace (the only namespace a
+      # ClusterIssuer's spec.ca.secretName resolves from). Keys:
       #   tls.crt  the intermediate certificate
       #   tls.key  the intermediate's private key
       #   ca.crt   the ROOT certificate — what edges pin
-      # Empty in intermediate mode is a render-time failure: a ClusterIssuer
-      # pointing at no Secret stays NotReady and every Certificate sits
-      # Pending while the Ingresses serve nginx's default self-signed cert,
-      # which reads as a browser warning rather than a misconfiguration.
+      # Empty in intermediate mode is a render-time failure.
       secretRef: ""
 
   acme:
     email: ""
     server: https://acme-v02.api.letsencrypt.org/directory
-    # Provider-specific solver block, passed through verbatim.
-    dns01Solver: {}
+    dns01Solver: {}     # provider-specific block, passed through verbatim
 
 
 # =============================================================================
 # certSync — keep each edge's copy of the management Secrets current
 # =============================================================================
-# THE FAILURE THIS PREVENTS. cert-manager renews certificates on the
-# MANAGEMENT cluster. Edge clusters hold copies that scripts/07b pushed ONCE,
-# and nothing re-pushes them, so a certificate that renews at two-thirds of
-# its lifetime leaves the edge holding an expired one and whatever used it
-# stops working on a date nobody has in a calendar. A shared password does not
-# expire, so mTLS on the Loki push path was strictly WORSE than the password it
-# replaces until this job existed — which is why it shipped first, and why the
-# Loki push CLIENT CERTIFICATE is now one of the things it carries.
-#
-# This REPLACES the manual distribution in scripts/07b (the ca-bundle and the
-# Loki push credential), rather than adding to it.
-#
-# One CronJob per entry in `edges`, so one site being unreachable cannot stop
-# any other site's rotation, and so "this edge has not synced" is a per-edge
-# Prometheus series — see files/prometheus-rules/cert-sync.yaml.
+# Replaces manual, one-time distribution of the ca-bundle and the Loki push
+# client certificate. cert-manager renews on the MANAGEMENT cluster; without
+# this, an edge's copy silently expires on whatever date it was last pushed.
+# One CronJob per edge, so one unreachable site cannot stall another's
+# rotation. Full incident history: docs/hardening-decisions.md §1.
 certSync:
   enabled: true
 
-  # Every 6h. CertSyncStale fires after 24h without a successful run, so this
-  # gets four attempts inside the alert window. The chart REFUSES to render a
-  # schedule coarser than daily: below that, the alert fires on a healthy
-  # fleet and a renewal can land inside a gap where nothing is watching.
+  # Every 6h — CertSyncStale fires after 24h without a success, so this is
+  # four attempts inside the alert window. CAUTION: the chart refuses a
+  # schedule coarser than daily; below that, a renewal can land inside a gap
+  # nothing is watching.
   schedule: "23 */6 * * *"
 
-  # How the job reaches the child API server.
-  #
-  # inCluster   find k0smotron's control-plane Service by label in the edge's
-  #             namespace and talk to it over ClusterIP. Measured on the live
-  #             cluster: the child API server's certificate carries
-  #             kmc-<edge>-nodeport.<ns>.svc.cluster.local as a SAN, so
-  #             verification against the kubeconfig's CA succeeds on that
-  #             address. Discovery is by label, so this survives a site moving
-  #             from NodePort to ClusterIP+SNI.
-  # kubeconfig  use the address k0smotron published in the kubeconfig, which
-  #             is the EXTERNAL ingress hostname (measured:
-  #             https://k0s.<domain>:443). Cluster DNS does not resolve that,
-  #             so it depends on the hostAliases the CronJob renders and on
-  #             the request hairpinning back in through the ingress. That path
-  #             has not been tested from inside a pod.
-  #
-  # inCluster falls back to the kubeconfig address by itself if discovery
-  # finds no Service, and logs which one it used.
+  # inCluster   find k0smotron's control-plane Service by label in the
+  #             edge's namespace, talk over ClusterIP. Verified working
+  #             across a NodePort -> ClusterIP+SNI move (discovery is by
+  #             label). Falls back to kubeconfig automatically if no Service
+  #             is found, and logs which path it used.
+  # kubeconfig  the EXTERNAL ingress hostname k0smotron published. Depends on
+  #             this CronJob's hostAliases and on hairpinning back through
+  #             the ingress — not tested from inside a pod.
   apiEndpoint: inCluster
 
-  # Per-call kubectl timeout. A wedged API server must not hold the Job open
-  # until activeDeadlineSeconds, because concurrencyPolicy: Forbid would then
-  # skip the following runs silently.
+  # Per-call kubectl timeout. CAUTION: a wedged API server must not hold the
+  # Job open until activeDeadlineSeconds — concurrencyPolicy: Forbid would
+  # then skip every following run silently.
   requestTimeoutSeconds: 30
 
-  # kubectl is genuinely needed here: this job talks to ANOTHER cluster's API
-  # server, which is not something the aws-cli image used elsewhere can do.
-  # Pinned like every other image. alpine/kubectl carries a busybox shell,
-  # base64 and sed, which is all cert-sync.sh uses — verified by running the
-  # image. There is no bash in it, so the script is POSIX sh.
+  # Needs to talk to ANOTHER cluster's API server, which the aws-cli image
+  # used elsewhere cannot do. alpine/kubectl carries the busybox shell,
+  # base64, sed this job's script needs — no bash, so the script is POSIX sh.
   image:
     repository: alpine/kubectl
     tag: "1.35.4"
     pullPolicy: IfNotPresent
 
-  # WHAT GETS COPIED, mgmt -> edge. Names only; no value is ever templated.
-  #
-  #   source.namespace   "" means this release's namespace.
-  #   source.name        "<edge>" is replaced with the edge's name, so one
-  #                      entry covers a fleet of per-site Secrets.
-  #   source.keys        srcKey: dstKey. REQUIRED, and there is deliberately
-  #                      no "copy the whole Secret" option:
-  #                      ais-edge-ca-secret contains tls.key, the private key
-  #                      of the CA that signs the entire fleet, and a
-  #                      whole-Secret copy would put it on every edge. The
-  #                      chart refuses to render tls.key out of the CA Secret
-  #                      at all.
-  #   destination.type   defaults to Opaque.
-  #
-  # The first entry below is what scripts/07b pushes by hand; the second is the
-  # per-site Loki push client certificate, which has no imperative equivalent.
+  # WHAT GETS COPIED, mgmt -> edge. Names only, never a value.
+  #   source.namespace   "" means this release's namespace
+  #   source.name        "<edge>" expands per site, so one entry covers a
+  #                      fleet of per-site Secrets
+  #   source.keys        srcKey: dstKey. REQUIRED — no "whole Secret" option.
+  #                      CAUTION: the chart refuses to copy tls.key out of
+  #                      the CA Secret specifically (ais-edge-ca-secret) —
+  #                      that key signs the entire fleet.
+  #   destination.type   defaults to Opaque
   secrets:
     - source:
-        # Must match certManager.clusterResourceNamespace — cert-manager
-        # resolves the CA into its own cluster-resource namespace, and the
-        # chart checks the two agree rather than logging sync_failed forever
-        # for a Secret that exists one namespace away.
+        # CAUTION: must equal certManager.clusterResourceNamespace, or every
+        # sync logs sync_failed forever for a Secret one namespace away.
         namespace: cert-manager
         name: ais-edge-ca-secret
         keys:
@@ -664,30 +437,12 @@ certSync:
         name: ca-bundle
         type: Opaque
     - source:
-        # This edge's Loki push CLIENT CERTIFICATE, issued by cert-manager from
-        # the same CA as the ca-bundle above (templates/observability.yaml).
-        # The name is fixed by the chart — see mgmt.lokiClientCertSecret — and
-        # templates/cert-sync.yaml refuses to render if this entry does not
-        # match it, because the Ingress would then demand a certificate nothing
-        # delivers.
-        #
-        # tls.key IS copied here, unlike the CA entry above which refuses to.
-        # The distinction is what the key can do: this one authenticates ONE
-        # site to ONE endpoint and cert-manager replaces it every 90 days; the
-        # CA key signs the entire fleet.
-        #
-        # This replaced an entry that handed each edge one key out of a shared
-        # `loki-push-auth` password map. That path never worked — nginx will
-        # not read a bare password out of an auth-map — and a shared password
-        # cannot rotate itself. docs/hardening-decisions.md §1.
-        #
-        # DROP THIS ENTRY on a management node running observability.enabled:
-        # false. The certificate is issued from templates/observability.yaml,
-        # so with observability off there is no source to copy and every
-        # cert-sync run logs sync_failed and eventually raises CertSyncStale.
-        # That is not guarded at render time on purpose: it is the same class
-        # as any other source that does not exist, and cert-sync already names
-        # the missing Secret in its logs.
+        # This edge's Loki push CLIENT CERTIFICATE, from the same CA as the
+        # ca-bundle above. tls.key IS copied here (unlike the CA entry) —
+        # this key authenticates one site to one endpoint and rotates every
+        # 90 days; it is not the fleet-signing key.
+        # CAUTION: drop this entry when observability.enabled is false — the
+        # cert has no source to copy and every run logs sync_failed.
         namespace: ""
         name: "<edge>-loki-client"
         keys:
@@ -696,70 +451,44 @@ certSync:
       destination:
         namespace: logging
         name: loki-push-client-tls
-        # kubernetes.io/tls, so the key names are fixed by Kubernetes and the
-        # edge chart can mount tls.crt / tls.key without a second values knob
-        # to keep in step. The API server validates that both are present.
-        type: kubernetes.io/tls
+        type: kubernetes.io/tls   # names fixed by Kubernetes, not a values knob
 
 
 # =============================================================================
-# ingressNginx
+# ingressNginx / ingress-nginx subchart
 # =============================================================================
-# =============================================================================
-# ingress-nginx subchart values
-# =============================================================================
-# THESE WERE MISSING AND THE OMISSION IS NOT COSMETIC.
+# CAUTION: this block is not optional to have SOME value for. Its absence
+# leaves the subchart on LoadBalancer + no hostNetwork — on-prem has no cloud
+# controller to satisfy that, so :443 never binds and every fleet hostname
+# (SeaweedFS, Loki push, each edge's k0s API/konnectivity) is refused, while
+# the controller pod itself reports 1/1 Running.
 #
-# Without this block the subchart takes its own defaults: a Service of type
-# LoadBalancer and no hostNetwork. On an on-prem node there is no cloud
-# controller to satisfy a LoadBalancer, so the Service sits at
-# EXTERNAL-IP <pending> forever and NOTHING BINDS THE NODE'S :443. Every
-# hostname the fleet depends on — the SeaweedFS S3 endpoint, the Loki push
-# endpoint, and each edge's k0s API and konnectivity tunnel — resolves to the
-# management node and is then refused. The management cluster looks entirely
-# healthy: the controller pod is 1/1 Running, its Ingress objects exist, and
-# the only symptom is "connection refused" on the far side of the link, on a
-# machine in another building.
-#
-# The imperative installer had this right, in two files chosen by topology
-# (manifests/01-management/nginx-ingress-values{,-cloud}.yaml.tpl). The values
-# below are the on-prem one.
-#
-# ON CLOUD, OVERRIDE IN THE SITE FILE:
+# ON CLOUD, override in the site file instead:
 #   ingress-nginx:
 #     controller:
 #       hostNetwork: false
 #       dnsPolicy: ClusterFirst
-#       service:
-#         type: LoadBalancer
-#         loadBalancerIP: "<the pre-allocated address>"
-# Managed Kubernetes generally forbids binding hostNetwork on a worker, and
-# there a LoadBalancer is what the platform actually provides.
+#       service: {type: LoadBalancer, loadBalancerIP: "<pre-allocated address>"}
 ingress-nginx:
   controller:
-    # ONE replica, and hostNetwork means it must stay one: two pods cannot
-    # both bind :443 on the same node.
-    replicaCount: 1
+    replicaCount: 1        # CAUTION: must stay 1 — hostNetwork means one pod per :443
     hostNetwork: true
-    # With hostNetwork the default ClusterFirst gives the pod the HOST's
-    # /etc/resolv.conf, and the controller then cannot resolve the in-cluster
-    # Service names of its own upstreams.
+    # ClusterFirstWithHostNet, not the ClusterFirst default: with hostNetwork
+    # the pod would otherwise get the HOST's resolv.conf and lose its own
+    # in-cluster upstream names.
     dnsPolicy: ClusterFirstWithHostNet
     ingressClassResource:
       name: nginx
       enabled: true
       default: true
     service:
-      # Internal only. The host's :443 is what edges connect to.
-      type: ClusterIP
+      type: ClusterIP      # internal only — the host's :443 is what edges hit
     extraArgs:
-      # REQUIRED. The k0s API and konnectivity are mTLS end to end; terminating
-      # TLS here would leave the management side looking healthy and break only
-      # the workers' join, surfacing as an x509 error on the edge VM.
+      # REQUIRED. k0s API + konnectivity are mTLS end to end; terminating TLS
+      # here breaks only the workers' join, as an x509 error on the edge VM.
       enable-ssl-passthrough: "true"
     config:
-      # DICOM sessions run to gigabytes; the 1MB default would reject them.
-      proxy-body-size: "50g"
+      proxy-body-size: "50g"       # DICOM sessions run to gigabytes
       proxy-read-timeout: "3600"
       proxy-send-timeout: "3600"
       use-forwarded-headers: "true"
@@ -769,12 +498,9 @@ ingress-nginx:
       requests: {cpu: 100m, memory: 128Mi}
       limits:   {cpu: 1,    memory: 512Mi}
 
-
 ingressNginx:
   enabled: true
-  # Required: the k0smotron child-cluster API and konnectivity tunnel are TLS
-  # end-to-end and must NOT be terminated at the ingress.
-  sslPassthrough: true
+  sslPassthrough: true   # required — k0smotron traffic must not terminate here
   loadBalancerIP: ""
   proxyBodySize: 50g
 
@@ -785,18 +511,14 @@ ingressNginx:
 observability:
   enabled: true
 
-  # LANDMINE. Prometheus discovers PrometheusRule and ServiceMonitor objects
-  # by label. The imperative installer hardcoded `release: kube-prometheus-stack`
-  # in five files because that was the release name it used. As a SUBCHART the
-  # release name is this chart's, so the label must follow it — otherwise
-  # Prometheus silently stops loading our rules and the Grafana Ingress 503s,
-  # with no error anywhere. Templated from .Release.Name by default; override
-  # only if kube-prometheus-stack is installed as a separate release.
+  # CAUTION: Prometheus discovers PrometheusRule/ServiceMonitor objects by
+  # label, and as a subchart the release name is THIS chart's — not
+  # kube-prometheus-stack, which the old imperative installer hardcoded in
+  # five places. Templated from .Release.Name by default; override only if
+  # kube-prometheus-stack is a separate release.
   prometheusReleaseLabel: ""
 
-  # StorageClass for the four observability PVCs. On a k0s management node
-  # this is the built-in local-path provisioner.
-  storageClassName: local-path
+  storageClassName: local-path   # the four observability PVCs
 
   grafana:
     adminSecretRef: grafana-admin-credentials   # keys: admin-user, admin-password
@@ -816,31 +538,20 @@ observability:
       limits:   {cpu: 1,    memory: 512Mi}
 
   loki:
-    # s3         chunks in SeaweedFS. Needs seaweedfs.enabled.
-    # filesystem single PVC. What tier-1 uses, where there is no SeaweedFS.
-    storage: s3
+    storage: s3         # s3: chunks in SeaweedFS. filesystem: single PVC (tier-1)
     s3SecretRef: loki-s3-credentials
     persistenceSize: 20Gi
     ingress: {enabled: true, tlsSecretName: loki-tls}
     push:
-      # mTLS. Loki itself runs auth_enabled: false and accepts anything that
-      # reaches it, so the push Ingress is the ONLY place a site is
-      # authenticated.
-      #
-      # true makes the chart issue one client certificate per entry in `edges`
-      # from the internal CA, and makes the Ingress require and pin one. There
-      # is no Secret to name here: the certificate names are derived, and the
-      # chart refuses to render if certSync is not carrying them to the sites
-      # (templates/cert-sync.yaml, and templates/observability.yaml if certSync
-      # is off altogether) — a half-configured mTLS path fails every push with
-      # no symptom except the logs going quiet.
-      #
-      # This replaced an HTTP Basic `authSecretRef` that never worked in any
-      # deployment: the shared password map is an ingress-nginx auth-map, and
-      # nginx's auth_basic_user_file does not accept the bare passwords the
-      # template shipped, so the repo's plaintext and the hand-hashed Secret on
-      # the live cluster had already drifted apart. See
-      # docs/hardening-decisions.md §1.
+      # mTLS. Loki itself runs auth_enabled: false and trusts anything that
+      # reaches it, so the push Ingress is the ONLY authentication point.
+      # true issues one client cert per `edges` entry from the internal CA
+      # and makes the Ingress require + pin it — no Secret to name here, the
+      # cert names are derived, and the chart refuses to render if certSync
+      # is not carrying them to every site.
+      # CAUTION: replaces an HTTP Basic path that never actually worked (a
+      # plaintext auth-map password nginx's auth_basic_user_file rejects).
+      # Full incident: docs/hardening-decisions.md §1.
       requireAuth: true
 
   alerting:
@@ -850,26 +561,20 @@ observability:
     smtpHost: ""
     smtpPort: 587
     smtpRequireTLS: true
-    # Alertmanager has smtp_auth_password_FILE but no smtp_auth_username_file,
-    # so unlike the password this cannot come from the mounted Secret and has
-    # to be a plain value. It is not sensitive on its own. Leaving it empty
-    # means no SMTP auth, and a relay that requires auth will reject every
-    # message — which surfaces only as alerts that never arrive.
+    # Plain value, not Secret-sourced: Alertmanager has smtp_auth_password_
+    # FILE but no _username_file equivalent. CAUTION: empty means no SMTP
+    # auth — a relay that requires it rejects every message silently.
     smtpUsername: ""
-    # Optional. Key: webhook-url. Must also appear in
-    # kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets so the
-    # operator mounts it — the chart refuses to render otherwise.
-    #
-    # LEAVING THIS EMPTY CHANGES THE ROUTING TREE, it does not just disable a
-    # destination. The Slack receivers are not rendered at all, severity=info
-    # goes to the info-email receiver and severity=critical to email-primary.
-    # Info alerts are then bounded at roughly one mail per (alertname, cluster)
-    # by send_resolved: false plus a 720h repeat_interval, so the inbox stays
-    # quiet without any alert being discarded.
-    #
-    # It used to mean "route info to Slack anyway, at a path that does not
-    # exist", which silently destroyed every info alert including CARotationDue.
-    # See files/alertmanager-config.yaml.
+    # Optional. Key: webhook-url. Must also appear in kube-prometheus-
+    # stack.alertmanager.alertmanagerSpec.secrets or the chart refuses to
+    # render.
+    # CAUTION: leaving this empty changes the ROUTING TREE, not just a
+    # destination — Slack receivers are not rendered at all, severity=info
+    # falls back to email (bounded to ~1 mail per alertname/cluster by a
+    # 720h repeat_interval) rather than being silently dropped. It used to
+    # mean "route to Slack anyway, at a path that does not exist", which
+    # destroyed every info alert including CARotationDue — see
+    # files/alertmanager-config.yaml.
     slackWebhookSecretRef: ""
     persistenceSize: 2Gi
 
@@ -877,9 +582,8 @@ observability:
 # =============================================================================
 # cloud (parked)
 # =============================================================================
-# Kept as a values key so the templates stay ready, but not wired up: the
-# LoadBalancer path in the shell installer was broken anyway, and pre-creating
-# an Octavia LB is Terraform work rather than Helm work.
+# Kept as a values key so templates stay ready, not wired up — pre-creating
+# an Octavia LB is Terraform work, not Helm work.
 cloud:
   enabled: false
   provider: openstack
@@ -896,13 +600,13 @@ podAnnotations: {}
 # =============================================================================
 # Everything below configures a PINNED upstream chart from Chart.yaml.
 #
-# THE CONSTRAINT THAT SHAPES ALL OF IT: Helm does NOT template values.yaml.
-# A subchart value cannot say `{{ .Release.Name }}-something` and expect it to
-# resolve — UNLESS that particular subchart runs `tpl` over that field itself.
-# Fields marked [tpl] rely on subchart-side tpl and do resolve; everything
-# else is a literal that has to be kept in step with a parent value by hand.
-# templates/observability.yaml renders a consistency check for every coupling
-# it can see, because each of these mismatches is otherwise completely silent.
+# CAUTION: Helm does NOT template values.yaml. A subchart value cannot say
+# `{{ .Release.Name }}-something` and expect it to resolve — UNLESS that
+# subchart runs `tpl` over that field itself. Fields marked [tpl] rely on
+# subchart-side tpl and do resolve; everything else is a literal kept in
+# step with a parent value by hand. templates/observability.yaml renders a
+# consistency check for every coupling it can see, because each mismatch is
+# otherwise silent.
 # -----------------------------------------------------------------------------
 
 kube-prometheus-stack:
@@ -917,14 +621,12 @@ kube-prometheus-stack:
       retentionSize: ""
       scrapeInterval: 30s
       evaluationInterval: 30s
-      # DELETED ON PURPOSE — do not re-add:
-      #   ruleSelector: {matchLabels: {release: kube-prometheus-stack}}
-      # That literal was correct only because the shell installer's release
-      # happened to be named kube-prometheus-stack. As a subchart the release
-      # is ours. Leaving the selectors empty keeps *SelectorNilUsesHelmValues
-      # at its default of true, which makes the chart template
-      # `release: <parent release>` into the selectors automatically — so
-      # they track mgmt.prometheusReleaseLabel with no literal to forget.
+      # DELETED ON PURPOSE, do not re-add: ruleSelector: {matchLabels:
+      # {release: kube-prometheus-stack}}. That literal was only correct
+      # under the shell installer's release name. Empty selectors keep
+      # *SelectorNilUsesHelmValues at its default true, which auto-templates
+      # `release: <parent release>` — tracking prometheusReleaseLabel above
+      # with nothing to forget.
       ruleNamespaceSelector: {}
       serviceMonitorNamespaceSelector: {}
       podMonitorNamespaceSelector: {}
@@ -945,17 +647,17 @@ kube-prometheus-stack:
     enabled: true
     alertmanagerSpec:
       configSecret: alertmanager-aisedge-config
-      # Mounted at /etc/alertmanager/secrets/<name>/<key>. This is how the
-      # SMTP password reaches Alertmanager WITHOUT being templated into a
-      # manifest — the config uses smtp_auth_password_file.
+      # Mounted at /etc/alertmanager/secrets/<name>/<key> — how the SMTP
+      # password reaches Alertmanager without being templated into a
+      # manifest (config uses smtp_auth_password_file).
       secrets:
         - alertmanager-smtp
       storage:
         volumeClaimTemplate:
           metadata:
             annotations:
-              # Holds the notification log. Wiping it re-sends every alert
-              # that is still firing.
+              # Holds the notification log — wiping it re-sends every still-
+              # firing alert.
               helm.sh/resource-policy: keep
           spec:
             accessModes: ["ReadWriteOnce"]
@@ -967,19 +669,14 @@ kube-prometheus-stack:
 
   grafana:
     enabled: true
-    # PATCH-PINNED AHEAD OF THE SUBCHART. kube-prometheus-stack 87.19.2 pulls
-    # grafana 12.8.1, whose appVersion is 13.1.1, and an empty tag here means
-    # "use the appVersion". 13.1.2 (2026-08-04) fixes CVE-2026-13438; no
-    # details are public yet, and Grafana is the one service on this cluster
-    # that ingress-nginx publishes with NO auth in front of it — its own login
-    # page is the whole perimeter — so an unknown Grafana bug is not something
-    # to sit on. Two logs-table bug fixes are the rest of the release.
-    #
-    # Done as a tag override rather than by moving to kube-prometheus-stack
-    # 88.x: that would drag prometheus-operator 0.92.1 -> 0.93.0 and its CRDs
-    # through a live cluster (Chart.yaml explains why subchart CRDs are the
-    # awkward part here) to pick up a Grafana PATCH. Drop this line when the
-    # stack is next bumped for its own reasons and the appVersion catches up.
+    # PATCH-PINNED ahead of the subchart. kube-prometheus-stack 87.19.2
+    # pulls grafana 12.8.1 / appVersion 13.1.1; 13.1.2 fixes CVE-2026-13438
+    # (no public details yet) on the one service here published with NO auth
+    # in front of it. Done as a tag override rather than bumping to
+    # kube-prometheus-stack 88.x, which would also drag prometheus-operator
+    # 0.92.1 -> 0.93.0 and its CRDs through a live cluster just for a Grafana
+    # patch. Drop this line when the stack is next bumped for its own
+    # reasons and the appVersion catches up.
     image:
       tag: "13.1.2"
     admin:
@@ -996,28 +693,26 @@ kube-prometheus-stack:
       size: 5Gi
       annotations:
         helm.sh/resource-policy: keep
-    # The PVC is RWO, so a rolling update deadlocks: the new pod cannot mount
-    # the volume while the old one holds it, and the old one will not
-    # terminate until the new one is Ready.
+    # Recreate, not RollingUpdate: the PVC is RWO, so a rolling update would
+    # deadlock (new pod can't mount while the old holds it; old won't
+    # terminate until the new is Ready).
     deploymentStrategy:
       type: Recreate
-    # Once Grafana has run, subdirectories like pdf/ are mode 700 owned by
-    # 472:472. The init container runs with drop:ALL + add:[CHOWN]; without
-    # DAC_OVERRIDE it cannot traverse them and `chown -R` fails. Ownership is
-    # already correct, and fsGroup handles a fresh PVC.
+    # Off: once Grafana has run, subdirectories like pdf/ are mode 700 owned
+    # by 472:472, and the init container (drop:ALL + add:[CHOWN], no
+    # DAC_OVERRIDE) cannot traverse them to chown. Ownership is already
+    # correct; fsGroup handles a fresh PVC.
     initChownData:
       enabled: false
     deleteDatasources:
-      # Grafana's provisioner addresses datasources by UID. A previous install
-      # may have left a `Loki` row with a generated UID in grafana.db on the
-      # PVC, and re-provisioning the same name with an explicit UID then fails
-      # with "data source not found". No-op on a fresh database.
+      # Grafana provisions datasources by UID. A previous install may have
+      # left a `Loki` row with a generated UID on the PVC; re-provisioning
+      # the same name with an explicit UID then fails "data source not
+      # found". No-op on a fresh database.
       - name: Loki
         orgId: 1
     additionalDataSources:
-      # [tpl] kube-prometheus-stack renders additionalDataSources through tpl,
-      # so this resolves — and it must, because the Service name contains the
-      # release name.
+      # [tpl] — must resolve, the Service name contains the release name.
       - name: Loki
         uid: loki                       # dashboards reference {"type":"loki","uid":"loki"}
         type: loki
@@ -1037,20 +732,18 @@ kube-prometheus-stack:
       requests: {cpu: 100m, memory: 256Mi}
       limits:   {cpu: 1,    memory: 1Gi}
 
-  # Host metrics off, matching the edges. The kubelet's cAdvisor still
+  # Host metrics off, matching the edges — kubelet's cAdvisor still
   # provides pod-level metrics.
   prometheus-node-exporter: {enabled: false}
   nodeExporter: {enabled: false}
 
-  # Required by the SeaweedFSDown / EdgePodCrashLoop rules.
-  kubeStateMetrics: {enabled: true}
+  kubeStateMetrics: {enabled: true}      # required by SeaweedFSDown / EdgePodCrashLoop
   kube-state-metrics:
     resources:
       requests: {cpu: 50m,  memory: 128Mi}
       limits:   {cpu: 200m, memory: 256Mi}
 
-  # k0s either embeds these or does not expose them the way the upstream
-  # chart assumes.
+  # k0s either embeds these or does not expose them the way upstream assumes.
   kubeApiServer:         {enabled: true}
   kubeControllerManager: {enabled: false}
   kubeScheduler:         {enabled: false}
@@ -1061,13 +754,12 @@ kube-prometheus-stack:
 
 
 loki:
-  # PINNED, and load-bearing. The vector block below is subchart values, which
-  # Helm never templates, so the Loki address in it is a literal that cannot
-  # follow `.Release.Name`. Without this override the Service is
-  # <release>-loki, and the literal is only correct for a release named "mgmt"
-  # — a rename would leave Vector retrying a name that does not resolve, with
-  # management logs silently never arriving. Pinning the name decouples the two
-  # instead of relying on everyone always using the same release name.
+  # PINNED, and load-bearing. The vector.sinks.loki.endpoint block below is
+  # subchart-literal (Helm never templates it), so it cannot follow
+  # `.Release.Name`. Without this override the Service is <release>-loki —
+  # correct only for a release literally named "mgmt" — and a rename would
+  # leave Vector retrying an address that no longer resolves, with
+  # management logs silently never arriving.
   fullnameOverride: mgmt-loki
   deploymentMode: SingleBinary
   loki:
@@ -1086,15 +778,14 @@ loki:
         ruler:  logs-bucket
         admin:  logs-bucket
       s3:
-        # [tpl] the loki chart renders its config through tpl. Plain http on
-        # purpose — it never leaves the node.
+        # [tpl]. Plain http on purpose — never leaves the node.
         endpoint: http://{{ .Release.Name }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
         region: us-east-1               # ignored by SeaweedFS, required by the SDK
         s3ForcePathStyle: true
         insecure: true
-        # NO CREDENTIALS HERE. ${...} is expanded by Loki itself at startup
-        # (-config.expand-env below), not by Helm, so the key never appears in
-        # a rendered manifest or in git.
+        # NO CREDENTIALS HERE — ${...} is expanded by Loki itself at startup
+        # (-config.expand-env below), never by Helm, so the key never lands
+        # in a rendered manifest or in git.
         accessKeyId: ${LOKI_S3_ACCESS_KEY}
         secretAccessKey: ${LOKI_S3_SECRET_KEY}
     limits_config:
@@ -1109,50 +800,23 @@ loki:
       retention_enabled: true
       retention_delete_delay: 2h
       retention_delete_worker_count: 150
-      # filesystem, NOT s3.
-      #
-      # With `delete_request_store: s3` Loki builds the delete store from
-      # `storage_config.aws` — a different path from the `common.storage.s3`
-      # that `loki.storage` renders into — and the Loki chart never populates
-      # it. The compactor then resolves an EMPTY bucket name and Loki exits 1
-      # at startup with:
-      #
-      #   init compactor: failed to init delete store: failed to get s3 object:
-      #   ... api error NoSuchBucket: The specified bucket does not exist
-      #
-      # which reads as "the bucket was not created" and is not: `aws s3api
-      # get-object` with Loki's own credentials returns NoSuchKey against that
-      # same bucket while Loki keeps reporting NoSuchBucket.
-      #
-      # Setting storage_config.aws to fix it does not work either: the chart
-      # treats that as taking manual control and then blanks
-      # common.storage.s3.bucketnames (its _helpers.tpl only fills the bucket
-      # when storage_config.aws is unset), so the chunk and index stores lose
-      # their bucket instead. Verified both ways on a live cluster.
-      #
-      # This deployment runs SingleBinary with a persistent PVC at /var/loki,
-      # so the delete-request store has the same durability as the rest of
-      # Loki's local state and does not need to be in S3 at all. Chunks and
-      # the index still go to S3 — only the delete-request bookkeeping is
-      # local. A distributed Loki would need the S3 form, and would then need
-      # both blocks kept in step by hand.
+      # filesystem, NOT s3 — s3 makes Loki fail to start with a NoSuchBucket
+      # error that reads as "the bucket was never created" and is not. Full
+      # explanation: docs/components/loki.md.
       delete_request_store: filesystem
-
 
     commonConfig:
       replication_factor: 1
-    # The ruler evaluates the LogQL alert rules and pushes firing alerts to
-    # Alertmanager. It lives here rather than in Prometheus because mgmt
-    # Prometheus cannot scrape edge pods across the one-way konnectivity
-    # tunnel, and because the source of truth for these alerts is the JSON log
-    # event, not a derived metric.
+    # Evaluates the LogQL alert rules and pushes to Alertmanager. Lives here
+    # rather than in Prometheus because mgmt Prometheus cannot scrape edge
+    # pods across the one-way konnectivity tunnel, and because these alerts'
+    # source of truth is the JSON log event, not a derived metric.
     rulerConfig:
       storage:
         type: local
         local: {directory: /etc/loki/rules}
       rule_path: /var/loki/rules-runtime
-      # [tpl]
-      alertmanager_url: http://{{ .Release.Name }}-kube-prometheus-stack-alertmanager.{{ .Release.Namespace }}.svc.cluster.local:9093
+      alertmanager_url: http://{{ .Release.Name }}-kube-prometheus-stack-alertmanager.{{ .Release.Namespace }}.svc.cluster.local:9093   # [tpl]
       enable_alertmanager_v2: true
       enable_api: true
       ring: {kvstore: {store: inmemory}}
@@ -1167,24 +831,22 @@ loki:
       storageClass: local-path
       annotations:
         helm.sh/resource-policy: keep
-      # helm.sh/resource-policy: keep governs HELM. It does not stop the
-      # StatefulSet controller deleting the PVC, and the loki chart defaults
-      # this to true — which renders
-      #   persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete,
-      #                                          whenScaled: Delete}
-      # so scaling the StatefulSet to zero, or deleting it, takes the log
-      # store with it. The annotation above gave a false sense of safety.
+      # CAUTION: the annotation above governs HELM only — it does not stop
+      # the StatefulSet controller itself deleting the PVC. The loki chart
+      # defaults enableStatefulSetAutoDeletePVC to true, which renders
+      # persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete, whenScaled:
+      # Delete} — so scaling to zero or deleting the StatefulSet takes the
+      # log store with it unless this stays false.
       enableStatefulSetAutoDeletePVC: false
-    # Turns the S3 key into env vars without putting it in values.
     extraArgs:
-      - -config.expand-env=true
+      - -config.expand-env=true         # turns the S3 key into env vars, not values
     extraEnv:
       - name: LOKI_S3_ACCESS_KEY
         valueFrom: {secretKeyRef: {name: loki-s3-credentials, key: access-key}}
       - name: LOKI_S3_SECRET_KEY
         valueFrom: {secretKeyRef: {name: loki-s3-credentials, key: secret-key}}
     # `fake` is Loki's tenant ID when auth_enabled is false; the ruler reads
-    # every YAML file in that directory as a rule group.
+    # every YAML file in this directory as a rule group.
     extraVolumes:
       - name: rules
         configMap: {name: loki-ruler-rules}
@@ -1201,9 +863,8 @@ loki:
   monitoring:
     serviceMonitor:
       enabled: true
-      # NOT tpl'd by the loki chart, so this is a literal release name. Only
-      # Loki's own self-metrics depend on it; no alert rule does, so a
-      # mismatch fails quietly rather than dangerously.
+      # Literal release name, not tpl'd by the loki chart. Only Loki's own
+      # self-metrics depend on it — a mismatch fails quietly, not dangerously.
       labels: {release: mgmt}
     selfMonitoring: {enabled: false}
     lokiCanary:     {enabled: false}
@@ -1258,49 +919,35 @@ vector:
       loki:
         type: loki
         inputs: [parse_json_messages]
-        # Same-cluster push: plain http, no bearer token, unlike the edges
+        # Same-cluster push: plain http, no bearer token — unlike edges,
         # which arrive over the Ingress.
-        #
-        # BARE SERVICE NAME, NOT AN FQDN. This block is passed straight to the
-        # vector subchart, so Helm never templates it and `.Release.Namespace`
-        # cannot appear here. It previously read
-        # `mgmt-loki.observability.svc.cluster.local`, which was the namespace
-        # the imperative installer used; once Loki became a subchart it moved to
-        # the release namespace and this address stopped resolving. Vector
-        # buffers and retries, so the only symptom was management logs quietly
-        # never reaching Loki. The short name resolves via the pod's own search
-        # domain, which is the release namespace for both charts.
-        #
-        # mgmt.validate cross-checks this against <release>-loki in the release
-        # namespace and refuses to render on a mismatch.
+        # CAUTION — BARE SERVICE NAME, NOT AN FQDN. Subchart-literal (no
+        # `.Release.Namespace` templating possible here). Previously read
+        # `mgmt-loki.observability.svc.cluster.local` — the old imperative
+        # installer's namespace — and once Loki became a subchart in the
+        # release namespace this stopped resolving; Vector buffered and
+        # retried, so the only symptom was management logs quietly never
+        # arriving. The short name resolves via the pod's own search domain
+        # (the release namespace, same for both charts). mgmt.validate
+        # cross-checks this against <release>-loki and refuses to render on
+        # a mismatch.
         endpoint: http://mgmt-loki:3100
-        # Vector >=0.49 rejects a label template with no literal prefix
-        # ("template confinement") without this. Symptom: sink build error
-        # "template references event fields but has no literal string prefix".
+        # Required by Vector >=0.49's "template confinement" — a label
+        # template with no literal prefix is otherwise a sink build error.
         dangerously_allow_unconfined_template_resolution: true
         encoding:
           codec: json
           except_fields: [kubernetes, file, source_type, stream, tags]
-        # ---------------------------------------------------------------
-        # THE BACKTICK ESCAPING BELOW IS REQUIRED. DO NOT "SIMPLIFY" IT.
-        #
-        # The Vector chart runs `tpl` over customConfig, so this file's
-        # contents ARE evaluated as a Helm template. Written bare, `{{ cluster }}`
-        # would be resolved against the CHART context, find no `cluster`, and
-        # render EMPTY — every mgmt log line would lose its stream labels and
-        # every ruler rule selecting on them would stop matching, with no
-        # error anywhere.
-        #
-        # Confirmed against the live cluster: the source carries the escaping
-        # and the rendered ConfigMap contains `cluster: '{{ cluster }}'`.
-        # Verify after any change to this block:
-        #   kubectl -n observability get cm mgmt-vector -o yaml | grep 'cluster:'
-        # must show {{ cluster }}, not an empty string.
-        #
-        # (charts/edge takes the other route for the same problem — its Vector
-        # config is a plain file loaded with .Files.Get, which Helm never
-        # templates, so it needs no escaping at all.)
-        # ---------------------------------------------------------------
+        # CAUTION — THE BACKTICK ESCAPING BELOW IS REQUIRED, DO NOT SIMPLIFY.
+        # The Vector chart runs `tpl` over customConfig, so this whole file
+        # is evaluated as a Helm template. Written bare, `{{ cluster }}`
+        # resolves against the CHART context (no `cluster` there) and
+        # renders EMPTY — every log line loses its stream labels with no
+        # error anywhere. Verify after any change:
+        #   kubectl -n ais-mgmt get cm mgmt-vector -o yaml | grep 'cluster:'
+        # must show the literal `{{ cluster }}`, not an empty string.
+        # (charts/edge avoids this differently — its Vector config is loaded
+        # with .Files.Get, which Helm never templates, so no escaping needed.)
         labels:
           cluster:   "{{`{{ cluster }}`}}"
           namespace: "{{`{{ kubernetes.pod_namespace }}`}}"

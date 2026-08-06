@@ -97,6 +97,34 @@ logcli --addr=https://loki.aisedge.local --tls-skip-verify=false \
 | Edge client key leak | An attacker could push fake logs (would need network reachability) | The push Ingress requires a client certificate signed by ais-edge-ca whose CN is one of the sites in `edges`. Keys are per-edge and cert-manager replaces them every 90 days with `rotationPolicy: Always`; revoke sooner by deleting the `<edge>-loki-client` Secret (cert-manager reissues) or by removing the site from `edges` and upgrading, which drops it from `auth-tls-match-cn` |
 | Label cardinality explosion | Stream count grows unbounded → memory / cost | Vector strips high-cardinality fields before pushing (we explicitly DO NOT label `session` for example, since each session is unique) |
 
+### Why `compactor.delete_request_store` is `filesystem`, not `s3`
+
+`s3` builds the delete store from `storage_config.aws` — a different config
+path from the `common.storage.s3` block `loki.storage` renders into, which
+the Loki chart never populates. The compactor then resolves an empty bucket
+name and Loki exits 1 at startup:
+
+```
+init compactor: failed to init delete store: failed to get s3 object:
+... api error NoSuchBucket: The specified bucket does not exist
+```
+
+which reads as "the bucket was never created" and is not — `aws s3api
+get-object` with Loki's own credentials returns `NoSuchKey` against that same
+bucket while Loki keeps reporting `NoSuchBucket`.
+
+Setting `storage_config.aws` directly does not fix it either: the chart
+treats that as taking manual control and blanks
+`common.storage.s3.bucketnames` in response (its `_helpers.tpl` only fills
+the bucket name when `storage_config.aws` is unset), so chunks and the index
+lose their bucket instead. **Verified both ways on a live cluster.**
+
+This deployment runs SingleBinary with a persistent PVC at `/var/loki`, so
+the delete-request store has the same durability as the rest of Loki's local
+state and does not need S3 at all — only chunks and the index do. A
+distributed Loki would need the S3 form, and would then need both config
+blocks kept in step by hand.
+
 ## Replacements / future
 
 - **Mimir-style scale-out** — when ingest exceeds ~50 GB/day or queries

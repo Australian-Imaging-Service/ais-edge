@@ -46,7 +46,7 @@
 #     reports as "PRE <session>/" — and an empty prefix is exactly what makes
 #     the uploader log a bogus success every cycle. Switching S3 client does
 #     not fix it; only the filer can remove a directory entry.
-#     See docs/helm-consolidation-briefing.md, A3.
+#     See docs/components/seaweedfs.md, "Deletion must go through the filer".
 #   * The filer is reached over its HTTP API:
 #         DELETE http://<filer>:8888/buckets/<bucket>/<prefix>/<session>?recursive=true
 #     Measured: returns 204 and the directory entry is genuinely gone, where
