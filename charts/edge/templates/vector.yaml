@@ -104,12 +104,23 @@ spec:
             - name: CLUSTER_LABEL
               value: {{ .Values.clusterLabel | quote }}
             - name: LOKI_ENDPOINT
-              value: {{ .Values.observability.loki.endpoint | quote }}
-            - name: LOKI_BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.observability.loki.existingTokenSecret }}
-                  key: token
+              value: {{ include "edge.lokiEndpoint" . | quote }}
+            # NO PUSH CREDENTIAL IN THE ENVIRONMENT ANY MORE. The site
+            # authenticates with a client certificate mounted below; there is
+            # nothing to interpolate, and nothing that shows up in `kubectl
+            # describe pod`.
+            #
+            # What was here was a shared Basic-auth username/password, and
+            # before that a bearer token. Neither ever authenticated a push:
+            # the management Ingress validates an ingress-nginx auth-map, and
+            # nginx's auth_basic_user_file does not accept the bare passwords
+            # the repo's template shipped, so the two ends had already drifted
+            # to different bytes. Every push 401'd, logs stopped arriving, and
+            # because the log-derived alerts are driven BY those logs the
+            # alerts that would tell you went quiet at the same moment —
+            # silence meaning both "nothing is wrong" and "nothing is being
+            # delivered". That is the failure this change ends.
+            #
             # The kubernetes_logs source scopes its tailing by node name.
             - name: VECTOR_SELF_NODE_NAME
               valueFrom:
@@ -137,6 +148,10 @@ spec:
             - {name: pod-logs,       mountPath: /var/log/pods,        readOnly: true}
             - {name: container-logs, mountPath: /var/log/containers,  readOnly: true}
             - {name: ca-bundle,      mountPath: /etc/ssl/ais-edge-ca, readOnly: true}
+            # Its OWN directory, not a subpath of /etc/vector: that path is
+            # already a ConfigMap mount and nesting one volume inside another
+            # depends on mount ordering the kubelet does not promise.
+            - {name: loki-client,    mountPath: /etc/ssl/loki-client, readOnly: true}
       volumes:
         - name: config
           configMap:
@@ -159,4 +174,25 @@ spec:
             items:
               - key: {{ .Values.observability.loki.caBundleKey }}
                 path: ca.crt
+        # NOT marked optional, and NOT gated on anything this chart can see —
+        # exactly like ca-bundle above, and for the same reason. Neither Secret
+        # is created by this chart: cert-sync writes both from the management
+        # cluster, so a freshly built site renders this manifest before either
+        # exists. An optional mount would let Vector start with no client
+        # certificate, every push would be rejected at the handshake, and the
+        # site would look healthy while shipping nothing. Failing to start is
+        # the visible failure, and it is the one we want.
+        - name: loki-client
+          secret:
+            secretName: {{ .Values.observability.loki.clientCertSecret }}
+            # No items: mapping — kubernetes.io/tls fixes the key names, so
+            # nothing here can drift out of step with the sink config.
+            #
+            # No defaultMode either. 0400 would be the tighter choice IF the
+            # container's UID matched the file owner, and this DaemonSet sets
+            # no runAsUser: it runs as whatever the distroless Vector image
+            # declares, which is not something the chart knows. A 0400 file the
+            # process cannot open fails the pod, which is the same outcome as
+            # the bug being fixed here. The volume is a tmpfs visible only to
+            # this pod, like ca-bundle beside it.
 {{- end }}

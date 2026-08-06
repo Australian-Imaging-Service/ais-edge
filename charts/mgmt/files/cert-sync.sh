@@ -7,14 +7,15 @@
 # hold copies that scripts/07b pushed ONCE, and nothing re-pushes them. A
 # certificate that renews at two-thirds of its lifetime therefore leaves the
 # edge holding an expired one, and whatever used it stops working silently on
-# a date nobody has in a calendar. A bearer token does not expire, so mTLS on
-# the Loki push path is strictly WORSE than the token it replaces until this
-# job exists. That is why this ships before mTLS, not with it.
+# a date nobody has in a calendar. A shared password does not expire, so mTLS
+# on the Loki push path was strictly WORSE than the password it replaces until
+# this job existed. That is why this shipped before mTLS, not with it — and
+# the per-site Loki push client certificate is now what it mainly carries.
 #
 # This REPLACES the manual distribution in scripts/07b — steps 2 and 3, the
-# loki-push-credentials token and the ca-bundle. Same two Secrets, pushed by a
-# scheduled job instead of by a human running a script once per site, so this
-# is a net reduction in moving parts rather than an addition.
+# push credential and the ca-bundle. Same Secrets, pushed by a scheduled job
+# instead of by a human running a script once per site, so this is a net
+# reduction in moving parts rather than an addition.
 #
 # ONE EDGE PER INVOCATION. templates/cert-sync.yaml renders one CronJob per
 # entry in `edges`, so a site that is unreachable cannot affect any other
@@ -95,7 +96,31 @@ errtext() {
 }
 
 # Management-cluster kubectl. Uses the pod's own ServiceAccount.
-kmgmt() { kubectl --request-timeout="$REQUEST_TIMEOUT" "$@"; }
+#
+# NO --request-timeout HERE, DELIBERATELY. Measured on alpine/kubectl:1.35.4
+# inside this very pod:
+#
+#   kubectl -n edge-dev get secret edge-dev-kubeconfig -o name
+#     -> secret/edge-dev-kubeconfig
+#   kubectl --request-timeout=30s -n edge-dev get secret edge-dev-kubeconfig -o name
+#     -> The connection to the server localhost:8080 was refused
+#
+# Passing the flag makes kubectl stop resolving IN-CLUSTER configuration and
+# fall back to its compiled-in default server. `kubectl --v=6` without it logs
+# "Using in-cluster configuration" and a 200 against https://10.96.0.1:443;
+# with it, no in-cluster config is loaded at all.
+#
+# The failure is indistinguishable from "the ServiceAccount cannot read the
+# Secret": every sync reports sync_failed on the FIRST call, so cert-sync has
+# never delivered anything, and the ca-bundle each edge needs was only ever
+# present because the old scripts/07b copied it by hand.
+#
+# The timeout still applies to the EDGE calls below, which pass an explicit
+# --kubeconfig and therefore load their config from the file rather than from
+# in-cluster discovery — the flag is harmless there. Management calls go to
+# 10.96.0.1 inside the same cluster; a hung call there is bounded by the Job's
+# own activeDeadlineSeconds instead.
+kmgmt() { kubectl "$@"; }
 
 # Edge-cluster kubectl. SERVER is a bare URL with no spaces, so the unquoted
 # expansion below is intentional and safe: it must produce two words or none.

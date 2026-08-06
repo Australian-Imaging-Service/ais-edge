@@ -42,15 +42,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- end }}
 
   {{- if eq .Values.upload.mode "s3" }}
-    {{- if not .Values.upload.s3.endpoint }}
-      {{- fail "upload.mode=s3 requires upload.s3.endpoint (e.g. https://seaweedfs.<domain>)" }}
+    {{- if not (include "edge.s3Endpoint" .) }}
+      {{- fail "upload.mode=s3 needs an S3 endpoint, and none could be derived. Either pass the management site values file too (it carries hostnames.seaweedfs / domain.internal), or set upload.s3.endpoint explicitly." }}
     {{- end }}
     {{- /* No default. A shared bucket name is exactly the mistake this is
            preventing: SeaweedFS scopes identities per BUCKET with no
            prefix-level control, so two sites in one bucket can read and
            delete each other's staged imaging. The name has to be stated. */ -}}
-    {{- if not .Values.upload.s3.bucket }}
-      {{- fail "upload.s3.bucket is empty. Set it to THIS site's own staging bucket — the management chart names them ingest-<edge name>. There is deliberately no default: a shared bucket gives every site read and delete access to every other site's staged imaging, because SeaweedFS scopes identities per bucket and has no prefix-level scoping." }}
+    {{- if not (include "edge.s3Bucket" .) }}
+      {{- fail "no staging bucket could be derived. Set it to THIS site's own staging bucket — the management chart names them ingest-<edge name>. There is deliberately no default: a shared bucket gives every site read and delete access to every other site's staged imaging, because SeaweedFS scopes identities per bucket and has no prefix-level scoping." }}
     {{- end }}
 
     {{- /* THE trap measured against SeaweedFS 3.99: AWS_CA_BUNDLE set to an
@@ -59,9 +59,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            "Unverified HTTPS request is being made". A request to a hostname
            the certificate does not cover then succeeds. So an https endpoint
            with no CA configured must be a hard render error, never a default. */ -}}
-    {{- if hasPrefix "https://" .Values.upload.s3.endpoint }}
+    {{- if hasPrefix "https://" (include "edge.s3Endpoint" .) }}
       {{- if not .Values.upload.s3.caBundleSecret }}
-        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." .Values.upload.s3.endpoint) }}
+        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
       {{- end }}
     {{- end }}
   {{- end }}
@@ -130,13 +130,34 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/* ===================================================================== */}}
 
 {{/* onprem edges usually cannot resolve the management hostnames via site
-     DNS, so pin them. Renders to nothing on cloud. */}}
+     DNS, so pin them. Renders to nothing on cloud.
+
+     BOTH the IP and the hostname list DERIVE from the management site file
+     when the edge file does not state them, because this is the entry whose
+     absence is hardest to diagnose: with no hostAlias the pod gets NXDOMAIN,
+     the uploader treats it as an endpoint failure and preserves the local copy
+     for the next attempt — correct behaviour that looks like nothing at all
+     from the management side, which is watching for arrivals rather than for
+     an absence. The edge fills its disk quietly.
+
+     The list is every management hostname an edge pod actually dials. Grafana
+     is deliberately NOT in it: nothing on the edge connects to Grafana, and a
+     hostAlias for a host you never contact is a claim you cannot verify. */}}
 {{- define "edge.hostAliases" -}}
-{{- if and (eq .Values.topology "onprem") .Values.hostAliases.enabled .Values.hostAliases.mgmtNodeIP .Values.hostAliases.hostnames }}
+{{- $ip := .Values.hostAliases.mgmtNodeIP | default .Values.domain.mgmtNodeIP }}
+{{- $names := .Values.hostAliases.hostnames }}
+{{- if not $names }}
+  {{- $names = list }}
+  {{- with (include "edge.seaweedfsHost" .) }}{{ $names = append $names . }}{{ end }}
+  {{- if $.Values.observability.enabled }}
+    {{- with (include "edge.lokiHost" $) }}{{ $names = append $names . }}{{ end }}
+  {{- end }}
+{{- end }}
+{{- if and (eq .Values.topology "onprem") .Values.hostAliases.enabled $ip $names }}
 hostAliases:
-  - ip: {{ .Values.hostAliases.mgmtNodeIP | quote }}
+  - ip: {{ $ip | quote }}
     hostnames:
-      {{- range .Values.hostAliases.hostnames }}
+      {{- range $names }}
       - {{ . | quote }}
       {{- end }}
 {{- end }}
@@ -175,4 +196,84 @@ affinity:
 {{- define "edge.logEnv" -}}
 - name: AIS_LOG_FORMAT
   value: {{ .Values.ingest.logFormat | quote }}
+{{- end }}
+
+{{/*
+=============================================================================
+Derived management-side endpoints
+=============================================================================
+Every value below can be worked out from facts the MANAGEMENT site file
+already states — the domain, the published hostnames, the node IP, the bucket
+prefix. Before these helpers each had to be typed a second time in the edge's
+own values file, and a mismatch was silent in the worst way:
+
+  * a wrong s3 endpoint or bucket  -> the uploader's head-bucket probe fails,
+    it preserves the local copy and retries forever. Disk fills on the edge
+    and the management side, which is watching for arrivals rather than
+    absences, reports nothing wrong.
+  * a hostname missing from hostAliases -> NXDOMAIN inside the pod, same
+    outcome.
+  * a wrong bucket that HAPPENS to exist -> worst case. The edge uploads
+    successfully, the management uploader reads a different bucket, and both
+    halves look healthy while nothing reaches XNAT.
+
+So the edge file now only needs what is genuinely local to the edge — its AET
+map, de-identification profile, storage paths. Pass the management site file
+to the edge release as well and these resolve themselves:
+
+    helm upgrade --install edge charts/edge \
+        -f sites/<mgmt>/values.yaml -f sites/<edge>/values.yaml
+
+An explicit value in the edge file still wins, for the case where a site
+genuinely differs.
+*/}}
+
+{{- define "edge.seaweedfsHost" -}}
+{{- if .Values.hostnames.seaweedfs }}{{ .Values.hostnames.seaweedfs }}
+{{- else if .Values.domain.internal }}{{ printf "seaweedfs.%s" .Values.domain.internal }}
+{{- end }}
+{{- end }}
+
+{{- define "edge.lokiHost" -}}
+{{- if .Values.hostnames.loki }}{{ .Values.hostnames.loki }}
+{{- else if .Values.domain.internal }}{{ printf "loki.%s" .Values.domain.internal }}
+{{- end }}
+{{- end }}
+
+{{- define "edge.grafanaHost" -}}
+{{- if .Values.hostnames.grafana }}{{ .Values.hostnames.grafana }}
+{{- else if .Values.domain.internal }}{{ printf "grafana.%s" .Values.domain.internal }}
+{{- end }}
+{{- end }}
+
+{{- define "edge.s3Endpoint" -}}
+{{- if .Values.upload.s3.endpoint }}{{ .Values.upload.s3.endpoint }}
+{{- else -}}
+  {{- with (include "edge.seaweedfsHost" .) }}{{ printf "https://%s" . }}{{ end }}
+{{- end }}
+{{- end }}
+
+{{- define "edge.lokiEndpoint" -}}
+{{- if .Values.observability.loki.endpoint }}{{ .Values.observability.loki.endpoint }}
+{{- else -}}
+  {{- with (include "edge.lokiHost" .) }}{{ printf "https://%s" . }}{{ end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The staging bucket. With seaweedfs.perSiteBuckets the management chart names
+it <bucketPrefix>-<edge name> (charts/mgmt/templates/_helpers.tpl mgmt.edgeBucket),
+and clusterLabel IS the edge name, so the same rule reproduces it exactly.
+
+There is still deliberately NO default for the shared-bucket layout: a
+defaulted shared bucket is the original isolation bug, since SeaweedFS matches
+actions as "<action>:<bucket>" with no prefix scoping, so every edge sharing
+one bucket can read and delete every other site's staged imaging. If a site
+really is on the old shared layout it must say so explicitly.
+*/}}
+{{- define "edge.s3Bucket" -}}
+{{- if .Values.upload.s3.bucket }}{{ .Values.upload.s3.bucket }}
+{{- else if .Values.seaweedfs.perSiteBuckets -}}
+{{ printf "%s-%s" (.Values.seaweedfs.bucketPrefix | default "ingest") .Values.clusterLabel }}
+{{- end }}
 {{- end }}

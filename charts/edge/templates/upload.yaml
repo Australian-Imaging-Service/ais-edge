@@ -69,7 +69,7 @@ spec:
             - name: EDGE_NAME
               value: {{ .Values.clusterLabel | quote }}
             - name: S3_BUCKET
-              value: {{ .Values.upload.s3.bucket | quote }}
+              value: {{ include "edge.s3Bucket" . | quote }}
             - name: S3_PREFIX
               value: {{ .Values.upload.s3.prefix | quote }}
             - name: ASSIGNED_DIR
@@ -93,7 +93,7 @@ spec:
 
             # --- AWS CLI configuration -------------------------------------
             - name: AWS_ENDPOINT_URL
-              value: {{ .Values.upload.s3.endpoint | quote }}
+              value: {{ include "edge.s3Endpoint" . | quote }}
             # SeaweedFS ignores the region; the AWS CLI refuses to run without
             # one.
             - name: AWS_DEFAULT_REGION

@@ -94,7 +94,10 @@ The out-of-band ceremony for intermediate mode is docs/ca-ceremony.md.
        would have rewritten its issuerRef. Caught by diffing the live object
        against the rendered one before adopting. */ -}}
 {{- $bootstrapIssuer := .Values.certManager.ca.bootstrapIssuerName | default (printf "%s-selfsigned-bootstrap" (include "mgmt.fullname" .)) }}
-{{- $caIssuerName := ternary "ais-edge-ca" $issuer $isAcme -}}
+{{- /* Shared with observability.yaml, which issues the Loki push client certs
+       from this same issuer. Two copies of the ternary is how those certs
+       would end up signed by a CA the push Ingress does not verify against. */ -}}
+{{- $caIssuerName := include "mgmt.caIssuerName" . -}}
 {{- $ca := .Values.certManager.ca -}}
 {{- $mode := $ca.mode -}}
 

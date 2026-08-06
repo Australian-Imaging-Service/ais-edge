@@ -95,7 +95,7 @@ logcli --addr=https://loki.aisedge.local --tls-skip-verify=false \
 | logs-bucket disk full on SeaweedFS | New writes fail; old logs may be unreadable until compactor frees space | Retention is set in days; SeaweedFSDiskFull alert at 80% |
 | Index PV corruption | Loki may need to be reinitialised; chunks themselves remain in S3 | Persistent volume is small (10Gi); reinitialise + re-run reads from S3 |
 | Loki pod crash | Logs queued in Vector's disk buffer get held until Loki recovers | Vector handles backpressure; replay continues automatically |
-| Bearer token leak | An attacker could push fake logs (would need network reachability) | Tokens are per-edge; rotate by deleting `loki-push-token-<edge>` Secret and re-running 02d |
+| Edge client key leak | An attacker could push fake logs (would need network reachability) | The push Ingress requires a client certificate signed by ais-edge-ca whose CN is one of the sites in `edges`. Keys are per-edge and cert-manager replaces them every 90 days with `rotationPolicy: Always`; revoke sooner by deleting the `<edge>-loki-client` Secret (cert-manager reissues) or by removing the site from `edges` and upgrading, which drops it from `auth-tls-match-cn` |
 | Label cardinality explosion | Stream count grows unbounded → memory / cost | Vector strips high-cardinality fields before pushing (we explicitly DO NOT label `session` for example, since each session is unique) |
 
 ## Replacements / future

@@ -54,11 +54,25 @@ sinks:
     type: loki
     inputs: [parse_json_messages]
     endpoint: ${LOKI_ENDPOINT}
-    auth:
-      strategy: bearer
-      token: ${LOKI_BEARER_TOKEN}
+    # mTLS. There is deliberately NO `auth:` block: this site proves who it is
+    # with a client certificate, not with a shared string.
+    #
+    # Both files are written into this namespace by the management cluster's
+    # cert-sync CronJob and mounted by charts/edge/templates/vector.yaml. The
+    # certificate's CN is this edge's name, and the push Ingress pins the CN to
+    # the sites listed in the management values, so a certificate signed by the
+    # fleet CA for some other purpose cannot push.
+    #
+    # WHAT WAS HERE BEFORE, because it cost months of blind operation: an
+    # `auth:` block, first bearer and then basic, against an ingress-nginx
+    # auth-map. nginx will not read a bare password out of an auth-map, so the
+    # ends had already drifted to different bytes and every push 401'd. The
+    # alerts that would have reported it are built from these very logs, so the
+    # failure was completely silent.
     tls:
       ca_file: /etc/ssl/ais-edge-ca/ca.crt
+      crt_file: /etc/ssl/loki-client/tls.crt
+      key_file: /etc/ssl/loki-client/tls.key
     # Slim the body: kubernetes_logs metadata is already promoted to stream
     # labels below, so repeating it inside the payload only inflates storage
     # and clutters the Grafana live tail.

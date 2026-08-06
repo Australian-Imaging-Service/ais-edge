@@ -35,6 +35,31 @@ fullnameOverride: ""
 # real DNS and skips the aliases entirely.
 topology: onprem
 
+# =============================================================================
+# THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
+# =============================================================================
+# Pass the management site's values file to the edge release as well:
+#
+#   helm upgrade --install edge charts/edge \
+#       -f sites/<mgmt>/values.yaml -f sites/<edge>/values.yaml
+#
+# and the S3 endpoint, the staging bucket, the Loki endpoint and the
+# hostAliases all resolve from these. Setting any of them in the edge file
+# still wins, but every one you set is a value that must now be kept in step
+# with the management side by hand — and every mismatch in this group fails
+# silently (the uploader retries forever, the management side sees an absence
+# it is not watching for). See the derivation helpers in _helpers.tpl.
+domain:
+  internal: ""
+  mgmtNodeIP: ""
+hostnames:
+  seaweedfs: ""
+  grafana: ""
+  loki: ""
+seaweedfs:
+  perSiteBuckets: true
+  bucketPrefix: ingest
+
 # Free-text label attached to every log line and metric from this site. It is
 # what Grafana's `cluster` variable filters on, so it must be unique per site.
 clusterLabel: ""
@@ -449,7 +474,19 @@ samba:
   enabled: false
   image:
     repository: dockurr/samba
-    tag: "4.23.5"
+    # 4.23.5 missed two Samba security releases. The ones that reach a
+    # standalone smbd like this one (the AD/DC-only fixes in those releases do
+    # not apply — no domain controller here):
+    #   4.23.8   CVE-2026-4480  unauthenticated RCE in the printing subsystem
+    #            CVE-2026-4408  unauthenticated RCE in the DCE/RPC SAMR server
+    #            CVE-2026-1933  reparse-point xattrs writable on a read-only share
+    #            CVE-2026-2340  the WORM module did not block overwrite-by-rename
+    #   4.23.10  CVE-2026-58224 CTDB protocol bounds checks
+    # Nothing enables this today (see `enabled: false` above and no site turns
+    # it on), so this is a latent default rather than live exposure — but the
+    # site that does turn it on binds 445 on an edge node inside a hospital
+    # network, which is the worst place to meet an unauthenticated smbd RCE.
+    tag: "4.23.10"
     pullPolicy: IfNotPresent
   shareName: edge
   # Only this subdirectory is exported. Sharing the volume root would put
@@ -481,7 +518,23 @@ observability:
       limits:   {memory: 512Mi, cpu: 500m}
   loki:
     endpoint: ""                        # https://loki.<domain>
-    existingTokenSecret: loki-push-token
+    # This edge's CLIENT CERTIFICATE for the management Loki push endpoint.
+    # kubernetes.io/tls, so the keys are tls.crt / tls.key and there is no key
+    # name to configure. Written into this namespace by the management side's
+    # cert-sync CronJob, from a cert-manager Certificate named after this edge;
+    # you do not create it here, and the certificate rotates without anyone
+    # touching the site.
+    #
+    # THE NAME MUST MATCH the certSync destination in the MANAGEMENT site
+    # values. A mismatch leaves Vector in CreateContainerConfigError — loud on
+    # the edge, invisible from the management node.
+    #
+    # This replaced `existingAuthSecret`, a shared Basic-auth password that
+    # never authenticated a single push: nginx does not read bare passwords out
+    # of an ingress-nginx auth-map, so every push 401'd and, because the
+    # log-derived alerts are built from the logs that never arrived, nothing
+    # said so for months. docs/hardening-decisions.md §1.
+    clientCertSecret: loki-push-client-tls
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
 

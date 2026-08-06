@@ -66,7 +66,41 @@ move sites one at a time, retire the shared bucket last. No flag day.
 
 ---
 
-## 1. Loki push authentication 🔴
+## 1. Loki push authentication 🔴 — **SHIPPED**
+
+> **Status: implemented as specified below.** cert-manager issues
+> `<edge>-loki-client` per entry in `edges`; cert-sync carries it into the site
+> as `loki-push-client-tls`; Vector uses `tls.crt_file` / `tls.key_file`; the
+> push Ingress carries `auth-tls-secret`, `auth-tls-verify-client: on`,
+> `auth-tls-verify-depth: 2` and `auth-tls-match-cn` built from `edges`.
+> `loki-push-auth` / `loki-push-credentials` and every trace of the basic-auth
+> path are removed.
+>
+> Two corrections to what is written below, both learned by implementing it.
+>
+> **The basic-auth interlude was worse than recorded.** After the bearer/basic
+> mismatch was "fixed" by moving both ends to Basic, it still 401'd every push:
+> an ingress-nginx `auth-map` is fed to nginx's `auth_basic_user_file`, which
+> does not accept a bare password. The repo shipped plaintext and the live
+> Secret held an apr1 hash, so the "one credential, both ends read the same
+> bytes" property the design rested on was not achievable at all. Measured on
+> the live edge on the day of the change: Vector, `401 Unauthorized`, events
+> dropped, continuously.
+>
+> **`auth-tls-match-cn` does not stop one edge impersonating another**, which
+> is what §1 below implies it buys. All sites push to one hostname through one
+> Ingress, so the regex has to admit every site. What it does buy is that only
+> a certificate minted for pushing is accepted — not every certificate the
+> fleet CA has ever signed — and that removing a site from `edges` and
+> upgrading revokes it. Per-site pinning would need a hostname per site, which
+> is §2's shape, not this one. Loki has no per-tenant separation to violate
+> anyway (`auth_enabled: false`, and the `cluster` label comes from the
+> payload) — see the multi-tenancy non-goal at the end of this section.
+>
+> **Still missing: the log-absence alert of §6.** R2 below made it a
+> precondition and it does not exist. It is not a regression — nothing has ever
+> arrived over this path, so there is no working state to lose — but until it
+> lands, "this edge stopped shipping" is still only visible by looking.
 
 Today: the token is minted, shipped and sent but **never validated** — the
 push endpoint accepts unauthenticated writes from anything that can route to

@@ -81,7 +81,7 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
   {{ .Values.samba.existingSecret }}   keys: username, password
 {{- end }}
 {{- if .Values.observability.enabled }}
-  {{ .Values.observability.loki.existingTokenSecret }}   key: token
+  {{ .Values.observability.loki.clientCertSecret }}   keys: tls.crt, tls.key
   {{ .Values.observability.loki.caBundleSecret }}   key: {{ .Values.observability.loki.caBundleKey }}
 {{- end }}
 
