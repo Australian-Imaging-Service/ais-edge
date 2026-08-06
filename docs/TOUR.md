@@ -851,3 +851,36 @@ symptom if it ever does not. If it recurs on every run rather than one in
 three, check whether the k0smotron `Cluster` spec's API server
 `extraArgs`/SAN configuration actually includes the in-cluster Service DNS
 name, rather than assuming it always will.
+
+**11. The full pipeline was run end-to-end with a synthetic DICOM drop, and
+it works.** `storescu` against `edge-orthanc:4242` with AE title `AISEDGE` →
+synchronous de-identification (`PatientIdentityRemoved: YES`, name/ID/
+accession replaced per the profile) → `group-orthanc` labels it within one
+60s pass → `assign` stages it under the mapped project within the next →
+`edge-s3-uploader` uploads it to `s3://ingest-edge-dev/staged/` once past
+the 5-minute settle guard → `mgmt-upload-edge-dev` picks it up on its own
+60s poll and lands it in XNAT (`test_project`), confirmed both by the
+`Successfully uploaded all files` line and by checking XNAT directly.
+Two things surfaced along the way, neither in the plumbing:
+
+- A first attempt used `Modality: OT` (Other), which XNAT's session-type
+  mapping does not support. The uploader does not quarantine a permanently
+  invalid session — it retried the same `unsupported modalities` error
+  every 60s, forever. Not a bug in this repo's charts; recorded because it
+  is a real gap in `xnat-ingest` itself. Re-run with `Modality: MR` to get
+  a clean pass. The poison-pill session was cleaned up afterward: deleted
+  from S3 staging through the SeaweedFS filer (`docs/components/
+  seaweedfs.md`, "Deletion must go through the filer"), not `aws s3 rm`.
+- The re-run's success also triggered a real, correctly-firing
+  `XNATAuthFailure` — a genuine one-time 401 from an expired XNAT session
+  token mid-loop, self-healed by `xnat-ingest`'s own reconnect logic one
+  cycle later, confirmed resolved in Alertmanager within minutes. Worth
+  recording only because it is easy to mistake for the tqdm-progress-bar
+  false positive fixed earlier this session (`charts/mgmt/files/
+  loki-ruler-rules.yaml`, `XNATAuthFailure` comment) — it is not that; the
+  fix for that bug held throughout this test (no progress-bar line ever
+  matched), and this was a different, real event. A third, previously
+  unknown finding came out of the same run: a benign ERROR-level checksum
+  mismatch that `xnat-ingest` re-logs every loop for several minutes after
+  a session first lands, before XNAT's own catalog catches up — see
+  `docs/components/xnat-ingest.md`, "Known upstream defects" §3.

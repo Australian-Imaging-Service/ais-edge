@@ -229,6 +229,43 @@ everything staged, and report success while doing it.
 **Suggested upstream fix.** Refresh the listing once per loop iteration, or
 expose the cache TTL as a flag.
 
+### 3. A benign checksum mismatch logs at ERROR, every loop, until XNAT catches up
+
+Measured with a synthetic drop (`scripts/site-secrets.sh` §"synthetic DICOM
+drop" in `docs/TOUR.md`): for several minutes right after a session first
+lands in XNAT, every `--loop` pass re-logs
+
+```
+ERROR "'DICOM' resource in '<session>' already exists on XNAT with different
+checksums. Please delete on XNAT to overwrite: {'<file>.dcm': ('', '<md5>')}"
+```
+
+immediately followed by `INFO "Skipping ... resource as it is already
+uploaded"` and `INFO "Successfully uploaded all files"` — so the pass still
+ends in success. The left side of that tuple, `''`, is XNAT's own catalog
+entry for the file's checksum; it is empty because XNAT has not finished
+computing it yet, not because the bytes actually differ. A session running
+for hours (`test_project.65DDEFA8D833.8607324A38C9`) shows zero occurrences
+of this line — it stops once XNAT's own checksum catches up — but a
+freshly-arrived session repeats it on every ~60s pass in the meantime.
+
+Not dangerous today: no alert rule matches on log text or level for the
+`xnat-upload` namespace (checked — `grep -i "checksum\|already exists"
+charts/mgmt/files/loki-ruler-rules.yaml` returns nothing), so this currently
+produces noise in `kubectl logs` and nothing else. It is the same trap as
+defect 1 above, one severity level worse: an ERROR-labelled line that means
+nothing is wrong, re-emitted every loop for as long as the session is
+freshly staged. **If anyone ever adds a rule that alerts on `level="ERROR"`
+in this namespace without reading the message first, this line will fire it
+on every normal upload** — the exact failure mode that made
+`OrthancStorageGrowing` and `XNATBacklogGrowing` (deleted this session, see
+`docs/TOUR.md` §9.9) look like coverage while measuring nothing.
+
+**Suggested upstream fix.** Either skip the checksum comparison (and this
+log line) when XNAT's stored checksum is empty/unset — that state means "not
+computed yet", not "computed and different" — or log it at INFO/DEBUG, since
+the pass's own outcome is already success.
+
 ## Replacements / future
 
 - **Orthanc** as a C-STORE listener instead of file-watch (would
