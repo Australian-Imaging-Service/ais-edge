@@ -41,10 +41,10 @@ creation_rules:
   - path_regex: sites/[^/]+/secrets\.enc\.ya?ml$
     encrypted_regex: '^(data|stringData)$'
     age: >-
-      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY
+      age13952y4twf97ng8zjr654g496p6t9ud20hps5rwnwg0n0e2hmhvasr9w0nu
 
   # Anything else that ends up encrypted: team key only.
   - path_regex: .*\.enc\.ya?ml$
     encrypted_regex: '^(data|stringData)$'
     age: >-
-      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY
+      age13952y4twf97ng8zjr654g496p6t9ud20hps5rwnwg0n0e2hmhvasr9w0nu
