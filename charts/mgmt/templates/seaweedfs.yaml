@@ -279,9 +279,36 @@ spec:
             - "-s3"
             - "-s3.config=/etc/seaweedfs/s3.json"
             - "-s3.port=8333"
+            # MUST BE PASSED, and it is the reason this flag arrived with the
+            # 3.99 -> 4.34 bump rather than on its own.
+            #
+            # 4.x added an Iceberg REST Catalog to the S3 gateway and DEFAULTED
+            # IT ON: weed/command/server.go declares
+            #   -s3.port.iceberg (default 8181, "0 to disable")
+            # and weed/command/s3.go starts it whenever that port is > 0. 3.99
+            # had no such server at all. Upgrading for the S3 CVEs would
+            # therefore have silently opened a second, undeclared HTTP API on
+            # the pod — and that API is precisely what two of the advisories we
+            # are patching are about: CVE-2026-54917 is titled "path traversal
+            # in the S3 AND ICEBERG REST gateways", and CVE-2026-55873 is an
+            # authorization gap in the S3Tables/Iceberg REST management API.
+            # Nothing here speaks Iceberg, so the whole surface goes away.
+            #
+            # Second reason: if 8181 cannot be bound, s3.go calls glog.Fatalf,
+            # so a port clash on this node kills the entire staging store
+            # rather than one subsystem.
+            #
+            # NOTE: this flag does not exist before 4.x. Pinning
+            # seaweedfs.image.tag back to a 3.x tag while leaving this here
+            # gives "flag provided but not defined" and a CrashLoop — loud, but
+            # roll the tag and this flag together.
+            - "-s3.port.iceberg=0"
             # `weed server` exposes ONE Prometheus endpoint aggregating
-            # master + volume + filer + s3. The per-subsystem metricsPort flags
-            # that the 4.x docs describe do not exist in 3.x.
+            # master + volume + filer + s3, and -metricsPort is still how you
+            # ask for it on 4.34 (verified in weed/command/server.go). The
+            # per-subsystem metricsPort flags the docs describe belong to the
+            # standalone `weed master` / `weed volume` commands, not to this
+            # one.
             - "-metricsPort=9324"
             # SeaweedFS already logs every S3 request to stdout with
             # bucket/key/status/bytes, which Vector indexes into Loki. That is

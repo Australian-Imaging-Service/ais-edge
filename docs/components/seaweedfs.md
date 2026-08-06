@@ -30,8 +30,14 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
 - Cluster: management cluster only
 - Namespace: `seaweedfs`
 - Workload: Deployment `seaweedfs` (single replica, all-in-one)
-- Image: `chrislusf/seaweedfs:3.99` (last 3.x stable; pinned to avoid
-  the 4.18/4.19 filer memory regression)
+- Image: `chrislusf/seaweedfs:4.34` (was 3.99 — moved off it because 3.99 is
+  vulnerable to CVE-2026-54917, CVE-2026-58372 and CVE-2026-55874: three S3
+  path traversals that let one site's key read, copy and *delete* across
+  another site's bucket. 4.34 is the lowest version clean of all six published
+  SeaweedFS advisories. Issue #9035, the 4.18/4.19 filer memory regression the
+  old pin avoided, is closed — but see the risk table for #10253, which is not.
+  The Iceberg REST Catalog 4.x turns on by default is disabled explicitly with
+  `-s3.port.iceberg=0`.)
 - Service: `seaweedfs.seaweedfs.svc.cluster.local` (ClusterIP only)
 - External: nginx-ingress route `https://seaweedfs.aisedge.local:443`
   (TLS-terminated, signed by ais-edge-ca)
@@ -84,7 +90,8 @@ bash scripts/03-deploy-seaweedfs.sh
 | `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` alert at 80%; retention CronJob (TODO) deletes uploaded sessions |
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
 | `s3-config` ConfigMap drift | Auth fails | Re-running script 03 regenerates it; config-hash annotation rolls the pod |
-| 4.x filer memory regression | Memory growth | We pin to 3.99 explicitly; revisit when 4.x is stable |
+| Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
+| aws-cli checksum headers verified only against 3.99 | Uploads rejected | Appendix A of `helm-consolidation-briefing.md` measured `x-amz-checksum-*` acceptance against 3.99's S3 gateway. 4.34's `auth_credentials.go` is roughly three times the size of 3.99's; the identity/action semantics we depend on are unchanged, but the checksum path was not re-measured. **Re-run Appendix A against 4.34 before trusting it** |
 
 ## Replacements / future
 
@@ -104,6 +111,7 @@ bash scripts/03-deploy-seaweedfs.sh
   `ingest-bucket/staged/` after XNAT confirms
 - Dedicated metrics service-monitor (currently the metrics port is
   exposed but Prometheus discovery via ServiceMonitor needs verification
-  against the 3.99 metrics format)
+  against the 3.99 metrics format; re-checked on 4.34 — the three
+  `SeaweedFS_volumeServer_*` series these read are unchanged, 4.x only adds)
 - Replication: 3-master HA with Raft, separate volume/filer/s3
   deployments

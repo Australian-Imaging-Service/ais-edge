@@ -130,13 +130,26 @@ dataPolicy:
 #
 # Secrets are referenced, never inlined:
 #   s3SecretRef   Secret with keys access-key / secret-key
-#   lokiTokenRef  Secret with key token
+#
+# There is deliberately no per-edge field for the Loki push credential. Its
+# Secret name comes from certSync.secrets[].source.name, where "<edge>" expands
+# to the edge name, so one entry covers the whole fleet. A `lokiTokenRef` field
+# used to be documented here and was read by no template at all: setting it
+# looked like configuration and did nothing.
+#
+# And, for install.sh only — the charts never read them:
+#   nodeIP        the worker's address
+#   sshUser       account install.sh joins the worker as
+#   sshKey        private key for that account
+# The join has to be SSH: there is no API server on an edge until it has
+# happened. They live on this entry so a site has ONE config file rather than
+# a values.yaml plus a parallel edge-nodes.env that could disagree about which
+# host `edge-dev` actually is.
 #
 # edges:
 #   - name: edge-dev
 #     nodeIP: 203.101.230.171
 #     s3SecretRef: edge-dev-s3
-#     lokiTokenRef: edge-dev-loki-token
 edges: []
 
 # k0smotron hosted control planes.
@@ -275,7 +288,56 @@ seaweedfs:
   enabled: true
   image:
     repository: chrislusf/seaweedfs
-    tag: "3.99"
+    # 4.34, NOT 3.99, and NOT the 4.30 the first advisory points at.
+    #
+    # Everything below this line about "the bucket IS the boundary" was false
+    # on 3.99. THREE published S3 path traversals cross that boundary, and no
+    # single version below 4.34 closes all of them:
+    #   CVE-2026-54917  CVSS 10.0, fixed 4.30. `GET /bucket-A/../bucket-B/key`
+    #     — the router matched bucket=bucket-A so the identity check passed,
+    #     then the path was collapsed and the read landed in bucket-B.
+    #   CVE-2026-58372  CVSS 8.1, fixed 4.34 — the same trick in
+    #     DeleteMultipleObjectsHandler, i.e. cross-bucket DELETE. This is the
+    #     one that matters most on a store holding staged patient imaging: the
+    #     other two leak, this one destroys. 4.30 does NOT fix it.
+    #   CVE-2026-55874  CVSS 7.7, fixed 4.34 — again via the X-Amz-Copy-Source
+    #     header on CopyObject/UploadPartCopy. Read-only (C:H/I:N) and needs a
+    #     valid key, but any key: one site's credential reads every site.
+    # So 4.30 would look patched while leaving cross-bucket delete and
+    # cross-bucket copy-read wide open. Also fixed on the way past: 4.30's
+    # CVE-2026-58371 (JSONP reflection, LOW).
+    #
+    # 4.34 is the LOWEST version with no published advisory against it — NVD
+    # lists six SeaweedFS CVEs in total and 4.34 clears every one. It is here
+    # rather than the newest release because SeaweedFS numbers sequentially
+    # (4.00 is just what came after 3.99, not a semver major), so every extra
+    # release is untested change for no security gain.
+    #
+    # NOT a reason to go to 4.34: CVE-2026-55873. It is scored 4.3 and only
+    # lets a low-privileged key ENUMERATE S3Tables buckets — and the template
+    # disables the Iceberg/S3Tables server outright, so it does not apply here
+    # either way. Do not let it be cited as load-bearing later.
+    #
+    # Checked against the 4.34 sources before bumping, because a flag or format
+    # change here is a silent outage rather than a crash:
+    #   * every flag `weed server` is given exists unchanged in 4.34 — but 4.x
+    #     also ADDS one that defaults ON, see -s3.port.iceberg in the template
+    #   * the image still has no USER, so the data PVC's ownership is
+    #     unaffected
+    #   * s3.json keeps the {"identities":[...]} shape and the
+    #     "<action>:<bucket>" matching that the identity block below relies on
+    #     (auth_credentials.go renamed canDo -> CanDo; the logic is the same)
+    #   * the filer HTTP API the reclaimer deletes through is unchanged:
+    #     DELETE ...?recursive=true still returns 204, and the JWT gate still
+    #     allows everything while no signing key is configured. That contract
+    #     is load-bearing — see charts/mgmt/files/reclaim-staged.sh.
+    #   * SeaweedFS_volumeServer_{resource,total_disk_size,volumes} — the only
+    #     SeaweedFS metrics the alert rules and dashboards read — still exist
+    #
+    # STILL UNVERIFIED, and it needs a live check: Appendix A of
+    # docs/helm-consolidation-briefing.md measured aws-cli's x-amz-checksum-*
+    # headers against 3.99's S3 gateway only. Re-run it after this rolls out.
+    tag: "4.34"
     pullPolicy: IfNotPresent
 
   storage:
@@ -516,9 +578,10 @@ certManager:
 # MANAGEMENT cluster. Edge clusters hold copies that scripts/07b pushed ONCE,
 # and nothing re-pushes them, so a certificate that renews at two-thirds of
 # its lifetime leaves the edge holding an expired one and whatever used it
-# stops working on a date nobody has in a calendar. A bearer token does not
-# expire, so mTLS on the Loki push path is strictly WORSE than the token it
-# replaces until this job exists — which is why it ships first.
+# stops working on a date nobody has in a calendar. A shared password does not
+# expire, so mTLS on the Loki push path was strictly WORSE than the password it
+# replaces until this job existed — which is why it shipped first, and why the
+# Loki push CLIENT CERTIFICATE is now one of the things it carries.
 #
 # This REPLACES the manual distribution in scripts/07b (the ca-bundle and the
 # Loki push credential), rather than adding to it.
@@ -584,7 +647,8 @@ certSync:
   #                      at all.
   #   destination.type   defaults to Opaque.
   #
-  # The two entries below are exactly what scripts/07b pushes by hand today.
+  # The first entry below is what scripts/07b pushes by hand; the second is the
+  # per-site Loki push client certificate, which has no imperative equivalent.
   secrets:
     - source:
         # Must match certManager.clusterResourceNamespace — cert-manager
@@ -600,22 +664,112 @@ certSync:
         name: ca-bundle
         type: Opaque
     - source:
-        # scripts/02d creates loki-push-token-<edge> in the observability
-        # namespace. When §1's mTLS lands, this entry becomes the per-edge
-        # client certificate and the token entry goes away.
+        # This edge's Loki push CLIENT CERTIFICATE, issued by cert-manager from
+        # the same CA as the ca-bundle above (templates/observability.yaml).
+        # The name is fixed by the chart — see mgmt.lokiClientCertSecret — and
+        # templates/cert-sync.yaml refuses to render if this entry does not
+        # match it, because the Ingress would then demand a certificate nothing
+        # delivers.
+        #
+        # tls.key IS copied here, unlike the CA entry above which refuses to.
+        # The distinction is what the key can do: this one authenticates ONE
+        # site to ONE endpoint and cert-manager replaces it every 90 days; the
+        # CA key signs the entire fleet.
+        #
+        # This replaced an entry that handed each edge one key out of a shared
+        # `loki-push-auth` password map. That path never worked — nginx will
+        # not read a bare password out of an auth-map — and a shared password
+        # cannot rotate itself. docs/hardening-decisions.md §1.
+        #
+        # DROP THIS ENTRY on a management node running observability.enabled:
+        # false. The certificate is issued from templates/observability.yaml,
+        # so with observability off there is no source to copy and every
+        # cert-sync run logs sync_failed and eventually raises CertSyncStale.
+        # That is not guarded at render time on purpose: it is the same class
+        # as any other source that does not exist, and cert-sync already names
+        # the missing Secret in its logs.
         namespace: ""
-        name: loki-push-token-<edge>
+        name: "<edge>-loki-client"
         keys:
-          token: token
+          tls.crt: tls.crt
+          tls.key: tls.key
       destination:
         namespace: logging
-        name: loki-push-credentials
-        type: Opaque
+        name: loki-push-client-tls
+        # kubernetes.io/tls, so the key names are fixed by Kubernetes and the
+        # edge chart can mount tls.crt / tls.key without a second values knob
+        # to keep in step. The API server validates that both are present.
+        type: kubernetes.io/tls
 
 
 # =============================================================================
 # ingressNginx
 # =============================================================================
+# =============================================================================
+# ingress-nginx subchart values
+# =============================================================================
+# THESE WERE MISSING AND THE OMISSION IS NOT COSMETIC.
+#
+# Without this block the subchart takes its own defaults: a Service of type
+# LoadBalancer and no hostNetwork. On an on-prem node there is no cloud
+# controller to satisfy a LoadBalancer, so the Service sits at
+# EXTERNAL-IP <pending> forever and NOTHING BINDS THE NODE'S :443. Every
+# hostname the fleet depends on — the SeaweedFS S3 endpoint, the Loki push
+# endpoint, and each edge's k0s API and konnectivity tunnel — resolves to the
+# management node and is then refused. The management cluster looks entirely
+# healthy: the controller pod is 1/1 Running, its Ingress objects exist, and
+# the only symptom is "connection refused" on the far side of the link, on a
+# machine in another building.
+#
+# The imperative installer had this right, in two files chosen by topology
+# (manifests/01-management/nginx-ingress-values{,-cloud}.yaml.tpl). The values
+# below are the on-prem one.
+#
+# ON CLOUD, OVERRIDE IN THE SITE FILE:
+#   ingress-nginx:
+#     controller:
+#       hostNetwork: false
+#       dnsPolicy: ClusterFirst
+#       service:
+#         type: LoadBalancer
+#         loadBalancerIP: "<the pre-allocated address>"
+# Managed Kubernetes generally forbids binding hostNetwork on a worker, and
+# there a LoadBalancer is what the platform actually provides.
+ingress-nginx:
+  controller:
+    # ONE replica, and hostNetwork means it must stay one: two pods cannot
+    # both bind :443 on the same node.
+    replicaCount: 1
+    hostNetwork: true
+    # With hostNetwork the default ClusterFirst gives the pod the HOST's
+    # /etc/resolv.conf, and the controller then cannot resolve the in-cluster
+    # Service names of its own upstreams.
+    dnsPolicy: ClusterFirstWithHostNet
+    ingressClassResource:
+      name: nginx
+      enabled: true
+      default: true
+    service:
+      # Internal only. The host's :443 is what edges connect to.
+      type: ClusterIP
+    extraArgs:
+      # REQUIRED. The k0s API and konnectivity are mTLS end to end; terminating
+      # TLS here would leave the management side looking healthy and break only
+      # the workers' join, surfacing as an x509 error on the edge VM.
+      enable-ssl-passthrough: "true"
+    config:
+      # DICOM sessions run to gigabytes; the 1MB default would reject them.
+      proxy-body-size: "50g"
+      proxy-read-timeout: "3600"
+      proxy-send-timeout: "3600"
+      use-forwarded-headers: "true"
+    tolerations:
+      - operator: Exists
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits:   {cpu: 1,    memory: 512Mi}
+
+
 ingressNginx:
   enabled: true
   # Required: the k0smotron child-cluster API and konnectivity tunnel are TLS
@@ -668,13 +822,26 @@ observability:
     s3SecretRef: loki-s3-credentials
     persistenceSize: 20Gi
     ingress: {enabled: true, tlsSecretName: loki-tls}
-    # Vector on every edge pushes here with a bearer token. Loki itself runs
-    # auth_enabled: false, so the token is only meaningful if the Ingress
-    # actually checks it — see auth below.
     push:
+      # mTLS. Loki itself runs auth_enabled: false and accepts anything that
+      # reaches it, so the push Ingress is the ONLY place a site is
+      # authenticated.
+      #
+      # true makes the chart issue one client certificate per entry in `edges`
+      # from the internal CA, and makes the Ingress require and pin one. There
+      # is no Secret to name here: the certificate names are derived, and the
+      # chart refuses to render if certSync is not carrying them to the sites
+      # (templates/cert-sync.yaml, and templates/observability.yaml if certSync
+      # is off altogether) — a half-configured mTLS path fails every push with
+      # no symptom except the logs going quiet.
+      #
+      # This replaced an HTTP Basic `authSecretRef` that never worked in any
+      # deployment: the shared password map is an ingress-nginx auth-map, and
+      # nginx's auth_basic_user_file does not accept the bare passwords the
+      # template shipped, so the repo's plaintext and the hand-hashed Secret on
+      # the live cluster had already drifted apart. See
+      # docs/hardening-decisions.md §1.
       requireAuth: true
-      # Secret holding the htpasswd/token map the Ingress validates against.
-      authSecretRef: loki-push-auth
 
   alerting:
     smtpSecretRef: alertmanager-smtp    # keys: username, password
@@ -689,7 +856,21 @@ observability:
     # means no SMTP auth, and a relay that requires auth will reject every
     # message — which surfaces only as alerts that never arrive.
     smtpUsername: ""
-    slackWebhookSecretRef: ""           # optional
+    # Optional. Key: webhook-url. Must also appear in
+    # kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets so the
+    # operator mounts it — the chart refuses to render otherwise.
+    #
+    # LEAVING THIS EMPTY CHANGES THE ROUTING TREE, it does not just disable a
+    # destination. The Slack receivers are not rendered at all, severity=info
+    # goes to the info-email receiver and severity=critical to email-primary.
+    # Info alerts are then bounded at roughly one mail per (alertname, cluster)
+    # by send_resolved: false plus a 720h repeat_interval, so the inbox stays
+    # quiet without any alert being discarded.
+    #
+    # It used to mean "route info to Slack anyway, at a path that does not
+    # exist", which silently destroyed every info alert including CARotationDue.
+    # See files/alertmanager-config.yaml.
+    slackWebhookSecretRef: ""
     persistenceSize: 2Gi
 
 
@@ -786,6 +967,21 @@ kube-prometheus-stack:
 
   grafana:
     enabled: true
+    # PATCH-PINNED AHEAD OF THE SUBCHART. kube-prometheus-stack 87.19.2 pulls
+    # grafana 12.8.1, whose appVersion is 13.1.1, and an empty tag here means
+    # "use the appVersion". 13.1.2 (2026-08-04) fixes CVE-2026-13438; no
+    # details are public yet, and Grafana is the one service on this cluster
+    # that ingress-nginx publishes with NO auth in front of it — its own login
+    # page is the whole perimeter — so an unknown Grafana bug is not something
+    # to sit on. Two logs-table bug fixes are the rest of the release.
+    #
+    # Done as a tag override rather than by moving to kube-prometheus-stack
+    # 88.x: that would drag prometheus-operator 0.92.1 -> 0.93.0 and its CRDs
+    # through a live cluster (Chart.yaml explains why subchart CRDs are the
+    # awkward part here) to pick up a Grafana PATCH. Drop this line when the
+    # stack is next bumped for its own reasons and the appVersion catches up.
+    image:
+      tag: "13.1.2"
     admin:
       existingSecret: grafana-admin-credentials
       userKey: admin-user
@@ -913,39 +1109,35 @@ loki:
       retention_enabled: true
       retention_delete_delay: 2h
       retention_delete_worker_count: 150
-      delete_request_store: s3
+      # filesystem, NOT s3.
+      #
+      # With `delete_request_store: s3` Loki builds the delete store from
+      # `storage_config.aws` — a different path from the `common.storage.s3`
+      # that `loki.storage` renders into — and the Loki chart never populates
+      # it. The compactor then resolves an EMPTY bucket name and Loki exits 1
+      # at startup with:
+      #
+      #   init compactor: failed to init delete store: failed to get s3 object:
+      #   ... api error NoSuchBucket: The specified bucket does not exist
+      #
+      # which reads as "the bucket was not created" and is not: `aws s3api
+      # get-object` with Loki's own credentials returns NoSuchKey against that
+      # same bucket while Loki keeps reporting NoSuchBucket.
+      #
+      # Setting storage_config.aws to fix it does not work either: the chart
+      # treats that as taking manual control and then blanks
+      # common.storage.s3.bucketnames (its _helpers.tpl only fills the bucket
+      # when storage_config.aws is unset), so the chunk and index stores lose
+      # their bucket instead. Verified both ways on a live cluster.
+      #
+      # This deployment runs SingleBinary with a persistent PVC at /var/loki,
+      # so the delete-request store has the same durability as the rest of
+      # Loki's local state and does not need to be in S3 at all. Chunks and
+      # the index still go to S3 — only the delete-request bookkeeping is
+      # local. A distributed Loki would need the S3 form, and would then need
+      # both blocks kept in step by hand.
+      delete_request_store: filesystem
 
-    # THIS REPEATS storage.s3 ABOVE ON PURPOSE. IT IS NOT REDUNDANT.
-    #
-    # `loki.storage.s3` renders into `common.storage.s3`, which configures the
-    # chunk and index stores. The compactor's DELETE REQUEST STORE is built from
-    # a different path — `storage_config.aws` — and the Loki chart never
-    # populates that from `loki.storage`. So with `delete_request_store: s3` and
-    # retention enabled, the compactor resolves an EMPTY bucket name and Loki
-    # exits 1 at startup with:
-    #
-    #   init compactor: failed to init delete store: failed to get s3 object:
-    #   ... api error NoSuchBucket: The specified bucket does not exist
-    #
-    # The message names a bucket problem, and on a fresh install that is ALSO
-    # briefly true — the bucket-creation Job is a post-install hook — so it
-    # reads as a startup race and sends you after the wrong thing. It is not a
-    # race: the bucket exists, the credentials are correct, and
-    # `aws s3api get-object` using Loki's own key returns NoSuchKey against that
-    # same bucket while Loki keeps reporting NoSuchBucket. Confirmed by patching
-    # this block into the live ConfigMap: Loki then started with zero restarts.
-    #
-    # Keep the two blocks in step. Nothing enforces it.
-    storage_config:
-      aws:
-        # [tpl] same endpoint as storage.s3 above.
-        endpoint: http://{{ .Release.Name }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
-        bucketnames: logs-bucket
-        region: us-east-1
-        s3forcepathstyle: true
-        insecure: true
-        access_key_id: ${LOKI_S3_ACCESS_KEY}
-        secret_access_key: ${LOKI_S3_SECRET_KEY}
 
     commonConfig:
       replication_factor: 1
