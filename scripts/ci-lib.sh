@@ -21,7 +21,26 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Work directory is deliberately OUTSIDE the repository. Build artefacts inside
 # the tree are one `git add -A` away from being committed, and .gitignore is
 # not maintained by these scripts.
-CI_WORK_DIR="${CI_WORK_DIR:-${TMPDIR:-/tmp}/ais-edge-ci}"
+#
+# IT IS ALSO KEYED TO THIS CHECKOUT, and that is not cosmetic. The path used to
+# be a single fixed directory, so two copies of the repo running CI at the same
+# time silently destroyed each other's work: the second run's ci-render.sh
+# cleared and rewrote the render directory the first run was still reading.
+#
+# The symptom is baffling rather than obvious. `render` reports 40 passed, and
+# then `pvc-retention` fails on the very charts that just rendered while
+# `runtime-templates` reports the render directory empty — so it reads as a
+# broken chart, not as two processes colliding. It was found while five agents
+# built in parallel.
+#
+# Hashing the checkout path gives every working copy its own directory, which is
+# exactly the case that occurs in practice (parallel agents, git worktrees, a
+# second clone). Two concurrent runs in the SAME checkout still share one
+# directory and still conflict; fixing that needs a per-invocation id threaded
+# from the Makefile through every stage, and has not been worth the plumbing.
+# Set CI_WORK_DIR explicitly if you need it.
+_ci_checkout_key="$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)"
+CI_WORK_DIR="${CI_WORK_DIR:-${TMPDIR:-/tmp}/ais-edge-ci-${_ci_checkout_key}}"
 CI_VALUES_DIR="$CI_WORK_DIR/values"
 CI_RENDER_DIR="$CI_WORK_DIR/render"
 CI_TOOL_DIR="${CI_TOOL_DIR:-$HOME/.cache/ais-edge-ci/bin}"

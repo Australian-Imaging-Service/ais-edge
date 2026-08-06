@@ -91,4 +91,96 @@ print(n)
   fi
 done < <(ci_positive_cases)
 
+# -----------------------------------------------------------------------------
+# No version-bearing label may reach a selector
+# -----------------------------------------------------------------------------
+# THIS CHECK EXISTS BECAUSE A ROUTINE VERSION BUMP TOOK A SITE OFFLINE, AND EVERY
+# OTHER STAGE IN THIS SUITE WAS GREEN BEFORE AND AFTER IT.
+#
+# k0smotron copies a k0smotron.io Cluster's labels onto the Services it generates
+# AND uses those labels as the Services' selectors. The chart's shared label
+# helper carries helm.sh/chart (which embeds .Chart.Version) and
+# app.kubernetes.io/version (.Chart.AppVersion). Bumping the chart 0.1.0 -> 0.1.1
+# for an image CVE therefore regenerated a selector asking for
+# helm.sh/chart=ais-mgmt-0.1.1 while the running kmc-<edge>-0 pod still carried
+# 0.1.0 — endpoints dropped to zero, the child API became unreachable and
+# cert-sync failed with a connection timeout. Nothing crashed, nothing restarted
+# and nothing logged an error.
+#
+# A StatefulSet's pod template labels are fixed when its pods are created and its
+# selector is immutable, so this can never self-heal.
+#
+# Two things are asserted, because either alone would have missed it:
+#   1. no Service SELECTOR this chart renders contains a version-bearing key;
+#   2. no object whose labels a controller turns into a selector carries one
+#      either — today that means k0smotron.io Cluster objects.
+ci_heading "no version-bearing label reaches a selector"
+python3 - "$CI_RENDER_DIR" <<'PY' > "$CI_WORK_DIR/selector-labels.txt" 2>&1 || true
+import os, sys, yaml
+
+render_dir = sys.argv[1]
+
+# Keys whose VALUE changes when the chart is released. They describe a release,
+# not a workload, so they can never be part of an identity match.
+VERSIONED = {"helm.sh/chart", "app.kubernetes.io/version"}
+
+# Kinds whose metadata.labels are propagated into a Service selector by their
+# controller. Add a kind here the moment another controller does the same.
+SELECTOR_SOURCE_KINDS = {"Cluster"}
+
+checked = 0
+for fn in sorted(os.listdir(render_dir)):
+    if not fn.endswith(".yaml"):
+        continue
+    case = fn[:-5]
+    try:
+        docs = [d for d in yaml.safe_load_all(open(os.path.join(render_dir, fn))) if d]
+    except Exception as exc:
+        print(f"FAIL {case}: unreadable render ({exc})")
+        continue
+
+    for d in docs:
+        kind = d.get("kind")
+        md = d.get("metadata") or {}
+        name = md.get("name", "?")
+
+        if kind == "Service":
+            sel = (d.get("spec") or {}).get("selector") or {}
+            bad = sorted(VERSIONED & set(sel))
+            if bad:
+                print(f"FAIL {case}: Service/{name} selector contains {bad} — "
+                      "the selector stops matching its own pods on the next chart release")
+                continue
+            checked += 1
+
+        # k0smotron.io only — Cluster is also a Cluster API / cluster.x-k8s.io kind
+        # whose labels are not used this way, and failing on it would be noise.
+        if kind in SELECTOR_SOURCE_KINDS and "k0smotron.io" in str(d.get("apiVersion", "")):
+            bad = sorted(VERSIONED & set(md.get("labels") or {}))
+            if bad:
+                print(f"FAIL {case}: {kind}/{name} carries {bad}, and k0smotron copies "
+                      "these onto the Services it generates AND selects on them — use "
+                      "mgmt.selectorSafeLabels")
+                continue
+            checked += 1
+
+if checked == 0:
+    print("FAIL no Services or k0smotron Cluster objects were examined — "
+          "the check is not looking at anything")
+else:
+    print(f"PASS {checked} selector-bearing object(s) carry no version label")
+PY
+
+if [ ! -s "$CI_WORK_DIR/selector-labels.txt" ]; then
+  ci_fail "selector-label check produced no output"
+else
+  while IFS= read -r line; do
+    case "$line" in
+      PASS\ *) ci_pass "${line#PASS }" ;;
+      FAIL\ *) ci_fail "${line#FAIL }" ;;
+      *)       ci_fail "selector-label check error: $line" ;;
+    esac
+  done < "$CI_WORK_DIR/selector-labels.txt"
+fi
+
 ci_summary "render"

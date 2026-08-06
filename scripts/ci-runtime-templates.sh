@@ -45,6 +45,18 @@ ci_heading "runtime templates survive rendering"
 # case <TAB> kind <TAB> object name <TAB> literal that must be present
 #
 # Object names use the release names ci-render.sh installs with: mgmt and edge.
+#
+# NO COMMENTS OR BLANK-FIELD LINES INSIDE THE HEREDOC — the reader below splits
+# on tabs and does not skip '#', so a comment becomes a case named '#'.
+#
+# The mgmt-slack row: the Slack receivers are a SECOND .Files.Get fragment,
+# spliced into the Alertmanager config only when
+# observability.alerting.slackWebhookSecretRef is set, so mgmt-slack is the only
+# case that can prove they survive rendering. The literal is
+# `{{ .Labels.alertname }}` rather than `{{ range .Alerts }}` deliberately: the
+# latter also appears in that file's own header comment, which travels into the
+# Secret, so it would pass on a comment while the real message body rendered
+# empty — exactly the failure this whole check exists to catch.
 expectations() {
   cat <<'EOF'
 mgmt-defaults	ConfigMap	mgmt-vector	{{ cluster }}
@@ -52,6 +64,7 @@ mgmt-defaults	ConfigMap	mgmt-vector	{{ kubernetes.pod_namespace }}
 mgmt-defaults	ConfigMap	mgmt-vector	{{ kubernetes.pod_name }}
 mgmt-defaults	ConfigMap	loki-ruler-rules	{{ $labels.cluster }}
 mgmt-defaults	Secret	alertmanager-aisedge-config	{{ .CommonLabels.
+mgmt-slack	Secret	alertmanager-aisedge-config	{{ .Labels.alertname }}
 mgmt-defaults	PrometheusRule	mgmt-warning	{{ $labels.
 mgmt-defaults	PrometheusRule	mgmt-info	{{ $labels.
 mgmt-defaults	PrometheusRule	mgmt-critical	{{ $labels.

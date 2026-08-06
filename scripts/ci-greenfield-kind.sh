@@ -207,20 +207,40 @@ fi
 # for 16 objects. Measured on kind v1.35.5 with helm v3.20.1, and already noted
 # in charts/mgmt/Chart.yaml. Install first, dry-run second.
 #
-# `--create-namespace` is per case, not blanket, and the RELEASE namespace is
-# not always the workload namespace. Measured:
-#   charts/mgmt  references .Release.Namespace, so that namespace has to exist:
-#                --create-namespace, and it creates xnat-upload and the
-#                per-edge namespaces itself.
-#   charts/edge  never references .Release.Namespace — every object goes into
-#                .Values.namespace, and the chart RENDERS that Namespace. So
-#                the release is installed into an existing namespace (default)
-#                and the chart creates xnat-ingest. Passing --create-namespace
-#                for xnat-ingest instead makes Helm pre-create it without
-#                ownership metadata and the install then aborts with
-#                `namespaces "xnat-ingest" already exists` — which looks
-#                exactly like the adoption collision this job exists to prove
-#                does not happen.
+# NEITHER CHART CREATES ITS WORKLOAD NAMESPACE, AND THAT IS DELIBERATE.
+#
+# The rule is uniform across both charts and written out in full in
+# charts/edge/templates/namespace.yaml: NAMESPACES AND SECRETS FIRST, WORKLOADS
+# SECOND. A workload that mounts a Secret cannot start before that Secret
+# exists, and the Secret cannot exist before its namespace does. In a real
+# install `scripts/site-secrets.sh apply` creates every namespace its Secrets
+# name, and install.sh runs it before the corresponding release.
+#
+# So this job has to do the same thing, or it is not testing the install path.
+#
+# It used to claim, as "measured", that charts/mgmt created xnat-upload and
+# charts/edge created xnat-ingest. Neither has ever been true. Both installs
+# failed with `namespaces "xnat-upload" not found` and `namespaces
+# "xnat-ingest" not found`, and nobody saw it because greenfield is in
+# ALL_STAGES (make ci) and not FAST_STAGES (make ci-fast).
+#
+# `--create-namespace` still only covers the RELEASE namespace, which for
+# charts/mgmt is ais-mgmt. The workload namespaces are pre-created below
+# instead. Do NOT switch to --create-namespace for those: Helm would create
+# them without ownership metadata and a later release that does render a
+# Namespace aborts with "invalid ownership metadata", which looks exactly like
+# the adoption collision this job exists to disprove.
+prepare_workload_namespaces() { # <namespace>...
+  for ns in "$@"; do
+    if "$KUBECTL" get namespace "$ns" >/dev/null 2>&1; then
+      ci_pass "workload namespace already present: $ns"
+    elif "$KUBECTL" create namespace "$ns" >/dev/null 2>&1; then
+      ci_pass "workload namespace pre-created, as site-secrets.sh apply would: $ns"
+    else
+      ci_fail "could not create workload namespace $ns"
+    fi
+  done
+}
 install_case() { # install_case <release> <namespace> <create-ns:0|1> <chart> <values...>
   local release="$1" ns="$2" create_ns="$3" chart="$4"; shift 4
   local args=()
@@ -248,6 +268,16 @@ install_case() { # install_case <release> <namespace> <create-ns:0|1> <chart> <v
     return 1
   fi
 }
+
+# xnat-upload  the management uploader and the s3-staged reclaimer live here,
+#              not in the release namespace, because they mount the XNAT and
+#              staging credentials and nothing else in ais-mgmt should read them.
+# xnat-ingest  every object charts/edge renders goes here (.Values.namespace);
+#              the chart never references .Release.Namespace.
+# The per-edge namespaces are NOT listed: templates/edge-clusters.yaml does
+# render those, and pre-creating them would cause the ownership collision the
+# note above warns about.
+prepare_workload_namespaces xnat-upload xnat-ingest
 
 mgmt_ok=0
 install_case mgmt ais-mgmt 1 charts/mgmt mgmt-base.yaml mgmt-two-edges.yaml && mgmt_ok=1

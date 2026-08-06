@@ -64,4 +64,36 @@ else
   ci_pass "$found shell scripts parsed"
 fi
 
+# -----------------------------------------------------------------------------
+# `yes ... |` inside a script that sets pipefail
+# -----------------------------------------------------------------------------
+# When the reader exits, `yes` is killed by SIGPIPE and reports 141. With
+# `set -o pipefail` that becomes the PIPELINE's status, and with `set -e` the
+# calling script then aborts — AFTER the piped-to command did its work and
+# printed its success messages.
+#
+# install.sh had exactly this: `yes y | site-secrets.sh apply` created every
+# Secret, printed "secrets applied", and then killed the installer before it
+# reached the Helm steps. The run ended looking like it had simply finished,
+# and `echo EXIT=$?` reported 0 because the abort happened inside a subshell
+# that had already produced output. It cost a full install cycle to find.
+#
+# Feed a non-interactive flag instead of piping into a prompt.
+pipe_yes=0
+while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  grep -q 'pipefail' "$f" || continue
+  # Command position only: optional indent, then `yes`, then a pipe on the
+  # same line. Matching the WORD anywhere hits every comment containing "yes"
+  # — including the ones explaining this very check.
+  if grep -qE '^[[:space:]]*yes([[:space:]]+[^|]*)?\|' "$f"; then
+    ci_fail "$(basename "$f"): pipes \`yes\` into a command while set -o pipefail is on — SIGPIPE (141) becomes the pipeline status and aborts the script after the command succeeded"
+    pipe_yes=1
+  fi
+done < <(
+  find "$REPO_ROOT/scripts" -type f -name '*.sh' 2>/dev/null
+  find "$REPO_ROOT" -maxdepth 1 -type f -name '*.sh' 2>/dev/null
+)
+[ "$pipe_yes" -eq 0 ] && ci_pass "no \`yes |\` pipelines under pipefail"
+
 ci_summary "shell syntax"

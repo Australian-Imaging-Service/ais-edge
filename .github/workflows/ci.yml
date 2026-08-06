@@ -112,6 +112,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: make runtime-templates RENDER_DEP=
 
+      # Renders both charts against sites/example-site/ and proves every Secret
+      # they mount is satisfied there, in the right namespace, with the right
+      # keys. The shipped template placed the management secrets in namespaces
+      # the workloads do not run in: helm installs cleanly, the pods sit in
+      # CreateContainerConfigError, and no other stage notices.
+      - name: Secret contract (namespaces and keys the charts actually mount)
+        if: ${{ !cancelled() }}
+        run: make secret-contract
+
       # On failure the rendered manifests are the evidence. Kept short: they
       # are reproducible from `make render`, this is only to save a round trip.
       - name: Upload renders (on failure)

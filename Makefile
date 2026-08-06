@@ -32,13 +32,17 @@ SHELL := /usr/bin/env bash
 # a stage invoked on its own agrees with one invoked from `ci`. Kept OUTSIDE
 # the repository: build artefacts inside the tree are one `git add -A` away
 # from being committed.
-export CI_WORK_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/ais-edge-ci
+# Keyed to THIS checkout so two copies of the repo can run CI at the same time
+# without destroying each other's renders. Must stay byte-identical to the
+# fallback in scripts/ci-lib.sh, or a stage invoked directly would look in a
+# different directory from one invoked through make. See the long note there.
+export CI_WORK_DIR ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/ais-edge-ci-$(shell printf '%s' '$(CURDIR)' | cksum | cut -d' ' -f1)
 export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer
+FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer secret-contract
 ALL_STAGES  := $(FAST_STAGES) greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -117,6 +121,11 @@ runtime-templates: $(RENDER_DEP)
 # The only stage that needs no render.
 shell-syntax:
 	@scripts/ci-shell-syntax.sh
+
+# Renders both charts itself (with the EXAMPLE site values, which is the point)
+# so it does not read $(CI_RENDER_DIR) and has no render dependency.
+secret-contract:
+	@scripts/ci-secret-namespaces.sh
 
 # Needs docker + kubectl + kind. Skips, loudly, if any is missing — a skip is
 # reported separately from a pass so a run without docker never reads as

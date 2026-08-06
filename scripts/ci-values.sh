@@ -51,7 +51,6 @@ edges:
   - name: edge-alpha
     nodeIP: 198.51.100.21
     s3SecretRef: edge-alpha-s3
-    lokiTokenRef: edge-alpha-loki-token
     exposure: nodePort
     apiNodePort: 30443
     konnectivityNodePort: 30132
@@ -98,14 +97,12 @@ edges:
   - name: edge-alpha
     nodeIP: 198.51.100.21
     s3SecretRef: edge-alpha-s3
-    lokiTokenRef: edge-alpha-loki-token
     exposure: nodePort
     apiNodePort: 30443
     konnectivityNodePort: 30132
   - name: edge-beta
     nodeIP: 198.51.100.22
     s3SecretRef: edge-beta-s3
-    lokiTokenRef: edge-beta-loki-token
     exposure: nodePort
     apiNodePort: 30444
     konnectivityNodePort: 30133
@@ -119,12 +116,10 @@ edges:
   - name: edge-alpha
     nodeIP: 198.51.100.21
     s3SecretRef: edge-alpha-s3
-    lokiTokenRef: edge-alpha-loki-token
     exposure: sni
   - name: edge-beta
     nodeIP: 198.51.100.22
     s3SecretRef: edge-beta-s3
-    lokiTokenRef: edge-beta-loki-token
     exposure: nodePort
     apiNodePort: 30444
     konnectivityNodePort: 30133
@@ -195,7 +190,7 @@ observability:
   enabled: true
   loki:
     endpoint: "https://loki.ci.198-51-100-10.nip.io"
-    existingTokenSecret: loki-push-token
+    clientCertSecret: loki-push-client-tls
     caBundleSecret: ca-bundle
 EOF
 
@@ -236,6 +231,29 @@ hostAliases:
   enabled: false
 EOF
 
+# Slack configured. The ONLY case that renders the Slack half of the
+# Alertmanager config: slackWebhookSecretRef switches the severity=info and
+# severity=critical routes onto the Slack receivers AND splices
+# files/alertmanager-slack-receivers.yaml in. Without a case here that branch
+# ships untested — which is how every info alert came to be routed at a
+# webhook file no Secret ever provided.
+#
+# alertmanagerSpec.secrets has to be restated in full: the guard in
+# templates/observability.yaml requires the webhook Secret to be mounted, and
+# Helm REPLACES lists rather than merging them, so naming only the new one
+# would drop alertmanager-smtp and trip the SMTP guard first.
+cat >"$V/mgmt-slack.yaml" <<'EOF'
+observability:
+  alerting:
+    slackWebhookSecretRef: alertmanager-slack
+kube-prometheus-stack:
+  alertmanager:
+    alertmanagerSpec:
+      secrets:
+        - alertmanager-smtp
+        - alertmanager-slack
+EOF
+
 # =============================================================================
 # NEGATIVE overlays — each one injects exactly ONE defect.
 # =============================================================================
@@ -274,6 +292,17 @@ cat >"$V/neg-mgmt-edge-no-s3secret.yaml" <<'EOF'
 edges:
   - name: edge-alpha
     nodeIP: 198.51.100.21
+    exposure: sni
+EOF
+
+# An edge name that is not a DNS-1123 label. The `.` is the point: the name is
+# interpolated into the auth-tls-match-cn regex on the Loki push Ingress, where
+# a metacharacter WIDENS what is accepted instead of erroring.
+cat >"$V/neg-mgmt-edge-name-not-label.yaml" <<'EOF'
+edges:
+  - name: edge.alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
     exposure: sni
 EOF
 
@@ -512,6 +541,33 @@ EOF
 # The CA Secret sourced from the wrong namespace. cert-manager writes it into
 # its --cluster-resource-namespace; one namespace away it exists and never
 # syncs, and every run logs sync_failed rather than erroring.
+# The certSync entry that delivers the edge S3 credential names its source as
+# "<edge>-s3", but cert-sync substitutes <edge> and nothing else — so an edge
+# whose s3SecretRef points somewhere else would have the credential synced from
+# a Secret that does not exist. sync_failed every six hours, the edge never
+# receives s3-edge-credentials, and its uploader sits in
+# CreateContainerConfigError; none of the three symptoms names the cause.
+cat >"$V/neg-mgmt-certsync-s3-name-mismatch.yaml" <<'EOF'
+edges:
+  - name: edge-alpha
+    nodeIP: "10.0.0.2"
+    s3SecretRef: some-other-name
+    uploadSecretRef: seaweedfs-upload
+    exposure: sni
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3"
+        keys: {access-key: access-key, secret-key: secret-key}
+      destination: {namespace: xnat-ingest, name: s3-edge-credentials, type: Opaque}
+EOF
+
 cat >"$V/neg-mgmt-certsync-ca-wrong-ns.yaml" <<'EOF'
 certSync:
   secrets:
@@ -534,6 +590,24 @@ certSync:
           ca.crt: ca.crt
           tls.key: tls.key
       destination: {namespace: logging, name: ca-bundle}
+EOF
+
+# mTLS on the push path with no distribution mechanism at all: cert-manager
+# issues every client certificate on the management cluster and nothing carries
+# any of them to a site.
+printf 'certSync:\n  enabled: false\n'                    >"$V/neg-mgmt-loki-mtls-no-certsync.yaml"
+
+# certSync is on and well-formed, but carries only the CA bundle. The push
+# Ingress still demands a client certificate, so every edge fails the handshake
+# — and the alerts that would report it are built from the logs that stop.
+cat >"$V/neg-mgmt-loki-mtls-no-client-cert.yaml" <<'EOF'
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: logging, name: ca-bundle, type: Opaque}
 EOF
 
 # | , = are the delimiters of the spec file cert-sync.sh parses, so a name
@@ -571,7 +645,13 @@ EOF
 # -- edge ---------------------------------------------------------------------
 printf 'upload:\n  mode: both\n'                          >"$V/neg-edge-bad-mode.yaml"
 printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-endpoint.yaml"
-printf 'upload:\n  s3:\n    bucket: ""\n'                 >"$V/neg-edge-s3-no-bucket.yaml"
+# perSiteBuckets derives <bucketPrefix>-<clusterLabel>, which is safe and is
+# now the normal path — so an empty bucket alone is no longer an error. What
+# must still be refused is the SHARED-bucket layout with no explicit name: a
+# defaulted shared bucket is the original isolation bug, because SeaweedFS
+# scopes identities per bucket with no prefix scoping, so every site sharing
+# one bucket can read and delete every other site's staged imaging.
+printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
 printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
 printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
@@ -630,6 +710,7 @@ mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
 mgmt-no-seaweedfs	charts/mgmt	mgmt-base.yaml mgmt-no-seaweedfs.yaml
 mgmt-shared-bucket	charts/mgmt	mgmt-base.yaml mgmt-shared-bucket.yaml
 mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
+mgmt-slack	charts/mgmt	mgmt-base.yaml mgmt-slack.yaml
 mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-datapolicy-on.yaml
 edge-defaults	charts/edge	edge-base.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
@@ -651,6 +732,7 @@ neg-mgmt-no-nodeip	charts/mgmt	mgmt-base.yaml neg-mgmt-no-nodeip.yaml	domain.mgm
 neg-mgmt-duplicate-edges	charts/mgmt	mgmt-base.yaml neg-mgmt-duplicate-edges.yaml	duplicate edge name
 neg-mgmt-edge-no-name	charts/mgmt	mgmt-base.yaml neg-mgmt-edge-no-name.yaml	needs a name
 neg-mgmt-edge-no-s3secret	charts/mgmt	mgmt-base.yaml neg-mgmt-edge-no-s3secret.yaml	has no s3SecretRef
+neg-mgmt-edge-name-not-label	charts/mgmt	mgmt-base.yaml neg-mgmt-edge-name-not-label.yaml	is not a DNS-1123 label
 neg-mgmt-edge-no-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-edge-no-nodeport.yaml	has no apiNodePort
 neg-mgmt-nodeport-out-of-range	charts/mgmt	mgmt-base.yaml neg-mgmt-nodeport-out-of-range.yaml	outside the cluster's NodePort range
 neg-mgmt-nodeport-collision	charts/mgmt	mgmt-base.yaml neg-mgmt-nodeport-collision.yaml	is requested by both
@@ -685,14 +767,17 @@ neg-mgmt-certsync-schedule-macro	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-sc
 neg-mgmt-certsync-schedule-weekly	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-schedule-weekly.yaml	runs less often than daily
 neg-mgmt-certsync-no-destination	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-no-destination.yaml	needs source.name, destination.namespace
 neg-mgmt-certsync-no-keys	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-no-keys.yaml	has no `keys` map
+neg-mgmt-certsync-s3-name-mismatch	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-s3-name-mismatch.yaml	but that edge's s3SecretRef is
 neg-mgmt-certsync-ca-wrong-ns	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-ca-wrong-ns.yaml	but cert-manager writes it into
 neg-mgmt-certsync-tls-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-tls-key.yaml	copies key tls.key out of
 neg-mgmt-certsync-delimiter-in-name	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-delimiter-in-name.yaml	contains one of | , =
 neg-mgmt-certsync-delimiter-in-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-delimiter-in-key.yaml	key mapping ca.crt=ca.crt=x
 neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-cronjob-name-too-long.yaml	the API server rejects CronJob names over 52
+neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
+neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
-neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	requires upload.s3.endpoint
-neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	upload.s3.bucket is empty
+neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
+neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
