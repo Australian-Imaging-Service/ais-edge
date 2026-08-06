@@ -149,9 +149,35 @@ pod restarts**. Re-dropping a file that hashes to the *same* session ID within
 notification (e.g. between demo takes) the nflog must be wiped:
 
 ```bash
-kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=0
-kubectl -n observability delete pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 --wait=false
-kubectl -n observability patch pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 \
+kubectl -n ais-mgmt scale statefulset/alertmanager-mgmt-kube-prometheus-stack-alertmanager --replicas=0
+kubectl -n ais-mgmt delete pvc alertmanager-mgmt-kube-prometheus-stack-alertmanager-db-alertmanager-mgmt-kube-prometheus-stack-alertmanager-0 --wait=false
+kubectl -n ais-mgmt patch pvc alertmanager-mgmt-kube-prometheus-stack-alertmanager-db-alertmanager-mgmt-kube-prometheus-stack-alertmanager-0 \
   -p '{"metadata":{"finalizers":null}}' --type=merge     # plain delete hangs on pvc-protection
-kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=1
+kubectl -n ais-mgmt scale statefulset/alertmanager-mgmt-kube-prometheus-stack-alertmanager --replicas=1
 ```
+
+## The reclaimer's pre-flight abort: two log lines, not one
+
+`charts/mgmt/files/reclaim-staged.sh` aborts if its XNAT auth probe fails —
+observed twice in 24h, both `HTTP 000`. A plain `log ; exit 1` would be a
+silent failure dressed as a safe one: nothing deleted, and nothing said,
+because `SessionStagedNotConfirmedInXNAT` builds its "staged" half from
+`{component="s3-reclaimer"} | json | event=~"reclaim_.*" | session != ""`,
+and a `session=""` abort line is dropped by that filter.
+
+**An isolated failure does not silence the alert** — its staged half is a
+24h count and one missed hour is absorbed by the other 23. The real risk is
+a **sustained** pre-flight failure across a whole 24h window, which would
+leave every session staged in that window invisible to the absence alert
+until the window slides past it — 48h after recovery, or never if it never
+recovers. That is exactly the state "staged and never confirmed" most needs
+to catch.
+
+So the script emits two things on abort: one run-level `reclaim_unavailable`
+with a machine-readable `reason` (`ReclaimerRunUnavailable` pages on this
+within the hour — what an operator actually acts on), and, best-effort, one
+`reclaim_unavailable` per staged session (capped, to avoid tripping a Loki
+ingestion limit and restoring the exact silence this exists to prevent) so
+the absence alert keeps getting a staged signal through an outage of any
+length. It must never emit `reclaim_finished` — a healthy no-op run and an
+aborted run must not look identical in the log.

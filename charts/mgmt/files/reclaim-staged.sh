@@ -2,65 +2,31 @@
 # =============================================================================
 # S3 staging reclaimer — the ONLY component that deletes from s3://<bucket>/staged
 # =============================================================================
-# `xnat-ingest upload` has no S3 retention. It rebuilds its work list from a
-# live listing of the staging prefix on every --loop pass and never removes
-# what it uploaded, so a delivered session is listed again, "uploaded" again,
-# and re-fires XNATUploadSuccess every 60s forever. (Observed 2026-07-29: 12
-# stale prefixes, ~2 success lines/minute, for two days.) This job closes that
-# gap by removing staged sessions AFTER XNAT has been re-queried and has
-# confirmed it holds them.
+# GUIDING: xnat-ingest upload has no S3 retention of its own — it relists the
+# staging prefix every loop and never removes what it sent, so a delivered
+# session gets re-uploaded and re-alerted forever without this job. Full
+# design write-up: docs/TOUR.md, docs/components/seaweedfs.md.
 #
 # -----------------------------------------------------------------------------
 # THE DOCTRINE: THIS SCRIPT DELETES PATIENT DATA. IT IS WRONG TO GUESS.
 # -----------------------------------------------------------------------------
-# A staged session that is not in XNAT is UNDELIVERED DATA. Every uncertainty —
-# a failed listing, a non-200 from XNAT, an unparseable response, a session ID
-# that does not decompose, a tool that is missing — resolves to KEEP. There is
-# no code path in this file where a delete happens because something could not
-# be checked. Keeping too much costs disk; deleting too much costs a scan that
-# no longer exists anywhere.
+# A staged session not confirmed in XNAT is UNDELIVERED DATA. Every
+# uncertainty — failed listing, non-200, unparseable response, malformed
+# session ID, missing tool — resolves to KEEP. No code path here deletes
+# because something could not be checked.
 #
-# Corollaries, each of which is load-bearing:
-#   * An uploader exit code is NOT confirmation. `xnat-ingest upload` logs
-#     "Successfully uploaded all files in '<session>'" for an EMPTY prefix.
-#     Only a positive answer from the XNAT REST API counts.
-#   * NOR is the EXISTENCE of the experiment in XNAT confirmation. XNAT creates
-#     the experiment as soon as the FIRST resource is POSTed, so an upload that
-#     died after 3 of 400 scans leaves a correctly-labelled experiment behind.
-#     An earlier version of this script matched on that label and would have
-#     deleted the 397 scans that never arrived. Confirmation means COUNTING:
-#     every file the staged session says it contains must be present in XNAT.
-#
-#     The count comes from the __MANIFEST__.json files xnat-ingest writes into
-#     each resource directory. Real example, captured from a staged session on
-#     this cluster:
-#         {"datatype": "medimage/dicom-series",
-#          "checksums": {"1.2.276...836886.dcm": "d991520d4335ae70d09e85c28f20296a"}}
-#     One entry per file, so summing `checksums` across a session's manifests
-#     gives exactly what should be in XNAT. (Note the name: __MANIFEST__.json,
-#     double underscores, per RESOURCE — not the per-session "MANIFEST.json"
-#     our docs used to describe.)
-#   * Deletion goes through the FILER, never `aws s3 rm`. Measured on
-#     SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it) removes
-#     the OBJECTS but leaves a 0-byte directory ENTRY, which `aws s3 ls` still
-#     reports as "PRE <session>/" — and an empty prefix is exactly what makes
-#     the uploader log a bogus success every cycle. Switching S3 client does
-#     not fix it; only the filer can remove a directory entry.
-#     See docs/components/seaweedfs.md, "Deletion must go through the filer".
-#   * The filer is reached over its HTTP API:
-#         DELETE http://<filer>:8888/buckets/<bucket>/<prefix>/<session>?recursive=true
-#     Measured: returns 204 and the directory entry is genuinely gone, where
-#     the same session deleted with `aws s3 rm --recursive` still listed as
-#     "PRE <session>/" afterwards.
-#     This deliberately replaces `kubectl exec ... weed shell`, which is how
-#     the hand-run cleanup script did it. Going over HTTP means this job needs
-#     no kubectl, no custom image (amazon/aws-cli already ships curl), and — the
-#     real prize — NO pods/exec RBAC. A CronJob that can exec into arbitrary
-#     pods is a far larger blast radius than one that can call one HTTP verb.
-#   * We never decide a deletion from `weed shell` TEXT. weed shell prints its
-#     prompt inline ("> FIRST_ENTRY"); an earlier cleanup script filtered
-#     those lines out, which made a session that HELD DATA look empty and
-#     deleted it. Every decision here comes from the S3 API or from XNAT.
+#   * CAUTION: an uploader exit code, or the experiment merely EXISTING in
+#     XNAT, is NOT confirmation. XNAT creates the experiment on the first
+#     resource POST, so a 3-of-400-scans upload leaves a correctly-labelled
+#     but empty experiment. Confirmation means COUNTING every file the
+#     staged __MANIFEST__.json says it contains against XNAT.
+#   * CAUTION: deletion goes through the FILER's HTTP DELETE, never
+#     `aws s3 rm` — see docs/components/seaweedfs.md, "Deletion must go
+#     through the filer", for why. HTTP rather than `weed shell` over
+#     kubectl exec also means this job needs no pods/exec RBAC.
+#   * CAUTION: never decide from `weed shell` TEXT — its inline prompt
+#     ("> FIRST_ENTRY") once made a session that held data look empty.
+#     Every decision here comes from the S3 API or from XNAT.
 #
 # -----------------------------------------------------------------------------
 # THE LOG SCHEMA BELOW IS A PUBLIC INTERFACE. DO NOT CHANGE IT CASUALLY.
@@ -166,56 +132,14 @@ s3_list_prefixes() {
 }
 
 # -----------------------------------------------------------------------------
-# Aborting the run. WHY THIS IS NOT JUST `jlog ... ; exit 1`.
+# Aborting the run: emits run-level AND per-session reclaim_unavailable, never
+# reclaim_finished. WHY: docs/alerting-architecture.md, "The reclaimer's
+# pre-flight abort".
+# CAUTION: this is not redundant with the run-level line — an isolated
+# pre-flight failure is absorbed by SessionStagedNotConfirmedInXNAT's 24h
+# window, but a SUSTAINED one would leave every session staged in that window
+# invisible to it without the per-session fan-out.
 # -----------------------------------------------------------------------------
-# Observed twice in 24h on the mgmt cluster — 2026-08-05T18:17:11Z and
-# 2026-08-06T01:17:11Z, both "XNAT auth probe returned HTTP 000". Each run
-# logged ONE reclaim_unavailable with session="" and exited. That is a
-# silent failure dressed as a safe one: nothing was deleted, and nothing was
-# said either.
-#
-# The second cost is structural. SessionStagedNotConfirmedInXNAT (see
-# files/loki-ruler-rules.yaml) builds its "this session is staged" half from
-#     {component="s3-reclaimer"} | json | event=~"reclaim_.*" | session != ""
-# because the reclaimer is the one component that walks every staged session
-# from the management plane. A line with session="" is dropped by that filter,
-# so an aborted run contributes NOTHING to it.
-#
-# BE PRECISE ABOUT HOW BAD THAT IS — the two observed failures did NOT silence
-# that alert, and claiming they did would be the fourth wrong diagnosis in this
-# repo. Its staged half is a count over a 24h window, and 22 of the 24 runs
-# either side of each failure were healthy: measured in Loki afterwards, the
-# window never emptied (10 / 16 / 22 events for the one staged session at
-# 19:00Z, 02:00Z and 10:00Z). An ISOLATED aborted run is absorbed.
-#
-# What the fan-out below actually buys is the SUSTAINED case: a pre-flight that
-# stays broken — an expired XNAT credential, a filer that does not come back —
-# across a whole 24h window. Then every session staged in that window is
-# invisible to the absence alert, and stays invisible until the window slides
-# over hours where the reclaimer worked again: 48h after recovery, and never if
-# it does not recover. That is precisely the state in which "staged and never
-# confirmed in XNAT" most needs to fire, so it is the state it must not be
-# blind in.
-#
-# So aborting does two things instead of one:
-#   1. logs the run-level reclaim_unavailable, now carrying a machine-readable
-#      `reason` slug. ReclaimerRunUnavailable alerts on that within the hour,
-#      which is what turns a pre-flight failure into a page instead of a gap.
-#   2. best-effort lists staging and logs one reclaim_unavailable PER SESSION,
-#      so the absence logic keeps getting the staged signal it depends on
-#      through an outage of any length. This is the belt-and-braces half: (1)
-#      is what an operator actually acts on, and (2) is what still fires ~48h
-#      later if nobody did.
-#
-# Best-effort, deliberately: if `aws` is the missing tool or the bucket is what
-# is unreachable, there is nothing to list and the run-level line stands alone.
-# That is also why the staging-listing failure in the main pass comes through
-# here — a listing that failed once may succeed on the retry, and if it does we
-# get the per-session events for free.
-#
-# What it must NOT do is emit reclaim_finished. A nothing-to-do run ends with
-# reclaim_finished examined=0; if an aborted run ended the same way, the two
-# would be indistinguishable in the log, which is the whole defect.
 
 # Cap on the per-session fan-out. A pre-flight that fails every hour against a
 # large staging prefix would otherwise push tens of thousands of lines a day at
@@ -429,27 +353,20 @@ s3_newest_epoch() {
 # -----------------------------------------------------------------------------
 # XNAT confirmation
 # -----------------------------------------------------------------------------
-# Staged prefixes are named by `xnat-ingest assign` as PROJECT.SUBJECT.VISIT
-# (docs/components/xnat-ingest.md). We ask XNAT for the experiments of that
-# ONE subject in that ONE project — a path-addressed query, so a 404 for a
-# missing project or subject is unambiguous — and then require an EXACT match
-# on a returned label or ID. A substring match could confirm the wrong
-# session, and confirming the wrong session deletes the right one.
+# GUIDING: staged prefixes are PROJECT.SUBJECT.VISIT (docs/components/
+# xnat-ingest.md). Query is path-addressed to that one subject/project — a
+# 404 is unambiguous — and requires an EXACT label/ID match; a substring
+# match could confirm the wrong session, and confirming wrong deletes right.
+# Returns 0 ONLY on positive confirmation; any other code, an HTML login
+# page, an empty result, or an unparseable name all keep the session.
 #
-# Returns 0 only on a positive confirmation. Everything else (any HTTP code
-# other than 200, an HTML login page, an empty result, a name that does not
-# decompose) returns non-zero and the caller keeps the session.
-# The set of files the STAGED session claims to contain, as
-# "<name>\t<md5>" lines, summed from every __MANIFEST__.json under its prefix.
-# Echoes ERR on any doubt.
-#
-# NAMES, not just a count. A count says "XNAT holds 400 files"; it does not say
-# they are THESE 400. Two sessions of equal size, a partially-overwritten
-# upload, or a session whose files landed under the wrong scan would all
-# satisfy a count and fail a name comparison. The manifest keys are the exact
-# filenames XNAT reports back, verified against the live server:
-#     manifest key : 1.2.276.0.7230010.3.1.4.8323329.102804.1785120247.836886.dcm
-#     XNAT Name    : 1.2.276.0.7230010.3.1.4.8323329.102804.1785120247.836886.dcm
+# CAUTION — NAMES, not just a count. "XNAT holds 400 files" does not mean
+# THESE 400 — two equal-sized sessions, a partial overwrite, or files landed
+# under the wrong scan would all pass a count check and fail a name one. The
+# set of files a STAGED session claims, as "<name>\t<md5>" lines summed from
+# every __MANIFEST__.json under its prefix, is compared against XNAT's exact
+# reported filenames (verified live: manifest keys match `Name` verbatim,
+# including the full DICOM UID).
 staged_manifest_files() {
     local session="$1" keys out mf
     keys=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" \
@@ -561,23 +478,14 @@ for r in rows:
 }
 
 # -----------------------------------------------------------------------------
-# Removal. The filer, and only the filer.
+# Removal. The filer, and only the filer — docs/components/seaweedfs.md.
 # -----------------------------------------------------------------------------
-# `aws s3 rm --recursive` here would leave the 0-byte directory entry behind
-# and RECREATE the bug this job exists to fix. Only the filer can remove a
-# directory entry, and its HTTP API does it directly:
-#
 #     DELETE /buckets/<bucket>/<prefix>/<session>?recursive=true   -> 204
 #
-# Measured on SeaweedFS 3.99: after this call the entry is genuinely gone from
-# both `aws s3 ls` and `weed shell fs.ls`, where the same session deleted with
-# `aws s3 rm --recursive` still listed as "PRE <session>/".
-#
-# Two flags matter. `recursive=true` is what makes it descend into the
-# session's scan subdirectories. `ignoreRecursiveError=false` (the default)
-# means a partial failure is reported rather than swallowed — the caller
-# re-lists staging afterwards and only trusts THAT, but a reported error is
-# still better than a silent one.
+# CAUTION: `recursive=true` descends into scan subdirectories.
+# `ignoreRecursiveError=false` (default) reports a partial failure rather
+# than swallowing it — the caller re-lists staging afterwards and trusts
+# only that, but a reported error is still better than a silent one.
 #
 # Echoes "HTTP <code>" plus any body, and returns non-zero on a non-2xx, so
 # the caller can log what actually happened rather than assuming success.
