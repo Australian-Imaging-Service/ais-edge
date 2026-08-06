@@ -91,10 +91,10 @@ paging about pods being NotReady when the whole cluster is gone).
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/observability/alertmanager-config.yaml.tpl` | rendered into the config Secret at install |
+| `charts/mgmt/files/alertmanager-config.yaml` | rendered into the config Secret at install |
 | `config/management.env` | `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `ALERT_SMTP_*`, `ALERT_SLACK_WEBHOOK` |
-| `manifests/01-management/observability/kube-prometheus-stack-values.yaml.tpl` | `alertmanagerSpec.configSecret = alertmanager-aisedge-config` |
-| `manifests/01-management/observability/alerts/*.yaml` | the PrometheusRule files that produce the alerts (see `prometheus.md`) |
+| `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | `alertmanagerSpec.configSecret = alertmanager-aisedge-config` |
+| `charts/mgmt/files/prometheus-rules/*.yaml` | the PrometheusRule files that produce the alerts (see `prometheus.md`) |
 
 ## Operations
 
@@ -114,7 +114,7 @@ amtool --alertmanager.url=http://localhost:9093 silence add \
   alertname=SeaweedFSDown --duration=30m --comment="planned restart"
 
 # Rotate config (after editing the template or env vars)
-bash scripts/02d-install-observability.sh   # recreates the Secret
+helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml   # recreates the Secret
 kubectl -n observability rollout restart statefulset/alertmanager-kube-prometheus-stack-alertmanager
 ```
 

@@ -22,7 +22,7 @@ The metrics layer of the observability stack. Prometheus scrapes:
   memory / network
 
 It evaluates the `PrometheusRule` files in
-`manifests/01-management/observability/alerts/` every 30s and pushes
+`charts/mgmt/files/prometheus-rules/` every 30s and pushes
 firing alerts to Alertmanager.
 
 ## What Prometheus has access to
@@ -49,10 +49,10 @@ firing alerts to Alertmanager.
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/observability/kube-prometheus-stack-values.yaml.tpl` | retention, scrape interval, storage size, selector labels |
-| `manifests/01-management/observability/alerts/critical.yaml` | 4 critical alerts |
-| `manifests/01-management/observability/alerts/warning.yaml` | 9 warning alerts |
-| `manifests/01-management/observability/alerts/info.yaml` | 3 info alerts |
+| `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | retention, scrape interval, storage size |
+| `charts/mgmt/files/prometheus-rules/critical.yaml` | critical alerts |
+| `charts/mgmt/files/prometheus-rules/warning.yaml` | warning alerts |
+| `charts/mgmt/files/prometheus-rules/info.yaml` | info alerts |
 | Per-component: ServiceMonitor / PodMonitor objects (released alongside Service definitions) | tell Prometheus what to scrape |
 
 The selector labels work by **opt-in**: Prometheus only scrapes

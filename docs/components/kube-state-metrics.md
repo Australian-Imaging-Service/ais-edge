@@ -69,7 +69,7 @@ rather than assumed:
 ## Configuration
 
 Lives entirely in the kube-prometheus-stack chart values
-(`manifests/01-management/observability/kube-prometheus-stack-values.yaml.tpl`):
+(`charts/mgmt/values.yaml`, under `kube-prometheus-stack:`):
 
 ```yaml
 kubeStateMetrics:

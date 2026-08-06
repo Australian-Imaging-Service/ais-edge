@@ -60,9 +60,8 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
 ## Where it runs
 
 Single pod (`Recreate` strategy — hostPath isn't shareable across
-replicas), one per edge worker. Deployed by
-`scripts/07c-deploy-edge-orthanc.sh`. Manifest at
-[`manifests/02-edge/orthanc.yaml.tpl`](../../manifests/02-edge/orthanc.yaml.tpl).
+replicas), one per edge worker. Deployed by the edge chart; template at
+[`charts/edge/templates/orthanc-deployment.yaml`](../../charts/edge/templates/orthanc-deployment.yaml).
 
 REST API exposed as a ClusterIP Service `orthanc.xnat-ingest.svc.cluster.local:8042`.
 DICOM port 4242 is exposed via `hostPort` directly on the edge node IP

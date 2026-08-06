@@ -47,7 +47,7 @@ Three reasons:
 ## Configuration
 
 The s3-uploader manifest is a single bash loop. It's defined inline
-in `manifests/02-edge/xnat-ingest.yaml.tpl` — no external script. Key
+in `charts/edge/files/s3-uploader.sh` — no external script. Key
 env vars:
 
 ```yaml
@@ -111,7 +111,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `ca-bundle` Secret missing | TLS verify fails: "x509: cert signed by unknown authority" | Pushed by `07-deploy-edge-ingest.sh`; verifiable with `kubectl exec ... -- mc alias set edge ...` |
+| `ca-bundle` Secret missing | TLS verify fails: "x509: cert signed by unknown authority" | Pushed by cert-sync (CronJob); verifiable with `kubectl exec ... -- mc alias set edge ...` |
 | Wrong S3 access key | 403 Forbidden | Each edge has its own scoped identity; rotated by editing `edge-nodes.env` and re-running script 03 |
 | Endpoint hostname unresolvable | "no such host" | `hostAliases` injected at pod-spec time |
 | Disk full on edge | mc mirror fails with no-space | `/data/xnat-ingest` is the worker's hostPath; size accordingly |

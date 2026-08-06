@@ -58,9 +58,9 @@ its own.
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/cert-issuers.yaml` | bootstrap + CA + CA Issuer |
-| `manifests/01-management/seaweedfs-tls-cert.yaml.tpl` | seaweedfs-tls Cert |
-| `manifests/01-management/observability/tls-certs.yaml.tpl` | grafana-tls + loki-tls Certs |
+| `charts/mgmt/templates/cert-issuers.yaml` | bootstrap + CA + CA Issuer |
+| `charts/mgmt/templates/seaweedfs.yaml` | seaweedfs-tls Certificate |
+| `charts/mgmt/templates/observability.yaml` | grafana-tls + loki-tls Certificates |
 | `scripts/02b-bootstrap-ca.sh` | applies the Issuers + CA, exports the public cert |
 | `scripts/rotate-ca.sh` | bundled-CA rotation (Phase 1 + Phase 2 transition) |
 
@@ -118,7 +118,7 @@ kubectl get clusterissuer
 
 - mTLS for edge → mgmt: cert-manager could also issue *client* certs
   to edges. Requires a per-edge Certificate + a way to deliver the
-  private key to edge pods (a Secret pushed via 07-deploy-edge-ingest.sh)
+  private key to edge pods (a Secret pushed by the cert-sync CronJob)
 - Cert-manager Approvers via Kyverno — automatically reject Certificates
   that don't match an allow-listed Issuer
 - ACME http-01 / dns-01 issuer for public hostnames once we have any

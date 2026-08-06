@@ -66,19 +66,19 @@ local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
 upstream, so no local rebuild is needed: the image is pulled directly and
 imported into k0s containerd via `ctr image import` on the management host
-and each edge worker. Override `XNAT_INGEST_IMAGE` in
-`config/management.env` to pin a different tag.
+and each edge worker. Override the tag via `xnatUpload.image.tag` in
+`charts/mgmt/values.yaml` (mgmt side) or `ingest.image.tag` in
+`charts/edge/values.yaml` (edge side).
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/xnat-upload.yaml.tpl` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
-| `manifests/02-edge/xnat-ingest.yaml.tpl` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
-| `scripts/04-deploy-xnat-upload.sh` | apply mgmt-side Deployment |
-| `scripts/07-deploy-edge-ingest.sh` | apply edge-side Deployments + push CA bundle |
-| `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS` |
-| `config/edge-nodes.env` | per-edge `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD` (destination project comes from `config/orthanc/routing.json`) |
+| `charts/mgmt/templates/xnat-upload.yaml` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
+| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
+| `install.sh` | installs both charts; cert-sync (CronJob) pushes the CA bundle into each edge |
+| `sites/<site>/secrets.enc.yaml` (`xnat-credentials`) | server URL, username, password — SOPS-encrypted |
+| `sites/<edge>/values.yaml` (`ingest:`) | per-edge loop intervals; the AET-to-project map is `orthanc.deid.aetMap` in the same file |
 
 Important env vars on each pod:
 - `AIS_LOG_FORMAT=json` — enable JSON structured log output (now
@@ -89,7 +89,7 @@ Important env vars on each pod:
 ### s3-uploader event schema
 
 Every state change in the upload loop emits one JSON line via the
-`jlog()` shell helper in `manifests/02-edge/xnat-ingest.yaml.tpl`. The
+`jlog()` shell helper in `charts/edge/files/s3-uploader.sh`. The
 shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 
 ```jsonc

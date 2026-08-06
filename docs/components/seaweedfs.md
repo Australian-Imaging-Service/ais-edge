@@ -47,10 +47,8 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/seaweedfs.yaml.tpl` | Deployment, ClusterIP Service, metrics Service, hostPath volume |
-| `manifests/01-management/seaweedfs-tls-cert.yaml.tpl` | server cert (Certificate signed by ais-edge-ca-issuer) |
-| `manifests/01-management/seaweedfs-ingress.yaml.tpl` | nginx Ingress for `seaweedfs.aisedge.local` |
-| `scripts/03-deploy-seaweedfs.sh` | renders s3.json from EDGE_NODES + Loki creds, applies all of the above, creates `ingest-bucket` and `logs-bucket` |
+| `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook |
+| `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, per-site bucket toggle, image tag |
 | `config/management.env` | `S3_ADMIN_*`, `S3_BUCKET`, `LOGS_BUCKET`, `LOKI_S3_*`, `SEAWEEDFS_HOSTNAME` |
 
 ## Operations
@@ -69,7 +67,7 @@ kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master
 kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
 
 # Re-render s3.json after editing edge-nodes.env
-bash scripts/03-deploy-seaweedfs.sh
+helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 # (idempotent — recomputes the config-hash annotation, rolls the pod)
 ```
 

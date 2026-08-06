@@ -1,7 +1,7 @@
 # Grafana dashboards — what every panel measures
 
 There are four dashboards under the `AIS Edge` folder in Grafana, all loaded
-from ConfigMaps in `manifests/01-management/observability/dashboards/` via
+from ConfigMaps in `charts/mgmt/files/dashboards/` via
 the Grafana sidecar. This document is the authoritative reference for what
 each panel means, what query backs it, and how to interpret the value.
 
@@ -13,7 +13,7 @@ match.
 
 Every panel relies on the structured JSON events emitted by the edge
 s3-uploader (one line per pipeline state change). The shape is fixed by the
-bash script in `manifests/02-edge/xnat-ingest.yaml.tpl`:
+bash script in `charts/edge/files/s3-uploader.sh`:
 
 ```jsonc
 {

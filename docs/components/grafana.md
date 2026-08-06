@@ -37,10 +37,9 @@ data interactively while triaging an incident.
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/observability/kube-prometheus-stack-values.yaml.tpl` | helm values — datasources, sidecar, persistence, admin user from Secret |
-| `manifests/01-management/observability/dashboards/*.json` | pre-built dashboards (loaded as ConfigMaps with `grafana_dashboard=1`) |
-| `manifests/01-management/observability/observability-ingress.yaml.tpl` | nginx Ingress for `grafana.aisedge.local` |
-| `manifests/01-management/observability/tls-certs.yaml.tpl` | `grafana-tls` Certificate |
+| `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | helm values — datasources, sidecar, persistence, admin user from Secret |
+| `charts/mgmt/files/dashboards/*.json` | pre-built dashboards (loaded as ConfigMaps with `grafana_dashboard=1`) |
+| `charts/mgmt/templates/observability.yaml` | Ingress for `grafana.aisedge.local`, `grafana-tls` Certificate |
 | `config/management.env` | `GRAFANA_HOSTNAME`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` |
 
 The dashboard sidecar pattern: a tiny container watches all ConfigMaps

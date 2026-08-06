@@ -68,10 +68,10 @@ cleanly.
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/observability/vector-mgmt-values.yaml.tpl` | mgmt-side helm values + custom Vector config |
-| `manifests/02-edge/vector.yaml.tpl` | edge-side full DaemonSet manifest including ServiceAccount + ClusterRole + ConfigMap + Service |
-| `scripts/02d-install-observability.sh` | helm-installs mgmt-side Vector |
-| `scripts/07b-deploy-edge-observability.sh` | applies edge-side manifest, pushes auth + CA Secrets |
+| `charts/mgmt/values.yaml` (`vector:`) | mgmt-side helm values + custom Vector config |
+| `charts/edge/templates/vector.yaml` | edge-side DaemonSet, ServiceAccount, ClusterRole, ConfigMap, Service |
+| `install.sh` | installs the mgmt chart (Vector subchart) and the edge chart (first-party Vector) |
+| cert-sync (CronJob) | pushes the CA bundle and this edge's Loki client cert into the edge cluster |
 
 ## Operations
 
