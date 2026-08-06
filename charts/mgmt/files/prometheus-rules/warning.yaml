@@ -2,9 +2,8 @@
 # Warning alerts (Prometheus / kube-state-metrics) — notify, don't page.
 #
 # Pipeline-event warning alerts (SessionUploadStalled, S3UploaderRetryStorm,
-# XNATBacklogGrowing, DICOMValidationFailureSpike) live in
-# loki-ruler-rules.yaml — those are derived from JSON events in Loki, not
-# from any Prometheus metric.
+# DICOMValidationFailureSpike) live in loki-ruler-rules.yaml — those are
+# derived from JSON events in Loki, not from any Prometheus metric.
 # =============================================================================
 groups:
   - name: ais-edge-warning

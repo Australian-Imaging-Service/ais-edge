@@ -48,11 +48,14 @@ expressions sit close to the dashboard queries that operators already trust.
 | `XNATUploadFailingForAllSessions` | Loki ruler | Derived from `event="upload_failed"` and `event="upload_completed"` JSON events on the edge. |
 | `S3UploaderRetryStorm` | Loki ruler | `event="upload_failed"` count over a window, per cluster. |
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
-| `XNATBacklogGrowing` | Loki ruler | Difference between mgmt-side `xnat_upload_completed` and edge-side `upload_completed`. |
 | `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — kube-state-metrics on each edge child. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
+
+`OrthancStorageGrowing` and `XNATBacklogGrowing` are not in this table —
+both were removed after measurement showed neither could ever fire. Why,
+and what a real fix would need: `docs/TOUR.md` §9.
 | `KonnectivityTunnelFlapping` | Prometheus | Container restart count, KSM. |
 | `EdgePodCrashLoop` | Prometheus | Container restart count, KSM. |
 | `SeaweedFSDiskFull` | Prometheus | `kubelet_volume_stats_*` from mgmt kubelet scrape. |

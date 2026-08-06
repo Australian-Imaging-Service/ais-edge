@@ -296,26 +296,6 @@ groups:
                  SessionStagedNotConfirmedInXNAT will fire on them in ~48h if
                  they are never confirmed.
 
-      - alert: XNATBacklogGrowing
-        # Sessions arriving in S3 faster than they're consumed by
-        # the mgmt-side xnat-ingest-upload pod (event=xnat_upload_completed).
-        expr: |
-          (sum(count_over_time(
-            {namespace="xnat-ingest", component="s3-uploader"}
-            | json | event="upload_completed" [30m]))
-           -
-           sum(count_over_time(
-            {namespace="xnat-upload"}
-            | json | event="xnat_upload_completed" [30m]))
-          ) > 3
-        for: 30m
-        labels:
-          severity: warning
-          source: loki-ruler
-        annotations:
-          summary: "XNAT upload backlog is growing"
-          description: "Sessions are landing in SeaweedFS faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing — check `kubectl logs -n xnat-upload -l app=xnat-ingest-upload`."
-
       - alert: DICOMRejectedUnmappedAET
         # SILENT DATA LOSS — the highest-value alert in this pipeline.
         #
@@ -531,24 +511,3 @@ groups:
             cert (the AWS CLI reads it as a single file via
             AWS_CA_BUNDLE, not as a directory of PEMs).
 
-      - alert: OrthancStorageGrowing
-        # Orthanc accepts C-STOREs into local storage before deid + group-orthanc
-        # pulls them out. If staging fills up faster than group-orthanc drains
-        # it, the edge will OOM. >1k stored instances accumulated over
-        # the last hour is a useful early-warning threshold; tune per
-        # site volume.
-        expr: |
-          sum by (cluster) (count_over_time(
-            {namespace="xnat-ingest", app="orthanc"}
-            |~ "(?i)new stored instance" [1h])) > 1000
-        for: 5m
-        labels:
-          severity: warning
-          source: loki-ruler
-          category: orthanc-backlog
-        annotations:
-          summary: "Orthanc received >1k instances on {{ $labels.cluster }} in the last hour"
-          description: |
-            Either a real ingest spike (legitimate, may need to scale
-            edge storage) or group-orthanc isn't draining Orthanc. Check the
-            group-orthanc pod's REST-pull loop and Orthanc's storage PVC size.

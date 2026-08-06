@@ -753,3 +753,36 @@ each re-fire is a new alert instance. The second change was giving
 `XNATUploadSuccess` a range longer than the uploader's loop period so it stops
 flapping. Verified live — with the uploader still re-emitting the success line
 every ~62s, the notification count stayed flat.
+
+**9. Two alert rules were removed, not fixed, because a fix would have
+shipped false coverage.**
+
+`OrthancStorageGrowing` matched `"new stored instance"` in the Orthanc log
+stream. Measured against a live edge: neither that string nor the corrected
+`"new instance stored"` word order appears at Orthanc's default log
+verbosity — the message is a Verbose-level log this deployment does not
+enable. Fixing the regex would not have fixed the rule; nothing in the
+current log stream indicates a stored-instance count. Enabling `--verbose`
+was rejected as the fix — it makes every REST call and DICOM operation
+chatty for the sake of one counter — and no alternative low-cost signal for
+"Orthanc storage is backing up" exists today. Deleted rather than left
+silently dead.
+
+`XNATBacklogGrowing` tried to measure "arriving in S3 faster than reaching
+XNAT" by subtracting a count of one log string from another. It could not
+fire for two independent reasons, only the second of which is fixable in
+this repo: the RHS parsed a JSON `event` key the management uploader's log
+format has never emitted (its lines carry `logger`/`message`/`ts`, no
+`event`), and even fixed to match on the real success string, that string is
+a **level** (docs/components/xnat-ingest.md, "Known upstream defects" §1) —
+its count grows with the size of the static backlog sitting in staging, not
+with new arrivals in the window, so a genuine backlog would make the
+subtraction more negative, exactly the wrong direction for a `> 3` alert.
+Deleted rather than shipped as an alert that reads as backlog coverage and
+provides the opposite.
+
+Both are recorded in `docs/alerting-architecture.md` and
+`docs/components/xnat-ingest.md` rather than silently dropped. Neither gap
+is currently covered by another rule: `SessionStagedNotConfirmedInXNAT` is
+the closest existing backstop for the XNATBacklogGrowing case, but fires only
+after `minAge` + the confirmation offset, not on rate.

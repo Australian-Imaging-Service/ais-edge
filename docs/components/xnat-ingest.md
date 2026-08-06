@@ -155,7 +155,7 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 |---|---|---|
 | DICOM missing AccessionNumber | Routes to `__invalid__/` | Manual rename + move; alert (`DICOMValidationFailureSpike`) fires when this happens >10x/h |
 | XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
-| XNAT down | uploads queue in SeaweedFS; backlog grows | `XNATBacklogGrowing` alert fires after 30 min |
+| XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
@@ -200,6 +200,16 @@ a message that should not be there.
 `Session '<session>' already in XNAT, skipping` — or drop the success line to
 debug when nothing was transferred. Either makes the successful-upload line an
 event again, which is what every consumer assumes it is.
+
+**It also blocks a real backlog alert.** `XNATBacklogGrowing` tried to measure
+"arriving in S3 faster than being pushed to XNAT" by subtracting a count of
+this string from a count of edge `upload_completed` events. Because the
+string is a level, its count grows with however many sessions are sitting in
+static backlog, not with new arrivals in the window — so a genuine backlog
+makes the subtraction more negative, not more positive, and the alert could
+never fire in the direction it was meant to. Removed rather than shipped as
+false coverage; a real version needs the fix above, or a distinct
+"session confirmed in XNAT" event with no level-persistence problem.
 
 ### 2. The XNAT listing is cached for the lifetime of a `--loop` run
 
