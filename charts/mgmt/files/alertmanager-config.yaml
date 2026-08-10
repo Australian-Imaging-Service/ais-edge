@@ -207,9 +207,50 @@ route:
       # email-upload-success.
       repeat_interval: 720h
       continue: false
+    # MUST PRECEDE the severity=critical route below: this alert IS critical,
+    # and Alertmanager takes the first matching route.
+    #
+    # Send the firing mail, never a "[RESOLVED]" one — the same reasoning as
+    # DICOMRejectedUnmappedAET above, which this file already applies and this
+    # alert was missed by. Its expression is
+    #   (staged, seen [24h] offset 48h) unless (reclaim_confirmed [72h])
+    # so the series stops existing 72h after the reclaimer last SAW the session,
+    # whether or not the data was ever delivered. Measured: the resolve mail for
+    # test_project.BAD8D5A3B895.6C639DD58C3A went out on 2026-08-09 while the
+    # session was, and remains, absent from XNAT — it had been hand-deleted from
+    # staging. "Resolved" there meant "the window slid", not "the data arrived",
+    # which is the exact opposite of what the operator reads.
+    - matchers:
+        - alertname = "SessionStagedNotConfirmedInXNAT"
+      receiver: email-no-resolved
+      group_by: ["alertname", "cluster", "session"]
+      # Per session, so a second undelivered session is its own mail rather
+      # than being folded into an existing group and held by repeat_interval.
+      repeat_interval: 24h
+      continue: false
     - matchers:
         - severity = "critical"
       receiver: __ALERT_CRITICAL_RECEIVER__
+      continue: false
+    # WARNINGS HAD NO ROUTE OF THEIR OWN, which is why they were the loudest
+    # thing in the inbox. Every warning fell through to the root's 30s/5m/12h
+    # with send_resolved: true, so a self-healing transient cost two mails and
+    # warning volume could not be tuned without also changing critical
+    # behaviour. Measured over one Alertmanager lifetime: ReclaimerRunUnavailable
+    # alone produced 21 of ~30 notifications that way.
+    #
+    # group_wait 2m: the faults these warnings watch are hourly-job and
+    # loop-period shaped, so nothing is gained by mailing within 30s, and a
+    # blip that clears inside two minutes never becomes mail at all.
+    # repeat_interval 24h: a warning that is still true tomorrow is worth
+    # restating once, not twice a day.
+    - matchers:
+        - severity = "warning"
+      receiver: email-primary
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 24h
       continue: false
 
 receivers:

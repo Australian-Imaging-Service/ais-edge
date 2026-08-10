@@ -266,11 +266,47 @@ groups:
         # which would put us back where we started. The critical for this
         # failure mode is SessionStagedNotConfirmedInXNAT, which now still
         # fires 48h later because of the per-session fan-out.
+        # ONE ABORT IS NOT AN INCIDENT; A RECLAIMER THAT STAYS BROKEN IS.
+        #
+        # This fired 11 times in one Alertmanager lifetime and, with the root
+        # route's send_resolved, produced 21 of roughly 30 total notifications —
+        # 70% of all alert mail. Every firing was a TRUE abort, so the rule was
+        # not wrong; it was scoped to a single transient miss of a job that runs
+        # hourly and almost always succeeds on the next attempt. Measured cause
+        # of the aborts: the management node's DNS to 8.8.8.8/8.8.4.4 drops
+        # packets (654 CoreDNS upstream timeouts in 5 days), so `curl` cannot
+        # resolve XNAT and reports HTTP 000.
+        #
+        # RAISING `for:` ALONE CANNOT FIX THIS, which is the counter-intuitive
+        # part. The [3h] range already holds the series up for three hours after
+        # a single abort, so any `for:` under 3h yields the identical 11
+        # notifications, just later. The persistence test has to be in the
+        # EXPRESSION.
+        #
+        # `unless` a run that reached the end: reclaim_finished is emitted only
+        # by a run that walked staging to completion (reclaim-staged.sh, and an
+        # aborted run never emits it), so it is exactly "the reclaimer recovered".
+        # [70m] spans one hourly cycle plus margin, so a healthy fleet suppresses
+        # continuously.
+        #
+        # `for: 75m` then requires the condition to survive a whole cycle: an
+        # abort at :17 whose successor at :17+1h succeeds goes false after ~60m
+        # and never reaches 75m, so it never mails. Two consecutive aborts stay
+        # true and fire. That is the intended threshold — "could not confirm
+        # anything for more than an hour", not "missed once".
+        #
+        # NOT COVERED, deliberately: a reclaimer that stops running altogether
+        # emits neither event, so this stays silent. SessionStagedNotConfirmedInXNAT
+        # is the 48h backstop for that case.
         expr: |
-          sum by (cluster, reason) (count_over_time(
+          (sum by (cluster, reason) (count_over_time(
             {namespace="xnat-upload", component="s3-reclaimer"}
-            | json | event="reclaim_unavailable" | session = "" [3h])) > 0
-        for: 0s
+            | json | event="reclaim_unavailable" | session = "" [3h])) > 0)
+          unless on (cluster)
+          (sum by (cluster) (count_over_time(
+            {namespace="xnat-upload", component="s3-reclaimer"}
+            | json | event="reclaim_finished" [70m])) > 0)
+        for: 75m
         labels:
           severity: warning
           source: loki-ruler
@@ -366,6 +402,91 @@ groups:
               dcmsend <edge-ip> 4242 -aec AISEDGE \
                 /data/facility-backup/__unmapped_aet__/{{ $labels.aet }}/**/*.dcm
 
+      - alert: EdgeDiskLow
+        # dataPolicy.originals.facilityBackup.minFreeDiskPercent MADE REAL.
+        #
+        # Until the data-policy engine existed, that key had no reader at all:
+        # an operator could set it to any number and nothing measured disk on
+        # an edge. This is the rule that turns it into a control.
+        #
+        # THE THRESHOLD IS A SENTINEL, not a literal. charts/mgmt/templates/
+        # observability.yaml replaces __DP_MIN_FREE_DISK_PCT__ with the value
+        # from dataPolicy, the same way the Alertmanager config is assembled.
+        # It cannot be read from the log line instead: LogQL rejects a
+        # comparison between two extracted fields
+        # (`| free_pct < min_free_pct` -> "syntax error: unexpected
+        # IDENTIFIER"), so one side must be a literal. The engine still echoes
+        # min_free_pct into every line so an operator reading the log can see
+        # what the reading was judged against.
+        #
+        # LOKI, NOT PROMETHEUS, and that is not a preference. Management
+        # Prometheus cannot scrape edge pods across the one-way konnectivity
+        # tunnel; two rules were deleted for exactly that reason
+        # (docs/TOUR.md §9.9). Edge logs DO reach Loki via Vector over mTLS.
+        #
+        # Warning, not critical: a full disk stops ingest but destroys nothing —
+        # the edge keeps its local copy and retries. Grouped by stage so the
+        # facility backup filling and the pipeline filling are separate mails.
+        expr: |
+          sum by (cluster, stage) (count_over_time(
+            {namespace="xnat-ingest", component="data-policy"}
+            | json | event="stage_report"
+            | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-storage
+        annotations:
+          summary: "Edge {{ $labels.cluster }} is low on disk at {{ $labels.stage }}"
+          description: |
+            The data-policy engine reports less free space than
+            dataPolicy.originals.facilityBackup.minFreeDiskPercent allows on
+            {{ $labels.cluster }}, for stage {{ $labels.stage }}.
+
+            NOTHING IS DELETED BECAUSE OF THIS. Originals are retained by
+            policy; a full disk stops new studies being accepted, it does not
+            discard anything already held.
+
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \
+                -n xnat-ingest logs -l app=data-policy --tail=20
+
+            Free space by growing the volume, or by enabling reclaim for the
+            derived stages once you are satisfied with the dry-run decisions.
+
+      - alert: QuarantinedDataUnresolved
+        # dataPolicy.originals.quarantine.alertAfter MADE REAL — the second key
+        # that had no reader before the engine existed.
+        #
+        # DICOMRejectedUnmappedAET fires the moment a study is rejected. This is
+        # the different, slower question: is rejected data STILL SITTING THERE
+        # unhandled? Clearing quarantine needs a human (map the AET, re-send),
+        # so the risk is not the rejection, it is the rejection nobody actioned.
+        # Studies here reached no project and are in no backup but this one.
+        expr: |
+          sum by (cluster) (count_over_time(
+            {namespace="xnat-ingest", component="data-policy"}
+            | json | event="stage_report"
+            | stage="originals.quarantine"
+            | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__ [15m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: dicom-routing
+        annotations:
+          summary: "Quarantined studies on {{ $labels.cluster }} older than the configured limit"
+          description: |
+            Studies rejected for an unmapped AE title have been sitting in
+            quarantine on {{ $labels.cluster }} for longer than
+            dataPolicy.originals.quarantine.alertAfter.
+
+            They are NOT lost and NOT in XNAT. Nothing will move them without
+            an operator: add the AE title to orthanc.deid.aetMap in
+            sites/{{ $labels.cluster }}/values.yaml, upgrade the edge release,
+            then re-send from the quarantine directory. The offending AE title
+            is in the DICOMRejectedUnmappedAET mail for the original rejection.
+
       - alert: DICOMValidationFailureSpike
         expr: |
           sum by (cluster) (count_over_time(
@@ -459,19 +580,63 @@ groups:
           sum by (cluster) (count_over_time(
             {namespace="xnat-upload"}
             != "it/s"
-            |~ "(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\b|HTTP[^0-9]{0,10}40[13]\\b|\\b40[13][^0-9]{0,3}(unauthorized|forbidden))" [5m])) > 0
-        for: 1m
+            |~ "(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\b|HTTP[^0-9]{0,10}40[13]\\b|\\b40[13][^0-9]{0,3}(unauthorized|forbidden))" [15m])) > 3
+        # `> 3` OVER [15m], NOT `> 0` OVER [5m], AND THE THRESHOLD IS THE POINT.
+        #
+        # The uploader holds one long-lived XNAT connection and re-authenticates
+        # BY ITSELF the moment a call comes back 401 — it logs "Detected XNAT
+        # authentication failure (expired session). Re-establishing…" in the same
+        # second and is uploading again on the next ~62s pass. The old `[5m] > 0`
+        # with `for: 1m` therefore paged on a fault that had already fixed itself
+        # before the mail was composed, and because the root route sent resolved
+        # notifications it cost two mails each time.
+        #
+        # Measured over five days: exactly two 401s, both single events, both
+        # self-healed. XNAT's own cookie declares a 900s session timeout, so an
+        # idle uploader crossing it is ROUTINE, not an incident. One of the two
+        # followed four consecutive 503s — XNAT was down ~4 minutes and the
+        # pre-outage session id was simply no longer known afterwards.
+        #
+        # The condition worth waking someone for is a credential that STAYS
+        # rejected: a rotated password, a locked account, a revoked role. That
+        # fails on every loop pass, so ~1/minute, so >3 inside 15 minutes. A lone
+        # expiry can never reach 4. `for:` is left at 0s deliberately — the
+        # threshold is already the persistence test, and adding `for:` on top of
+        # a 15m range would only delay a genuine outage.
+        #
+        # KNOWN GAP, stated rather than silently accepted: this rule cannot see
+        # 5xx. The 4 x 503 that preceded the 08-09 event are invisible to it,
+        # because 503 is not 40[13]. An "XNAT is not answering" rule is a
+        # separate signal and is not folded in here, where it would blur what
+        # "auth failure" means.
+        for: 0s
         labels:
           severity: warning
           source: loki-ruler
           category: xnat-auth
         annotations:
-          summary: "XNAT rejected authenticated calls from xnat-ingest-upload"
+          summary: "XNAT kept rejecting authenticated calls from the uploader on {{ $labels.cluster }}"
           description: |
-            The xnat-ingest-upload pod hit a 401/403 from XNAT in the
-            last 5 minutes. Check XNAT_URL/USER/PASS in the
-            xnat-credentials Secret and that the XNAT admin account
-            isn't locked.
+            More than 3 authentication rejections (401/403) from XNAT in 15
+            minutes — so this is NOT the routine session-cookie expiry, which
+            the uploader recovers from by itself within one ~62s loop and which
+            can never reach this threshold.
+
+            Check, in order:
+              1. Is XNAT up at all? A 5xx outage produces a 401 afterwards
+                 because the pre-outage session id is no longer known. This rule
+                 cannot see 5xx, so rule it out first:
+                   kubectl -n xnat-upload logs deploy/mgmt-upload-{{ $labels.cluster }} --tail=100 | grep -E "50[0-9]|Connection"
+              2. Did the credential change under the running pod? The uploader
+                 reads xnat-credentials once at startup and holds one connection:
+                   kubectl -n xnat-upload rollout restart deploy/mgmt-upload-{{ $labels.cluster }}
+                 If a restart fixes it, the Secret was rotated without one.
+              3. Is the account locked or the role revoked? Verify the
+                 username/password in the xnat-credentials Secret against XNAT
+                 directly before assuming the Secret is wrong.
+
+            Nothing is lost while this fires: sessions stay in S3 staging and
+            the reclaimer refuses to remove anything it cannot confirm.
 
       - alert: OrthancDeidLuaError
         # The Orthanc Lua deid hook logs Lua tracebacks when it can't
