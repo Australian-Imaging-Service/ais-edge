@@ -223,3 +223,37 @@ ci_kubectl() {
   echo "kubectl not found; run scripts/ci/tools.sh kind" >&2
   return 1
 }
+
+# =============================================================================
+# ci_charts_present — drop cases for charts this branch does not ship
+# =============================================================================
+# The case tables in scripts/ci/values.sh are shared between tiers and name a
+# chart in column 2. TIER-1 SHIPS ONLY charts/edge: it is a single-node
+# appliance, so there is no management plane, no charts/mgmt, and every mgmt-*
+# case is meaningless here rather than broken.
+#
+# Filtering keeps ONE case table across both tiers, so a case added for tier-2
+# is not silently missing from tier-1's copy and vice versa — the alternative
+# was deleting rows on this branch, which diverges the file and makes the next
+# merge a manual reconciliation.
+#
+# IT REPORTS WHAT IT DROPPED. A filter that quietly removes half the suite
+# turns a green run into a lie; the count is printed once per stage so "21
+# passed" can never be mistaken for full coverage.
+ci_charts_present() {
+    local repo dropped=0 kept=0 line chart
+    repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        chart="$(printf '%s' "$line" | cut -f2)"
+        if [ -n "$chart" ] && [ ! -d "${repo}/${chart}" ]; then
+            dropped=$((dropped + 1)); continue
+        fi
+        kept=$((kept + 1))
+        printf '%s\n' "$line"
+    done
+    [ "$dropped" -gt 0 ] && \
+        printf '  (%d case(s) skipped: this branch ships no charts/mgmt; %d ran)\n' \
+               "$dropped" "$kept" >&2
+    return 0
+}

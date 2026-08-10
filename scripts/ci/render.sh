@@ -48,7 +48,7 @@ while IFS=$'\t' read -r name chart valuesfiles; do
   else
     ci_pass "lint $name"
   fi
-done < <(ci_positive_cases)
+done < <(ci_positive_cases | ci_charts_present)
 
 ci_heading "helm template"
 while IFS=$'\t' read -r name chart valuesfiles; do
@@ -89,7 +89,7 @@ print(n)
   else
     ci_fail "template $name rendered invalid YAML: $err"
   fi
-done < <(ci_positive_cases)
+done < <(ci_positive_cases | ci_charts_present)
 
 # -----------------------------------------------------------------------------
 # No version-bearing label may reach a selector

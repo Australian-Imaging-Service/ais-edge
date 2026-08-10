@@ -48,7 +48,7 @@ while IFS=$'\t' read -r name chart valuesfiles expected; do
     ci_fail "$name failed for the WRONG reason (expected to see: $expected)"
     printf '%s\n' "$out" | head -5 | sed 's/^/        /'
   fi
-done < <(ci_negative_cases)
+done < <(ci_negative_cases | ci_charts_present)
 
 
 # =============================================================================
