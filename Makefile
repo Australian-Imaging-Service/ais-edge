@@ -42,8 +42,8 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer secret-contract
-ALL_STAGES  := $(FAST_STAGES) greenfield
+FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers
+ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
 # clears it, because it has already run `render` as a stage and each stage is
@@ -52,7 +52,7 @@ ALL_STAGES  := $(FAST_STAGES) greenfield
 # per `make ci` instead of once.
 RENDER_DEP := render
 
-.PHONY: ci ci-fast tools tools-all clean help $(ALL_STAGES)
+.PHONY: ci ci-fast tools tools-all clean help verify-live $(ALL_STAGES)
 
 # -----------------------------------------------------------------------------
 ci: tools-all
@@ -112,6 +112,19 @@ pvc-retention: $(RENDER_DEP)
 reclaimer:
 	@tests/reclaimer/run-tests.sh
 
+# Needs docker: runs the PINNED Loki version and evaluates the real rule
+# expressions against fixture logs. promtool covers only the Prometheus rules,
+# so without this the Loki rules have no test at all. Skips loudly without
+# docker; CI_REQUIRE_LOKI_TESTS=1 turns that skip into a failure.
+loki-rules:
+	@tests/loki-rules/run-tests.sh
+
+# Needs docker: runs the REAL engine under the REAL busybox image the chart
+# deploys, over real directory trees, and asserts on WHAT SURVIVED rather than
+# on log text. This is the component that deletes patient-derived data.
+data-policy:
+	@tests/data-policy/run-tests.sh
+
 duplicate-names: $(RENDER_DEP)
 	@scripts/ci/duplicate-names.sh
 
@@ -127,12 +140,27 @@ shell-syntax:
 secret-contract:
 	@scripts/ci/secret-namespaces.sh
 
+# Reads values.yaml and greps the templates; no render, no cluster. Catches a
+# values key that declares operator policy with nothing implementing it — Helm
+# itself never warns about an unread value.
+values-consumers:
+	@scripts/ci/values-consumers.sh
+
 # Needs docker + kubectl + kind. Skips, loudly, if any is missing — a skip is
 # reported separately from a pass so a run without docker never reads as
 # "the charts are installable". CI_REQUIRE_GREENFIELD=1 turns that skip into a
 # failure, which is what the GitHub workflow sets.
 greenfield:
 	@scripts/ci/greenfield-kind.sh
+
+# -----------------------------------------------------------------------------
+# LIVE checks, not CI. Everything above this line reads the repository and needs
+# no cluster; this reads the RUNNING deployment and changes nothing in it.
+#   make verify-live SITE=<site>
+verify-live:
+	@test -n "$(SITE)" || { echo "usage: make verify-live SITE=<site-name>"; \
+	  echo "  sites available:"; ls -1 sites/ | sed 's/^/    /'; exit 2; }
+	@scripts/verify-live.sh "$(SITE)"
 
 # -----------------------------------------------------------------------------
 clean:
@@ -146,9 +174,13 @@ help:
 	@echo 'make tools-all   additionally fetch pinned kind'
 	@echo 'make clean       remove $(CI_WORK_DIR)'
 	@echo
+	@echo 'make verify-live SITE=<site>   check the RUNNING deployment (read-only)'
+	@echo
 	@echo 'stages: $(ALL_STAGES)'
 	@echo
 	@echo 'useful env:'
 	@echo '  CI_REQUIRE_GREENFIELD=1  a skipped kind stage is a failure'
+	@echo '  CI_REQUIRE_LOKI_TESTS=1  a skipped Loki-rule stage is a failure'
+	@echo '  CI_REQUIRE_DATAPOLICY_TESTS=1  a skipped data-policy stage is a failure'
 	@echo '  CI_REQUIRE_RULE_TESTS=1  a rule file with no promtool test is a failure'
 	@echo '  CI_KIND_KEEP=1           leave the kind cluster up for inspection'
