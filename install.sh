@@ -149,7 +149,22 @@ if step "1/3  single-node k0s (k0s, kubectl, helm, local-path)"; then
     # only the optional observability PVCs bind against it. Left unconditional
     # anyway: it is idempotent, costs one small Deployment, and gating it would
     # mean turning observability on later silently produces Pending PVCs.
-    INSTALL_TOPOLOGY=onprem bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
+    # AIS_CONFIG_FROM_SITE=1 IS LOAD-BEARING, NOT DECORATION.
+    #
+    # 01-install-k0s.sh sources scripts/00-common.sh, and that file's default
+    # branch loads config/management.env AND config/edge-nodes.env, exiting 1 if
+    # either is missing. Those are the tier-2-era env files this site model
+    # replaces. Without this flag the step works only while a stale
+    # config/management.env happens to still be on disk, and dies on any fresh
+    # clone — after the k0s binary has been fetched but before anything is
+    # installed, which reads as a broken installer rather than a missing file.
+    #
+    # The flag is 00-common.sh's own documented escape hatch; it then requires
+    # MGMT_NODE_IP, which on tier-1 is the site's nodeIP.
+    AIS_CONFIG_FROM_SITE=1 \
+    MGMT_NODE_IP="$NODE_IP" \
+    INSTALL_TOPOLOGY=onprem \
+        bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
 fi
 
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
