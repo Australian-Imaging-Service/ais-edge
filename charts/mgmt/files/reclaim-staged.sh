@@ -256,15 +256,75 @@ CURL_OPTS=(-sS --max-time "$HTTP_TIMEOUT" -o - -w '\n%{http_code}')
 # Credentials go to curl on STDIN, never in argv: this container's `ps` output
 # and any crash dump would otherwise carry the XNAT password.
 curl_esc() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+# -----------------------------------------------------------------------------
+# ONE SESSION PER RUN, RELEASED ON EXIT.
+#
+# XNAT mints a NEW server-side session for every Basic-Auth request and keeps it
+# until it times out. This script authenticates on every call — the pre-flight,
+# then several per staged session — so an hourly run leaked dozens of sessions a
+# day. Observed on the live server: "You have 83 sessions open from one IP
+# address", all of them ours.
+#
+# The documented pattern is to exchange the credentials for one JSESSIONID, reuse
+# it, and DELETE it when finished. That is what the web UI does, and it turns
+# tens of sessions per day into one per run.
+#
+# The token goes to curl on STDIN as a header, for the same reason the password
+# does: a `-H "Cookie: ..."` would put a live session token in argv, where `ps`
+# and any crash dump would carry it.
+#
+# FALLING BACK IS DELIBERATE. If /data/JSESSION cannot be reached, this keeps
+# working with per-request Basic Auth rather than refusing to run: leaking
+# sessions is untidy, but a reclaimer that will not start is the failure mode
+# that leaves staging to grow unbounded.
+# -----------------------------------------------------------------------------
+XNAT_JSESSION=""
+
+xnat_login() {
+    local out code
+    out=$(printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
+          | curl "${CURL_OPTS[@]}" -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null)
+    code=$(printf '%s' "$out" | tail -n1)
+    if [ "$code" = "200" ]; then
+        # Body is the token; strip the trailing http_code line the -w added.
+        XNAT_JSESSION=$(printf '%s' "$out" | sed '$d' | tr -d '\r\n "')
+    fi
+    if [ -n "$XNAT_JSESSION" ]; then
+        jlog xnat_session_opened "" "reusing one XNAT session for this run"
+    else
+        jlog xnat_session_fallback "" "could not obtain a JSESSION (HTTP ${code}) — falling back to per-request auth, which leaves a session behind per call"
+    fi
+}
+
+xnat_logout() {
+    [ -n "$XNAT_JSESSION" ] || return 0
+    printf 'header = "Cookie: JSESSIONID=%s"\n' "$(curl_esc "$XNAT_JSESSION")" \
+        | curl -sS --max-time "$HTTP_TIMEOUT" ${XNAT_VERIFY_SSL:+} -o /dev/null \
+               -X DELETE -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null
+    XNAT_JSESSION=""
+}
+# Released however the run ends — including the `unavailable`/`die` paths, which
+# exit early and would otherwise leak the very session this change exists to stop.
+trap xnat_logout EXIT
+
 xnat_get() {
-    printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
-        | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null
+    if [ -n "$XNAT_JSESSION" ]; then
+        printf 'header = "Cookie: JSESSIONID=%s"\n' "$(curl_esc "$XNAT_JSESSION")" \
+            | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null
+    else
+        printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
+            | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null
+    fi
 }
 
 if [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
         unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
     fi
+    # Open the single session BEFORE the pre-flight probe, so the probe itself
+    # reuses it rather than being the first of many leaked logins.
+    xnat_login
     # THE PRE-FLIGHT KEEPS curl's STDERR AND EXIT STATUS. Every other caller
     # discards both, and for them that is right — they parse a body. Here it is
     # the whole diagnostic.
