@@ -646,6 +646,25 @@ observability:
   stack:
     enabled: false
 
+    # CONSUMED by templates/observability.yaml, which substitutes them into
+    # files/alertmanager-config.yaml as __SENTINEL__ tokens. Unlike the parent
+    # keys that were removed from here, these are real: the template reads them
+    # directly, so they are not blocked by Helm's inability to template subchart
+    # values.
+    alerting:
+      # Empty is allowed: the stack installs and the dashboards work, nothing is
+      # mailed. Set it to start receiving alerts.
+      emailTo: ""
+      emailFrom: ""
+      smtpHost: ""
+      smtpPort: 587
+      smtpUsername: ""
+      requireTLS: true
+      # The password is NEVER templated in. The operator mounts this Secret at
+      # /etc/alertmanager/secrets/<name>/ and the config reads the file, so the
+      # credential never lands in a rendered manifest or in git.
+      existingSecret: alertmanager-smtp
+
   vector:
     image:
       repository: timberio/vector
@@ -811,6 +830,19 @@ kube-prometheus-stack:
             resources: {requests: {storage: 20Gi}}
   alertmanager:
     alertmanagerSpec:
+      # BOTH OF THESE ARE LOAD-BEARING, and templates/observability.yaml fails
+      # the render without them.
+      #
+      # configSecret  without it the operator mounts the SUBCHART's default
+      #               alertmanager.yaml and every alert this chart raises goes
+      #               to a null receiver — healthy stack, nothing delivered.
+      # secrets       mounts the SMTP Secret at
+      #               /etc/alertmanager/secrets/<name>/, which is where the
+      #               config reads the password from. Without the mount every
+      #               notification fails authentication.
+      configSecret: alertmanager-aisedge-config
+      secrets:
+        - alertmanager-smtp
       storage:
         volumeClaimTemplate:
           spec:

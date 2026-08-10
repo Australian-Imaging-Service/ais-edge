@@ -1,0 +1,162 @@
+{{/*
+=============================================================================
+Observability CONTENT — the alerts, dashboards and alert routing
+=============================================================================
+The kube-prometheus-stack and loki subcharts give you a log store, a metrics
+store, a dashboard server and an alert router. They give you NOTHING to look at
+and NOTHING to alert on. That is what this file adds.
+
+WITHOUT IT the stack comes up perfectly healthy and evaluates none of this
+pipeline's alerts, shows none of its dashboards, and routes every alert it does
+raise to a null receiver. Measured before this template existed: the render
+contained 0 ais-edge PrometheusRule groups. A green cluster that reports nothing
+is the worst state this system can be in, because it is indistinguishable from a
+quiet site.
+
+TIER-1 ONLY. Gated on observability.stack.enabled. A tier-2 edge ships its logs
+to the management cluster and gets all of this from charts/mgmt instead.
+
+EVERYTHING IS LOADED WITH .Files.Get / .Files.Glob AND NEVER INLINED. Those
+files are full of LogQL and Go template syntax — {{ $labels.cluster }},
+{{ .CommonLabels.severity }}, {{ cluster }} — which Helm would evaluate against
+the CHART context, where those names do not exist, and render as EMPTY STRINGS.
+Nothing errors. The manifest applies. Every alert silently loses its labels and
+every rule that selects on one stops matching, permanently. .Files.Get returns
+raw bytes and is the only safe way to carry them.
+*/}}
+{{- if .Values.observability.stack.enabled }}
+{{- $ns := .Values.namespace }}
+{{- $amSecret := "alertmanager-aisedge-config" }}
+{{- $kps := index .Values "kube-prometheus-stack" | default dict }}
+{{- $amSpec := (get ((get $kps "alertmanager") | default dict) "alertmanagerSpec") | default dict }}
+
+{{/* ---------------------------------------------------------------------
+     GUARDS. Each of these is a silent failure that has actually happened.
+     --------------------------------------------------------------------- */}}
+{{- $configSecret := (get $amSpec "configSecret") | default "" }}
+{{- if ne $configSecret $amSecret }}
+  {{- fail (printf "kube-prometheus-stack.alertmanager.alertmanagerSpec.configSecret must be %q (it is %q). Without it Alertmanager runs the subchart's DEFAULT config and every alert this chart raises is routed to a null receiver — the stack looks healthy and nothing is ever delivered." $amSecret $configSecret) }}
+{{- end }}
+
+{{- $promSpec := (get ((get $kps "prometheus") | default dict) "prometheusSpec") | default dict }}
+{{- if not (eq (get $promSpec "ruleSelectorNilUsesHelmValues") false) }}
+  {{- fail "kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues must be false. While it is true, Prometheus selects ONLY rules labelled release=<release>, and it would load none of this chart's PrometheusRules — silently, with no error anywhere." }}
+{{- end }}
+
+{{- $smtpRef := .Values.observability.stack.alerting.existingSecret | default "" }}
+{{- if $smtpRef }}
+  {{- $mounted := get $amSpec "secrets" | default list }}
+  {{- if not (has $smtpRef $mounted) }}
+    {{- fail (printf "kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets must include %q so the operator mounts it at /etc/alertmanager/secrets/%s/. The Alertmanager config reads the SMTP password from that path rather than embedding it, so without the mount every notification fails authentication." $smtpRef $smtpRef) }}
+  {{- end }}
+{{- end }}
+
+---
+{{/* The LogQL pipeline alerts. Loki's ruler sidecar watches for ConfigMaps
+     carrying `loki_rule`, so the LABEL is what makes this load — not the name,
+     and not the namespace. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-loki-rules
+  namespace: {{ $ns }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    loki_rule: "true"
+data:
+  {{- $rules := .Files.Get "files/loki-ruler-rules.yaml" }}
+  {{- if not $rules }}
+    {{- fail "files/loki-ruler-rules.yaml is missing or empty — Loki would evaluate no pipeline alerts at all" }}
+  {{- end }}
+  {{- /* EdgeDiskLow and QuarantinedDataUnresolved compare against the dataPolicy
+         thresholds, which are set in values. LogQL cannot compare two extracted
+         fields, so the threshold has to be substituted in as a literal — hence
+         sentinels rather than a query-time reference. Left unreplaced they are
+         a syntax error at rule-load time, and Loki drops the whole GROUP. */ -}}
+  {{- $dpo := .Values.dataPolicy.originals }}
+  {{- $rules = $rules | replace "__DP_MIN_FREE_DISK_PCT__" (printf "%v" $dpo.facilityBackup.minFreeDiskPercent) }}
+  {{- $rules = $rules | replace "__DP_QUARANTINE_ALERT_AFTER_S__" (include "edge.durationSeconds" $dpo.quarantine.alertAfter) }}
+  ais-edge-rules.yaml: |
+{{ $rules | indent 4 }}
+
+{{/* Dashboards. Grafana's sidecar watches for grafana_dashboard="1". One
+     ConfigMap per file so a broken dashboard cannot take the others with it. */}}
+{{- range $path, $_ := .Files.Glob "files/dashboards/*.json" }}
+{{- $base := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" $ }}-dashboard-{{ $base }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "edge.labels" $ | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  {{ $base }}.json: |
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+
+{{/* The K8s-state alerts. One PrometheusRule per severity file, matching how
+     they are authored. `release` is deliberately NOT set: the guard above
+     forces ruleSelectorNilUsesHelmValues=false, so Prometheus selects every
+     PrometheusRule in the namespace and no label has to be kept in step. */}}
+{{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+{{- $sev := base $path | trimSuffix ".yaml" }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ais-edge-{{ $sev }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "edge.labels" $ | nindent 4 }}
+spec:
+{{ $.Files.Get $path | indent 2 }}
+{{- end }}
+
+---
+{{/* Alertmanager routing. A Secret, not a ConfigMap, because the operator
+     mounts configSecret as the whole alertmanager.yaml.
+
+     THE SMTP PASSWORD IS NOT IN HERE. The config references
+     /etc/alertmanager/secrets/<secret>/password, which the operator mounts from
+     alertmanagerSpec.secrets — so the credential never lands in a rendered
+     manifest, in git, or in `helm get values`. */}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $amSecret }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+{{- $alerting := .Values.observability.stack.alerting }}
+{{- $secretsDir := "/etc/alertmanager/secrets" }}
+{{- $am := .Files.Get "files/alertmanager-config.yaml" }}
+{{- if not $am }}
+  {{- fail "files/alertmanager-config.yaml is missing — Alertmanager would fall back to the subchart default and drop every alert" }}
+{{- end }}
+{{- /* SENTINEL REPLACEMENT, NEVER tpl. This file is full of ALERTMANAGER's own
+       {{ }} notification templates. Running tpl over it evaluates those against
+       the CHART context, where .CommonLabels and .Alerts do not exist, so they
+       render as EMPTY STRINGS — every alert would arrive with a blank body and
+       nothing would error. The file says so in its own header. The values the
+       installer needs to inject are written as __SENTINEL__ tokens instead. */ -}}
+{{- $infoReceiver := "info-email" }}
+{{- $criticalReceiver := "email-primary" }}
+{{- $slackReceivers := "" }}
+{{- $am = $am | replace "__ALERT_SLACK_RECEIVERS__"   $slackReceivers }}
+{{- $am = $am | replace "__ALERT_INFO_RECEIVER__"     $infoReceiver }}
+{{- $am = $am | replace "__ALERT_CRITICAL_RECEIVER__" $criticalReceiver }}
+{{- $am = $am | replace "__ALERT_EMAIL_TO__"          ($alerting.emailTo | default "") }}
+{{- $am = $am | replace "__ALERT_EMAIL_FROM__"        ($alerting.emailFrom | default $alerting.emailTo | default "") }}
+{{- $am = $am | replace "__ALERT_SMTP_HOST__"         ($alerting.smtpHost | default "") }}
+{{- $am = $am | replace "__ALERT_SMTP_PORT__"         (toString ($alerting.smtpPort | default 587)) }}
+{{- $am = $am | replace "__ALERT_SMTP_REQUIRE_TLS__"  (toString ($alerting.requireTLS | default true)) }}
+{{- $am = $am | replace "__ALERT_SMTP_USERNAME__"     ($alerting.smtpUsername | default "") }}
+{{- $am = $am | replace "__ALERT_SMTP_PASSWORD_FILE__" (printf "%s/%s/password" $secretsDir ($alerting.existingSecret | default "alertmanager-smtp")) }}
+{{ $am | indent 4 }}
+{{- end }}
