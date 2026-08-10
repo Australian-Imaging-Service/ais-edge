@@ -135,7 +135,19 @@ ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
 scp ${SSH_KEY_OPT} "${REPO_DIR}/join-token-${CLUSTER_NAME}" "${EDGE_SSH}:/tmp/join-token"
 
 # Install and start worker
-ssh ${SSH_KEY_OPT} "${EDGE_SSH}" bash -s <<'WORKER_SCRIPT'
+# dataPolicy.telemetry.podLogFiles, enforced by the kubelet itself. The kubelet
+# has no time-based log retention, so the bound is size x count: a container can
+# hold at most maxSize x maxFiles on disk before the oldest rotation is dropped.
+#
+# JOIN-TIME ONLY. `k0s install worker` writes the systemd unit, so this applies
+# to workers installed from here on; an already-joined node keeps whatever it was
+# installed with until the service is reinstalled. Said plainly because a values
+# change that silently does not reach an existing node is the failure mode this
+# repo keeps finding.
+KUBELET_EXTRA_ARGS="--container-log-max-size=${KUBELET_LOG_MAX_SIZE:-10Mi} --container-log-max-files=${KUBELET_LOG_MAX_FILES:-5}"
+echo "  kubelet log rotation: ${KUBELET_EXTRA_ARGS}"
+
+ssh ${SSH_KEY_OPT} "${EDGE_SSH}" KUBELET_EXTRA_ARGS="${KUBELET_EXTRA_ARGS}" bash -s <<'WORKER_SCRIPT'
 set -euo pipefail
 command -v k0s &>/dev/null || { curl -sSLf https://get.k0s.sh | sudo sh; }
 echo "k0s: $(k0s version)"
@@ -144,7 +156,8 @@ if ! sudo systemctl is-active k0sworker &>/dev/null; then
     sudo cp /tmp/join-token /etc/k0s/join-token
     sudo chmod 600 /etc/k0s/join-token
     rm -f /tmp/join-token
-    sudo k0s install worker --force --token-file /etc/k0s/join-token
+    sudo k0s install worker --force --token-file /etc/k0s/join-token \
+        --kubelet-extra-args="${KUBELET_EXTRA_ARGS}"
     sudo systemctl reset-failed k0sworker 2>/dev/null || true
     sudo k0s start
 fi

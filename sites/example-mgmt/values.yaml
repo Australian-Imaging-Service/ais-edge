@@ -292,4 +292,5 @@ dataPolicy:
     # Edit kube-prometheus-stack.prometheus.prometheusSpec.retention and
     # loki.loki.limits_config.retention_period instead. Setting them here is
     # rejected at render rather than silently ignored.
-    podLogFiles: {retain: 14d}    # <duration>
+    # kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi per container.
+    podLogFiles: {maxSize: 10Mi, maxFiles: 5}

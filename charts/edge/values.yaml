@@ -292,7 +292,23 @@ dataPolicy:
     # podLogFiles stays: it has no counterpart anywhere. Nothing implements it
     # yet — on-node pod log rotation is a kubelet setting and would be wired in
     # scripts/06-join-edge-worker.sh.
-    podLogFiles: {retain: 14d}
+    # ON-NODE POD LOG ROTATION, enforced by the kubelet on each edge worker.
+    #
+    # NOT a duration, and that is the kubelet's constraint rather than a choice.
+    # It rotates container logs by SIZE and COUNT (containerLogMaxSize /
+    # containerLogMaxFiles) and has no time-based retention at all — there is no
+    # "delete logs older than N days" setting to wire a duration to.
+    #
+    # This key used to read `retain: 14d`, which nothing implemented and nothing
+    # could: it promised a time window the kubelet cannot express. Stating the
+    # bound the kubelet actually enforces is the honest version — total on-disk
+    # log per container is maxSize x maxFiles, so 10Mi x 5 = 50Mi.
+    #
+    # Applied by scripts/06-join-edge-worker.sh via --kubelet-extra-args when the
+    # worker is installed. CAUTION: it is a JOIN-TIME setting, so changing it
+    # affects workers joined afterwards; an existing node needs its k0s worker
+    # service reinstalled to pick it up.
+    podLogFiles: {maxSize: 10Mi, maxFiles: 5}
 
 
 # =============================================================================

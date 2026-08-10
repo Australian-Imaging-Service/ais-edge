@@ -145,6 +145,13 @@ SEAWEEDFS_HOSTNAME="$(cfg hostnames.seaweedfs "seaweedfs.${INTERNAL_DOMAIN}")"
 GRAFANA_HOSTNAME="$(cfg hostnames.grafana "grafana.${INTERNAL_DOMAIN}")"
 LOKI_HOSTNAME="$(cfg hostnames.loki "loki.${INTERNAL_DOMAIN}")"
 
+# On-node pod log rotation, applied by script 06 at worker-join time. Read from
+# the site file so the kubelet bound and dataPolicy.telemetry agree; the kubelet
+# has no time-based retention, so these are size x count rather than a duration.
+KUBELET_LOG_MAX_SIZE="$(cfg dataPolicy.telemetry.podLogFiles.maxSize 10Mi)"
+KUBELET_LOG_MAX_FILES="$(cfg dataPolicy.telemetry.podLogFiles.maxFiles 5)"
+export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
+
 export MGMT_NODE_IP INTERNAL_DOMAIN INGRESS_PORT INSTALL_TOPOLOGY INSTALL_MODE
 export SEAWEEDFS_HOSTNAME GRAFANA_HOSTNAME LOKI_HOSTNAME
 

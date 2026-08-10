@@ -137,6 +137,16 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
     {{- fail (printf "dataPolicy.originals.quarantine.retain is %q, but the only supported value is 'forever'. Quarantine holds studies that reached no project and exist in NO other copy — expiring them by age discards exactly the data nobody has handled yet. Use dataPolicy.originals.quarantine.alertAfter to be nagged about it instead; that is enforced by the QuarantinedDataUnresolved alert." ($q.retain | toString)) }}
   {{- end }}
 
+  {{- /* podLogFiles.retain promised a TIME window the kubelet cannot express.
+         It rotates container logs by size and count only — there is no
+         "older than N days" setting to wire a duration to — so the key was
+         unimplementable rather than merely unwired. Replaced by the bound the
+         kubelet actually enforces. */ -}}
+  {{- $plf := (.Values.dataPolicy.telemetry | default dict).podLogFiles | default dict }}
+  {{- if hasKey $plf "retain" }}
+    {{- fail "dataPolicy.telemetry.podLogFiles.retain was removed: the kubelet rotates container logs by SIZE and COUNT and has no time-based retention, so a duration here could never be honoured. Use podLogFiles.maxSize and podLogFiles.maxFiles instead (total on-disk log per container is maxSize x maxFiles); they are applied by scripts/06-join-edge-worker.sh at worker-join time." }}
+  {{- end }}
+
   {{- $tel := .Values.dataPolicy.telemetry | default dict }}
   {{- if or (hasKey $tel "loki") (hasKey $tel "prometheus") }}
     {{- fail "dataPolicy.telemetry.loki / .prometheus were removed: Helm cannot template a subchart's values from this chart, so setting them here changes NOTHING. Set retention where it is actually read — kube-prometheus-stack.prometheus.prometheusSpec.retention for Prometheus, and loki.loki.limits_config.retention_period for Loki — then delete these keys." }}

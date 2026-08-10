@@ -673,6 +673,12 @@ orthanc:
 EOF
 
 # Reclaiming the operator's only copy.
+cat >"$V/neg-mgmt-podlogfiles-retain.yaml" <<'EOF'
+dataPolicy:
+  telemetry:
+    podLogFiles: {retain: 14d}
+EOF
+
 cat >"$V/neg-mgmt-quarantine-retain.yaml" <<'EOF'
 dataPolicy:
   originals:
@@ -832,6 +838,7 @@ neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is n
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
+neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
 EOF
 }

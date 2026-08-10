@@ -71,12 +71,7 @@ DECLARED_NOT_ENFORCED = {
 # Keys with NO reader at all. Real debt, not an exemption on principle.
 # Shrinking this list is the point; adding to it needs a reason in the commit
 # message.
-KNOWN_DEAD = {
-    # Real config lives in the subchart values behind "MUST MATCH" comments.
-    # Helm cannot template a subchart's values, so making these live needs an
-    # equality check rather than a reference.
-    "dataPolicy.telemetry.podLogFiles.retain",
-}
+KNOWN_DEAD = set()
 
 def leaves(d, pre=""):
     out = []
@@ -99,13 +94,28 @@ for chart in ("mgmt", "edge"):
             keys.setdefault(k, []).append(chart)
 
 def _grep(key):
-    # Only a real Helm reference counts: (.|$x.)Values.<path> followed by a
-    # non-identifier char, so `.minAge` does not match `.minAgeSeconds`.
-    pat = r"Values\." + re.escape(key) + r"($|[^A-Za-z0-9_])"
-    r = subprocess.run(
-        ["grep", "-rE", "-l", pat, os.path.join(repo, "charts")],
-        capture_output=True, text=True)
-    return [f for f in r.stdout.split() if not f.endswith("values.yaml")]
+    # Two ways a key is legitimately consumed, and the check missed the second:
+    #
+    #   templates  `.Values.<path>` — Helm rendering it into an object
+    #   installer  `cfg <path>`     — install.sh reading the site file directly,
+    #                                 for settings that are NOT Kubernetes
+    #                                 objects. podLogFiles is one: pod log
+    #                                 rotation is a kubelet flag applied at
+    #                                 worker-join time, so no chart can express
+    #                                 it, and grepping only charts/ would report
+    #                                 a wired key as dead forever.
+    pats = [(r"Values\." + re.escape(key) + r"($|[^A-Za-z0-9_])",
+             os.path.join(repo, "charts")),
+            (r"cfg[[:space:]]+" + re.escape(key) + r"($|[^A-Za-z0-9_.])",
+             os.path.join(repo, "install.sh"))]
+    hits = []
+    for pat, where in pats:
+        if not os.path.exists(where):
+            continue
+        r = subprocess.run(["grep", "-rE", "-l", pat, where],
+                           capture_output=True, text=True)
+        hits += [f for f in r.stdout.split() if not f.endswith("values.yaml")]
+    return hits
 
 # PRINTING A VALUE IS NOT IMPLEMENTING IT, and conflating the two is how this
 # check would have certified the exact bug it exists to catch. NOTES.txt is the
