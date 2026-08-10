@@ -229,10 +229,10 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Manual rename + move (see Operations); the `DICOMValidationFailureSpike` LogQL alert covers the >10/h case, evaluated by the Loki ruler — so only when `observability.stack.enabled` |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Manual rename + move (see Operations). `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case — it selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
 | Secret missing at install | pod sits in `CreateContainerConfigError` with nothing saying why | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
 | XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
-| XNAT down | uploads fail; assigned sessions accumulate in `/data/assigned` | `XNATBacklogGrowing` (Loki ruler, same caveat); the upload loop clears the backlog when XNAT returns |
+| XNAT down | uploads fail; assigned sessions accumulate in `/data/assigned` | the upload loop clears the backlog when XNAT returns. CAUTION: no shipped rule watches this on tier-1 — the backlog and stall rules in `loki-ruler-rules.yaml` (`SessionUploadStalled`, `SessionStagedNotConfirmedInXNAT`) all select `component="s3-uploader"`, which does not exist in `direct` mode. Watch the `component=upload` logs and free disk |
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |

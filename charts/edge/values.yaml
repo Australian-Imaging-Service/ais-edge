@@ -616,56 +616,35 @@ observability:
   # ---------------------------------------------------------------------------
   # stack — the WHOLE observability stack, on this node. TIER-1.
   # ---------------------------------------------------------------------------
-  # MUST STAY false BY DEFAULT. It gates the kube-prometheus-stack and loki
-  # dependencies in Chart.yaml, and a Helm dependency whose condition path does
-  # not resolve is treated as ENABLED — so this key existing, and being false,
-  # is what keeps a tier-2 edge rendering exactly as it did before.
+  # ONE KEY, AND IT IS ONLY A SWITCH. It gates the kube-prometheus-stack and loki
+  # dependencies in Chart.yaml, and nothing else. A Helm dependency whose
+  # condition path does not resolve is treated as ENABLED, so this key existing
+  # and being false is what keeps a tier-2 edge rendering exactly as before.
   #
-  # Tier-2 leaves this false: its Prometheus/Loki/Grafana/Alertmanager live in
-  # charts/mgmt, behind an ingress, with Loki's chunks in SeaweedFS. Tier-1 has
-  # none of that, so it runs the stack locally with FILESYSTEM storage.
+  # THE STACK IS TUNED IN THE SUBCHART BLOCKS AT THE BOTTOM OF THIS FILE
+  # (`loki:` and `kube-prometheus-stack:`), NOT HERE.
+  #
+  # There were friendly parent keys here — stack.retentionDays,
+  # stack.grafana.nodePort, stack.lokiStorage.size, stack.alerting.* — and every
+  # one of them was DEAD. Helm cannot template subchart values, so no template in
+  # this chart can read a parent key and push it down into a subchart; the
+  # subchart reads its own block or nothing. Measured before removing them:
+  # `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.
+  #
+  # This is the same conclusion tier-2 reached with dataPolicy.telemetry.loki /
+  # .prometheus retention, which were deleted for exactly this reason. A key that
+  # looks like configuration and changes nothing is worse than no key: it is
+  # read, trusted, and silently ignored.
+  #
+  # So, to change these, edit the block named:
+  #   retention (logs)     loki.loki.limits_config.retention_period
+  #   retention (metrics)  kube-prometheus-stack.prometheus.prometheusSpec.retention
+  #   Grafana port         kube-prometheus-stack.grafana.service.nodePort
+  #   Grafana password     Secret grafana-admin-credentials (already wired)
+  #   Loki disk            loki.singleBinary.persistence.size
+  #   alert routing        the alertmanager config (see templates/observability.yaml)
   stack:
     enabled: false
-
-    # Log and metric retention. Disk-bound — on tier-1 this node holds
-    # everything, and there is no object store to spill into.
-    retentionDays: 30
-
-    grafana:
-      # NO INGRESS ON TIER-1, so the UI is a NodePort: http://<nodeIP>:<port>.
-      # Must be inside the cluster's NodePort range (30000-32767 by default);
-      # the chart refuses to render otherwise, because an out-of-range value is
-      # only rejected at apply time, after the rest of the release installed.
-      nodePort: 30030
-      existingSecret: grafana-admin-credentials
-      persistence:
-        enabled: true
-        size: 5Gi
-        storageClass: local-path
-
-    prometheus:
-      persistence:
-        size: 20Gi
-        storageClass: local-path
-
-    lokiStorage:
-      # FILESYSTEM, not S3. charts/mgmt points Loki at SeaweedFS; there is no
-      # object store on a single node, so chunks land on a PVC. This is the one
-      # place the two tiers' observability genuinely diverges rather than just
-      # being wired differently.
-      size: 20Gi
-      storageClass: local-path
-
-    alerting:
-      # Leave emailTo empty to run the stack without mail routing — the
-      # dashboards and rules still work, nothing is sent.
-      emailTo: ""
-      emailFrom: ais-edge-alerts@example.org
-      smtpHost: ""
-      smtpPort: 587
-      smtpUsername: ""
-      requireTLS: true
-      existingSecret: alertmanager-smtp
 
   vector:
     image:

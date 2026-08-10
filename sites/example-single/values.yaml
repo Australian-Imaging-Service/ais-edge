@@ -174,28 +174,29 @@ upload:
 # Turn the whole thing off and the pipeline is unaffected — it is observability,
 # not plumbing.
 observability:
+  # Run Vector on this node and ship logs to Loki.
   enabled: true
+
   stack:
+    # Host the log/metric store HERE: Loki + Prometheus + Grafana + Alertmanager
+    # on this same node. Tier-2 ships logs off the box to a management cluster;
+    # tier-1 has nowhere to ship them, so it keeps them locally.
+    #
+    # THIS IS THE ONLY KEY. Everything about HOW the stack is configured —
+    # retention, the Grafana NodePort, Loki's disk, alert routing — lives in the
+    # `loki:` and `kube-prometheus-stack:` blocks in charts/edge/values.yaml.
+    # Helm cannot template subchart values, so a friendly key here could not
+    # reach them: it would be read, trusted and silently ignored. Override those
+    # blocks from this file if you need to, e.g.
+    #
+    #   kube-prometheus-stack:
+    #     grafana:
+    #       service:
+    #         nodePort: 31000
+    #
+    # Grafana's login comes from the grafana-admin-credentials Secret in
+    # secrets.enc.yaml, which IS wired.
     enabled: true
-    # Log and metric retention. Disk-bound: this node holds everything.
-    retentionDays: 30
-    grafana:
-      # http://<nodeIP>:<nodePort>. Must be in the 30000-32767 NodePort range;
-      # the chart refuses to render otherwise, because an out-of-range value
-      # fails at apply time after the rest of the release has installed.
-      nodePort: 30030
-      existingSecret: grafana-admin-credentials
-    alerting:
-      # Leave emailTo empty to install the stack without mail routing.
-      emailTo: ""
-      emailFrom: ais-edge-alerts@example.org
-      smtpHost: ""
-      smtpPort: 587
-      # For Gmail this must be an App Password. A 2FA account rejects the
-      # account password with 535 BadCredentials, and the only symptom is
-      # alerts that never arrive.
-      smtpUsername: ""
-      existingSecret: alertmanager-smtp
 
 # -----------------------------------------------------------------------------
 # Data policy — what is kept, and for how long
