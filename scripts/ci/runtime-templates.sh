@@ -260,7 +260,9 @@ import pathlib, sys
 root = pathlib.Path(sys.argv[1]).resolve()
 shared = root / "scripts/files/edge-join.sh"
 if not shared.is_file():
-    raise SystemExit("scripts/files/edge-join.sh is missing — both join paths depend on it")
+    # TIER-1: one machine, nothing to join, so neither delivery path exists.
+    print("skipped: this branch has no edge-join (single node — nothing to join)")
+    raise SystemExit
 
 problems = []
 for rel in ("scripts/06-join-edge-worker.sh", "scripts/06b-make-bootstrap.sh"):

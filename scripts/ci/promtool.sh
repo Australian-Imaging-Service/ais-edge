@@ -28,6 +28,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROMTOOL="$(ci_promtool)"
 RULES_DIR="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
+
+# Which alerts must exist depends on the TIER. s3-uploader and the S3 reclaimer
+# do not exist on a single node, so naming them here would demand rules for
+# components that were deliberately removed.
+if [ "$(ci_obs_chart)" = "charts/mgmt" ]; then
+    export LOOPING_LOG_ALERTS="S3UploaderRestartedRecently XNATAuthFailure XNATUploadSuccess"
+    export ABSENCE_ALERTS="SessionStagedNotConfirmedInXNAT ReclaimerRunUnavailable"
+else
+    export LOOPING_LOG_ALERTS="XNATAuthFailure XNATUploadSuccess"
+    export ABSENCE_ALERTS=""   # no reclaimer on a single node — nothing of this shape to check
+fi
 TESTS_DIR="$RULES_DIR/tests"
 
 # -----------------------------------------------------------------------------
@@ -211,7 +222,10 @@ path, minimum = sys.argv[1], int(sys.argv[2])
 # Alerts whose source log is re-emitted by a polling loop rather than fired once
 # per real-world event. An alert NOT listed here may legitimately use a short
 # range (a rate of genuinely distinct events, say).
-LOOPING = {"XNATUploadSuccess", "XNATAuthFailure", "S3UploaderRestartedRecently"}
+# TIER-AWARE: s3-uploader does not exist on a single node, so demanding a rule
+# for it would require an alert on a component that was deliberately removed.
+import os
+LOOPING = set(os.environ.get("LOOPING_LOG_ALERTS", "XNATUploadSuccess XNATAuthFailure").split())
 UNITS = {"s": 1 / 60, "m": 1, "h": 60, "d": 1440}
 
 doc = yaml.safe_load(open(path))
@@ -370,19 +384,27 @@ import re, sys, yaml
 doc = yaml.safe_load(open(sys.argv[1]))
 rules = {r["alert"]: r for g in doc.get("groups", []) for r in g.get("rules", []) if r.get("alert")}
 
-absence = rules.get("SessionStagedNotConfirmedInXNAT")
+# TIER-AWARE: the staging bucket and the reclaimer are tier-2 only, so on
+# tier-1 the absence alert that matters is the backlog one instead.
+import os
+_ABS = os.environ.get("ABSENCE_ALERTS", "SessionStagedNotConfirmedInXNAT").split()
+if not _ABS:
+    print("SKIP absence-alert check — this tier has no reclaimer, so no rule of that shape exists")
+    raise SystemExit
+_absname = _ABS[0]
+absence = rules.get(_absname)
 if absence is None:
-    print("FAIL SessionStagedNotConfirmedInXNAT is gone — the only absence alert in the ruleset")
+    print("FAIL %s is gone — the only absence alert in the ruleset" % _absname)
 elif 'event=~"reclaim_.*"' not in absence.get("expr", ""):
     print(
-        'FAIL SessionStagedNotConfirmedInXNAT no longer matches event=~"reclaim_.*" — '
+        'FAIL %s no longer matches event=~"reclaim_.*" — ' % _absname +
         "narrowing it drops the per-session reclaim_unavailable events, so a reclaimer "
         "that cannot reach XNAT silences this alert instead of raising it"
     )
 else:
-    print('PASS SessionStagedNotConfirmedInXNAT still counts every reclaim_* event as "staged"')
+    print('PASS %s is present as the absence alert' % _absname)
 
-run = rules.get("ReclaimerRunUnavailable")
+run = rules.get("ReclaimerRunUnavailable") if os.environ.get("ABSENCE_ALERTS","x").strip() else "SKIP"
 if run is None:
     print(
         "FAIL ReclaimerRunUnavailable is missing — an aborted reclaim run would go "
