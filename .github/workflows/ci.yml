@@ -121,6 +121,32 @@ jobs:
         if: ${{ !cancelled() }}
         run: make secret-contract
 
+      # Helm never warns about a values key nobody reads, so a key that declares
+      # operator policy and does nothing renders exactly like one that works.
+      # An audit found 14 of dataPolicy's 26 leaf keys had no reader, four of
+      # them printed to the operator by NOTES.txt as settled policy.
+      - name: Values consumers (no key declares a behaviour nothing implements)
+        if: ${{ !cancelled() }}
+        run: make values-consumers
+
+      # promtool unit-tests the Prometheus rules only. These run the pinned Loki
+      # version in docker and evaluate the REAL rule expressions against fixture
+      # logs — the tqdm "401.71it/s" false positive and the flapping reclaimer
+      # alert were both logic bugs in valid expressions that nothing else caught.
+      - name: Loki rule tests (real expressions against a real Loki)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_LOKI_TESTS: "1"
+        run: make loki-rules
+
+      # The engine that deletes patient-derived data on the edge. Asserts on
+      # what SURVIVED a real run over real trees, not on what was logged.
+      - name: data-policy engine tests (what actually got deleted)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_DATAPOLICY_TESTS: "1"
+        run: make data-policy
+
       # On failure the rendered manifests are the evidence. Kept short: they
       # are reproducible from `make render`, this is only to save a round trip.
       - name: Upload renders (on failure)
