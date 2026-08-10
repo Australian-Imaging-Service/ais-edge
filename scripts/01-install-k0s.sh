@@ -17,8 +17,22 @@ fi
 echo "=== 01: Installing k0s management cluster ==="
 
 # Install binary
+#
+# K0S_VERSION MUST BE PASSED THROUGH sudo EXPLICITLY. get.k0s.sh honours the
+# variable, but sudo runs with `Defaults env_reset`, which strips it from the
+# environment before the script ever sees it. Measured:
+#
+#   K0S_VERSION=v1.2.3 bash -c 'export K0S_VERSION; sudo -n sh -c "echo [\$K0S_VERSION]"'
+#   []
+#
+# So `export K0S_VERSION` in the caller pinned nothing, while install.sh's
+# banner printed "k0s: v1.35.2+k0s.0 (pinned)". Two installs a fortnight apart
+# would land on different k0s versions with the operator told they were
+# identical — which is exactly the support problem a hospital appliance cannot
+# afford. Unset, get.k0s.sh still takes latest, so this is safe for callers
+# that do not set it.
 if ! command -v k0s &>/dev/null; then
-    curl -sSLf https://get.k0s.sh | sudo sh
+    curl -sSLf https://get.k0s.sh | sudo ${K0S_VERSION:+K0S_VERSION="$K0S_VERSION"} sh
 fi
 echo "k0s: $(k0s version)"
 

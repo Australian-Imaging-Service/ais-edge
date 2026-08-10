@@ -214,7 +214,13 @@ import re, sys, pathlib
 # The repo root arrives as argv[1]: this block is fed to python on STDIN, so
 # __file__ is "<stdin>" and any path derived from it is wrong.
 root = pathlib.Path(sys.argv[1]).resolve()
-chart = (root / "charts/mgmt/values.yaml").read_text()
+mgmt = root / "charts/mgmt/values.yaml"
+if not mgmt.is_file():
+    # TIER-1: no management chart, so there are no per-edge hostnames to keep in
+    # step with install.sh. Nothing to assert rather than a false failure.
+    print("skipped: this branch ships no charts/mgmt (no per-edge hostnames)")
+    raise SystemExit
+chart = mgmt.read_text()
 inst  = (root / "install.sh").read_text()
 
 def chart_prefix(key):

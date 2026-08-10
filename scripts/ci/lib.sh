@@ -257,3 +257,16 @@ ci_charts_present() {
                "$dropped" "$kept" >&2
     return 0
 }
+
+# =============================================================================
+# ci_obs_chart — which chart ships the observability content on THIS branch
+# =============================================================================
+# Tier-2 keeps the alert rules, dashboards and Alertmanager config in
+# charts/mgmt; tier-1 has no management chart and ships them in charts/edge.
+# Stages that check that content hardcoded charts/mgmt, so on tier-1 they failed
+# with FileNotFoundError rather than checking the files that actually exist.
+ci_obs_chart() {
+    local repo; repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    if [ -d "${repo}/charts/mgmt/files/prometheus-rules" ]; then echo "charts/mgmt"
+    else echo "charts/edge"; fi
+}

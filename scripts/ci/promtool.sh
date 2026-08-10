@@ -27,7 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 PROMTOOL="$(ci_promtool)"
-RULES_DIR="$REPO_ROOT/charts/mgmt/files/prometheus-rules"
+RULES_DIR="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
 TESTS_DIR="$RULES_DIR/tests"
 
 # -----------------------------------------------------------------------------
@@ -154,7 +154,7 @@ fi
 # alert on the edge upload path. Verified live against Loki afterwards: the old
 # form returned no series while the rewritten one fires on the same data.
 ci_heading "LogQL rules express absence with unless, and pin their joins"
-python3 - "$REPO_ROOT/charts/mgmt/files/loki-ruler-rules.yaml" <<'PY' > "$CI_WORK_DIR/logql-shape.txt" 2>&1 || true
+python3 - "$REPO_ROOT/$(ci_obs_chart)/files/loki-ruler-rules.yaml" <<'PY' > "$CI_WORK_DIR/logql-shape.txt" 2>&1 || true
 import re, sys, yaml
 
 doc = yaml.safe_load(open(sys.argv[1]))
@@ -203,7 +203,7 @@ fi
 
 ci_heading "recurring-log alert rules have a range above the emitter loop period"
 MIN_RANGE_MINUTES=5
-python3 - "$REPO_ROOT/charts/mgmt/files/loki-ruler-rules.yaml" "$MIN_RANGE_MINUTES" <<'PY' > "$CI_WORK_DIR/range-check.txt" 2>&1 || true
+python3 - "$REPO_ROOT/$(ci_obs_chart)/files/loki-ruler-rules.yaml" "$MIN_RANGE_MINUTES" <<'PY' > "$CI_WORK_DIR/range-check.txt" 2>&1 || true
 import re, sys, yaml
 
 path, minimum = sys.argv[1], int(sys.argv[2])
@@ -364,7 +364,7 @@ fi
 #      well past the hourly CronJob so one aborted run cannot resolve before
 #      the next run reasserts it.
 ci_heading "reclaimer pre-flight failure is visible in the Loki rules"
-python3 - "$REPO_ROOT/charts/mgmt/files/loki-ruler-rules.yaml" <<'PY' > "$CI_WORK_DIR/reclaimer-silence.txt" 2>&1 || true
+python3 - "$REPO_ROOT/$(ci_obs_chart)/files/loki-ruler-rules.yaml" <<'PY' > "$CI_WORK_DIR/reclaimer-silence.txt" 2>&1 || true
 import re, sys, yaml
 
 doc = yaml.safe_load(open(sys.argv[1]))
