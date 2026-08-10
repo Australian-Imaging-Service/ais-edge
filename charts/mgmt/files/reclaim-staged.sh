@@ -265,8 +265,35 @@ if [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
         unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
     fi
-    probe=$(xnat_get "${XNAT_SERVER}/data/projects?format=json")
+    # THE PRE-FLIGHT KEEPS curl's STDERR AND EXIT STATUS. Every other caller
+    # discards both, and for them that is right — they parse a body. Here it is
+    # the whole diagnostic.
+    #
+    # `000` is curl's placeholder for "no HTTP response at all", so DNS failure
+    # (exit 6), connection refused (7), timeout (28) and TLS failure (35) are
+    # INDISTINGUISHABLE in the code alone. Measured: 19 xnat_probe_failed aborts
+    # over five days, and afterwards nothing in the logs could say which fault
+    # each one was — separating them needed a live investigation that only
+    # worked because the fault was still recurring. `-sS` is already in
+    # CURL_OPTS specifically so curl prints that one line; it was then thrown
+    # away. This is what makes the FIRST notification actionable.
+    #
+    # No mktemp: the tool pre-flight above guarantees aws, curl and python3
+    # only, and a missing mktemp would turn a diagnostic into a crash. $$ in
+    # the container's own tmp is unique enough for a single-purpose pod.
+    # jsan() escapes the result, so a multi-line curl error cannot break the
+    # one-JSON-object-per-line contract.
+    probe_err="${TMPDIR:-/tmp}/reclaim-xnat-probe-$$.err"
+    probe_rc=0
+    probe=$(printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
+            | curl "${CURL_OPTS[@]}" \
+                   -w '\n%{time_namelookup} %{time_connect} %{time_appconnect}\n%{http_code}' \
+                   -K - "${XNAT_SERVER}/data/projects?format=json" 2>"$probe_err") || probe_rc=$?
+    # curl uses the LAST -w, so the tail is: <body>\n<timings>\n<http_code>.
     code=$(printf '%s' "$probe" | tail -n1)
+    probe_timings=$(printf '%s' "$probe" | tail -n2 | head -n1)
+    probe_err_text=$(tr '\n' ' ' < "$probe_err" 2>/dev/null)
+    rm -f "$probe_err"
     if [ "$code" != "200" ]; then
         # Not a data-loss condition — but every session would come back
         # unconfirmed, so the run would be a very expensive no-op.
@@ -275,7 +302,7 @@ if [ "$VERIFY_XNAT" = "true" ]; then
         # abort note above). Going through `unavailable` is what keeps
         # SessionStagedNotConfirmedInXNAT supplied with staged sessions while
         # XNAT is unanswerable, instead of muting it.
-        unavailable xnat_probe_failed "XNAT auth probe returned HTTP ${code} — cannot confirm any session, so nothing is eligible; nothing removed"
+        unavailable xnat_probe_failed "XNAT auth probe returned HTTP ${code} (curl exit ${probe_rc}: ${probe_err_text:-no stderr}; namelookup/connect/tls ${probe_timings:-?}s) — cannot confirm any session, so nothing is eligible; nothing removed"
     fi
 else
     # dataPolicy.derived.s3Staged.verifyAgainstXnat=false. Deletion then rests

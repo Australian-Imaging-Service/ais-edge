@@ -343,10 +343,26 @@ groups:
             on the edge node (default host path
             /data/facility-backup/__unmapped_aet__/).
 
-            Fix: add '{{ $labels.aet }}' to the AETMap in
-            config/orthanc/routing.json (mapped to the correct XNAT
-            project), re-run scripts/07c-deploy-edge-orthanc.sh, then
-            re-send the quarantined files, e.g.
+            Fix: add '{{ $labels.aet }}' under orthanc.deid.aetMap in
+            sites/{{ $labels.cluster }}/values.yaml, mapped to the correct
+            XNAT project:
+
+              orthanc:
+                deid:
+                  aetMap:
+                    {{ $labels.aet }}: {project: <xnat-project>}
+
+            then re-render the edge chart:
+
+              helm upgrade --install edge charts/edge -n xnat-ingest \
+                -f sites/<management-site>/values.yaml \
+                -f sites/{{ $labels.cluster }}/values.yaml
+
+            routing.json is GENERATED from that key into the edge's
+            ConfigMap (charts/edge/templates/orthanc-config.yaml) — editing
+            config/orthanc/routing.json by hand changes nothing.
+
+            Then re-send the quarantined files from the edge node, e.g.
               dcmsend <edge-ip> 4242 -aec AISEDGE \
                 /data/facility-backup/__unmapped_aet__/{{ $labels.aet }}/**/*.dcm
 
