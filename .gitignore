@@ -6,9 +6,18 @@ config/edge-nodes.env
 *.token
 secrets/
 
+# SOPS. sites/*/secrets.enc.yaml IS committed — that is the point, it is
+# encrypted. These are the plaintext working forms that must never be:
+sites/*/secrets.yaml
+sites/*/secrets.plain.yaml
+sites/*/*.dec.yaml
+# age private keys, wherever someone leaves one
+*.agekey
+age-key*.txt
+keys.txt
+
 # Generated during install
 kubeconfig-*
-join-token-*
 ais-edge-ca.crt
 ca-bundle.crt
 
@@ -37,3 +46,10 @@ config/orthanc/deidentification-profile*.json
 # Local planning / working notes — not part of the deliverable
 docs/cai-lfs3-deployment-plan.md
 docs/zip-metadata-extraction-xnat-plan.md
+
+# Personal review notes — not part of the deliverable.
+docs/BEHAVIOUR-CHANGES.md
+
+# Run artefacts from scripts/adopt-existing.sh: a record of what one specific
+# live cluster adopted, timestamped per run. Output, not source.
+adoption-records/
