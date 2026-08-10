@@ -89,10 +89,57 @@ dataPolicy:
   # matches what you expect.
   dryRun: true
 
+  # The engine that ENFORCES everything below. Without it the rules are only
+  # declarations — which is how most of this block came to be unimplemented.
+  #
+  # It runs as its own DaemonSet attached to the VOLUMES, never as a sidecar on
+  # Orthanc: retention is a storage concern, and hanging it off the
+  # de-identifier means swapping that component silently ends edge disk
+  # monitoring. Report-only today; it deletes nothing.
+  #
+  # enabled: false stops the reporting, NOT the policy — no alert can fire on
+  # data nobody is measuring, so turning this off makes minFreeDiskPercent and
+  # quarantine.alertAfter inert.
+  reporter:
+    enabled: true
+    interval: 300              # seconds between passes
+    # Blast-radius cap per stage per pass, and how long a tree must be quiet
+    # before it is considered complete. Both mirror the S3 reclaimer's design.
+    maxRemovals: 50
+    settleMinutes: 5
+    image:
+      # Needs df, find, stat, date, awk AND curl. busybox has the first five but
+      # no curl, and its wget cannot issue the DELETE the orthanc-rest backend
+      # requires. curlimages/curl is alpine-based, so it still provides the
+      # busybox coreutils the filesystem backend uses.
+      repository: curlimages/curl
+      tag: "8.11.1"
+      pullPolicy: IfNotPresent
+    # 10001 matches Orthanc's, which owns the pipeline tree. The mounts are
+    # read-only, so this is about being able to READ every stage, not write.
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 10001
+      runAsGroup: 10001
+      fsGroup: 10001
+    resources:
+      requests: {cpu: 5m, memory: 16Mi}
+      limits:   {cpu: 100m, memory: 64Mi}
+
   # ---------------------------------------------------------------------
   # ORIGINALS
   # ---------------------------------------------------------------------
   originals:
+
+    # THE THIRD SWITCH. Originals are the only identifiable copy, so expiring
+    # them needs its own deliberate act on top of enabled + dryRun. While this
+    # is false the engine skips every `kind: original` stage AND the chart
+    # mounts the facility backup read-only, so nothing can remove an original
+    # even if the logic above were wrong.
+    #
+    # Turn it on only against a records-retention obligation, never to free
+    # disk — minFreeDiskPercent exists to tell you about disk.
+    allowExpiry: false
 
     # Identifiable DICOM exactly as it arrived off the wire. The Orthanc Lua
     # hook writes this BEFORE de-identification and only removes the instance
@@ -100,7 +147,36 @@ dataPolicy:
     # record for the site.
     facilityBackup:
       enabled: true
-      retain: forever            # forever | 30d | 90d | 7y
+      # WHERE THIS STAGE LIVES, as seen inside the pods. Every location below
+      # already matches this chart's own volume mounts, so a fresh install
+      # needs no edit — change one only if you move a mount or swap the
+      # component that writes it.
+      #
+      # These exist so the policy engine needs no knowledge of Orthanc or
+      # xnat-ingest: it walks declared paths. Replace the de-identifier (or
+      # the ingest path) and the retention rules keep working — point the
+      # location at the new store instead of rewriting a reclaimer.
+      location: /facility-backup
+      # forever | 30d | 90d | 7y
+      #
+      # WHAT A DURATION ACTUALLY DELETES — read this before setting one.
+      #
+      # The unit is the TOP-LEVEL ENTRY under location, which here is one
+      # PATIENT (the tree is <PatientID>/<StudyUID>/<SOPUID>.dcm), and the age
+      # used is the NEWEST file anywhere beneath it. So `retain: 30d` means:
+      #
+      #   A patient directory whose most recent file is older than 30 days is
+      #   deleted ENTIRELY.
+      #
+      # Both halves of that matter:
+      #   * a patient with ANY recent activity is fully protected, even if some
+      #     of their studies are years old — the newest file wins, deliberately;
+      #   * when a patient DOES expire, everything under them goes, including
+      #     studies far older than the window. It is not per-study expiry.
+      #
+      # Needs dataPolicy.originals.allowExpiry as well; until that is true the
+      # facility-backup volume is mounted read-only and nothing can be removed.
+      retain: forever
       # Warn only. This never triggers a deletion — running low on disk is an
       # operational problem, not a licence to discard originals.
       minFreeDiskPercent: 10
@@ -111,6 +187,9 @@ dataPolicy:
     # would silently discard precisely the data nobody has dealt with yet,
     # so the default is forever and we nag instead.
     quarantine:
+      # RELATIVE to facilityBackup.location, deliberately — the quarantine is
+      # a subtree of the archive, so one absolute path would let the two drift
+      # and the alert would then name a directory nothing writes to.
       subPath: __unmapped_aet__
       retain: forever
       alertAfter: 24h
@@ -119,6 +198,8 @@ dataPolicy:
     # NOTHING else holds a copy of these — there is no Orthanc copy and no
     # facility backup on this path.
     fileDrop:
+      # Root of ingest.fileDrop.inputGlob. Only read when that path is enabled.
+      location: /data/incoming
       reclaim: never             # never | onIngested
       minAge: 30d                # additionally required when not 'never'
 
@@ -131,6 +212,16 @@ dataPolicy:
     # it. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
     orthancStorage:
+      # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
+      # goes through the backend below, because Orthanc names files by UUID and
+      # a directory walk cannot map them back to sessions.
+      location: /data/orthanc-storage
+      # HOW this stage is reclaimed. filesystem walks the location; orthanc-rest
+      # asks Orthanc for studies carrying ingest.orthancGroup.processedLabel and
+      # deletes them through its API. Replacing the de-identifier means changing
+      # this word (or pointing location at the new store), not rewriting the
+      # engine.
+      backend: orthanc-rest      # filesystem | orthanc-rest
       reclaim: onGrouped         # never | onGrouped
       minAge: 7d
       # Orthanc's own recycler, independent of the rules above. 0 disables
@@ -146,12 +237,21 @@ dataPolicy:
     # the same sessions forever. onAssigned uses a processed-marker state
     # dir, so 'never' stays genuinely usable.
     grouped:
-      reclaim: onAssigned        # never | onAssigned
-      minAge: 0
+      location: /data/grouped
+      # NO minAge HERE, deliberately. `assign --unlink-source all` deletes each
+      # grouped tree at assign time, so a window measured from assign can never
+      # elapse — there is nothing left to wait on. What reaches the engine is
+      # only an ORPHAN: a tree assign copied but failed to unlink (crash, OOM,
+      # eviction). Those are cleaned up immediately; delaying an orphan buys
+      # nothing, since its bytes are still in Orthanc storage and the facility
+      # backup. Setting minAge here is rejected at render rather than ignored.
+      reclaim: onAssigned        # never | onAssigned (orphan cleanup)
 
     # Output of assign; input to whichever upload mode is enabled.
     assigned:
+      location: /data/assigned
       reclaim: onUploaded        # never | onUploaded
+      # As above: a recovery window after upload, not a delay before it.
       minAge: 0
 
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
@@ -171,14 +271,28 @@ dataPolicy:
   # TELEMETRY — contains no patient data. Tune freely for disk.
   # ---------------------------------------------------------------------
   telemetry:
-    podLogFiles:
-      retain: 14d
-    # Applied by charts/mgmt; kept here so one file answers every retention
-    # question for the site.
-    loki:
-      retain: 30d
-    prometheus:
-      retain: 15d
+    # LOKI AND PROMETHEUS RETENTION ARE NOT SET HERE. They live in their own
+    # subchart values, because Helm cannot template a subchart's values from
+    # this file and install.sh deliberately uses no --set. Declaring them here
+    # too produced two keys that read exactly like policy and did nothing —
+    # an operator could edit them, see a clean install, and keep the old
+    # retention indefinitely with nothing to say so.
+    #
+    # TO CHANGE RETENTION, EDIT THESE INSTEAD (in sites/<site>/values.yaml):
+    #
+    #   Prometheus:                       Loki:
+    #     kube-prometheus-stack:            loki:
+    #       prometheus:                       loki:
+    #         prometheusSpec:                   limits_config:
+    #           retention: 15d                    retention_period: 30d
+    #
+    # Setting loki/prometheus under telemetry is rejected at render, so the
+    # mistake cannot be silent again.
+    #
+    # podLogFiles stays: it has no counterpart anywhere. Nothing implements it
+    # yet — on-node pod log rotation is a kubelet setting and would be wired in
+    # scripts/06-join-edge-worker.sh.
+    podLogFiles: {retain: 14d}
 
 
 # =============================================================================

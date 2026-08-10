@@ -648,9 +648,32 @@ data:
   {{- /* .Files.Get: every annotation in here contains {{ $labels.cluster }},
          {{ $labels.session }} or {{ $labels.aet }}. Inlined, Helm would blank
          them and the alert emails would name neither the site nor the
-         session. */}}
+         session.
+
+         The file is read RAW and only __SENTINEL__ tokens are replaced — the
+         same mechanism the Alertmanager config above uses, and for the same
+         reason: templating the whole file would eat the runtime {{ }} above.
+
+         These two sentinels are what make dataPolicy's disk and quarantine
+         thresholds real controls rather than declarations. LogQL cannot
+         compare two extracted fields (`| free_pct < min_free_pct` is a parse
+         error), so the operator's number has to be substituted in as a
+         literal here. The engine still echoes the threshold into every log
+         line so the reading and the limit it was judged against stay
+         together for whoever reads the log. */}}
+  {{- $lokiRules := .Files.Get "files/loki-ruler-rules.yaml" }}
+  {{- $dpOrig := .Values.dataPolicy.originals }}
+  {{- $lokiRules = $lokiRules | replace "__DP_MIN_FREE_DISK_PCT__" (printf "%v" $dpOrig.facilityBackup.minFreeDiskPercent) }}
+  {{- $lokiRules = $lokiRules | replace "__DP_QUARANTINE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" $dpOrig.quarantine.alertAfter) }}
+  {{- /* A surviving sentinel is a silent break: the rule would ship with a
+         literal __DP_..._ in place of a number, Loki would reject the group at
+         load time, and every OTHER rule in the same file would stop evaluating
+         with it. Fail the render instead. */}}
+  {{- if regexMatch "__DP_[A-Z_]+__" $lokiRules }}
+    {{- fail "a __DP_*__ sentinel survived substitution in files/loki-ruler-rules.yaml — Loki would reject the whole rule group and every alert in this file would stop evaluating. Add the matching replace above." }}
+  {{- end }}
   ais-edge-pipeline.yaml: |
-    {{- .Files.Get "files/loki-ruler-rules.yaml" | nindent 4 }}
+    {{- $lokiRules | nindent 4 }}
 ---
 
 {{/* ===================================================================== */}}

@@ -119,6 +119,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- /* A removed key that is still set must fail, not be ignored — silently
+         dropping it is the exact defect this whole block is being cleaned of. */ -}}
+  {{- if hasKey .Values.dataPolicy.derived.grouped "minAge" }}
+    {{- fail "dataPolicy.derived.grouped.minAge was removed and setting it does nothing. `assign --unlink-source all` deletes each grouped tree at assign time, so a window measured from assign can never elapse; only trees assign FAILED to unlink reach the policy engine, and those are cleaned up immediately. Remove the key. If you want a post-upload recovery window, dataPolicy.derived.assigned.minAge is the one that works." }}
+  {{- end }}
+
   {{- if not .Values.clusterLabel }}
     {{- fail "clusterLabel must be set: it is the per-site identifier on every log line and metric, and Grafana's `cluster` variable filters on it." }}
   {{- end }}
@@ -276,4 +282,94 @@ really is on the old shared layout it must say so explicitly.
 {{- else if .Values.seaweedfs.perSiteBuckets -}}
 {{ printf "%s-%s" (.Values.seaweedfs.bucketPrefix | default "ingest") .Values.clusterLabel }}
 {{- end }}
+{{- end }}
+
+{{/*
+=============================================================================
+dataPolicy — duration to seconds, and the stage table the engine walks
+=============================================================================
+The engine is deliberately free of duration parsing: converting here means the
+chart and the engine cannot disagree about what "24h" is, and a busybox shell
+never has to do arithmetic on unit suffixes.
+
+`forever` is NOT a duration and never becomes one. It renders as `-`, which the
+engine treats as "no rule", so an unparseable or absent value can never be
+mistaken for 0 (which would read as "expire immediately").
+*/}}
+{{- define "edge.durationSeconds" -}}
+{{- $d := . | toString | trim -}}
+{{- if or (eq $d "") (eq $d "forever") (eq $d "never") -}}
+-
+{{- else if not (regexMatch "^[0-9]+[smhdwy]?$" $d) -}}
+{{- /* VALIDATE THE WHOLE STRING BEFORE TRIMMING A SUFFIX. Dispatching on the
+       last character alone is silently wrong: "7 days" ends in "s", so it took
+       the seconds branch, trimSuffix left "7 day", and int64 of that is 0 —
+       "expire immediately" on an originals stage, from a typo. "one day" ends
+       in "y" and did the same. Both were caught by the negative cases in
+       scripts/ci/values.sh, which is why this validates first and fails loudly
+       rather than defaulting. */ -}}
+{{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
+{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
+{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
+{{- else -}}{{ $d | int64 }}
+{{- end -}}
+{{- end }}
+
+{{/*
+The stage table: one line per declared stage, consumed by files/data-policy.sh.
+
+  name <TAB> kind <TAB> location <TAB> minFreeDiskPercent <TAB> alertAfterSec <TAB> retain
+
+TSV rather than JSON because the engine runs on busybox, where parsing JSON in
+sh is a liability and `IFS` splitting is not. `-` means "no rule for this
+field" everywhere.
+
+quarantine has no location of its own: it is subPath UNDER facilityBackup, so
+the two cannot drift and the alert can never name a directory nothing writes to.
+*/}}
+{{- define "edge.dataPolicyStages" -}}
+{{- /* FULL .Values PATHS, NOT LOCAL ALIASES — scripts/ci/values-consumers.sh
+       proves a key has a reader by grepping for `Values.<path>`, and an alias
+       makes the dependency invisible to it. That check is the only thing
+       standing between this block and another 14 dead keys.
+
+       COLUMNS (tab-separated):
+         1 name          2 kind (original|derived)   3 location
+         4 minFreeDiskPercent   5 alertAfter seconds
+         6 policy word (retain for originals, reclaim for derived)
+         7 age seconds (retain for originals, minAge for derived)
+         8 backend (filesystem | orthanc-rest)
+
+       `backend` is what keeps the engine store-agnostic. A filesystem stage is
+       walked directly; anything else is handed to an adapter. Orthanc needs one
+       because its storage is UUID-named — a directory walk cannot tell which
+       files belong to which session — and putting that knowledge inline would
+       undo the independence that lets the de-identifier be replaced. */ -}}
+{{- if .Values.dataPolicy.originals.facilityBackup.enabled }}
+originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
+originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
+{{- end }}
+{{- if .Values.ingest.fileDrop.enabled }}
+originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}	-	-	{{ .Values.dataPolicy.originals.fileDrop.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.fileDrop.minAge }}	filesystem
+{{- end }}
+derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.location }}	-	-	{{ .Values.dataPolicy.derived.orthancStorage.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.orthancStorage.minAge }}	{{ .Values.dataPolicy.derived.orthancStorage.backend }}
+derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
+derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ .Values.dataPolicy.derived.assigned.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
+{{- end }}
+
+{{/*
+The uploader's fingerprint state directory.
+
+ONE DEFINITION, TWO CONSUMERS. templates/upload.yaml sets STATE_DIR from it, and
+templates/data-policy.yaml derives the `onUploaded` condition from it. If those
+two ever disagree, the policy engine looks for upload markers in a directory the
+uploader never writes to — every session then fails its condition, nothing is
+ever reclaimed, and the only symptom is staging that quietly stops draining.
+*/}}
+{{- define "edge.uploaderStateDir" -}}
+/data/LOGS/s3-uploader-state
 {{- end }}

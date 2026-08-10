@@ -134,4 +134,67 @@ PY
   fi
 done < <(expectations)
 
+# =============================================================================
+# dataPolicy `location` must match where the data ACTUALLY is
+# =============================================================================
+# Each dataPolicy stage declares a location so the policy engine can walk paths
+# instead of knowing about Orthanc or xnat-ingest — that is what lets the
+# de-identifier or the ingest path be replaced without rewriting retention.
+#
+# The cost of that indirection is a NEW way to fail silently: if a template's
+# path moves and the declared location does not follow, the engine walks a
+# directory that no longer exists. Nothing errors. An empty directory reports
+# zero files, zero bytes and nothing to reclaim — which is indistinguishable
+# from a healthy, tidy site. This is the same shape as every other silent
+# failure in this repo, so it gets a guard rather than a comment.
+#
+# Checked against edge-everything-on because it has fileDrop enabled; the
+# fileDrop container is not rendered at all when that path is off, so a
+# defaults-only case would pass the fileDrop line vacuously.
+ci_heading "dataPolicy locations point at real paths"
+
+loc_render="$CI_RENDER_DIR/edge-everything-on.yaml"
+if [ ! -s "$loc_render" ]; then
+  ci_fail "no render at $loc_render — run scripts/ci/render.sh first"
+else
+  # 2>&1 IS LOAD-BEARING: SystemExit writes its message to stderr, so without
+  # it this reported "FAIL dataPolicy locations:" with nothing after the colon
+  # — a guard that fires but cannot say what drifted.
+  loc_out="$(python3 - "$loc_render" "$REPO_ROOT/charts/edge/values.yaml" 2>&1 <<'PY'
+import re, sys, yaml
+
+render = open(sys.argv[1]).read()
+dp = (yaml.safe_load(open(sys.argv[2])) or {}).get("dataPolicy") or {}
+
+targets = []
+for group in ("originals", "derived"):
+    for stage, cfg in (dp.get(group) or {}).items():
+        if isinstance(cfg, dict) and cfg.get("location"):
+            targets.append((f"{group}.{stage}", cfg["location"]))
+sub = ((dp.get("originals") or {}).get("quarantine") or {}).get("subPath")
+if sub:
+    targets.append(("originals.quarantine.subPath", sub))
+
+if not targets:
+    raise SystemExit("no dataPolicy stage declares a location — the schema regressed")
+
+missing = []
+for name, value in targets:
+    # Word-boundary-ish: /data/grouped must not be satisfied by /data/grouped-old
+    if not re.search(re.escape(value) + r"(?![\w-])", render):
+        missing.append(f"{name}={value}")
+
+if missing:
+    raise SystemExit(
+        "declared location(s) appear nowhere in the rendered edge chart: "
+        + ", ".join(missing)
+        + ". Either a template's path moved and the dataPolicy default did not "
+          "follow, or the reverse. The engine would walk a path that does not "
+          "exist and report it as empty — which looks exactly like a tidy site."
+    )
+print(f"{len(targets)} location(s) verified against the rendered chart")
+PY
+  )" && ci_pass "$loc_out" || ci_fail "dataPolicy locations: $loc_out"
+fi
+
 ci_summary "runtime-templates"

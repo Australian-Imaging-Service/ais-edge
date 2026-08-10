@@ -75,7 +75,7 @@ spec:
             - name: ASSIGNED_DIR
               value: /data/assigned
             - name: STATE_DIR
-              value: /data/LOGS/s3-uploader-state
+              value: {{ include "edge.uploaderStateDir" . | quote }}
             - name: INTERVAL
               value: {{ .Values.upload.s3.interval | quote }}
             - name: SETTLE_MINUTES

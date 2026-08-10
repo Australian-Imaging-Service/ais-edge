@@ -63,15 +63,26 @@ dataPolicy:
   enabled: false
   dryRun: true
 
+  # `location` is WHERE each stage lives inside the edge pods. Defaults match
+  # the edge chart's own volume mounts, so a fresh install needs no edit. They
+  # exist so the policy engine walks declared paths instead of knowing about
+  # Orthanc or xnat-ingest — swap the de-identifier and you repoint a location
+  # rather than rewrite a reclaimer. MUST match charts/edge/values.yaml.
+  # quarantine has no location of its own: it is subPath UNDER facilityBackup.
   originals:
-    facilityBackup: {enabled: true, retain: forever, minFreeDiskPercent: 10}
+    # Third switch — originals are the only identifiable copy. See charts/edge.
+    allowExpiry: false
+    # retain: a DURATION deletes the whole top-level entry (one PATIENT under
+    # the facility backup) once its NEWEST file is older than that. See
+    # charts/edge/values.yaml for the full semantics; it is not per-study.
+    facilityBackup: {enabled: true, location: /facility-backup, retain: forever, minFreeDiskPercent: 10}
     quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}
-    fileDrop:       {reclaim: never, minAge: 30d}
+    fileDrop:       {location: /data/incoming, reclaim: never, minAge: 30d}
 
   derived:
-    orthancStorage: {reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
-    grouped:        {reclaim: onAssigned, minAge: 0}
-    assigned:       {reclaim: onUploaded, minAge: 0}
+    orthancStorage: {location: /data/orthanc-storage, backend: orthanc-rest, reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
+    grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine
+    assigned:       {location: /data/assigned, reclaim: onUploaded, minAge: 0}
 
     # Owned by THIS chart. xnat-ingest upload has no S3 retention of its own —
     # it rebuilds its work list from a live S3 listing every loop, so an
@@ -95,9 +106,28 @@ dataPolicy:
         pullPolicy: IfNotPresent
 
   telemetry:
+    # LOKI AND PROMETHEUS RETENTION ARE NOT SET HERE. They live in their own
+    # subchart values, because Helm cannot template a subchart's values from
+    # this file and install.sh deliberately uses no --set. Declaring them here
+    # too produced two keys that read exactly like policy and did nothing —
+    # an operator could edit them, see a clean install, and keep the old
+    # retention indefinitely with nothing to say so.
+    #
+    # TO CHANGE RETENTION, EDIT THESE INSTEAD (in sites/<site>/values.yaml):
+    #
+    #   Prometheus:                       Loki:
+    #     kube-prometheus-stack:            loki:
+    #       prometheus:                       loki:
+    #         prometheusSpec:                   limits_config:
+    #           retention: 15d                    retention_period: 30d
+    #
+    # Setting loki/prometheus under telemetry is rejected at render, so the
+    # mistake cannot be silent again.
+    #
+    # podLogFiles stays: it has no counterpart anywhere. Nothing implements it
+    # yet — on-node pod log rotation is a kubelet setting and would be wired in
+    # scripts/06-join-edge-worker.sh.
     podLogFiles: {retain: 14d}
-    loki:        {retain: 30d}
-    prometheus:  {retain: 15d}
 
 
 # =============================================================================
@@ -617,7 +647,7 @@ kube-prometheus-stack:
 
   prometheus:
     prometheusSpec:
-      retention: 15d                    # MUST MATCH dataPolicy.telemetry.prometheus.retain
+      retention: 15d                    # THE one place Prometheus retention is set
       retentionSize: ""
       scrapeInterval: 30s
       evaluationInterval: 30s
@@ -795,7 +825,7 @@ loki:
         accessKeyId: ${LOKI_S3_ACCESS_KEY}
         secretAccessKey: ${LOKI_S3_SECRET_KEY}
     limits_config:
-      retention_period: 30d             # MUST MATCH dataPolicy.telemetry.loki.retain
+      retention_period: 30d             # THE one place Loki retention is set
       reject_old_samples: true
       reject_old_samples_max_age: 168h
       max_global_streams_per_user: 10000

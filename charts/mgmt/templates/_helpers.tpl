@@ -111,6 +111,37 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
 {{/* Validation — all of these fail silently at runtime if wrong           */}}
 {{/* ===================================================================== */}}
 {{- define "mgmt.validate" -}}
+  {{- /* Removed keys must FAIL, not be ignored. These two read exactly like
+         policy and did nothing: Helm cannot template a subchart's values from
+         here, so retention only ever came from the subchart blocks. Someone
+         re-adding them under telemetry would edit a number, see a clean
+         install, and keep the old retention with nothing to say so — which is
+         how they went unnoticed in the first place. */ -}}
+  {{- /* QUARANTINE IS NEVER TIME-EXPIRED, and the schema says so rather than
+         the docs. It holds studies that reached NO project — rejected for an
+         unmapped AE title — so they exist in no other copy: not in XNAT, not
+         in the pipeline, only here. Expiring them by age would discard
+         precisely the data nobody has dealt with yet, and it would do it
+         quietly, because the operator who never actioned the alert is the same
+         operator who would never see the deletion.
+
+         The only condition that would make removal safe is "the AE title is
+         now mapped", and answering that means reading Orthanc's routing.json —
+         which would put de-identifier knowledge back inside the policy engine
+         and undo the store-independence the stage model exists for.
+
+         alertAfter (live, and enforced by QuarantinedDataUnresolved) is the
+         mechanism here: nag until a human maps the AET and re-sends. */ -}}
+  {{- $q := .Values.dataPolicy.originals.quarantine }}
+  {{- if ne ($q.retain | toString) "forever" }}
+    {{- fail (printf "dataPolicy.originals.quarantine.retain is %q, but the only supported value is 'forever'. Quarantine holds studies that reached no project and exist in NO other copy — expiring them by age discards exactly the data nobody has handled yet. Use dataPolicy.originals.quarantine.alertAfter to be nagged about it instead; that is enforced by the QuarantinedDataUnresolved alert." ($q.retain | toString)) }}
+  {{- end }}
+
+  {{- $tel := .Values.dataPolicy.telemetry | default dict }}
+  {{- if or (hasKey $tel "loki") (hasKey $tel "prometheus") }}
+    {{- fail "dataPolicy.telemetry.loki / .prometheus were removed: Helm cannot template a subchart's values from this chart, so setting them here changes NOTHING. Set retention where it is actually read — kube-prometheus-stack.prometheus.prometheusSpec.retention for Prometheus, and loki.loki.limits_config.retention_period for Loki — then delete these keys." }}
+  {{- end }}
+
 
   {{- if not .Values.domain.internal }}
     {{- fail "domain.internal must be set — every management hostname and TLS SAN derives from it." }}
@@ -292,4 +323,36 @@ not been migrated yet, so this can roll out one site at a time.
   {{- $_ := set $seen $ctx.Values.seaweedfs.buckets.ingest true -}}
 {{- end }}
 {{- keys $seen | sortAlpha | join " " }}
+{{- end }}
+
+{{/*
+Duration to seconds, for substituting a dataPolicy threshold into the Loki
+rules. Mirrors edge.durationSeconds — the two charts read the SAME dataPolicy
+block from the site file, so they must agree on what "24h" means.
+
+`forever`/`never` are not durations. They render as -1, which no oldest_age_s
+can exceed, so a stage set to `forever` can never trip an age alert. Rendering
+0 instead would make every stage trip it immediately.
+*/}}
+{{- define "mgmt.durationSeconds" -}}
+{{- $d := . | toString | trim -}}
+{{- if or (eq $d "") (eq $d "forever") (eq $d "never") -}}
+-1
+{{- else if not (regexMatch "^[0-9]+[smhdwy]?$" $d) -}}
+{{- /* VALIDATE THE WHOLE STRING BEFORE TRIMMING A SUFFIX. Dispatching on the
+       last character alone is silently wrong: "7 days" ends in "s", so it took
+       the seconds branch, trimSuffix left "7 day", and int64 of that is 0 —
+       "expire immediately" on an originals stage, from a typo. "one day" ends
+       in "y" and did the same. Both were caught by the negative cases in
+       scripts/ci/values.sh, which is why this validates first and fails loudly
+       rather than defaulting. */ -}}
+{{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
+{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
+{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
+{{- else -}}{{ $d | int64 }}
+{{- end -}}
 {{- end }}
