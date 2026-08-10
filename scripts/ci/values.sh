@@ -673,6 +673,46 @@ orthanc:
 EOF
 
 # Reclaiming the operator's only copy.
+cat >"$V/neg-mgmt-quarantine-retain.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    quarantine:
+      retain: 90d
+EOF
+
+cat >"$V/neg-mgmt-telemetry-retain.yaml" <<'EOF'
+dataPolicy:
+  telemetry:
+    prometheus: {retain: 90d}
+EOF
+
+cat >"$V/neg-edge-grouped-minage.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    grouped:
+      minAge: 3600
+EOF
+
+# An unparseable duration must FAIL the render, never default to 0. Zero would
+# read as "expire immediately", which on an originals stage means discarding the
+# archive of record because someone typed "7 days" instead of "7d".
+cat >"$V/neg-edge-bad-duration.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    assigned:
+      minAge: "7 days"
+EOF
+
+# Same guard on the management side. Both charts read the SAME dataPolicy block
+# from the site file, so a duration the two disagree about would mean the edge
+# and the reclaimer enforcing different windows from one line of config.
+cat >"$V/neg-mgmt-bad-duration.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    quarantine:
+      alertAfter: "one day"
+EOF
+
 cat >"$V/neg-edge-filedrop-reclaim.yaml" <<'EOF'
 dataPolicy:
   enabled: true
@@ -788,6 +828,11 @@ neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toproc
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
+neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
+neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
+neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
+neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
+neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
 EOF
 }
 

@@ -262,7 +262,6 @@ dataPolicy:
     # /data/grouped, once assign has built the session.
     grouped:
       reclaim: onAssigned         # never | onAssigned
-      minAge: 0                   # <duration>
 
     # /data/assigned, once the s3-uploader has shipped it.
     assigned:
@@ -289,6 +288,8 @@ dataPolicy:
   # telemetry — logs and metrics, never patient data.
   # ---------------------------------------------------------------------------
   telemetry:
+    # Loki/Prometheus retention is NOT set here — see charts/mgmt/values.yaml.
+    # Edit kube-prometheus-stack.prometheus.prometheusSpec.retention and
+    # loki.loki.limits_config.retention_period instead. Setting them here is
+    # rejected at render rather than silently ignored.
     podLogFiles: {retain: 14d}    # <duration>
-    loki:        {retain: 30d}    # <duration>
-    prometheus:  {retain: 15d}    # <duration>

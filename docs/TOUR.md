@@ -244,116 +244,175 @@ decisions in the logs, then enable.
 
 ## 3. Secrets
 
-```bash
-scripts/site-secrets.sh init-key                  # once per operator
-scripts/site-secrets.sh add-recipient <pub>       # register the key
-scripts/site-secrets.sh new <name> <mgmt|edge>    # scaffold, one per machine
-scripts/site-secrets.sh encrypt <name>            # before committing anything
-scripts/site-secrets.sh apply <name>              # decrypt straight into the cluster
-```
+Secrets live in git, encrypted. You hold an age keypair; the private half stays
+at `~/.config/sops/age/keys.txt` and is never committed, the public half goes in
+`.sops.yaml`. Any key listed there can decrypt, which is why adding a colleague
+is one command. Only the **values** are encrypted, so `git diff` still shows
+*which* secret changed without showing what it changed to.
 
-**Files:** `scripts/site-secrets.sh`, `.sops.yaml`, `sites/<name>/secrets.enc.yaml`
+**One file per machine:** `sites/<name>/secrets.enc.yaml`. They are not
+interchangeable — `apply` pushes a whole file into whatever cluster
+`KUBECONFIG` points at, so a merged file would put the XNAT account and the S3
+admin key on a hospital machine.
 
-### How SOPS works here, in one paragraph
+> **The file is plaintext until you run `encrypt`.** It is called
+> `secrets.enc.yaml` from the moment it is created, which is a promise it has
+> not kept yet. Two things catch it: `install.sh` refuses to run against an
+> unencrypted secrets file, and `site-secrets.sh check` fails on any committed
+> one.
 
-You have a keypair. The private half lives at `~/.config/sops/age/keys.txt` and
-is never committed; the public half goes in `.sops.yaml`. Encrypting a file locks
-it so that **any** public key listed there can be opened by its owner's private
-key — which is why adding a colleague is just `add-recipient` plus
-`sops updatekeys` on each existing file. Adding a recipient does **not**
-retroactively unlock files encrypted before you added them.
+### What goes where
 
-> **The file is plaintext until you run `encrypt`.** It is named
-> `secrets.enc.yaml` from the moment it is created, which reads as a promise it
-> has not kept yet. `install.sh` refuses to run against an unencrypted secrets
-> file, and `site-secrets.sh check` fails if a committed one is not encrypted.
+|                        | Management site (one)                                    | Each edge site                        |
+| ---------------------- | -------------------------------------------------------- | ------------------------------------- |
+| Namespaces             | `ais-mgmt`, `xnat-upload`                                | `xnat-ingest`                         |
+| You fill in            | 6 Secrets, plus one `<edge>-s3` per edge                 | **1 Secret** — the de-id salt         |
+| Delivered for you      | —                                                        | CA bundle, Loki client cert, S3 key   |
 
-### Which secrets go where
-
-They are **not** interchangeable, and `apply` sends a whole file to whatever
-cluster `KUBECONFIG` points at — so a merged file would push management
-credentials onto a hospital machine.
-
-|            | Management site                                                                                                   | Each edge site                                  |
-| ---------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Namespaces | `ais-mgmt`, `xnat-upload`                                                                                     | `xnat-ingest`                                 |
-| Holds      | S3 admin + upload identities, the XNAT account, Grafana, Loki's storage identity, SMTP, one`<edge>-s3` per edge | the de-identification salt, and its S3 identity |
-| Roughly    | eight Secrets                                                                                                     | two                                             |
-
-`scripts/ci/secret-namespaces.sh` renders both charts and fails if a mounted
-Secret is missing, in the wrong namespace, or declared in the wrong template.
-
-### Knowing your secrets — what each one holds
-
-Every field ships as a `REPLACE_*` placeholder, and `encrypt` warns if any
-survive. The templates are the authority; this table is the map.
+That last row is the part people get wrong: an edge has **exactly one** secret
+you write by hand. Everything else arrives via cert-sync (see "Two secrets you
+must NOT create by hand" below).
 
 **Management site** (`sites/example-mgmt/secrets.example.yaml`):
 
-| Secret | Keys | What it is | Rotating it needs |
-|---|---|---|---|
-| `seaweedfs-admin` | `access-key`, `secret-key` | full access to the object store | restart SeaweedFS (below) |
-| `seaweedfs-upload` | `access-key`, `secret-key` | the XNAT uploader + reclaimer's S3 identity | restart SeaweedFS |
-| `xnat-credentials` | `server`, `username`, `password` | the XNAT account every site's data is pushed with | restart the uploader |
-| `grafana-admin-credentials` | `admin-password` | Grafana login | restart Grafana |
-| `loki-s3-credentials` | `access-key`, `secret-key` | Loki's log-chunk storage identity | restart SeaweedFS + Loki |
-| `alertmanager-smtp` | `username`, `password` | alert mail. For Gmail this is an **App Password** — a 2FA account rejects the real one with `535 BadCredentials`, and the only symptom is alerts that never arrive | restart Alertmanager |
-| `<edge>-s3` (one per edge) | `access-key`, `secret-key` | that edge's bucket-scoped S3 identity | restart SeaweedFS |
+| Secret                        | Keys                                   | What it is                                                                                                                                                                 | Rotating it needs         |
+| ----------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `seaweedfs-admin`           | `access-key`, `secret-key`         | full access to the object store                                                                                                                                            | restart SeaweedFS (below) |
+| `seaweedfs-upload`          | `access-key`, `secret-key`         | the XNAT uploader + reclaimer's S3 identity                                                                                                                                | restart SeaweedFS         |
+| `xnat-credentials`          | `server`, `username`, `password` | the XNAT account every site's data is pushed with                                                                                                                          | restart the uploader      |
+| `grafana-admin-credentials` | `admin-password`                     | Grafana login                                                                                                                                                              | restart Grafana           |
+| `loki-s3-credentials`       | `access-key`, `secret-key`         | Loki's log-chunk storage identity                                                                                                                                          | restart SeaweedFS + Loki  |
+| `alertmanager-smtp`         | `username`, `password`             | alert mail. For Gmail this is an**App Password** — a 2FA account rejects the real one with `535 BadCredentials`, and the only symptom is alerts that never arrive | restart Alertmanager      |
+| `<edge>-s3` (one per edge)  | `access-key`, `secret-key`         | that edge's bucket-scoped S3 identity                                                                                                                                      | restart SeaweedFS         |
 
 **Edge site** (`sites/example-edge/secrets.example.yaml`):
 
-| Secret | Keys | What it is |
-|---|---|---|
-| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the HMAC salt that turns a patient identifier into `${SubjectHash}`. **Effectively permanent** — see the rotation warning below |
+| Secret                | Keys                                  | What it is                                                                                                                              |
+| --------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the HMAC salt that turns a patient identifier into`${SubjectHash}`. **Effectively permanent** — see the rotation warning below |
 
 Everything else in the edge template is commented out and optional (Orthanc
 auth, Samba). `s3-edge-credentials` is deliberately absent — see the next
 section.
 
-### Setting up secrets, end to end
-
-**Once per operator, on a new machine:**
+### Step A — once per operator, on a new machine
 
 ```bash
-scripts/site-secrets.sh init-key          # writes ~/.config/sops/age/keys.txt, mode 600
+scripts/site-secrets.sh init-key
 ```
 
-It prints your **public** key (`age1...`). Two things follow immediately:
+Every command tells you what it did and what to do next, so you can follow the
+prompts rather than this page. `init-key` prints your **public** key:
 
-1. **Back up `~/.config/sops/age/keys.txt` to a password manager now.** There is
-   no escrow and no reset. If every recipient key for a file is lost, that file
-   is unreadable forever.
-2. Register the public half so encrypted files are readable by you:
+```
+[site-secrets] created /home/you/.config/sops/age/keys.txt (mode 600)
+
+  PUBLIC key — share this, add it as a recipient:
+    age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg8sfn9aqmcac8p
+```
+
+**Back that file up to a password manager now.** There is no escrow and no
+reset: if every recipient key for a file is lost, the file is gone. Then
+register your public half so you can read encrypted files:
 
 ```bash
-scripts/site-secrets.sh add-recipient age1yourpublickey...
+scripts/site-secrets.sh add-recipient age1ql3z7...
 ```
 
-**Then, per site:**
+### Step B — the management site
 
 ```bash
-scripts/site-secrets.sh new <site> mgmt      # scaffold the management site
-$EDITOR sites/<site>/secrets.enc.yaml        # fill in every REPLACE_ (still PLAINTEXT)
-scripts/site-secrets.sh encrypt <site>       # <-- do not commit before this
-scripts/site-secrets.sh apply <site>         # decrypt straight into the cluster
+scripts/site-secrets.sh new my-deployment mgmt
 ```
 
-For an edge, prefer the one-command path — it generates the S3 key pair rather
-than making you invent and type it twice:
+```
+[site-secrets] created sites/my-deployment/ from sites/example-mgmt/
+  1. edit sites/my-deployment/values.yaml       (non-secret site config)
+  2. edit sites/my-deployment/secrets.enc.yaml  (still PLAINTEXT at this point)
+  3. scripts/site-secrets.sh encrypt my-deployment   <-- do not commit before this
+```
+
+Do exactly those three. Fill in every `REPLACE_` in the secrets file — the six
+Secrets in the table above — then encrypt.
+
+### Step C — each edge
+
+Use `add-edge`, not `new`: it generates the S3 key pair instead of making you
+invent one and type it into two files that must match. It is the **first of six
+steps**, not a replacement for them — you still fill in the salt, and you still
+encrypt.
 
 ```bash
-scripts/site-secrets.sh add-edge <mgmt-site> <edge-name>
+scripts/site-secrets.sh add-edge my-deployment hospital-a
 ```
+
+It does three things and then tells you the other five, including the exact
+`edges:` block to paste — you do not have to remember any of this:
+
+```
+[site-secrets] created sites/hospital-a/ from sites/example-edge/
+[site-secrets] appended hospital-a-s3 to sites/my-deployment/secrets.enc.yaml (re-encrypted)
+
+  Still needed by hand:
+
+  1. Fill in sites/hospital-a/values.yaml — the AE-title map, de-identification
+     profile and disk paths are facts only you have; nothing generates them.
+  2. Fill in sites/hospital-a/secrets.enc.yaml — orthanc-deid-salt still needs
+     'openssl rand -hex 32'
+  3. Paste this into sites/my-deployment/values.yaml, under 'edges:':
+
+       - name: hospital-a
+         nodeIP: "<this edge's IP>"
+         sshUser: ubuntu
+         sshKey: ~/.ssh/id_ed25519
+         s3SecretRef: hospital-a-s3
+         exposure: sni
+
+  4. scripts/site-secrets.sh encrypt hospital-a
+  5. ./install.sh my-deployment
+```
+
+**There is no manual `apply` for an edge.** `install.sh` applies the management
+secrets at its step 3 and this edge's into the child cluster at step 7. You only
+run `apply` by hand to change a secret on an already-running system.
+
+> **Step 2 is the one that bites — do not skip the salt.** `add-edge` scaffolds
+> the edge's secrets from the template, so `orthanc-deid-salt` arrives as the
+> literal placeholder `REPLACE_64_HEX_CHARS`. **Nothing rejects that value**: the
+> chart checks only that a salt Secret is *named*, never that its contents are
+> real. An edge installed with the placeholder starts cleanly and derives every
+> `${SubjectHash}` and `${SessionHash}` from a string published in this
+> repository.
+>
+> You cannot rely on `encrypt` to catch it. Measured: `encrypt` warns
+> `still contains REPLACE_ placeholders. Encrypt anyway? [y/N]` on **every**
+> edge, even a correctly filled-in one, because the check greps the whole file
+> and the template's own comments contain that string — including a comment
+> that literally reads "fill in every REPLACE_". So the warning is expected
+> here and you have to answer `y`; it tells you nothing about whether you
+> actually set the salt. Check it yourself before encrypting:
+>
+> ```bash
+> grep AIS_DEID_HMAC_SALT sites/<edge-name>/secrets.enc.yaml   # must NOT say REPLACE_
+> ```
+>
+> Treat the salt as permanent once set: rotating it gives the same patient a
+> different pseudonym and breaks linkage to everything already in XNAT.
+
+Both `add-edge` and `new` leave the same two things to you deliberately: the
+`edges:` block (that file is the most heavily hand-annotated in the repo, and a
+generated rewrite would drop every caution comment in it — so the command prints
+the block for you to paste), and the salt.
 
 ### The everyday loop
 
-| Command | What it does |
-|---|---|
-| `view <site>` | decrypt to stdout, change nothing. **This prints secrets to your terminal** — prefer `edit` |
-| `edit <site>` | decrypt into `$EDITOR`, re-encrypt on save. The normal way to change a value |
-| `encrypt <site>` | encrypt a file that is still plaintext. Warns if `REPLACE_` placeholders remain and asks before proceeding |
-| `apply <site>` | decrypt and `kubectl apply` into the cluster |
-| `check` | fails if any **committed** `sites/*/secrets*.yaml` lacks the `sops:` header. Run it before every push |
+| Command            | What it does                                                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `view <site>`    | decrypt to stdout, change nothing.**This prints secrets to your terminal** — prefer `edit`            |
+| `edit <site>`    | decrypt into`$EDITOR`, re-encrypt on save. The normal way to change a value                                  |
+| `encrypt <site>` | encrypt a file that is still plaintext. Warns if`REPLACE_` placeholders remain and asks before proceeding    |
+| `apply <site>`   | decrypt and`kubectl apply` into the cluster                                                                  |
+| `check`          | fails if any**committed** `sites/*/secrets*.yaml` lacks the `sops:` header. Run it before every push |
 
 > **`apply` sends the whole file to whatever `KUBECONFIG` points at.** Applying
 > a management file while pointed at an edge would push the XNAT account and the
@@ -416,7 +475,9 @@ certificate the management CA never signed — the push is then rejected at the
 TLS handshake, its logs stop arriving, and the alerts that would tell you are
 built from those same logs.
 
-#### How that is possible when the edge accepts no inbound connection
+<details>
+<summary><b>How that is possible when the edge accepts no inbound connection</b>
+— background, not needed to set anything up</summary>
 
 This doc says two things that sound contradictory, and the resolution is worth
 stating once rather than leaving every reader to work out: the hospital "never
@@ -455,6 +516,8 @@ separate credentials), not physical. That is inherent to hosted control planes,
 and it is the same reason `charts/mgmt/templates/cert-issuers.yaml` states
 plainly that a compromised management node already holds the staged imaging, the
 XNAT credentials and every child kubeconfig.
+
+</details>
 
 ### The names that must line up
 
@@ -611,8 +674,41 @@ paranoid:
 
 ## 5b. Adding another edge site, after the first deploy
 
-This is the normal growth path: **add one block, run one command, re-run the
-installer.**
+Six steps. `add-edge` does three of them for you; the rest are facts only you
+have, plus one command you must not skip.
+
+```bash
+# 1. generate + scaffold
+scripts/site-secrets.sh add-edge <management-site> edge-syd
+
+# 2. the AE-title map, de-identification profile and disk paths
+$EDITOR sites/edge-syd/values.yaml
+
+# 3. the de-identification salt — THIS IS NOT OPTIONAL, see the warning below
+openssl rand -hex 32                       # paste as AIS_DEID_HMAC_SALT
+$EDITOR sites/edge-syd/secrets.enc.yaml    # still PLAINTEXT despite the name
+
+# 4. paste the printed 'edges:' block into the management values.yaml
+$EDITOR sites/<management-site>/values.yaml
+
+# 5. encrypt before committing anything
+scripts/site-secrets.sh encrypt edge-syd
+
+# 6. install, then prove it worked
+./install.sh <management-site>
+make verify-live SITE=<management-site>
+```
+
+> **Do not skip step 3.** `add-edge` scaffolds
+> `sites/edge-syd/secrets.enc.yaml` from the template, so `orthanc-deid-salt`
+> arrives as the literal placeholder `REPLACE_64_HEX_CHARS`. Nothing rejects
+> it: the chart only checks that a salt Secret is *named*, not that its value
+> is real, so the edge installs, Orthanc starts, and every `${SubjectHash}` and
+> `${SessionHash}` on that site is derived from a string published in this
+> repository. `encrypt` warns — `WARNING: ... still contains REPLACE_ placeholders. Encrypt anyway? [y/N]` — and answering `y` there is the whole
+> failure. The salt is also effectively permanent: rotating it later gives the
+> same patient a different pseudonym and breaks linkage to everything already
+> in XNAT (§3, "Rotating a secret").
 
 ### 1. Add the entry
 
@@ -747,6 +843,58 @@ go with the entry. Its staged data does not — remove that deliberately.
 
 ---
 
+## 5c. dataPolicy — what actually deletes, and what it deletes
+
+`dataPolicy` is enforced by the `edge-data-policy` DaemonSet. It attaches to the
+VOLUMES rather than to Orthanc, so replacing the de-identifier (AIS-deid) or the
+ingest path (Prefect for non-DICOM) does not silently end retention or edge disk
+monitoring — the new store declares a stage and inherits both.
+
+### Three switches, and originals need all three
+
+| | `enabled` | `dryRun` | `allowExpiry` | Effect |
+|---|---|---|---|---|
+| report-only *(default)* | false | true | false | measures only; **both volumes mounted read-only** |
+| dry-run | true | true | false | logs every decision, deletes nothing |
+| armed | true | **false** | false | reclaims DERIVED stages; facility backup still read-only |
+| originals armed | true | **false** | **true** | originals may expire |
+
+The mount is the enforcement, not the script: until all three line up the kernel
+refuses the write, so a bug in the engine cannot remove an original.
+
+### What a `retain` duration deletes
+
+The unit is the **top-level entry** under the stage's location. For the facility
+backup that tree is `<PatientID>/<StudyUID>/<SOPUID>.dcm`, so the entry is one
+PATIENT, and the age used is the **newest file anywhere beneath it**. With
+`retain: 30d`:
+
+> **A patient directory whose most recent file is older than 30 days is deleted
+> entirely.**
+
+Both halves matter. A patient with any recent activity is fully protected even
+if some of their studies are years old — the newest file wins, deliberately. But
+when a patient does expire, everything under them goes, **including studies far
+older than the window**. This is per-entry expiry, not per-study.
+
+Verified with `retain: 30d` against real files: a patient last touched 31 days
+ago was reported `WOULD expire` in dry-run and removed when armed; a patient
+holding a 60-day-old study *and* a 2-day-old one was kept in both.
+
+### Derived stages need a condition AND an age
+
+`grouped` and `assigned` are reclaimed only when something downstream proves the
+copy is reconstructible — the uploader's own fingerprint file, or assign's
+output — **and** `minAge` has elapsed. An unknown condition word keeps rather
+than deletes, so a typo in values.yaml cannot authorise removal.
+
+`orthancStorage` is different: Orthanc names files by UUID, so a directory walk
+cannot map them to sessions. That stage declares `backend: orthanc-rest` and is
+handed to an adapter which asks Orthanc for studies carrying the processed
+label. That backend seam is where a future store plugs in.
+
+---
+
 ## 6. Observability
 
 Two sources of alerts, deliberately:
@@ -774,12 +922,55 @@ An alert that cannot fire is worse than no alert: it looks like coverage.
 
 ## 7. Testing
 
+There are **two** kinds of check here, and they answer different questions.
+Neither substitutes for the other.
+
+|                                  | Question                                             | Needs a cluster? |
+| -------------------------------- | ---------------------------------------------------- | ---------------- |
+| `make ci-fast` / `make ci`   | Is the code and config I am about to deploy correct? | No               |
+| `make verify-live SITE=<site>` | Is the thing I already deployed actually working?    | Yes — reads it  |
+
+### 7.1 Verifying an install — `make verify-live`
+
+**Run this straight after `./install.sh`, and any time you are asked "is it
+working?"** It is read-only: it creates, patches and deletes nothing.
+
+```bash
+make verify-live SITE=stream-2-ab-dev
+```
+
+It checks, in order: the management API server and node; every pod in
+`ais-mgmt` and `xnat-upload`; the CA certificate and every issued certificate;
+the SeaweedFS S3 gateway answering **in-cluster**; then per edge — the hosted
+control plane, the child API server, the worker node, the pipeline pods, and
+the three Secrets cert-sync delivers; then every CronJob's freshness against
+its own schedule; and finally XNAT: reachable, credentials accepted, **and
+returning a file listing consistent with its own catalog**.
+
+That last one exists because of a real fault. On 2026-08-09 XNAT began
+answering `200` with `file_count: 1` and an empty file list. Every pod stayed
+green, the reclaimer completed normally, and no alert fired — it simply could
+not confirm any delivery, and a critical alert was silently armed to fire two
+days later against sessions that were perfectly healthy. Nothing in this repo
+would have told you. Now `verify-live` says so in one line.
+
+Read the output carefully in one respect:
+
+> **`SKIP` is not `PASS`.** Skips are counted and listed separately under
+> `NOT CHECKED`. A missing kubeconfig, an unreachable edge or an absent tool
+> produces a skip, and the whole point is that it must never read as green.
+
+Exit status is `0` only when nothing failed, so it drops straight into a
+smoke-test or a cron.
+
+### 7.2 Checking the code — `make ci`
+
 ```bash
 make ci-fast     # no cluster needed
 make ci          # adds a kind-based greenfield install
 ```
 
-Nine stages. Two are worth explaining:
+Ten stages. Three are worth explaining:
 
 **`reclaimer`** — 28 cases that assert on **what was deleted**, not on log text.
 A run that logs `reclaim_kept` and issues a DELETE anyway passes a log-only test
@@ -790,6 +981,15 @@ plausible success would test the opposite of the property that matters.
 **`secret-contract`** — renders both charts and fails if any mounted Secret is
 absent, in the wrong namespace, or missing a key. A wrong namespace and a missing
 key fail *identically and silently* at runtime.
+
+**`values-consumers`** — fails if a `dataPolicy` key declares operator policy
+that **nothing implements**. Helm never warns about a value nobody reads, so
+such a key renders green and silently does nothing. An audit found 14 of that
+block's 26 leaf keys had no reader — four of them printed to the operator by
+`NOTES.txt` after every install as though they were in force. Those 14 are
+listed as tracked debt in `scripts/ci/values-consumers.sh`; the stage fails on
+any *new* one, and also if a listed key gains a reader, so the list cannot
+quietly become a permanent exemption.
 
 ---
 

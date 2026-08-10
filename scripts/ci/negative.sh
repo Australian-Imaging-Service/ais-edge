@@ -70,13 +70,13 @@ ci_heading "guard census"
 # file<TAB>expected fail-call-sites
 expected_census() {
   cat <<'EOF'
-charts/mgmt/templates/_helpers.tpl	15
+charts/mgmt/templates/_helpers.tpl	18
 charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	13
 charts/mgmt/templates/edge-clusters.yaml	10
-charts/mgmt/templates/observability.yaml	9
+charts/mgmt/templates/observability.yaml	10
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2
-charts/edge/templates/_helpers.tpl	13
+charts/edge/templates/_helpers.tpl	15
 EOF
 }
 
@@ -92,7 +92,16 @@ EOF
 #     name, which helm rejects first.
 #
 # Count them here so the census total stays honest.
-UNREACHABLE_GUARDS=1
+#   observability.yaml, "a __DP_*__ sentinel survived substitution"
+#     The Loki rules file is read raw and only __SENTINEL__ tokens are replaced,
+#     so a threshold an operator sets can reach the rule as a literal. This
+#     guard fires only if someone ADDS a sentinel to the rules file without
+#     adding the matching replace — a template edit, not a misconfiguration. No
+#     values file can reach it, because every sentinel in the file today is
+#     already substituted. Without the guard the rule would ship containing a
+#     literal __DP_..._, Loki would reject the whole group at load time, and
+#     every OTHER alert in that file would stop evaluating with it.
+UNREACHABLE_GUARDS=2
 
 # Any template not listed above is expected to contain no guards at all. That
 # half matters as much as the counts: a guard added to a file nobody watches is
