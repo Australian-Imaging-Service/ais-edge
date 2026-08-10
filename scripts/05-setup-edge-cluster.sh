@@ -100,15 +100,19 @@ echo "Kubeconfig: kubeconfig-${CLUSTER_NAME}  (server: https://${K0S_API_HOSTNAM
 if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
     HOSTS_MARKER="# ais-edge phase2 tls hostnames"
     HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
-    # Check for the ENTRY, not the marker. A marker left behind by an
-    # incomplete teardown would otherwise make this skip, and the node then
-    # cannot resolve its own child-cluster API — which surfaces much later as
-    # the worker join timing out.
-    if ! grep -qF "${K0S_API_HOSTNAME}" /etc/hosts; then
-        sudo sed -i "\|${HOSTS_MARKER}|d" /etc/hosts 2>/dev/null || true
-        echo "Adding Phase 2 hostnames to management /etc/hosts (sudo)..."
-        echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
-    fi
+    # ALWAYS REWRITE. Two earlier guards were both wrong in the same way:
+    # keying on the marker made a stale block permanent, and keying on
+    # K0S_API_HOSTNAME being present only checked ONE of the three names — so
+    # when the konnectivity prefix changed (konnect- -> konnectivity-, to match
+    # what the chart actually serves) the API name still matched, this skipped,
+    # and the line kept a konnectivity host that resolves to nothing.
+    #
+    # The old delete was also half a delete: `sed \|MARKER|d` removes the
+    # comment but NOT the entry line under it, so a re-run orphaned the old
+    # addresses and appended a second pair. `,+1d` takes both.
+    echo "Pinning Phase 2 hostnames in management /etc/hosts (sudo)..."
+    sudo sed -i "\|^${HOSTS_MARKER}\$|,+1d" /etc/hosts 2>/dev/null || true
+    printf '%s\n%s\n' "${HOSTS_MARKER}" "${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
 else
     echo "Cloud topology — skipping management /etc/hosts edit. Mgmt VM resolves"
     echo "  SNI hostnames via the real public DNS that points at the LB VIP."

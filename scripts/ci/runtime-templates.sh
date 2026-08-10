@@ -197,4 +197,47 @@ PY
   )" && ci_pass "$loc_out" || ci_fail "dataPolicy locations: $loc_out"
 fi
 
+# -----------------------------------------------------------------------------
+# install.sh's generated edge hostnames must match the chart's
+# -----------------------------------------------------------------------------
+# The chart renders the Ingress and the certificate SANs for each hosted control
+# plane; install.sh writes the /etc/hosts entries that let the edge RESOLVE
+# those names. They derive the same hostname independently, from two different
+# defaults, and nothing joined them up: the chart used konnectivityPrefix
+# `konnectivity`, install.sh hardcoded `konnect-`. /etc/hosts then pointed at a
+# name nothing served and the worker join failed with "no such host" from public
+# DNS — which reads as a site DNS problem, not a repo one.
+# 2>&1: SystemExit writes its message to STDERR, and a bare $( ) captures only
+# stdout — so the failure arrived as "edge hostnames: " with nothing after it.
+host_out="$(python3 - "$HERE/../.." 2>&1 <<'PY'
+import re, sys, pathlib
+# The repo root arrives as argv[1]: this block is fed to python on STDIN, so
+# __file__ is "<stdin>" and any path derived from it is wrong.
+root = pathlib.Path(sys.argv[1]).resolve()
+chart = (root / "charts/mgmt/values.yaml").read_text()
+inst  = (root / "install.sh").read_text()
+
+def chart_prefix(key):
+    m = re.search(r"^\s*%s:\s*(\S+)" % key, chart, re.M)
+    return m.group(1).strip('"\'') if m else None
+
+def install_prefix(var):
+    # export VAR="${OVERRIDE:-<prefix>-${EDGE_NAME}.${INTERNAL_DOMAIN}}"
+    m = re.search(r'export %s="\$\{[A-Z_]+:-([a-z0-9-]+?)-\$\{EDGE_NAME\}' % var, inst)
+    return m.group(1) if m else None
+
+pairs = [("apiPrefix", "K0S_API_HOSTNAME"), ("konnectivityPrefix", "KONNECTIVITY_HOSTNAME")]
+bad = []
+for ckey, ivar in pairs:
+    c, i = chart_prefix(ckey), install_prefix(ivar)
+    if c is None: bad.append("charts/mgmt/values.yaml has no %s" % ckey)
+    elif i is None: bad.append("install.sh: could not read the %s fallback" % ivar)
+    elif c != i: bad.append("%s=%r but install.sh generates %r-<edge>" % (ckey, c, i))
+
+if bad:
+    raise SystemExit("; ".join(bad) + ". The edge would resolve a hostname the chart never serves.")
+print("%d edge hostname prefix(es) agree between chart and install.sh" % len(pairs))
+PY
+)" && ci_pass "$host_out" || ci_fail "edge hostnames: $host_out"
+
 ci_summary "runtime-templates"

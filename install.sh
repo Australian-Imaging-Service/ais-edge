@@ -195,8 +195,19 @@ echo "============================================"
 # placeholder can be caught before it becomes a live credential.
 if [ -f "$SECRETS" ]; then
     grep -q '^sops:' "$SECRETS" || die "sites/${SITE}/secrets.enc.yaml is NOT encrypted. Run: scripts/site-secrets.sh encrypt ${SITE}"
-    if grep -q 'REPLACE_' "$SECRETS"; then
-        die "sites/${SITE}/secrets.enc.yaml still contains REPLACE_ placeholders."
+    # The line above already established the file is ENCRYPTED, so every value
+    # in it is ciphertext and a `grep REPLACE_` over the file can only ever
+    # match the templates' own COMMENTS — which every correctly-filled site
+    # still carries, including one that reads "fill in every REPLACE_". So this
+    # refused to install a complete, correct site, and no amount of filling
+    # placeholders in could satisfy it. Decrypt to a pipe (never to disk) and
+    # check the VALUES, which is what the check was always meant to mean.
+    if command -v sops >/dev/null 2>&1; then
+        UNFILLED="$(sops --config "${SCRIPT_DIR}/.sops.yaml" -d "$SECRETS" 2>/dev/null \
+                    | grep -nE '^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*REPLACE_' || true)"
+        [ -n "$UNFILLED" ] && die "sites/${SITE}/secrets.enc.yaml still has unfilled placeholder VALUES:
+${UNFILLED}
+       Fix with: scripts/site-secrets.sh edit ${SITE}"
     fi
 else
     info "WARNING: no sites/${SITE}/secrets.enc.yaml — the charts reference Secrets by name and will not start without them"
@@ -359,6 +370,30 @@ if step "4/7  helm: management chart (SeaweedFS, uploader, observability, CA, in
 fi
 
 # =============================================================================
+# Management-node /etc/hosts: the operator-facing hostnames
+# =============================================================================
+# Grafana and Loki are published by Ingress under hostnames.grafana /
+# hostnames.loki, and ingress-nginx runs with hostNetwork on :80/:443 — so the
+# only thing standing between an operator and https://<grafana host>/ is a name
+# that resolves. install.sh already derives, exports and validates both names,
+# but nothing ever wrote them anywhere: scripts/05 writes only the phase-2 TLS
+# names it needs for the child API. The result was a healthy Grafana that no
+# browser on the management node could reach, and the ONLY evidence left of the
+# writer that used to do this is scripts/uninstall.sh, which still cleans up an
+# "# ais-edge observability hostnames" marker nothing creates any more.
+#
+# REWRITTEN, not skipped-if-present, for the same reason as the edge block: a
+# marker-keyed guard makes a stale or truncated entry permanent, and these names
+# change whenever hostnames.* does.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    OBS_MARKER="# ais-edge observability hostnames"
+    OBS_LINE="${MGMT_NODE_IP} ${GRAFANA_HOSTNAME} ${LOKI_HOSTNAME}"
+    info "management /etc/hosts: ${GRAFANA_HOSTNAME}, ${LOKI_HOSTNAME} -> ${MGMT_NODE_IP}"
+    sudo sed -i "\|^${OBS_MARKER}\$|,+1d" /etc/hosts 2>/dev/null || true
+    printf '%s\n%s\n' "$OBS_MARKER" "$OBS_LINE" | sudo tee -a /etc/hosts >/dev/null
+fi
+
+# =============================================================================
 # 5-7. Per edge
 # =============================================================================
 for i in $(seq 0 $((EDGE_COUNT - 1))); do
@@ -392,8 +427,16 @@ PY
     export NODE_IP="$EDGE_NODE_IP"
     export SSH_USER="$EDGE_SSH_USER"
     export SSH_KEY="$EDGE_SSH_KEY"
+    # THESE FALLBACKS MUST MATCH charts/mgmt/values.yaml k0smotron.hostnames.*
+    # exactly. The chart is the authority: it renders the Ingress and the
+    # certificate SANs. This script only writes the /etc/hosts entries that let
+    # the edge RESOLVE those names. When they disagreed — the chart generating
+    # `konnectivity-<edge>` while this generated `konnect-<edge>` — /etc/hosts
+    # pointed at a name nothing served, and the worker failed to join with
+    # "no such host" against public DNS, which reads as a site DNS fault.
+    # scripts/ci/runtime-templates.sh asserts the two stay equal.
     export K0S_API_HOSTNAME="${EDGE_API_HOST:-k0s-${EDGE_NAME}.${INTERNAL_DOMAIN}}"
-    export KONNECTIVITY_HOSTNAME="${EDGE_KONN_HOST:-konnect-${EDGE_NAME}.${INTERNAL_DOMAIN}}"
+    export KONNECTIVITY_HOSTNAME="${EDGE_KONN_HOST:-konnectivity-${EDGE_NAME}.${INTERNAL_DOMAIN}}"
     # The Cluster object belongs to charts/mgmt now; 05 must not re-apply it.
     export CLUSTER_CR_MANAGED_BY_HELM=1
 

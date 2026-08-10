@@ -278,7 +278,11 @@ for p in /var/lib/k0s /etc/k0s /data /var/lib/local-path-provisioner /opt/local-
     printf '  %-34s %s\n' "$p" "$(sudo test -e "$p" && echo 'STILL PRESENT' || echo 'gone')"
 done
 printf '  %-34s %s\n' "$HOME/.kube/config" "$([ -f "$HOME/.kube/config" ] && echo 'STILL PRESENT' || echo 'gone')"
-printf '  %-34s %s\n' "/etc/hosts aisedge entries" "$(grep -c 'aisedge' /etc/hosts 2>/dev/null || echo 0)"
+# grep -c PRINTS 0 and ALSO exits 1 when it matches nothing, so `|| echo 0`
+# fires on top of the 0 grep already wrote — the report showed two zeros on
+# separate lines. Take grep's own count; only substitute if the file is absent.
+hosts_marker_count=$(grep -c 'aisedge' /etc/hosts 2>/dev/null) || true
+printf '  %-34s %s\n' "/etc/hosts aisedge entries" "${hosts_marker_count:-0}"
 printf '  %-34s %s\n' "kubeconfig-* / join-token-*" "$(ls "${SCRIPT_DIR}"/kubeconfig-* "${SCRIPT_DIR}"/join-token-* 2>/dev/null | wc -l)"
 echo
 echo "  KEPT (deliberately):"

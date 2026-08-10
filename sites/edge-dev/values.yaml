@@ -1,42 +1,88 @@
 # =============================================================================
-# edge-dev — what is LOCAL to this edge
+# EXAMPLE EDGE SITE — what is LOCAL to one edge
 # =============================================================================
-# The management site file (sites/stream-2-ab-dev/values.yaml) is passed to
-# this release too, and supplies everything shared: the domain, the published
-# hostnames, the management node IP, the bucket prefix. So the S3 endpoint,
-# the staging bucket, the Loki endpoint and the hostAliases are DERIVED and
-# are deliberately absent below — each one used to be typed here a second time,
-# and every mismatch in that group failed silently.
+# This is the config for ONE edge node: the machine inside a facility that runs
+# Orthanc, the de-identification hook, the grouper and assigner, the S3
+# uploader, Vector and (optionally) Samba.
+#
+# There is one of these PER EDGE. Copy it once per site:
+#
+#   scripts/site-secrets.sh new <edge-name> edge   # copies this directory
+#   $EDITOR sites/<edge-name>/values.yaml          # <- everything below
+#   $EDITOR sites/<edge-name>/secrets.enc.yaml     # still plaintext
+#   scripts/site-secrets.sh encrypt <edge-name>
+#
+# ...and add a matching entry to `edges:` in the MANAGEMENT site file, then
+# re-run install.sh.
+#
+# HOW HELM SEES THIS FILE. install.sh gives the edge chart TWO values files:
 #
 #   helm upgrade --install edge charts/edge -n xnat-ingest \
-#       -f sites/stream-2-ab-dev/values.yaml \
-#       -f sites/edge-dev/values.yaml
+#       -f sites/<management-site>/values.yaml \    <- shared facts, first
+#       -f sites/<edge-name>/values.yaml            <- this file, last (wins)
 #
-# What remains is genuinely this site's own: which AE titles map to which XNAT
-# project, the de-identification profile, and where data lives on this node.
+# Because the management file comes first, everything shared is already set by
+# the time this file is read: the internal domain, the published hostnames, the
+# management node's IP, the bucket prefix, the data policy. The S3 endpoint, the
+# staging bucket, the Loki endpoint and the hostAliases are DERIVED from those
+# and are deliberately absent below.
+#
+# Every one of those used to be typed here a second time, and every mismatch in
+# that group failed silently — the pod started, pointed at a hostname or bucket
+# that did not exist, and retried forever. Do not add them back.
+#
+# You never edit charts/edge/values.yaml. That file holds the defaults and the
+# reasoning for them; this file holds only what is true of THIS site.
 # =============================================================================
+
+# This edge's own short name. Becomes the `cluster` label on its logs and
+# metrics, and is the commonName of the client certificate it authenticates to
+# the Loki push endpoint with — so it must match the `edges[].name` entry in
+# the management values file, which is what that certificate is issued from and
+# what the push Ingress pins the CN to.
 clusterLabel: edge-dev
+
 namespace: xnat-ingest
+
+# onprem  hostPath storage on this node, no cloud load balancer.
+# cloud   parked, not ported to the charts yet.
 topology: onprem
+
 storage:
   storageClass:
     create: true
     name: hostpath-pipeline
+  # Working space for the pipeline: received, grouped, assigned.
   pipeline:
     hostPath: /data/xnat-ingest
     capacity: 500Gi
+  # THE ARCHIVE OF RECORD. Originals land here before anything else touches
+  # them, and before de-identification. dataPolicy.originals.facilityBackup in
+  # the management file governs how long they stay.
   facilityBackup:
     enabled: true
     hostPath: /data/facility-backup
     capacity: 500Gi
+
 orthanc:
+  # The AE title THIS Orthanc answers to. Modalities are configured to send here.
   aet: AISEDGE
   auth:
+    # true requires the orthanc-credentials Secret. Leave false only where the
+    # DICOM network is already isolated.
     enabled: false
   deid:
     enabled: true
+    # No safe default: this asserts that a human has READ the profile below and
+    # accepts what it does and does not remove. The chart refuses to render
+    # while it is false and deid is enabled.
     policyReviewed: true
     existingSaltSecret: orthanc-deid-salt
+
+    # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
+    # This is the most site-specific thing in the whole deployment and the main
+    # reason each edge has its own file. A study whose calling AE is not listed
+    # here is QUARANTINED, not dropped — map the AET and re-send it.
     aetMap:
       AISEDGE:
         project: test_project
@@ -48,19 +94,27 @@ orthanc:
         project: test_project
       UNKNOWN:
         project: test_project
+
+    # The de-identification profile applied to every incoming study.
     profile:
       DeidMode: modify
       Force: true
       RemovePrivateTags: false
+      # UIDs are RETAINED so a study stays internally consistent across series;
+      # the identity fields are replaced below instead.
       Keep:
-      - StudyInstanceUID
-      - SeriesInstanceUID
-      - SOPInstanceUID
-      - FrameOfReferenceUID
+        - StudyInstanceUID
+        - SeriesInstanceUID
+        - SOPInstanceUID
+        - FrameOfReferenceUID
       Replace:
         PatientIdentityRemoved: 'YES'
         DeidentificationMethod: AIS-Edge research-default v1; Retain UIDs Option
         PatientName: ANONYMOUS
+        # ${SubjectHash} and ${SessionHash} are HMACs keyed by the salt in the
+        # orthanc-deid-salt Secret. Rotating that salt gives the same patient a
+        # different pseudonym, so they appear in XNAT as two subjects — see the
+        # warning on that Secret before you touch it.
         PatientID: ${ProjectCode}-${SubjectHash}
         PatientBirthDate: ${BirthYearOnly}0101
         AccessionNumber: ${SessionHash}
@@ -78,47 +132,59 @@ orthanc:
         PatientTelephoneNumbers: ''
         PatientComments: ''
         StudyDescription: ''
+
 ingest:
+  # Pulls studies Orthanc has labelled as ready, and clears the label after.
   orthancGroup:
     enabled: true
     interval: 60
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-ingest-processed
+  # Builds an XNAT session out of a grouped study.
   assign:
     interval: 60
+
 upload:
+  # s3      this edge pushes to the central staging bucket and the MANAGEMENT
+  #         uploader moves it into XNAT. The edge holds no XNAT credential and
+  #         never contacts XNAT. One XNAT account for the whole fleet.
+  # direct  this edge talks to XNAT itself (single-site tier-1 only). Needs an
+  #         xnat-credentials Secret here.
   mode: s3
   s3:
+    # endpoint and bucket are DERIVED from the management file's domain,
+    # hostnames and bucketPrefix. Do not set them here.
     existingSecret: s3-edge-credentials
+    # An https endpoint with NO CA bundle is refused: an empty AWS_CA_BUNDLE
+    # disables TLS verification entirely rather than falling back to the system
+    # trust store. cert-sync populates this Secret.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
     interval: 60
+
 observability:
   enabled: true
   loki:
-    # Both Secrets are written into this namespace by the management side's
-    # cert-sync CronJob; neither is created here. clientCertSecret is this
-    # site's mTLS identity for the Loki push endpoint and must match the
-    # certSync destination in sites/stream-2-ab-dev/values.yaml.
+    # Both Secrets are written by the management side's cert-sync CronJob; you
+    # do not create them here.
+    #
+    # clientCertSecret is this site's mTLS identity for the Loki push endpoint
+    # — a cert-manager certificate whose CN is this edge's name. It must match
+    # the certSync destination name in the MANAGEMENT site values.
     clientCertSecret: loki-push-client-tls
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
-# dataPolicy is DELIBERATELY ABSENT. It is set once, in the management site file
-# (sites/stream-2-ab-dev/values.yaml), which install.sh passes to this release
-# BEFORE this file — so the whole policy is inherited and the retention rules
-# cannot say one thing on the management node and another here.
+
+# dataPolicy is DELIBERATELY ABSENT — it is set ONCE in the management site
+# file, which is passed to this release first, so the whole fleet's retention
+# rules are inherited and cannot say one thing on the management node and
+# another here.
 #
-# It used to be repeated below as `enabled: false / dryRun: true`, duplicating
-# the site file exactly. That was not a second setting doing useful work: the
-# management chart only ever reads the site file, while this chart reads both
-# with this file winning, so the same name silently meant two independent
-# knobs. Turning the policy on in the site file alone would have started the
-# management reclaimer freeing staged S3 objects while this edge kept
-# everything — a half-enabled policy, with nothing to indicate it.
+# Setting it here would silently override the shared policy FOR THIS EDGE ONLY.
+# Because the management chart never reads this file, the two would then be
+# independent knobs wearing one name: enable the policy centrally and the
+# management reclaimer starts freeing staged S3 objects while this edge keeps
+# everything.
 #
-# Removing it changes no rendered output (verified: the release renders
-# byte-identical with and without it).
-#
-# A site that genuinely needs a DIFFERENT policy from the rest of the fleet can
-# still set dataPolicy here; because this file is passed last it overrides the
-# shared value. Do that only when the difference is intended, and say why.
+# If one site genuinely needs a different policy from the rest of the fleet,
+# set dataPolicy here deliberately and write down why.

@@ -48,13 +48,26 @@ ssh ${SSH_KEY_OPT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${E
 # dev, a registered domain for prod). The hostAliases block in pod manifests
 # is similarly stripped by render_with_topology.
 if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
+    # An empty component here silently produces a malformed /etc/hosts entry,
+    # and the only symptom is the worker resolving the API hostname through
+    # public DNS. Refuse instead.
+    for _v in MGMT_NODE_IP SEAWEEDFS_HOSTNAME K0S_API_HOSTNAME KONNECTIVITY_HOSTNAME; do
+        [ -n "${!_v:-}" ] || { echo "ERROR: ${_v} is empty — refusing to write /etc/hosts on the edge"; exit 1; }
+    done
     HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
     HOSTS_MARKER="# ais-edge phase2 tls hostnames"
     echo "Ensuring /etc/hosts on edge has the TLS hostnames..."
+    # REWRITE, don't skip-if-present. The guard used to be `grep -q MARKER ||
+    # append`, which keys on the marker COMMENT rather than on the content
+    # beneath it. Any edge whose block was truncated, or written before a
+    # hostname changed, was then permanently unrepairable: every later run saw
+    # the marker, short-circuited, and left the wrong entry in place. Deleting
+    # the marker and the line after it before appending makes this converge on
+    # the correct value from any starting state, including a half-written one.
     ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
-        "grep -qF '${HOSTS_MARKER}' /etc/hosts || \
-         echo -e '${HOSTS_MARKER}\n${HOSTS_LINE}' | sudo tee -a /etc/hosts >/dev/null"
-    ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "grep -A1 '${HOSTS_MARKER}' /etc/hosts | tail -2"
+        "sudo sed -i '\\#^${HOSTS_MARKER}\$#,+1d' /etc/hosts && \
+         printf '%s\n%s\n' '${HOSTS_MARKER}' '${HOSTS_LINE}' | sudo tee -a /etc/hosts >/dev/null"
+    ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "grep -A1 -F '${HOSTS_MARKER}' /etc/hosts | tail -2"
 else
     echo "Cloud topology — skipping /etc/hosts edit. Edge resolves SNI hostnames"
     echo "  (${SEAWEEDFS_HOSTNAME} / ${K0S_API_HOSTNAME} / ${KONNECTIVITY_HOSTNAME})"
@@ -147,19 +160,63 @@ scp ${SSH_KEY_OPT} "${REPO_DIR}/join-token-${CLUSTER_NAME}" "${EDGE_SSH}:/tmp/jo
 KUBELET_EXTRA_ARGS="--container-log-max-size=${KUBELET_LOG_MAX_SIZE:-10Mi} --container-log-max-files=${KUBELET_LOG_MAX_FILES:-5}"
 echo "  kubelet log rotation: ${KUBELET_EXTRA_ARGS}"
 
-ssh ${SSH_KEY_OPT} "${EDGE_SSH}" KUBELET_EXTRA_ARGS="${KUBELET_EXTRA_ARGS}" bash -s <<'WORKER_SCRIPT'
+# ssh does NOT take an argv the way a local command does: it joins everything
+# after the host into ONE string and hands it to the remote shell, which then
+# re-splits it on whitespace. So `ssh host VAR="a b" bash -s` reaches the remote
+# as `VAR=a b bash -s` — the assignment takes only `a`, and `b` becomes the
+# command. That is exactly what happened here:
+#
+#   bash: line 1: --container-log-max-files=5: command not found
+#
+# `bash -s` therefore never ran, the heredoc was consumed by nothing, and the
+# worker was never installed. install.sh's `set -e` did abort the run, so this
+# was loud rather than silent — but the message names only the stray argument,
+# which reads like a k0s flag problem rather than a quoting one.
+# printf %q quotes the value so the REMOTE shell sees it as a single word.
+# IS THE NODE ACTUALLY JOINED? Ask the child cluster, not the edge's systemd.
+#
+# Step 05 mints a FRESH join token on every run. A worker still holding an older
+# one — or a kubelet still holding a client certificate signed by a control
+# plane that has since been rebuilt — reaches the API and is refused:
+#
+#   "the server has asked for the client to provide credentials"
+#
+# Its systemd unit is nonetheless `active`, so a guard keyed on
+# `systemctl is-active` skipped the join, left the stale credential in place,
+# and did so again on every subsequent run. The node could never be repaired by
+# re-running the installer, which is the one thing an operator will try.
+NODE_JOINED=false
+if KUBECONFIG="$EDGE_KC" kubectl get nodes --no-headers 2>/dev/null | grep -q ' Ready'; then
+    NODE_JOINED=true
+fi
+echo "  already joined and Ready: ${NODE_JOINED}"
+
+ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
+    "KUBELET_EXTRA_ARGS=$(printf '%q' "${KUBELET_EXTRA_ARGS}") NODE_JOINED=$(printf '%q' "${NODE_JOINED}") bash -s" <<'WORKER_SCRIPT'
 set -euo pipefail
 command -v k0s &>/dev/null || { curl -sSLf https://get.k0s.sh | sudo sh; }
 echo "k0s: $(k0s version)"
-if ! sudo systemctl is-active k0sworker &>/dev/null; then
+if [ "${NODE_JOINED}" != "true" ]; then
     sudo mkdir -p /etc/k0s
     sudo cp /tmp/join-token /etc/k0s/join-token
     sudo chmod 600 /etc/k0s/join-token
     rm -f /tmp/join-token
+    # Clear prior worker state before re-joining. The kubelet caches its client
+    # certificate under /var/lib/k0s/kubelet/pki and PREFERS it to the join
+    # token, so re-installing alone would keep presenting the rejected identity.
+    # Only reached when the node is NOT joined, so there is nothing to lose.
+    if sudo systemctl is-active k0sworker &>/dev/null; then
+        echo "  worker active but not joined — resetting before re-join"
+        sudo k0s stop 2>/dev/null || true
+        sudo k0s reset 2>/dev/null || true
+    fi
     sudo k0s install worker --force --token-file /etc/k0s/join-token \
         --kubelet-extra-args="${KUBELET_EXTRA_ARGS}"
     sudo systemctl reset-failed k0sworker 2>/dev/null || true
     sudo k0s start
+else
+    echo "  node already joined and Ready — leaving the worker alone"
+    rm -f /tmp/join-token
 fi
 RETRIES=18
 for i in $(seq 1 $RETRIES); do

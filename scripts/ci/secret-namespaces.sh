@@ -133,6 +133,7 @@ ALLOWED = {
     edge_example: ({'xnat-ingest'}, 'edge'),
 }
 
+by_name = {}      # name -> {ns: {k: v}}   for the cross-namespace match check
 for path, (allowed_ns, role) in ALLOWED.items():
     for d in load(path):
         if d.get('kind') != 'Secret':
@@ -141,8 +142,23 @@ for path, (allowed_ns, role) in ALLOWED.items():
         ns = md.get('namespace')
         keys = set((d.get('stringData') or {}).keys()) | set((d.get('data') or {}).keys())
         supplied.setdefault((ns, md['name']), set()).update(keys)
+        by_name.setdefault(md['name'], {})[ns] = dict(d.get('stringData') or {})
         if ns not in allowed_ns:
             misplaced.append((role, ns, md['name'], sorted(allowed_ns)))
+
+# A credential that must exist in TWO namespaces is two objects holding one
+# value, so it can drift. seaweedfs-upload is the live case: SeaweedFS reads
+# the ais-mgmt copy to decide which keys are authorised, the uploader presents
+# the xnat-upload copy. Drift authorises one key and presents another, and the
+# only symptom is S3 403 on every upload. Compare them here, where they are
+# still adjacent and readable.
+drifted = []
+for name, per_ns in by_name.items():
+    if len(per_ns) < 2:
+        continue
+    values = list(per_ns.values())
+    if any(v != values[0] for v in values[1:]):
+        drifted.append((name, sorted(per_ns)))
 
 required = {}     # (ns, name) -> {keys}   (None key = mounted whole)
 created   = set() # (ns, name) the chart or a known controller produces
@@ -168,6 +184,17 @@ for path in rendered:
                 sn = o.get('secretName')
                 if isinstance(sn, str):
                     required.setdefault((ns, sn), set()).add(None)
+                # PROJECTED VOLUME SOURCES name the Secret as `secret.name`, not
+                # `secretName`. Missing this hid a whole class of failure: the
+                # SeaweedFS pod projects seaweedfs-admin, seaweedfs-upload,
+                # loki-s3-credentials and every <edge>-s3 into one directory to
+                # build its s3.json identity list, and the shipped template put
+                # seaweedfs-upload in xnat-upload only. This check passed, and a
+                # from-scratch install then stalled at step 4 with the SeaweedFS
+                # pod in Init:0/1 and every other component healthy.
+                sec = o.get('secret')
+                if isinstance(sec, dict) and isinstance(sec.get('name'), str):
+                    required.setdefault((ns, sec['name']), set()).add(None)
                 for v in o.values():
                     walk(v)
             elif isinstance(o, list):
@@ -231,6 +258,11 @@ for role, ns, name, allowed in misplaced:
     problems.append(('MISPLACED', ns, name,
                      f"declared in the {role} template, which may only create Secrets in {allowed}"))
 
+for name, namespaces in drifted:
+    problems.append(('DRIFT', '/'.join(namespaces), name,
+                     "the same Secret carries DIFFERENT values in each namespace; "
+                     "they are one credential and must match"))
+
 for kind, ns, name, msg in problems:
     print(f"{kind}\t{ns}/{name}\t{msg}")
 print(f"__SUMMARY__\t{len(required)}\t{len(problems)}")
@@ -242,6 +274,7 @@ while IFS=$'\t' read -r kind target msg; do
         NAMESPACE)   bad "$target — $msg" ;;
         KEYS)        bad "$target — $msg" ;;
         ABSENT)      bad "$target — $msg" ;;
+        DRIFT)       bad "$target — $msg" ;;
         MISPLACED)   bad "$target — $msg" ;;
         # A problem kind this loop does not know about must not vanish. Adding
         # MISPLACED above without this arm produced "0 passed, 0 failed" and
