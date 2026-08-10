@@ -121,8 +121,22 @@ state that produces the bogus successes.
 level (only the filer can delete a directory entry), then restart the uploader:
 
 ```bash
-bash scripts/clear-staged-s3.sh          # SAFE: removes ONLY empty prefixes
+bash scripts/clear-staged-s3.sh <site>            # SAFE: removes ONLY empty prefixes
+bash scripts/clear-staged-s3.sh <site> <edge>     # a fleet: name the edge
 ```
+
+`<site>` is the directory under `sites/` that `install.sh` takes. The script
+reads it to find the edge, its bucket (`ingest-<edge>` when `perSiteBuckets` is
+on), and then discovers the filer and both uploaders **by label**
+(`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
+rather than by hardcoded name.
+
+> It used to take no arguments and address `seaweedfs/seaweedfs`,
+> `xnat-ingest-upload` and a fleet-wide `ingest-bucket` — all pre-consolidation
+> names — while counting objects with `mc`, which the current uploader image
+> does not contain. Every call was `|| true` or `2>/dev/null`, so it printed its
+> normal output, reported "removed 0 empty prefixes" and changed nothing. If you
+> ran it before and the alerts continued, that is why: re-run it now.
 
 > **Production safety.** The default mode deletes **only 0-byte prefixes** and
 > deliberately **keeps any session that still contains objects** — a staged
@@ -130,9 +144,16 @@ bash scripts/clear-staged-s3.sh          # SAFE: removes ONLY empty prefixes
 > and deleting it would lose undelivered data. The script prints which
 > sessions it kept and why.
 >
-> `scripts/clear-staged-s3.sh --all` wipes the whole staging prefix including
-> undelivered sessions. It prompts for confirmation and is intended for
-> resetting demo/test environments only — never point it at production.
+> `scripts/clear-staged-s3.sh <site> [edge] --all` wipes the whole staging
+> prefix including undelivered sessions. It prompts for confirmation and is
+> intended for resetting demo/test environments only — never point it at
+> production.
+>
+> **A failed listing is no longer read as an empty bucket.** `aws s3 ls` exits 1
+> with no output for an empty prefix but 255 with an error for a broken call,
+> and `kubectl exec` adds a line of its own on any non-zero exit — so the three
+> cases are told apart explicitly. If the listing cannot be read the script
+> aborts rather than reporting "nothing to do".
 
 **Verify it is quiet:**
 
