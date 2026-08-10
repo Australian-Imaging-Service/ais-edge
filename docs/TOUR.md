@@ -127,7 +127,8 @@ register the domain anywhere.
 edges:
   - name: edge-dev
     nodeIP: "203.0.113.20"
-    sshUser: ubuntu
+    join: ssh              # ssh | bundle — see §4.1
+    sshUser: ubuntu        # join: ssh only
     sshKey: ~/.ssh/id_ed25519
     s3SecretRef: edge-dev-s3
     exposure: sni          # ← use this. No ports to assign.
@@ -602,10 +603,13 @@ management node, then mints a join token and re-points it at the ingress.
 > The token stays in a script rather than the chart because a Helm-rendered token
 > would be **re-minted on every upgrade**.
 
-**6 — join the worker over SSH** (`scripts/06-join-edge-worker.sh`)
+**6 — join the worker** (`scripts/06-join-edge-worker.sh` or `06b-make-bootstrap.sh`)
 Writes `/etc/hosts` on the edge, mints a server certificate for the k0smotron
-haproxy from the child cluster's CA, installs k0s as a worker, and **rewrites the
-child cluster's CoreDNS** so konnectivity can resolve the management hostnames.
+haproxy from the child cluster's CA, and installs k0s as a worker. Then
+`scripts/06c-post-join.sh` waits for the node and **rewrites the child cluster's
+CoreDNS** so konnectivity can resolve the management hostnames.
+
+Which of the two runs is `edges[].join` — see §4.1 below.
 
 **7 — the edge chart, then seed cert-sync** (`charts/edge`)
 Orthanc, the pipeline, the uploader, Vector. Then it runs the cert-sync CronJob
@@ -615,6 +619,90 @@ Orthanc, the pipeline, the uploader, Vector. Then it runs the cert-sync CronJob
 > `loki-push-client-tls` — the s3-uploader mounts the first and Vector mounts the
 > second, so neither pod can start at all. The install would report success and
 > the site would do nothing until the small hours.
+
+### 4.1 Joining an edge you cannot SSH to — `join: bundle`
+
+Step 6 normally **pushes**: the management node SSHes to the edge. A hospital
+behind a whitelisted-IP allowlist, a VPN, or GlobalProtect has no inbound path,
+so that cannot work — and it fails *after* the management cluster is built,
+which is the worst place to discover it.
+
+Set the mode per edge, in the management site's `edges[]` entry:
+
+```yaml
+edges:
+  - name: hospital-a
+    nodeIP: "10.20.30.40"     # still required — the bundle refuses other machines
+    join: bundle              # ssh (default) | bundle
+    # sshUser / sshKey are not used and can be omitted entirely
+```
+
+**Only the one-time bootstrap changes.** Once joined, the two modes are
+identical: the edge dials *out* (konnectivity, and the kubelet to its hosted
+control plane) and nothing ever connects into the site. That is the same
+property that lets cert-sync deliver Secrets inward without inbound access.
+
+> **`bundle` is not `offline`.** A bundle-joined edge still needs **outbound**
+> reachability to the management node on 443, permanently — its control plane
+> lives there. An air-gapped machine cannot be a worker in this architecture at
+> all. The bundle removes the *inbound* requirement, nothing more.
+
+**What the operator does**
+
+```bash
+# on the management node — needs no path to the edge
+./install.sh -y <site>
+   --- 6/7  hospital-a: bootstrap bundle (no ssh to this edge) ---
+     wrote hospital-a-join.sh  (12K)
+     token valid until 2026-08-10 16:22 UTC
+   waiting for hospital-a to appear in its cluster... (29m left)
+
+# carry hospital-a-join.sh over by whatever route exists, then on the edge:
+sudo bash hospital-a-join.sh
+   [1/6] preconditions ....................... ok (root, 3 staged files)
+   [2/6] /etc/hosts .......................... ok (k0s-hospital-a... -> 10.0.0.1)
+   [3/6] reach k0s-hospital-a...:443 ......... ok (HTTP 401)
+   [4/6] current join state .................. ok (not joined — will install)
+   [5/6] haproxy certs ....................... ok (/etc/haproxy/certs)
+   [6/6] k0s worker .......................... ok (installed, kubelet active)
+
+   JOINED — hospital-a is a k0s worker.
+```
+
+The installer on the other side notices the node arrive and carries on to
+step 7 by itself. If it times out, nothing is lost — re-run it once the edge is
+joined and it will pick up where it stopped.
+
+**It is a single plain-text file on purpose.** A tarball needs a binary-safe
+channel; an ASCII file also survives a console paste, a ticket attachment or an
+email body, and in a locked-down site the console is often the only channel
+there is.
+
+**The bundle is a credential.** It carries the join token, which grants cluster
+membership. It defends itself:
+
+| Guard | Why |
+| --- | --- |
+| SHA-256 of its own payload | a truncated console paste is the likeliest failure of this delivery method |
+| refuses a machine without `nodeIP` | stops hospital-a's bundle joining hospital-b in a fleet (override: `--any-host`) |
+| refuses after the token expires | says "ask for a fresh bundle" instead of failing later as a TLS error |
+| shreds the token after use | it belongs in `/etc/k0s/join-token` at 0600, not in `/tmp` |
+
+Tokens are minted with `expiry: 2h` (`joinTokenTTL` on the edge entry). The ssh
+path consumes one in seconds, so the bound costs it nothing; raise it only if a
+bundle genuinely has to travel further, and treat that as a deliberate decision.
+
+**Re-running is safe and is the repair path.** The join converges rather than
+skipping: it rewrites `/etc/hosts` rather than leaving a stale block, and it
+asks the API whether this node's identity is still accepted rather than trusting
+`systemctl is-active`. A worker holding a credential the control plane has
+started refusing is reset and re-joined.
+
+> **Teardown still needs a way in.** `scripts/uninstall.sh` runs `k0s reset` and
+> wipes `/data` on the edge over SSH. For a `join: bundle` site it cannot, so it
+> skips that edge, says so, and prints the commands to run on the edge by hand.
+> A site removed only from the management side leaves patient data on the edge —
+> finish the job there.
 
 ### What can go wrong
 

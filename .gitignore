@@ -54,3 +54,11 @@ docs/BEHAVIOUR-CHANGES.md
 # Run artefacts from scripts/adopt-existing.sh: a record of what one specific
 # live cluster adopted, timestamped per run. Output, not source.
 adoption-records/
+
+# Bootstrap bundles produced by scripts/06b-make-bootstrap.sh for `join: bundle`
+# sites. Each EMBEDS THAT EDGE'S JOIN TOKEN — a bearer credential that grants
+# cluster membership — so one must never be committed. Root-anchored so it
+# cannot swallow scripts/files/edge-join.sh or scripts/06c-post-join.sh, which
+# are source.
+/*-join.sh
+/join-token-*.expires

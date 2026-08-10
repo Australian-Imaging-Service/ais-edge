@@ -408,6 +408,10 @@ emit("EDGE_SSH_USER", e.get("sshUser", ""))
 emit("EDGE_SSH_KEY", e.get("sshKey", ""))
 emit("EDGE_API_HOST", e.get("apiHost", ""))
 emit("EDGE_KONN_HOST", e.get("konnectivityHost", ""))
+# How the worker gets joined. Absent means ssh, so every site file written
+# before this existed keeps its behaviour exactly.
+emit("EDGE_JOIN", e.get("join", "ssh"))
+emit("EDGE_JOIN_TTL", e.get("joinTokenTTL", ""))
 PY
 )"
 
@@ -444,10 +448,41 @@ PY
         bash "${SCRIPT_DIR}/scripts/05-setup-edge-cluster.sh" "$EDGE_NAME"
     fi
 
-    if step "6/7  ${EDGE_NAME}: join the k0s worker over SSH"; then
-        [ -n "$EDGE_NODE_IP" ] || die "edges[].nodeIP is required to join ${EDGE_NAME}"
-        [ -n "$EDGE_SSH_USER" ] || die "edges[].sshUser is required to join ${EDGE_NAME}"
-        bash "${SCRIPT_DIR}/scripts/06-join-edge-worker.sh" "$EDGE_NAME"
+    # HOW THE WORKER IS JOINED.
+    #
+    #   ssh     (default) this node pushes the join to the edge. Needs an
+    #           inbound path from here to the edge on 22.
+    #   bundle  no inbound path exists — a hospital behind a whitelisted-IP
+    #           allowlist, a VPN, or GlobalProtect. Emit a self-contained script
+    #           the operator carries to the edge and runs there, then wait for
+    #           the node to appear.
+    #
+    # Only the BOOTSTRAP differs. Once joined, both are identical: the edge
+    # dials out (konnectivity, kubelet -> hosted control plane) and nothing ever
+    # connects into the site.
+    case "${EDGE_JOIN:-ssh}" in
+        ssh|bundle) ;;
+        *) die "edges[].join for ${EDGE_NAME} is '${EDGE_JOIN}' — must be 'ssh' or 'bundle'" ;;
+    esac
+
+    if [ "${EDGE_JOIN:-ssh}" = "bundle" ]; then
+        if step "6/7  ${EDGE_NAME}: bootstrap bundle (no ssh to this edge)"; then
+            [ -n "$EDGE_NODE_IP" ] || die "edges[].nodeIP is required for ${EDGE_NAME} (the bundle refuses to run on the wrong machine)"
+            JOIN_TOKEN_TTL="${EDGE_JOIN_TTL:-${JOIN_TOKEN_TTL:-2h}}" \
+                bash "${SCRIPT_DIR}/scripts/06b-make-bootstrap.sh" "$EDGE_NAME"
+            # Wait rather than fail: the operator has to physically get the
+            # bundle to the site. Long default, and 06c prints what it is
+            # waiting for so an unattended run does not look hung.
+            WAIT_MINUTES="${BUNDLE_WAIT_MINUTES:-30}" \
+                bash "${SCRIPT_DIR}/scripts/06c-post-join.sh" "$EDGE_NAME"
+        fi
+    else
+        if step "6/7  ${EDGE_NAME}: join the k0s worker over SSH"; then
+            [ -n "$EDGE_NODE_IP" ] || die "edges[].nodeIP is required to join ${EDGE_NAME}"
+            [ -n "$EDGE_SSH_USER" ] || die "edges[].sshUser is required to join ${EDGE_NAME}
+       (or set join: bundle on this edge if there is no ssh path to it)"
+            bash "${SCRIPT_DIR}/scripts/06-join-edge-worker.sh" "$EDGE_NAME"
+        fi
     fi
 
     if step "7/7  ${EDGE_NAME}: helm: edge chart (Orthanc, de-id, pipeline, uploader, Vector)"; then

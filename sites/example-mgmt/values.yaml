@@ -123,11 +123,37 @@ observability:
 # practical ceiling around 15 sites.
 edges:
   - name: edge-dev
+    # Required for BOTH join modes: ssh connects to it, and a bundle refuses to
+    # run on a machine that does not hold this address.
     nodeIP: "10.0.0.2"
-    # install.sh joins the worker over SSH — there is no API server on the edge
-    # until it has — so the connection details belong with the edge.
+
+    # HOW THE WORKER GETS JOINED. Only the one-time bootstrap differs; once
+    # joined, both are identical — the edge dials OUT (konnectivity, and the
+    # kubelet to its hosted control plane) and nothing ever connects into the
+    # site.
+    #
+    # ssh     Default, and what you want when it works. This node pushes the
+    #         join to the edge, so it needs an inbound path to it on port 22.
+    # bundle  For a site this node CANNOT reach inbound — a hospital behind a
+    #         whitelisted-IP allowlist, a VPN, or GlobalProtect. install.sh
+    #         writes <edge>-join.sh instead; you carry it to the edge by
+    #         whatever route you have and run it there, and the installer waits
+    #         for the node to appear. See docs/TOUR.md 4.1.
+    #
+    # NOT "offline": a bundle-joined edge still needs OUTBOUND reachability to
+    # this node on 443, permanently. An air-gapped machine cannot be a worker.
+    join: ssh
+
+    # Only used by join: ssh. Leave them out entirely for join: bundle.
     sshUser: ubuntu
     sshKey: ~/.ssh/id_ed25519
+
+    # How long this edge's join token stays valid. Optional; default 2h.
+    # The token is a BEARER CREDENTIAL — anything holding it can join a node.
+    # ssh consumes it in seconds, so the default costs nothing there. Raise it
+    # only if a bundle has to travel further than that, and treat a long value
+    # as the deliberate decision it is.
+    # joinTokenTTL: 2h
     # Names of Secrets in sites/<this site>/secrets.enc.yaml. The charts never
     # contain credentials; they reference them by name only.
     s3SecretRef: edge-dev-s3

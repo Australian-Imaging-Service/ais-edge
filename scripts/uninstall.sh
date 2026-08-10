@@ -124,6 +124,7 @@ for i in $(seq 0 $((EDGE_COUNT - 1))); do
 import json, shlex, sys
 e = json.loads('''$EDGES_JSON''')[int(sys.argv[1])]
 for k, v in (("EDGE_NAME", e.get("name","")), ("EDGE_NODE_IP", e.get("nodeIP","")),
+             ("EDGE_JOIN", e.get("join","ssh")),
              ("EDGE_SSH_USER", e.get("sshUser","")), ("EDGE_SSH_KEY", e.get("sshKey",""))):
     print(f"{k}={shlex.quote(str(v))}")
 PY
@@ -143,7 +144,29 @@ PY
         kubectl --kubeconfig "$EDGE_KC" delete pv --all --ignore-not-found --wait=false >/dev/null 2>&1 || true
     fi
 
-    if [ "$KEEP_CLUSTER" = false ] && [ -n "$EDGE_NODE_IP" ] && [ -n "$EDGE_SSH_USER" ]; then
+    # A join: bundle site has no inbound path from here, so the remote half of
+    # the teardown cannot run. SAY SO LOUDLY. The old condition simply required
+    # sshUser to be non-empty, which a bundle site legitimately leaves out — so
+    # this skipped in silence, and "full reset" would have reported success with
+    # k0s still running and /data (the facility backup — PATIENT DATA) intact on
+    # the edge. A teardown that quietly does half the job is exactly the failure
+    # this script's own header warns about.
+    if [ "$KEEP_CLUSTER" = false ] && { [ "${EDGE_JOIN:-ssh}" = "bundle" ] || [ -z "$EDGE_SSH_USER" ]; }; then
+        warn "${EDGE_NAME}: no SSH path from here (join: ${EDGE_JOIN:-ssh}) — the EDGE HALF IS NOT DONE."
+        cat >&2 <<MANUAL
+    Run these ON ${EDGE_NAME} (${EDGE_NODE_IP:-its console}) to finish:
+
+        sudo k0s stop
+        sudo k0s reset
+        sudo rm -rf /var/lib/k0s /etc/k0s /data /etc/haproxy/certs /var/lib/vector
+        sudo sed -i '/aisedge\.local/d' /etc/hosts
+        sudo reboot        # clears CNI interfaces and iptables state
+
+    /data is the facility backup — the archive of record. Copy it somewhere
+    else first if this is not a scratch machine.
+
+MANUAL
+    elif [ "$KEEP_CLUSTER" = false ] && [ -n "$EDGE_NODE_IP" ] && [ -n "$EDGE_SSH_USER" ]; then
         SSH_KEY="${EDGE_SSH_KEY/#\~/$HOME}"
         KEY_OPT=""; [ -n "$SSH_KEY" ] && KEY_OPT="-i $SSH_KEY"
         info "${EDGE_NAME}: k0s reset + wipe over SSH"

@@ -240,4 +240,37 @@ print("%d edge hostname prefix(es) agree between chart and install.sh" % len(pai
 PY
 )" && ci_pass "$host_out" || ci_fail "edge hostnames: $host_out"
 
+# -----------------------------------------------------------------------------
+# One join implementation, two delivery paths
+# -----------------------------------------------------------------------------
+# scripts/06 (join: ssh) and scripts/06b (join: bundle) must both deliver
+# scripts/files/edge-join.sh rather than carry their own copy of the join. A
+# second copy drifts, and the symptom would be "joins over ssh but not from a
+# bundle" — discovered at a hospital, by someone who cannot see the management
+# cluster. Assert both reference the shared file and that neither has grown its
+# own `k0s install worker`.
+join_out="$(python3 - "$HERE/../.." 2>&1 <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+shared = root / "scripts/files/edge-join.sh"
+if not shared.is_file():
+    raise SystemExit("scripts/files/edge-join.sh is missing — both join paths depend on it")
+
+problems = []
+for rel in ("scripts/06-join-edge-worker.sh", "scripts/06b-make-bootstrap.sh"):
+    text = (root / rel).read_text()
+    if "files/edge-join.sh" not in text:
+        problems.append("%s no longer delivers scripts/files/edge-join.sh" % rel)
+    if "k0s install worker" in text:
+        problems.append("%s contains its own 'k0s install worker' — the join has been copied" % rel)
+
+if "k0s install worker" not in shared.read_text():
+    problems.append("scripts/files/edge-join.sh no longer installs the worker")
+
+if problems:
+    raise SystemExit("; ".join(problems))
+print("both join paths deliver the one shared edge-join.sh")
+PY
+)" && ci_pass "$join_out" || ci_fail "join paths: $join_out"
+
 ci_summary "runtime-templates"

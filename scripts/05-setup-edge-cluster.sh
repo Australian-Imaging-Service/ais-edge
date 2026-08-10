@@ -122,6 +122,18 @@ fi
 kubectl delete jointokenrequest "${CLUSTER_NAME}-token" -n "${CLUSTER_NAME}" --ignore-not-found 2>/dev/null
 kubectl delete secret "${CLUSTER_NAME}-token" -n "${CLUSTER_NAME}" --ignore-not-found 2>/dev/null
 sleep 2
+# BOUND THE TOKEN'S LIFETIME. This is a bearer credential: whoever holds it can
+# join a node to the cluster. It used to be minted with no expiry at all, which
+# was survivable while it existed only for the few seconds between step 05 and
+# step 06 inside one ssh session — and is not survivable now that `join: bundle`
+# puts it in a file an operator carries to a hospital through email, a jump host
+# or a console paste.
+#
+# 2h is deliberately short: the ssh path consumes it immediately, and install.sh
+# re-mints on every run, so nothing normal is inconvenienced. A bundle that has
+# to travel further than that should say so explicitly — set joinTokenTTL on the
+# edge's entry rather than leaving a long-lived credential as the default.
+JOIN_TOKEN_TTL="${JOIN_TOKEN_TTL:-2h}"
 cat <<EOF | kubectl apply -f -
 apiVersion: k0smotron.io/v1beta1
 kind: JoinTokenRequest
@@ -132,6 +144,7 @@ spec:
   clusterRef:
     name: ${CLUSTER_NAME}
     namespace: ${CLUSTER_NAME}
+  expiry: ${JOIN_TOKEN_TTL}
 EOF
 
 RETRIES=12
@@ -160,7 +173,18 @@ fi
 
 echo "$TOKEN" > "${REPO_DIR}/join-token-${CLUSTER_NAME}"
 chmod 600 "${REPO_DIR}/join-token-${CLUSTER_NAME}"
-echo "Join token saved"
+# Record when it dies, next to it. The token itself is base64(gzip(kubeconfig))
+# and carries no readable expiry, so `join: bundle` would otherwise have no way
+# to tell an operator "this expired an hour ago" instead of letting them watch a
+# join fail with a TLS error at the far end.
+python3 - "$JOIN_TOKEN_TTL" "${REPO_DIR}/join-token-${CLUSTER_NAME}.expires" <<'PY'
+import re, sys, time
+ttl, out = sys.argv[1], sys.argv[2]
+units = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+total = sum(float(v) * units[u] for v, u in re.findall(r"([0-9.]+)(ms|h|m|s)", ttl)) or 7200
+open(out, "w").write("%d\n" % (time.time() + total))
+PY
+echo "Join token saved (valid for ${JOIN_TOKEN_TTL})"
 
 # Note: SeaweedFS S3 identities for edge users are provisioned by step 03
 # (the s3.json ConfigMap is built from edge-nodes.env at install time).

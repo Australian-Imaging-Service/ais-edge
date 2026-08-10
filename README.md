@@ -283,12 +283,27 @@ identity, an uploader and a reclaimer.
 edges:
   - name: edge-dev
     nodeIP: "203.0.113.20"
-    sshUser: ubuntu                 # install.sh joins the worker over SSH
+    join: ssh                       # ssh (default) | bundle — see below
+    sshUser: ubuntu                 # join: ssh only — install.sh pushes the join
     sshKey: ~/.ssh/id_ed25519       #   (no API server on the edge until then)
     s3SecretRef: edge-dev-s3
     exposure: sni                   # sni | nodePort — use sni
+    # joinTokenTTL: 2h              # bearer credential — keep it short
     # apiHost / konnectivityHost default to <prefix>-<name>.<domain>
 ```
+
+**`join: bundle` — for an edge this node cannot reach.** A hospital behind a
+whitelisted-IP allowlist, a VPN or GlobalProtect has no inbound path, so the
+default push-over-SSH join cannot run. With `join: bundle`, `install.sh` writes
+a single self-contained `<edge>-join.sh` instead; you carry it to the site by
+whatever route you have and run `sudo bash <edge>-join.sh` there, and the
+installer waits for the node to appear. `sshUser`/`sshKey` are then unused.
+
+Only the one-time bootstrap differs — once joined, both modes are identical,
+because the edge dials *out* and nothing ever connects into the site. It is
+**not** an offline mode: the edge still needs permanent outbound reachability to
+this node on 443. Full walkthrough, guards and teardown caveat: `docs/TOUR.md`
+§4.1.
 
 **Use `exposure: sni`.** The control plane becomes a ClusterIP Service reached
 through the ssl-passthrough Ingress on :443 — which is already how the worker

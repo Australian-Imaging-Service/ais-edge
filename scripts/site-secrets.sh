@@ -310,10 +310,15 @@ EOF2
 
        - name: ${EDGE}
          nodeIP: "<this edge's IP>"
-         sshUser: ubuntu
+         join: ssh                      # ssh | bundle
+         sshUser: ubuntu                # join: ssh only — drop both for bundle
          sshKey: ~/.ssh/id_ed25519
          s3SecretRef: ${EDGE}-s3
          exposure: sni
+
+     If this management node cannot reach the edge inbound (whitelisted IPs,
+     VPN, GlobalProtect), use 'join: bundle' and omit sshUser/sshKey. The
+     installer then writes ${EDGE}-join.sh for you to carry to the site.
 
   4. $0 encrypt ${EDGE}
      $([ -f "${MGMT_SECRETS}" ] && grep -q '^sops:' "$MGMT_SECRETS" 2>/dev/null || echo "$0 encrypt ${MGMT}")
