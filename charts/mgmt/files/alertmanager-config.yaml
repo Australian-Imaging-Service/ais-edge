@@ -1,0 +1,352 @@
+# =============================================================================
+# Alertmanager configuration  —  email primary, optional Slack secondary
+# =============================================================================
+# LOADED WITH .Files.Get, NEVER INLINED IN A TEMPLATE.
+#
+# Everything below that looks like `{{ .CommonLabels.session }}` or
+# `{{ range .Alerts }}` is an ALERTMANAGER notification template, evaluated by
+# Alertmanager at notification time. Helm's own delimiters are identical. If
+# this file were pasted into templates/observability.yaml, Helm would evaluate
+# those expressions against the CHART's context, find no `.CommonLabels`, and
+# render them as empty strings — every alert email would arrive with a blank
+# subject line and every Slack message with an empty body, with no error
+# anywhere. .Files.Get returns the bytes untouched, which is the whole reason
+# this is a file.
+#
+# For the same reason this file CANNOT be a Helm template, the values the
+# installer used to substitute are written as __SENTINEL__ tokens and replaced
+# with `replace` in templates/observability.yaml. `replace` is a plain string
+# substitution: it cannot see, and cannot eat, the Go templates above.
+#
+# CREDENTIALS ARE NOT SUBSTITUTED. The SMTP password and the Slack webhook are
+# read by Alertmanager FROM FILES at notification time
+# (`smtp_auth_password_file`, `api_url_file`). The prometheus-operator mounts
+# every Secret named in alertmanagerSpec.secrets at
+#   /etc/alertmanager/secrets/<secret-name>/<key>
+# so the credential never passes through Helm, never lands in a rendered
+# manifest, and stays SOPS-encryptable in its own Secret.
+#
+# Routing tree:
+#   alertname=DICOMRejectedUnmappedAET  →  email, firing only
+#   alertname=XNATUploadSuccess         →  email, one per session
+#   severity=info                       →  slack, or email if no Slack (see below)
+#   severity=critical                   →  email + slack, or email if no Slack
+#   everything else                     →  email
+#
+# NO ROUTE MAY POINT AT A RECEIVER THAT CANNOT DELIVER.
+# ----------------------------------------------------
+# Slack is optional (observability.alerting.slackWebhookSecretRef). It used to
+# be optional only in name: the two Slack receivers were defined
+# unconditionally with `api_url_file` pointing at
+# /etc/alertmanager/secrets/slack-not-configured/webhook-url, a Secret nothing
+# ever creates. Alertmanager reads that file at SEND time and treats ENOENT as
+# unrecoverable, so on a site without Slack:
+#
+#   severity=info      routed to slack-only        → nothing was delivered
+#                                                    ANYWHERE. CARotationDue,
+#                                                    CertificateRenewed and
+#                                                    NewEdgeJoined existed only
+#                                                    as an ERROR line in the
+#                                                    alertmanager pod log.
+#   severity=critical  routed to email-and-slack   → the email half still went
+#                                                    (integrations in a receiver
+#                                                    fan out independently), but
+#                                                    every critical alert also
+#                                                    logged a failure and bumped
+#                                                    alertmanager_notifications_
+#                                                    failed_total — poisoning the
+#                                                    one metric you would use to
+#                                                    notice this class of bug.
+#
+# Observed on the live cluster before the fix:
+#   err="slack-only/slack[0]: notify retry canceled due to unrecoverable error
+#        after 1 attempts: open /etc/alertmanager/secrets/slack-not-configured/
+#        webhook-url: no such file or directory"
+#
+# So the Slack receivers now live in files/alertmanager-slack-receivers.yaml and
+# are spliced into the end of the receivers list ONLY when a webhook Secret is
+# configured. The two routes below name their receiver through a sentinel that
+# templates/observability.yaml sets from the SAME condition, so the route names
+# and the receiver definitions cannot drift apart — a route naming a receiver
+# that does not exist is rejected by Alertmanager at config load.
+#
+# WHEN THERE IS NO SLACK, info alerts go to email. That is a deliberate choice
+# over dropping them: "the operator gets a mail a month" is recoverable and
+# "the root CA expiry warning went nowhere" is not. The reason info was split
+# off Slack in the first place — inbox volume — is handled by the SHAPE of the
+# fallback receiver (send_resolved: false) and its route (repeat_interval), not
+# by deleting the alert. See info-email below.
+# =============================================================================
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "__ALERT_SMTP_HOST__:__ALERT_SMTP_PORT__"
+  smtp_from: "__ALERT_EMAIL_FROM__"
+  smtp_auth_username: "__ALERT_SMTP_USERNAME__"
+  # Read at send time from the mounted Secret. Alertmanager has no
+  # `smtp_auth_username_file`, which is why the username above is a plain
+  # value and the password is not.
+  smtp_auth_password_file: "__ALERT_SMTP_PASSWORD_FILE__"
+  smtp_require_tls: __ALERT_SMTP_REQUIRE_TLS__
+
+route:
+  # `session` IS LOAD-BEARING HERE, NOT DECORATION.
+  #
+  # The pipeline alerts carry a `session` label. Grouping only by
+  # (alertname, cluster) puts EVERY session into a single group, and
+  # Alertmanager re-notifies a group whenever its membership changes — so a
+  # steady trickle of per-session alerts produced a fresh email every
+  # group_interval (5m), indefinitely. That is what the duplicate
+  # "XNAT upload completed" mail actually was at the notification layer.
+  #
+  # With `session` in the key, each session is its own group: a new session
+  # notifies once, and an already-notified session stays silent until
+  # repeat_interval. One email per session.
+  #
+  # Alerts without a `session` label (node, certificate, capacity) simply
+  # group under the empty value, which is the pre-existing behaviour.
+  #
+  # THIS IS ONE HALF OF THE FIX. It is necessary and it is not sufficient.
+  #
+  # Grouping only collapses alerts that are firing AT THE SAME TIME. It does
+  # nothing about an alert that RESOLVES and then FIRES AGAIN, because each
+  # re-fire is a new alert instance and Alertmanager is right to notify on it.
+  #
+  # That is what was really happening: XNATUploadSuccess matched a log line the
+  # uploader re-emits every ~62s on its polling loop, against a [1m] range, so
+  # the series went empty between passes and the alert flapped once a minute.
+  # Adding `session` here cut the mail down but a live drop still produced
+  # three. The other half is in files/loki-ruler-rules.yaml, where that rule's
+  # range now comfortably exceeds the uploader's loop period so the series
+  # stays continuous; scripts/ci/promtool.sh keeps it that way.
+  #
+  # Keep both. This grouping means the NEXT chatty rule cannot flood the inbox,
+  # and the range floor means a looping emitter cannot flap in the first place.
+  group_by: ["alertname", "cluster", "session"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: email-primary       # default — every alert hits the inbox
+  routes:
+    # Per-alert override: XNATUploadSuccess is severity=info (so the
+    # default routing tree below would send it to Slack), but operators
+    # want an email confirmation for every successful XNAT push for
+    # audit / peace-of-mind reasons. Putting this matcher first
+    # overrides the `severity=info → slack-only` route below.
+    # Quarantine alerts: send the FIRING mail, but never a "[RESOLVED]" one.
+    # The expression only measures "no new rejections in the last 5 minutes",
+    # which is NOT the same as the problem being fixed — the rejected studies
+    # are still sitting in <FacilityBackupDir>/__unmapped_aet__/<AET>/ until
+    # an operator maps the AET and re-sends them. A "Resolved" mail here
+    # would be false reassurance. (Resolving on "quarantine directory is
+    # empty" would need a component that reports that state; Alertmanager and
+    # the Loki ruler only ever see logs, never the filesystem.)
+    - matchers:
+        - alertname = "DICOMRejectedUnmappedAET"
+      receiver: email-no-resolved
+      continue: false
+    - matchers:
+        - alertname = "XNATUploadSuccess"
+      receiver: email-upload-success
+      # Group by session so each session that lands in XNAT is its own
+      # notification group: a new session emails straight away, while the
+      # same session — which the uploader keeps re-logging every --loop pass
+      # while it remains in the S3 staging prefix — is held off by
+      # repeat_interval instead of emailing every cycle.
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 10s          # land in the inbox promptly after the upload
+      group_interval: 5m
+      # DELIBERATELY LONGER THAN ANY REAL STAGING LIFETIME, because repeating a
+      # SUCCESS notification tells the operator nothing they were not told the
+      # first time.
+      #
+      # This alert fires continuously rather than once: the uploader re-asserts
+      # "Successfully uploaded all files in '<session>'" on every --loop pass
+      # for as long as the session sits in S3 staging, so the alert stays firing
+      # until the reclaimer removes it (or forever, when dataPolicy.enabled is
+      # false and nothing is ever reclaimed). Any repeat_interval short enough
+      # to be a "reminder" is therefore just recurring mail about an upload that
+      # already worked.
+      #
+      # It was 24h, which happened to equal dataPolicy.derived.s3Staged.minAge
+      # (1d). That is a race, not a design: the session becomes eligible for
+      # reclaim at 24h but the reclaimer only runs hourly, so the reminder was
+      # due at roughly the moment the object was being removed and a stray
+      # second mail could land either side of it. Tying this to minAge would
+      # only move the coupling; the fix is not to repeat at all.
+      #
+      # THE FAILURE MODE IS NOT SILENCED BY THIS. "Staged and never confirmed in
+      # XNAT" is owned by SessionStagedNotConfirmedInXNAT in
+      # files/loki-ruler-rules.yaml, which is gated on minAge and exists for
+      # exactly that case. Repetition here would be a worse duplicate of it.
+      #
+      # 720h rather than 30d: Alertmanager's duration parser accepts `d` only in
+      # newer builds, and hours are unambiguous across all of them.
+      repeat_interval: 720h
+      continue: false
+    # slack-only when a webhook Secret is configured, info-email when not.
+    # Substituted by templates/observability.yaml; see the header.
+    - matchers:
+        - severity = "info"
+      receiver: __ALERT_INFO_RECEIVER__
+      # SAME REASONING AS email-upload-success ABOVE, and it applies whichever
+      # receiver won the sentinel: an info alert is either an event that already
+      # happened (CertificateRenewed, NewEdgeJoined) or a slow-moving condition
+      # (CARotationDue), and re-announcing either one tells nobody anything new.
+      #
+      # The inherited 12h is actively harmful here. CARotationDue trips at
+      # T-365d and stays firing until the CA is rotated, so 12h means roughly
+      # 730 notifications about one unchanged fact. That volume — not the
+      # existence of the alert — is what made "send info somewhere else"
+      # attractive, and it is the thing to fix.
+      #
+      # This does NOT suppress genuinely new information: repeat_interval only
+      # holds back re-notification of an UNCHANGED group. A second certificate
+      # renewing changes the group's membership and notifies at group_interval.
+      #
+      # 720h rather than 30d for the same parser-compatibility reason as
+      # email-upload-success.
+      repeat_interval: 720h
+      continue: false
+    # MUST PRECEDE the severity=critical route below: this alert IS critical,
+    # and Alertmanager takes the first matching route.
+    #
+    # Send the firing mail, never a "[RESOLVED]" one — the same reasoning as
+    # DICOMRejectedUnmappedAET above, which this file already applies and this
+    # alert was missed by. Its expression is
+    #   (staged, seen [24h] offset 48h) unless (reclaim_confirmed [72h])
+    # so the series stops existing 72h after the reclaimer last SAW the session,
+    # whether or not the data was ever delivered. Measured: the resolve mail for
+    # test_project.BAD8D5A3B895.6C639DD58C3A went out on 2026-08-09 while the
+    # session was, and remains, absent from XNAT — it had been hand-deleted from
+    # staging. "Resolved" there meant "the window slid", not "the data arrived",
+    # which is the exact opposite of what the operator reads.
+    - matchers:
+        - alertname = "SessionStagedNotConfirmedInXNAT"
+      receiver: email-no-resolved
+      group_by: ["alertname", "cluster", "session"]
+      # Per session, so a second undelivered session is its own mail rather
+      # than being folded into an existing group and held by repeat_interval.
+      repeat_interval: 24h
+      continue: false
+    - matchers:
+        - severity = "critical"
+      receiver: __ALERT_CRITICAL_RECEIVER__
+      continue: false
+    # WARNINGS HAD NO ROUTE OF THEIR OWN, which is why they were the loudest
+    # thing in the inbox. Every warning fell through to the root's 30s/5m/12h
+    # with send_resolved: true, so a self-healing transient cost two mails and
+    # warning volume could not be tuned without also changing critical
+    # behaviour. Measured over one Alertmanager lifetime: ReclaimerRunUnavailable
+    # alone produced 21 of ~30 notifications that way.
+    #
+    # group_wait 2m: the faults these warnings watch are hourly-job and
+    # loop-period shaped, so nothing is gained by mailing within 30s, and a
+    # blip that clears inside two minutes never becomes mail at all.
+    # repeat_interval 24h: a warning that is still true tomorrow is worth
+    # restating once, not twice a day.
+    - matchers:
+        - severity = "warning"
+      receiver: email-primary
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 24h
+      continue: false
+
+receivers:
+  - name: email-primary
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: true
+
+  # Upload-success is an EVENT ("this session landed in XNAT"), not a
+  # condition that clears. send_resolved: false stops the pointless
+  # "[RESOLVED]" follow-up ~5 min later (resolve_timeout) — the operator
+  # only wants the single "upload completed" mail.
+  # Firing-only email. For alerts whose "resolved" state would be misleading
+  # (see the DICOMRejectedUnmappedAET route above).
+  - name: email-no-resolved
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+
+  - name: email-upload-success
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge: XNAT upload completed — {{ .CommonLabels.session }}'
+
+  # THE FALLBACK FOR severity=info ON A SITE WITH NO SLACK.
+  #
+  # Deliberately a separate receiver rather than reusing email-primary, because
+  # the two differ in the one thing that decides whether the fallback is usable:
+  # email-primary sends the "[RESOLVED]" follow-up, and for info alerts that is
+  # pure duplication. CertificateRenewed resolving is not news — the whole alert
+  # WAS the news. Paired with repeat_interval on the route, an info alert costs
+  # the inbox one message per (alertname, cluster).
+  #
+  # It is defined unconditionally, and referenced only when Slack is absent. An
+  # unreferenced EMAIL receiver is inert; that is the difference from the
+  # unreferenced SLACK receivers this replaced, which carried a path that could
+  # not resolve and were one route edit away from silently eating alerts again.
+  - name: info-email
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge [info]: {{ .CommonLabels.alertname }}'
+
+# Slack receivers (email-and-slack, slack-only) splice in at the sentinel on the
+# line below, from files/alertmanager-slack-receivers.yaml, and only when
+# observability.alerting.slackWebhookSecretRef names a Secret. It sits at column
+# 0 so that the fragment's own two-space list indentation lands correctly; the
+# whole config is nindent-ed as one block afterwards.
+#
+# NEVER WRITE A SENTINEL'S EXACT SPELLING IN A COMMENT HERE. `replace` is a
+# blind string substitution over the whole file and has no idea what a YAML
+# comment is: naming this one in prose above produced a SECOND, silently
+# duplicated copy of both Slack receivers inside the header block. Describe
+# tokens, do not quote them.
+#
+# DO NOT ADD A slack_configs BLOCK TO THIS FILE. Everything here renders on
+# every site, Slack or not, and the webhook-path sentinel resolves to the empty
+# string when there is no webhook Secret. Alertmanager rejects
+# `api_url_file: ""` at config load, so the mistake would at least be loud
+# rather than a silently undeliverable receiver — but the place for a Slack
+# receiver is the fragment file, which only exists when there is somewhere to
+# send to.
+__ALERT_SLACK_RECEIVERS__
+
+inhibit_rules:
+  # If the mgmt apiserver is unreachable, suppress the other mgmt-plane
+  # alerts that share its fate — cert-manager and SeaweedFS both run there,
+  # so their alerts are noise (or unreliable) for the same outage.
+  #
+  # CAUTION: matched by ALERTNAME, not by `equal: ["cluster"]` as it read
+  # before. Nothing in this stack sets a `cluster` label on either side of
+  # that comparison — Prometheus rules here never set one statically, and
+  # none of their underlying metrics (KSM, cert-manager, SeaweedFS) carry
+  # one either. Alertmanager treats an absent label as an empty string for
+  # `equal`, so both sides compared "" == "" and the rule likely inhibited
+  # by ACCIDENT rather than by the cluster scoping it was written to express
+  # — fragile, and it would have started doing nothing the day either side
+  # gained a real cluster label.
+  #
+  # The alertname list below is exhaustive on purpose, not a pattern: it is
+  # every current severity=warning|info Prometheus alert, and each is
+  # genuinely mgmt-plane (SeaweedFS and cert-manager both run only on mgmt).
+  # `EdgePodCrashLoop` and `KonnectivityTunnelFlapping` used to also match
+  # `severity =~ "warning|info"` here — deleted from prometheus-rules/
+  # warning.yaml (see docs/TOUR.md §9): mgmt Prometheus has zero series for
+  # either selector, because it cannot scrape edge-cluster namespaces at
+  # all. Naming alerts explicitly, rather than matching by severity, means
+  # this inhibit rule can never accidentally reach into a Loki-sourced
+  # severity=info alert about an EDGE (XNATUploadSuccess, CARotationDue if a
+  # future per-edge cert lands there) just because a regex happened to match.
+  - source_matchers:
+      - alertname = "ManagementClusterDown"
+    target_matchers:
+      - alertname =~ "SeaweedFSDiskFull|CertificateExpiringSoon|CARotationDue|CertificateRenewed"
+
+templates: []

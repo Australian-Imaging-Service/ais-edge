@@ -1,0 +1,215 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: orthanc
+    component: dicom-receiver
+spec:
+  replicas: 1
+  # Recreate, never RollingUpdate: two Orthancs cannot share one SQLite index,
+  # and hostPort 4242 cannot be bound twice on the same node anyway.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: orthanc
+      component: dicom-receiver
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: orthanc
+        component: dicom-receiver
+      annotations:
+        # Roll the pod automatically when the config or the Lua hook changes.
+        # Without this a ConfigMap edit is silently ignored until someone
+        # restarts the pod by hand — which is exactly what bit us before.
+        checksum/config: {{ include (print $.Template.BasePath "/orthanc-config.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      {{- if .Values.serviceAccounts.create }}
+      serviceAccountName: {{ include "edge.fullname" . }}-orthanc
+      {{- end }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      securityContext:
+        {{- toYaml .Values.orthanc.podSecurityContext | nindent 8 }}
+      initContainers:
+        # hostPath PVs ignore fsGroup, so the directories have to be chowned
+        # for the non-root Orthanc user before it starts.
+        #
+        # Recursive on purpose: existing sites have orthanc-storage/ created
+        # root-owned by the old imperative installer, and a non-recursive
+        # chown would leave Orthanc unable to read its own index or write new
+        # instances — it fails at runtime, not at install.
+        - name: init-perms
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /data/orthanc-storage /data/grouped /data/assigned /data/LOGS /data/tmp
+              chown -R {{ .Values.orthanc.podSecurityContext.runAsUser }}:{{ .Values.orthanc.podSecurityContext.runAsGroup }} \
+                /data/orthanc-storage /data/grouped /data/assigned /data/LOGS /data/tmp
+              {{- if .Values.storage.facilityBackup.enabled }}
+              # The hook must be able to write originals here before it will
+              # remove anything from Orthanc. If this is not writable the hook
+              # aborts and KEEPS the instance, which is safe but stalls ingest.
+              mkdir -p /facility-backup
+              chown -R {{ .Values.orthanc.podSecurityContext.runAsUser }}:{{ .Values.orthanc.podSecurityContext.runAsGroup }} /facility-backup
+              {{- end }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- if .Values.storage.facilityBackup.enabled }}
+            - name: facility-backup
+              mountPath: /facility-backup
+            {{- end }}
+      containers:
+        - name: orthanc
+          image: "{{ .Values.orthanc.image.repository }}:{{ .Values.orthanc.image.tag }}"
+          imagePullPolicy: {{ .Values.orthanc.image.pullPolicy }}
+          # A directory, so Orthanc scans it. Only orthanc.json and scripts/
+          # live there — see orthanc-config.yaml for why that matters.
+          args: ["/etc/orthanc"]
+          securityContext:
+            {{- toYaml .Values.orthanc.securityContext | nindent 12 }}
+          ports:
+            - name: dicom
+              containerPort: {{ .Values.orthanc.dicomPort }}
+              {{- if has .Values.orthanc.expose.dicom (list "hostPort" "both") }}
+              # Modalities are configured with a fixed host:port and are
+              # painful to repoint, so bind the real DICOM port on the node.
+              # This pins the pod to one node, which is fine for a single-node
+              # edge and is why the strategy above is Recreate.
+              hostPort: {{ .Values.orthanc.dicomPort }}
+              {{- end }}
+            - name: http
+              containerPort: {{ .Values.orthanc.httpPort }}
+          env:
+            {{- if .Values.orthanc.deid.enabled }}
+            - name: AIS_ROUTING_FILE
+              value: /etc/ais-edge/routing.json
+            - name: AIS_DEID_HMAC_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.deid.existingSaltSecret }}
+                  key: AIS_DEID_HMAC_SALT
+            {{- end }}
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.orthanc.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.orthanc.probes.liveness.periodSeconds }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.orthanc.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.orthanc.probes.readiness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.orthanc.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/orthanc/orthanc.json
+              subPath: orthanc.json
+              readOnly: true
+            - name: scripts
+              mountPath: /etc/orthanc/scripts
+              readOnly: true
+            {{- if .Values.orthanc.deid.enabled }}
+            # Deliberately NOT under /etc/orthanc: Orthanc would read these as
+            # server configuration.
+            - name: routing
+              mountPath: /etc/ais-edge
+              readOnly: true
+            {{- end }}
+            {{- if .Values.orthanc.auth.enabled }}
+            - name: credentials
+              mountPath: /etc/orthanc-credentials
+              readOnly: true
+            {{- end }}
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- if .Values.storage.facilityBackup.enabled }}
+            - name: facility-backup
+              mountPath: /facility-backup
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "edge.fullname" . }}-orthanc-config
+        - name: scripts
+          configMap:
+            name: {{ include "edge.fullname" . }}-orthanc-scripts
+            defaultMode: 0755
+        {{- if .Values.orthanc.deid.enabled }}
+        - name: routing
+          configMap:
+            name: {{ include "edge.fullname" . }}-orthanc-routing
+        {{- end }}
+        {{- if .Values.orthanc.auth.enabled }}
+        - name: credentials
+          secret:
+            secretName: {{ .Values.orthanc.auth.existingSecret }}
+            items:
+              - key: users.json
+                path: users.json
+        {{- end }}
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- if .Values.storage.facilityBackup.enabled }}
+        - name: facility-backup
+          persistentVolumeClaim:
+            claimName: {{ include "edge.facilityBackupPvc" . }}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "edge.fullname" . }}-orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: orthanc
+spec:
+  {{- if or (has .Values.orthanc.expose.dicom (list "nodePort" "both")) (eq .Values.orthanc.expose.http "nodePort") }}
+  type: NodePort
+  {{- else }}
+  type: ClusterIP
+  {{- end }}
+  selector:
+    app: orthanc
+    component: dicom-receiver
+  ports:
+    - name: dicom
+      port: {{ .Values.orthanc.dicomPort }}
+      targetPort: dicom
+      protocol: TCP
+      {{- if has .Values.orthanc.expose.dicom (list "nodePort" "both") }}
+      nodePort: {{ .Values.orthanc.expose.nodePorts.dicom }}
+      {{- end }}
+    - name: http
+      port: {{ .Values.orthanc.httpPort }}
+      targetPort: http
+      protocol: TCP
+      {{- if eq .Values.orthanc.expose.http "nodePort" }}
+      nodePort: {{ .Values.orthanc.expose.nodePorts.http }}
+      {{- end }}
+{{- if .Values.serviceAccounts.create }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "edge.fullname" . }}-orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+{{- end }}

@@ -1,0 +1,190 @@
+{{- /*
+The terminal step of the pipeline: staged sessions in SeaweedFS -> XNAT.
+
+The mgmt-side counterpart of charts/edge upload.mode=s3, rendered ONCE PER
+EDGE SITE.
+
+It used to be a single fleet-wide Deployment. That was wrong twice over.
+Correctness: with one staging bucket per site (see mgmt.edgeBucket), one
+uploader cannot serve them all — `xnat-ingest upload` takes exactly one
+s3://bucket/prefix. Reliability: a single uploader means one site's poison
+session, stuck multipart or expired credential stops delivery for EVERY site,
+and the failure is indistinguishable per-site because they share one log
+stream. Per-site uploaders give per-site failure isolation, per-site alerting
+via the `edge` label, and let one site be paused without touching the others.
+
+Cost, measured on the live single uploader: 231Mi resident, 4m CPU. On a 16Gi
+management node that puts a practical ceiling around 15 sites, which is
+documented rather than discovered.
+*/ -}}
+{{- if .Values.xnatUpload.enabled }}
+{{- /*
+THIS CHART DOES NOT CREATE THIS NAMESPACE, DELIBERATELY.
+
+It used to, with helm.sh/resource-policy: keep, so that `helm uninstall` could
+not delete the XNAT and S3 credentials living in it. Right intent, wrong
+mechanism — it made a greenfield install circular:
+
+  * the namespace does not exist until `helm install` creates it,
+  * so the operator cannot apply the Secrets before installing,
+  * so the uploader starts without them and sits in
+    CreateContainerConfigError,
+  * and pre-creating the namespace to fix that aborts the install with
+    "invalid ownership metadata ... missing key app.kubernetes.io/managed-by".
+
+Every other namespace this chart writes into (observability, each edge's) is
+already an operator-created prerequisite, so this one being special was the
+inconsistency. Now the rule is uniform and the ordering is the safe one:
+NAMESPACES AND SECRETS FIRST, WORKLOADS SECOND. A workload can never start
+before the credential it needs exists.
+
+`scripts/site-secrets.sh apply <site>` creates any namespace its Secrets name,
+so the documented flow does this for you:
+
+    scripts/site-secrets.sh apply <site>
+    helm upgrade --install mgmt charts/mgmt -n ais-mgmt --create-namespace ...
+
+Not creating it also gets the original property for free: helm cannot delete a
+namespace it does not own, so the credentials survive uninstall.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mgmt.fullname" . }}-xnat-upload
+  namespace: {{ .Values.xnatUpload.namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+# The uploader talks to S3 and XNAT, never to the Kubernetes API. Running it
+# under `default` with a mounted token would hand an image we do not build a
+# usable API credential for no reason.
+automountServiceAccountToken: false
+{{- $root := . }}
+{{- range $edge := .Values.edges }}
+{{- $bucket := include "mgmt.edgeBucket" (list $root $edge) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mgmt.fullname" $root }}-upload-{{ $edge.name }}
+  namespace: {{ $root.Values.xnatUpload.namespace }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    app: xnat-ingest
+    component: upload
+    edge: {{ $edge.name }}
+spec:
+  replicas: 1
+  strategy:
+    # NOT in the imperative manifest this was ported from, and its absence was
+    # a real defect: the default RollingUpdate brings the new pod up before the
+    # old one goes down, so for the length of a rollout two `--loop` uploaders
+    # list the SAME staging prefix and push the same sessions to XNAT
+    # concurrently. Recreate makes the handover exclusive.
+    # Not settable: RollingUpdate here means two `--loop` uploaders read the
+    # same staging prefix during every rollout and push the same sessions to
+    # XNAT concurrently. There is no configuration for which that is correct,
+    # so it is not offered as one.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: upload
+      edge: {{ $edge.name }}
+  template:
+    metadata:
+      labels:
+        {{- include "mgmt.labels" $root | nindent 8 }}
+        app: xnat-ingest
+        edge: {{ $edge.name }}
+        # LOAD-BEARING LABELS. The Loki ruler selects this pod's logs by
+        # namespace + app + component; XNATUploadSuccess and two Grafana
+        # dashboards select component="upload" in namespace xnat-upload.
+        # Renaming either disables them with no error anywhere.
+        component: upload
+      {{- with $root.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mgmt.fullname" $root }}-xnat-upload
+      automountServiceAccountToken: false
+      {{- include "mgmt.schedulingRules" $root | nindent 6 }}
+      containers:
+        - name: upload
+          image: "{{ $root.Values.xnatUpload.image.repository }}:{{ $root.Values.xnatUpload.image.tag }}"
+          imagePullPolicy: {{ $root.Values.xnatUpload.image.pullPolicy }}
+          # xnat-ingest loops internally via --loop; no bash wrapper needed.
+          command: ["xnat-ingest", "upload"]
+          args:
+            - "s3://{{ $bucket }}/{{ $root.Values.xnatUpload.prefix }}"
+            # $(VAR) is expanded by the kubelet from the env below, so the XNAT
+            # server and the S3 keys never appear as literals in this manifest
+            # or in `kubectl get deploy -o yaml`.
+            - "$(XINGEST_HOST)"
+            - "--always-include"
+            - {{ $root.Values.xnatUpload.alwaysInclude | quote }}
+            - "--loop"
+            - {{ $root.Values.xnatUpload.loop | quote }}
+            {{- if not $root.Values.xnatUpload.requireManifest }}
+            # Edge-staged sessions carry no manifest: the s3-uploader syncs the
+            # assigned directory as-is. Requiring one skips every session.
+            - "--dont-require-manifest"
+            {{- end }}
+            {{- if not $root.Values.xnatUpload.verifySsl }}
+            - "--dont-verify-ssl"
+            {{- end }}
+            # xnat-ingest has no S3 env-var path of its own; it persists the
+            # keys into its own credential store on first run, and this is the
+            # only way to seed it.
+            - "--store-credentials"
+            - "$(S3_ACCESS_KEY)"
+            - "$(S3_SECRET_KEY)"
+          env:
+            - name: XINGEST_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.xnatUpload.xnatSecretRef }}
+                  key: server
+            - name: XINGEST_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.xnatUpload.xnatSecretRef }}
+                  key: username
+            - name: XINGEST_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $root.Values.xnatUpload.xnatSecretRef }}
+                  key: password
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.uploadSecretRef | default $root.Values.xnatUpload.s3SecretRef }}
+                  key: access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $edge.uploadSecretRef | default $root.Values.xnatUpload.s3SecretRef }}
+                  key: secret-key
+
+            # --- boto3 / SeaweedFS -----------------------------------------
+            # In-cluster Service address, plain http. This traffic never leaves
+            # the node, and using the https Ingress here would drag the custom
+            # CA into a pod that has no reason to trust one. Derived from the
+            # release name via the helper: hardcoding `seaweedfs.seaweedfs`
+            # (as the imperative manifest did) breaks the moment the release is
+            # not named seaweedfs.
+            - name: AWS_ENDPOINT_URL
+              value: {{ include "mgmt.s3InternalEndpoint" $root | quote }}
+            # SeaweedFS ignores the region; botocore refuses to sign without one.
+            - name: AWS_DEFAULT_REGION
+              value: {{ $root.Values.xnatUpload.region | quote }}
+            # One JSON object per log line. Functional, not cosmetic: the Loki
+            # ruler pipes these through `| json` and matches on the `event`
+            # field (xnat_upload_completed). Plain-text logs make every
+            # xnat-upload alert stop matching.
+            - name: AIS_LOG_FORMAT
+              value: "json"
+          resources:
+            {{- toYaml $root.Values.xnatUpload.resources | nindent 12 }}
+{{- end }}
+{{- end }}

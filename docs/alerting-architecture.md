@@ -18,7 +18,7 @@ those pods directly — k0smotron's konnectivity tunnel is one-way (worker →
 control plane), so there is no path from mgmt Prometheus back into a child
 cluster's pod network.
 
-There are two production-grade options:
+There are two options that work unattended:
 
 1. **Edge Prometheus → mgmt remote-write.** Stand up a Vector
    `prometheus_exporter` sink on each edge, expose it through the edge's
@@ -48,15 +48,20 @@ expressions sit close to the dashboard queries that operators already trust.
 | `XNATUploadFailingForAllSessions` | Loki ruler | Derived from `event="upload_failed"` and `event="upload_completed"` JSON events on the edge. |
 | `S3UploaderRetryStorm` | Loki ruler | `event="upload_failed"` count over a window, per cluster. |
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
-| `XNATBacklogGrowing` | Loki ruler | Difference between mgmt-side `xnat_upload_completed` and edge-side `upload_completed`. |
 | `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
-| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — kube-state-metrics on each edge child. |
+| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
-| `KonnectivityTunnelFlapping` | Prometheus | Container restart count, KSM. |
-| `EdgePodCrashLoop` | Prometheus | Container restart count, KSM. |
-| `SeaweedFSDiskFull` | Prometheus | `kubelet_volume_stats_*` from mgmt kubelet scrape. |
+| `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter. |
 | `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_*` from mgmt cert-manager. |
+
+Four alerts that used to be in this table are not, all removed after
+measurement showed they could never fire — `docs/TOUR.md` §9 has the
+evidence for each: `OrthancStorageGrowing` and `XNATBacklogGrowing` (Loki,
+matched a log string that either does not exist or cannot distinguish new
+arrivals from static backlog), `EdgePodCrashLoop` and
+`KonnectivityTunnelFlapping` (Prometheus, named child-cluster objects mgmt
+cannot scrape — zero series, confirmed live).
 
 If we ever need a pipeline-event metric *as a metric* (e.g. for a Grafana
 panel that needs ms-resolution sliding windows that LogQL can't deliver),
@@ -141,17 +146,57 @@ kubectl -n xnat-ingest exec deploy/s3-uploader -- \
 Any `Successfully uploaded all files in '<same session>'` repeating on a ~60 s
 cadence means staged sessions (or empty prefixes) are still present.
 
+**A second, independent cause of duplicate mail: range shorter than the
+emitter's loop period.** The uploader re-scans staging every ~62s and logs
+the success string on EVERY pass — including passes where it finds the
+session already delivered and skips it. That string is a LEVEL re-asserted
+for as long as the session sits in staging, not a one-off event. A rule
+range shorter than that ~62s loop lets the series go empty between passes:
+the alert resolves and re-fires every loop, and `group_by` cannot suppress
+that because it only collapses alerts firing at the same time, not a
+resolve/re-fire cycle. Fixed by widening the range past the loop period
+(`XNATUploadSuccess` now uses `[10m]`); `scripts/ci/promtool.sh` asserts any
+rule matching a looping process's output keeps enough headroom.
+
 **Related alert-suppression gotcha.** `XNATUploadSuccess` is grouped by
-`session` with `repeat_interval: 24h`, and Alertmanager records what it has
-already sent in `/alertmanager/nflog` — which lives on a **PVC and survives
-pod restarts**. Re-dropping a file that hashes to the *same* session ID within
-24 h therefore fires the alert but sends **no email**. To force a fresh
-notification (e.g. between demo takes) the nflog must be wiped:
+`session`, and Alertmanager records what it has already sent in
+`/alertmanager/nflog` — which lives on a **PVC and survives pod restarts**.
+Its route sets `repeat_interval: 720h` deliberately: a success notification
+carries no new information on repeat, so re-dropping a file that hashes to
+the same session ID fires the alert but sends **no email** for a long time.
+To force a fresh notification (e.g. between demo takes) the nflog must be
+wiped:
 
 ```bash
-kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=0
-kubectl -n observability delete pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 --wait=false
-kubectl -n observability patch pvc alertmanager-kube-prometheus-stack-alertmanager-db-alertmanager-kube-prometheus-stack-alertmanager-0 \
+kubectl -n ais-mgmt scale statefulset/alertmanager-mgmt-kube-prometheus-stack-alertmanager --replicas=0
+kubectl -n ais-mgmt delete pvc alertmanager-mgmt-kube-prometheus-stack-alertmanager-db-alertmanager-mgmt-kube-prometheus-stack-alertmanager-0 --wait=false
+kubectl -n ais-mgmt patch pvc alertmanager-mgmt-kube-prometheus-stack-alertmanager-db-alertmanager-mgmt-kube-prometheus-stack-alertmanager-0 \
   -p '{"metadata":{"finalizers":null}}' --type=merge     # plain delete hangs on pvc-protection
-kubectl -n observability scale statefulset/alertmanager-kube-prometheus-stack-alertmanager --replicas=1
+kubectl -n ais-mgmt scale statefulset/alertmanager-mgmt-kube-prometheus-stack-alertmanager --replicas=1
 ```
+
+## The reclaimer's pre-flight abort: two log lines, not one
+
+`charts/mgmt/files/reclaim-staged.sh` aborts if its XNAT auth probe fails —
+observed twice in 24h, both `HTTP 000`. A plain `log ; exit 1` would be a
+silent failure dressed as a safe one: nothing deleted, and nothing said,
+because `SessionStagedNotConfirmedInXNAT` builds its "staged" half from
+`{component="s3-reclaimer"} | json | event=~"reclaim_.*" | session != ""`,
+and a `session=""` abort line is dropped by that filter.
+
+**An isolated failure does not silence the alert** — its staged half is a
+24h count and one missed hour is absorbed by the other 23. The real risk is
+a **sustained** pre-flight failure across a whole 24h window, which would
+leave every session staged in that window invisible to the absence alert
+until the window slides past it — 48h after recovery, or never if it never
+recovers. That is exactly the state "staged and never confirmed" most needs
+to catch.
+
+So the script emits two things on abort: one run-level `reclaim_unavailable`
+with a machine-readable `reason` (`ReclaimerRunUnavailable` pages on this
+within the hour — what an operator actually acts on), and, best-effort, one
+`reclaim_unavailable` per staged session (capped, to avoid tripping a Loki
+ingestion limit and restoring the exact silence this exists to prevent) so
+the absence alert keeps getting a staged signal through an outage of any
+length. It must never emit `reclaim_finished` — a healthy no-op run and an
+aborted run must not look identical in the log.

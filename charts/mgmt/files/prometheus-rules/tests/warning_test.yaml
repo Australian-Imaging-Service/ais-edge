@@ -1,0 +1,82 @@
+# =============================================================================
+# promtool unit tests — warning rules
+# =============================================================================
+#   promtool test rules charts/mgmt/files/prometheus-rules/tests/*_test.yaml
+#
+# WHY THESE EXIST. SeaweedFSDiskFull shipped selecting
+# `kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*seaweedfs.*"}`
+# for a hostPath volume. The hostPath plugin has no MetricsProvider, so that
+# series does not exist and never will — verified against the live Prometheus,
+# where `count(kubelet_volume_stats_used_bytes)` returns nothing. The alert was
+# green from the day it was written, and green is exactly what a working alert
+# looks like. Four of ~21 rules were in that state.
+#
+# An alert that cannot fire is worse than no alert, because it reads as
+# coverage. Every rule therefore needs a test that PROVES it fires on the
+# condition it claims to detect, and stays quiet otherwise. These run in
+# seconds with no cluster.
+#
+# Sample values are taken from the real cluster so the tests describe the
+# system we actually have:
+#   SeaweedFS_volumeServer_resource{name="/data",type="all"}  211247489024
+#   SeaweedFS_volumeServer_resource{name="/data",type="used"}  92370411520
+# =============================================================================
+rule_files:
+  - ../warning.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # ---------------------------------------------------------------------
+  - interval: 30s
+    name: SeaweedFSDiskFull fires above 80% and not below
+    input_series:
+      # 211 GB total, constant.
+      - series: 'SeaweedFS_volumeServer_resource{name="/data",type="all",job="seaweedfs"}'
+        values: "211247489024+0x40"
+      # Climbs from 43% (the live value) to 90%.
+      - series: 'SeaweedFS_volumeServer_resource{name="/data",type="used",job="seaweedfs"}'
+        values: "92370411520+3168712335x40"
+    alert_rule_test:
+      # 43% — nothing.
+      - eval_time: 1m
+        alertname: SeaweedFSDiskFull
+        exp_alerts: []
+      # ~66% — still under the threshold.
+      - eval_time: 8m
+        alertname: SeaweedFSDiskFull
+        exp_alerts: []
+      # Past 80% AND past the 5m `for:` — must fire.
+      - eval_time: 20m
+        alertname: SeaweedFSDiskFull
+        exp_alerts:
+          # No `type` label here: `ignoring(type)` drops it, which is the
+          # right outcome — the alert is about the disk, not about the
+          # "used" series specifically.
+          - exp_labels:
+              severity: warning
+              name: "/data"
+              job: seaweedfs
+            exp_annotations:
+              summary: "SeaweedFS disk >80% full on /data"
+              description: |
+                The staging store is over 80% full. Staged sessions are patient
+                data that has not necessarily reached XNAT yet, so DO NOT clear
+                them blindly — check dataPolicy.derived.s3Staged and the
+                s3-reclaimer logs first, then grow the disk.
+
+  # ---------------------------------------------------------------------
+  # The regression test for the actual bug: with the OLD metric name present
+  # and the new one absent, the rule must produce nothing. If someone
+  # "helpfully" restores the kubelet series, this test says so.
+  - interval: 30s
+    name: SeaweedFSDiskFull ignores kubelet volume stats (the metric that does not exist here)
+    input_series:
+      - series: 'kubelet_volume_stats_used_bytes{persistentvolumeclaim="mgmt-seaweedfs"}'
+        values: "200000000000+0x40"
+      - series: 'kubelet_volume_stats_capacity_bytes{persistentvolumeclaim="mgmt-seaweedfs"}'
+        values: "211247489024+0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: SeaweedFSDiskFull
+        exp_alerts: []

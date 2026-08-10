@@ -44,8 +44,12 @@ Both shape the data identically before it hits Loki:
 - ClusterRole `vector` (get/list/watch on namespaces, pods, nodes)
 - **CA bundle Secret** mounted at `/etc/ssl/ais-edge-ca/ca.crt` to verify
   the Loki server cert (signed by ais-edge-ca)
-- **Bearer-token Secret** `loki-push-credentials` (each edge has its
-  own token, generated at install by 02d)
+- **Client certificate Secret** `loki-push-client-tls`, mounted at
+  `/etc/ssl/loki-client/` and used as `tls.crt_file` / `tls.key_file` on the
+  Loki sink. cert-manager issues it per edge (`CN=<edge name>`) from
+  ais-edge-ca and cert-sync delivers it; there is no shared credential. It
+  replaced a bearer token, then a Basic password, neither of which the push
+  Ingress ever accepted — see docs/hardening-decisions.md §1.
 - **hostAliases** for the five `aisedge.local` names → MGMT_NODE_IP,
   so Vector can resolve `loki.aisedge.local` without an external DNS
 
@@ -57,16 +61,17 @@ Both shape the data identically before it hits Loki:
 | Edge | `logging` | DaemonSet `vector` (hand-rolled manifest) | `timberio/vector:0.49.0-distroless-libc` |
 
 Why hand-rolled on edges: tighter control over `hostAliases`, security
-context, and the bearer-auth wiring than the helm chart supports cleanly.
+context, and the client-certificate wiring than the helm chart supports
+cleanly.
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/observability/vector-mgmt-values.yaml.tpl` | mgmt-side helm values + custom Vector config |
-| `manifests/02-edge/vector.yaml.tpl` | edge-side full DaemonSet manifest including ServiceAccount + ClusterRole + ConfigMap + Service |
-| `scripts/02d-install-observability.sh` | helm-installs mgmt-side Vector |
-| `scripts/07b-deploy-edge-observability.sh` | applies edge-side manifest, pushes auth + CA Secrets |
+| `charts/mgmt/values.yaml` (`vector:`) | mgmt-side helm values + custom Vector config |
+| `charts/edge/templates/vector.yaml` | edge-side DaemonSet, ServiceAccount, ClusterRole, ConfigMap, Service |
+| `install.sh` | installs the mgmt chart (Vector subchart) and the edge chart (first-party Vector) |
+| cert-sync (CronJob) | pushes the CA bundle and this edge's Loki client cert into the edge cluster |
 
 ## Operations
 

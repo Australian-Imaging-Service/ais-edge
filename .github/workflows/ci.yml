@@ -1,0 +1,207 @@
+# =============================================================================
+# CI
+# =============================================================================
+# Runs on every push and every pull request.
+#
+# WHY THIS EXISTS. Everything in docs/hardening-decisions.md was verified by
+# hand in a session. Two of the fixes in that work were caught only by a
+# harness, and the two defects that reached the charts — an alert selecting a
+# metric series that does not exist, and a StatefulSet deleting its own PVC
+# despite carrying helm.sh/resource-policy: keep — were both invisible to
+# review and both would have been caught by a check here. So this lands before
+# more changes do.
+#
+# EVERY TOOL AND ACTION IS PINNED. Actions are pinned to a COMMIT SHA, not a
+# tag: a tag is a mutable pointer, and `@v4` re-points whenever the publisher
+# moves it. The helm / promtool / kind / kubectl versions live in
+# scripts/ci/lib.sh with a sha256 on the downloaded bytes, so the pin is on the
+# artefact rather than on a name.
+#
+# THE SAME THING RUNS LOCALLY. Each step below is a `make` target, and
+# `make ci` runs all of them in this order with the same pinned tools. There is
+# no CI-only logic anywhere in this file — if a step fails here it reproduces
+# locally with one command.
+# =============================================================================
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Read-only. Nothing here publishes, comments or writes to the repository.
+permissions:
+  contents: read
+
+# A superseded run tells you nothing. Cancel it — except on the default branch,
+# where the last green commit is a record worth completing.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Set explicitly rather than left to the scripts' default, so the artifact
+  # upload path below and the scripts agree on one location. Outside the
+  # workspace, so nothing here can be picked up as a repository change.
+  # Literal paths, not ${{ runner.temp }}: the `runner` context is not
+  # available in a workflow-level `env` block and the workflow fails to parse.
+  CI_WORK_DIR: /tmp/ais-edge-ci-work
+  CI_TOOL_DIR: /tmp/ais-edge-ci-tools
+
+jobs:
+  # ===========================================================================
+  # Everything that needs no cluster: seconds to a couple of minutes.
+  # ===========================================================================
+  checks:
+    name: charts
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The check scripts parse rendered manifests with PyYAML rather than
+      # grepping them — a grep for `whenDeleted: Delete` cannot tell a
+      # StatefulSet spec from a comment, and the PVC-retention check has to
+      # traverse by shape at any depth, including into subchart output.
+      - name: Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: PyYAML
+        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+
+      # Keyed on ci/lib.sh because that is where the version pins and their
+      # sha256s live, so changing a pin misses the cache by construction and
+      # cannot be served a binary from the previous pin.
+      - name: Cache pinned tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.CI_TOOL_DIR }}
+          key: ais-edge-ci-tools-${{ runner.os }}-${{ hashFiles('scripts/ci/lib.sh') }}
+
+      - name: Fetch pinned tools
+        run: make tools
+
+      # -- the seven checks ---------------------------------------------------
+      # Separate steps rather than one `make ci-fast`, so a failure names itself
+      # in the GitHub UI without anyone opening a log.
+      #
+      # `RENDER_DEP=` clears the Makefile prerequisite that would otherwise
+      # re-run the render for each of the three stages that read it. `render`
+      # is the step above; re-rendering here would cost four extra passes over
+      # two charts and five subcharts and prove nothing new.
+      - name: helm lint + helm template (values matrix, both charts)
+        run: make render
+
+      - name: Negative tests (every render guard must still fire)
+        if: ${{ !cancelled() }}
+        run: make negative
+
+      - name: promtool check rules + test rules
+        if: ${{ !cancelled() }}
+        run: make promtool RENDER_DEP=
+
+      - name: bash -n (scripts/ and charts/*/files/)
+        if: ${{ !cancelled() }}
+        run: make shell-syntax
+
+      - name: PVC retention (nothing holding data may be auto-deleted)
+        if: ${{ !cancelled() }}
+        run: make pvc-retention RENDER_DEP=
+
+      - name: Runtime templates survive rendering
+        if: ${{ !cancelled() }}
+        run: make runtime-templates RENDER_DEP=
+
+      # Renders both charts against sites/example-site/ and proves every Secret
+      # they mount is satisfied there, in the right namespace, with the right
+      # keys. The shipped template placed the management secrets in namespaces
+      # the workloads do not run in: helm installs cleanly, the pods sit in
+      # CreateContainerConfigError, and no other stage notices.
+      - name: Secret contract (namespaces and keys the charts actually mount)
+        if: ${{ !cancelled() }}
+        run: make secret-contract
+
+      # Helm never warns about a values key nobody reads, so a key that declares
+      # operator policy and does nothing renders exactly like one that works.
+      # An audit found 14 of dataPolicy's 26 leaf keys had no reader, four of
+      # them printed to the operator by NOTES.txt as settled policy.
+      - name: Values consumers (no key declares a behaviour nothing implements)
+        if: ${{ !cancelled() }}
+        run: make values-consumers
+
+      # promtool unit-tests the Prometheus rules only. These run the pinned Loki
+      # version in docker and evaluate the REAL rule expressions against fixture
+      # logs — the tqdm "401.71it/s" false positive and the flapping reclaimer
+      # alert were both logic bugs in valid expressions that nothing else caught.
+      - name: Loki rule tests (real expressions against a real Loki)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_LOKI_TESTS: "1"
+        run: make loki-rules
+
+      # The engine that deletes patient-derived data on the edge. Asserts on
+      # what SURVIVED a real run over real trees, not on what was logged.
+      - name: data-policy engine tests (what actually got deleted)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_DATAPOLICY_TESTS: "1"
+        run: make data-policy
+
+      # On failure the rendered manifests are the evidence. Kept short: they
+      # are reproducible from `make render`, this is only to save a round trip.
+      - name: Upload renders (on failure)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rendered-manifests
+          path: ${{ env.CI_WORK_DIR }}/render
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ===========================================================================
+  # Greenfield install into an empty kind cluster.
+  # ===========================================================================
+  # Separate job because it is the slow one (a cluster, the prerequisite CRDs,
+  # two real `helm install`s) and because a chart problem should be reported by
+  # the fast job, not found four minutes into this one.
+  #
+  # It runs unconditionally on every push and PR rather than nightly. The claim
+  # it proves — the charts install into a cluster that has never seen them, with
+  # NO adoption step — is exactly the one that decays silently: the moment it
+  # stops being true, `scripts/adopt-existing.sh` has quietly become a
+  # prerequisite and a new site cannot be built from the chart alone. Nobody
+  # discovers that until they stand up a new site.
+  greenfield:
+    name: greenfield install (kind)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: PyYAML
+        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+
+      - name: Cache pinned tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ env.CI_TOOL_DIR }}
+          key: ais-edge-ci-tools-kind-${{ runner.os }}-${{ hashFiles('scripts/ci/lib.sh') }}
+
+      # helm, promtool, kind AND kubectl, all pinned. kubectl is fetched rather
+      # than taken from the runner image so that what this job proves does not
+      # change when GitHub rebuilds ubuntu-24.04.
+      - name: Fetch pinned tools (incl. kind, kubectl)
+        run: make tools-all
+
+      # CI_REQUIRE_GREENFIELD=1 turns the script's "docker unavailable" SKIP
+      # into a hard failure. Without it a runner that lost docker would report
+      # green, and a skipped install test reads as coverage — which is the
+      # precise failure mode this whole suite exists to prevent.
+      - name: Install both charts into an empty cluster
+        env:
+          CI_REQUIRE_GREENFIELD: '1'
+        run: make greenfield

@@ -1,0 +1,513 @@
+{{- /*
+=============================================================================
+cert-sync — keep each edge's copy of the management Secrets current.
+=============================================================================
+THE PROBLEM. cert-manager renews certificates on the MANAGEMENT cluster. Edge
+clusters hold copies that scripts/07b pushed ONCE, and nothing re-pushes them.
+A certificate that renews at two-thirds of its lifetime therefore leaves the
+edge holding an expired one, and whatever used it stops working silently on a
+date nobody has in a calendar. A shared password does not expire, so mTLS on
+the Loki push path was strictly WORSE than the password it replaces until this
+existed. This is why it shipped BEFORE mTLS rather than alongside it (docs/
+hardening-decisions.md, R2) — and the per-site Loki push client certificate is
+now the load-bearing thing it carries.
+
+IT REPLACES WORK, IT DOES NOT ADD IT. scripts/07b steps 2 and 3 push a push
+credential and the ca-bundle into the edge by hand, once per site, at build
+time. This does the same on a schedule, from the same kubeconfigs the
+management cluster already holds, so the manual step goes away. Net reduction
+in moving parts.
+
+ONE CRONJOB PER EDGE, not one CronJob looping the fleet.
+Two reasons, and the first is the load-bearing one:
+
+  * The required alert is "an edge has not been synced recently", which needs
+    a PER-EDGE signal. kube_cronjob_status_last_successful_time is labelled by
+    cronjob name, so one CronJob per site makes staleness expressible as a
+    Prometheus rule with a promtool unit test (files/prometheus-rules/
+    cert-sync.yaml). A single looping CronJob only produces per-edge evidence
+    in its logs, and the Loki ruler ConfigMap is built from one fixed file
+    rather than a glob, so a new LogQL rule cannot be added without editing
+    that file.
+  * Cross-site isolation — "one site being down is not a reason to stop
+    rotating everyone else's certs" — becomes structural rather than a
+    property of a shell loop that a later edit could break. It is also how
+    s3-staged-reclaimer.yaml is already built, so the fleet has one shape.
+
+WHAT THE SERVICEACCOUNT CAN REACH — stated honestly, because scoping here is
+mostly theatre and it should not read as more than it is:
+
+  * get (not list, not watch) on exactly the named Secrets below: each edge's
+    <edge>-kubeconfig, and each configured source Secret. It cannot enumerate
+    Secrets in any namespace, so it cannot discover credentials it was not
+    explicitly granted.
+  * list on Services in each edge namespace, to find the child control-plane
+    Service by label instead of hardcoding k0smotron's naming and NodePort.
+  * WHAT THAT DOES NOT BUY: <edge>-kubeconfig is a cluster-admin credential
+    for that child cluster — verified, `kubectl --kubeconfig <it> auth can-i
+    create secrets -n logging` answers yes. Anything that can read it is
+    cluster-admin on that edge. Tightening the management-side Role does not
+    change that; only k0smotron issuing a reduced-privilege kubeconfig would,
+    and it does not. The scoping that is real is between SITES: each CronJob
+    is granted one site's kubeconfig and no other's.
+*/ -}}
+{{- $cs := .Values.certSync }}
+{{- if and $cs.enabled .Values.edges }}
+{{- $root := . }}
+{{- $fullname := include "mgmt.fullname" . }}
+
+{{- /* DELIBERATELY NOT GATED ON k0smotron.enabled.
+
+       That value means "THIS CHART creates the Cluster CRs" — it does not mean
+       "k0smotron exists". On a cluster where k0smotron was installed
+       imperatively and the Cluster CRs already exist, enabled=false is the
+       CORRECT setting (re-creating a Cluster CR would tear down a running
+       child cluster), and the kubeconfig Secret is present regardless.
+       Verified on stream-2-ab-dev: k0smotron-controller-manager 1/1,
+       Cluster edge-dev present, Secret edge-dev-kubeconfig present, with the
+       chart's k0smotron.enabled set to false.
+
+       An earlier guard here conflated the two and refused to render on
+       exactly that configuration. It is the same mistake certManager.enabled
+       made — "do we install it" and "does it exist" are different questions
+       and a chart can only answer the first.
+
+       The real precondition is that the kubeconfig Secret exists, which no
+       template can know at render time. cert-sync already handles it
+       precisely at runtime: it logs sync_failed naming the namespace and
+       Secret, and exits non-zero so CertSyncStale fires. That is a better
+       answer than a render-time refusal that is wrong half the time.
+
+       (There is deliberately no guard for an empty `edges` either. The
+       enclosing `if and $cs.enabled .Values.edges` above already renders
+       nothing in that case, which is the correct outcome — no sites means
+       nothing to sync, not a misconfiguration. A `fail` there would be
+       unreachable code pretending to be a safety check.) */ -}}
+{{- if not $cs.secrets }}
+  {{- fail "certSync.enabled=true but certSync.secrets is empty. A cert-sync job with nothing to sync succeeds on every run and keeps the CertSyncStale alert quiet, which is exactly the appearance of a working rotation with no rotation happening. List the Secrets to distribute, or set certSync.enabled=false." }}
+{{- end }}
+
+{{- /* SCHEDULE vs ALERT WINDOW. files/prometheus-rules/cert-sync.yaml fires
+       CertSyncStale at 24h without a successful run. A schedule coarser than
+       daily therefore alerts on a healthy fleet, and — much worse — leaves a
+       renewal window in which the edge holds an expired certificate and
+       nothing has said so. Anything below daily is rejected here rather than
+       discovered as alert noise months later. */ -}}
+{{- $fields := splitList " " (trim $cs.schedule) }}
+{{- if ne (len $fields) 5 }}
+  {{- fail (printf "certSync.schedule must be a 5-field cron expression, got %q. Macro forms such as @daily are not accepted because the render-time frequency check below cannot read them." $cs.schedule) }}
+{{- end }}
+{{- if or (ne (index $fields 2) "*") (ne (index $fields 3) "*") (ne (index $fields 4) "*") }}
+  {{- fail (printf "certSync.schedule %q runs less often than daily (day-of-month, month and day-of-week must all be *). CertSyncStale in files/prometheus-rules/cert-sync.yaml fires after 24h without a successful run, so a weekly or monthly schedule both alerts on a healthy fleet and leaves days in which an edge can hold an expired certificate with nothing saying so." $cs.schedule) }}
+{{- end }}
+
+{{- /* cert-manager resolves the CA into ITS cluster resource namespace, which
+       is where templates/cert-issuers.yaml puts the CA Certificate. If a
+       secrets entry names the CA Secret but points at a different namespace,
+       every run logs sync_failed for a Secret that exists — one namespace
+       away. Same expression as cert-issuers.yaml, deliberately. */ -}}
+{{- $cmNamespace := ternary .Release.Namespace "cert-manager" .Values.certManager.enabled }}
+
+{{- /* Field/key hygiene: the spec file handed to the script is
+       pipe-delimited with comma-separated key pairs, so any of | , = inside a
+       name or key silently corrupts the parse into a different, plausible
+       instruction. Reject it here. */ -}}
+{{- range $item := $cs.secrets }}
+  {{- $src := $item.source }}
+  {{- $dst := $item.destination }}
+  {{- if or (not $src.name) (not $dst.name) (not $dst.namespace) }}
+    {{- fail "every certSync.secrets entry needs source.name, destination.namespace and destination.name. There is no default destination namespace: the edge namespace a Secret belongs in is a property of what consumes it, and guessing it would write the Secret somewhere nothing reads." }}
+  {{- end }}
+  {{- if not $src.keys }}
+    {{- fail (printf "certSync.secrets entry for source %q has no `keys` map. Copying a whole Secret is refused on purpose: %s contains tls.key, the private key of the CA that signs the whole fleet, and a whole-Secret copy would distribute it to every edge. Name the keys to copy." $src.name $root.Values.certManager.ca.secretName) }}
+  {{- end }}
+  {{- $srcNs := $src.namespace | default $root.Release.Namespace }}
+  {{- if eq $src.name $root.Values.certManager.ca.secretName }}
+    {{- if ne $srcNs $cmNamespace }}
+      {{- fail (printf "certSync.secrets copies %q from namespace %q, but cert-manager writes it into %q (its --cluster-resource-namespace, the same value templates/cert-issuers.yaml uses). Every sync would log sync_failed for a Secret that exists one namespace away. Set source.namespace to %q." $src.name $srcNs $cmNamespace $cmNamespace) }}
+    {{- end }}
+    {{- range $sk, $dk := $src.keys }}
+      {{- if eq $sk "tls.key" }}
+        {{- fail (printf "certSync.secrets copies key tls.key out of %q. That is the private key of the CA that signs every certificate in the fleet; distributing it to edge clusters means any edge can mint a certificate for any hostname in the fleet. Copy ca.crt only." $src.name) }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- range $f := (list $srcNs $src.name $dst.namespace $dst.name) }}
+    {{- if regexMatch "[|,=]" $f }}
+      {{- fail (printf "certSync.secrets field %q contains one of | , = — those are the delimiters of the spec file cert-sync.sh parses, and a name containing one is read as a different instruction rather than as an error." $f) }}
+    {{- end }}
+  {{- end }}
+  {{- range $sk, $dk := $src.keys }}
+    {{- if or (regexMatch "[|,=]" $sk) (regexMatch "[|,=]" $dk) }}
+      {{- fail (printf "certSync.secrets key mapping %s=%s contains one of | , = — those are the delimiters of the spec file cert-sync.sh parses." $sk $dk) }}
+    {{- end }}
+  {{- end }}
+  {{- /*
+  A source written as "<edge>-s3" is a NAMING CONVENTION, and edges[].s3SecretRef
+  is free text, so the two can drift apart without anything noticing.
+
+  This entry exists so an edge's S3 key pair is written ONCE, on the management
+  side, and delivered from there — rather than being typed identically into two
+  files, which is how it used to be done and how the two copies drifted. But
+  cert-sync substitutes only <edge>, so it reads `<name>-s3` regardless of what
+  s3SecretRef actually says. Point s3SecretRef somewhere else and cert-sync syncs
+  from a Secret that does not exist: it logs sync_failed every six hours, the
+  edge never receives s3-edge-credentials, and its uploader sits in
+  CreateContainerConfigError — three symptoms, none of which names the cause.
+
+  Refusing to render is the only place that mismatch is cheap to find.
+  */ -}}
+  {{- if eq $src.name "<edge>-s3" }}
+    {{- range $e := $root.Values.edges }}
+      {{- $expected := printf "%s-s3" $e.name }}
+      {{- if and $e.s3SecretRef (ne $e.s3SecretRef $expected) }}
+        {{- fail (printf "certSync.secrets copies %q, which resolves to %q for edge %q, but that edge's s3SecretRef is %q. cert-sync substitutes <edge> and nothing else, so it would sync from a Secret that does not exist and the edge would never receive s3-edge-credentials. Either rename the Secret to %q, or drop this certSync entry and put the key pair in the edge's own secrets file." $src.name $expected $e.name $e.s3SecretRef $expected) }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- /* THE LOKI PUSH CLIENT CERTIFICATE MUST ACTUALLY BE ON THE LIST.
+
+       templates/observability.yaml issues one per edge and puts
+       auth-tls-verify-client: on across the push Ingress. If no entry here
+       carries that certificate into the site, cert-manager mints identities
+       nobody receives and every push fails the TLS handshake — and the
+       log-derived alerts that would report it are built FROM the logs that
+       stopped arriving, so the fleet goes quiet and quiet is also what healthy
+       looks like. That is the exact failure the basic-auth version of this
+       path had for months.
+
+       Deliberately AFTER the per-entry hygiene checks above: those name a
+       specific defect in a specific entry, and this one would otherwise mask
+       them for any malformed list.
+
+       The reverse direction — an edge mounting a Secret nothing delivers — is
+       covered by scripts/ci/secret-namespaces.sh. This is the direction that
+       check cannot see, because it derives what is delivered from these very
+       entries. */ -}}
+{{- if and .Values.observability.enabled .Values.observability.loki.ingress.enabled .Values.observability.loki.push.requireAuth }}
+  {{- range $edge := .Values.edges }}
+    {{- $want := include "mgmt.lokiClientCertSecret" $edge.name }}
+    {{- $found := false }}
+    {{- range $item := $cs.secrets }}
+      {{- if eq ($item.source.name | replace "<edge>" $edge.name) $want }}
+        {{- $srcKeys := keys ($item.source.keys | default dict) }}
+        {{- if and (has "tls.crt" $srcKeys) (has "tls.key" $srcKeys) }}
+          {{- $found = true }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if not $found }}
+      {{- fail (printf "no certSync.secrets entry copies %q (both tls.crt and tls.key) into edge %q, but observability.loki.push.requireAuth makes the Loki push Ingress demand a client certificate. cert-manager would issue that certificate on this cluster and nothing would carry it to the site, so every push from every edge would fail the TLS handshake silently. Add:\n  - source: {name: \"<edge>-loki-client\", keys: {tls.crt: tls.crt, tls.key: tls.key}}\n    destination: {namespace: <the edge namespace>, name: loki-push-client-tls, type: kubernetes.io/tls}" $want $edge.name) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+
+{{- /* Which source Secrets live in which namespace, across the whole fleet,
+       so each source namespace gets ONE Role naming exactly the Secrets that
+       are actually copied out of it. */ -}}
+{{- $srcRoles := dict }}
+{{- range $edge := .Values.edges }}
+  {{- range $item := $cs.secrets }}
+    {{- $ns := $item.source.namespace | default $root.Release.Namespace }}
+    {{- $nm := $item.source.name | replace "<edge>" $edge.name }}
+    {{- $cur := (index $srcRoles $ns) | default (list) }}
+    {{- $_ := set $srcRoles $ns (append $cur $nm | uniq | sortAlpha) }}
+  {{- end }}
+{{- end }}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-cert-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-cert-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, never inline: the script is ${...}, backticks and
+         jsonpath braces throughout, and keeping it a real file is what lets
+         `sh -n` lint it and lets it be run against a live pair of clusters
+         outside Helm. */}}
+  cert-sync.sh: |
+    {{- .Files.Get "files/cert-sync.sh" | nindent 4 }}
+
+{{/* --------------------------------------------------------------------- */}}
+{{/* RBAC on the SOURCE namespaces                                          */}}
+{{/* --------------------------------------------------------------------- */}}
+{{- range $ns, $names := $srcRoles }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-cert-sync-source
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+rules:
+  # resourceNames, so this is `get` on these exact Secrets and nothing else.
+  # resourceNames cannot be combined with list/watch, which is the point: the
+  # job has no way to enumerate what else is in this namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames:
+      {{- range $n := $names }}
+      - {{ $n | quote }}
+      {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-cert-sync-source
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-cert-sync-source
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-cert-sync
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
+
+{{/* --------------------------------------------------------------------- */}}
+{{/* Per edge: RBAC on the edge namespace, the spec, and the CronJob        */}}
+{{/* --------------------------------------------------------------------- */}}
+{{- range $edge := .Values.edges }}
+{{- $edgeNs := $edge.namespace | default $edge.name }}
+{{- $kcSecret := $edge.kubeconfigSecret | default (printf "%s-kubeconfig" $edge.name) }}
+{{- $cronName := printf "%s-cert-sync-%s" $fullname $edge.name }}
+
+{{- /* A CronJob name is capped at 52 characters because the controller
+       appends a timestamp to build Job names. Over the limit the CronJob is
+       rejected by the API server halfway through an upgrade. */ -}}
+{{- if gt (len $cronName) 52 }}
+  {{- fail (printf "cert-sync CronJob name %q is %d characters; the API server rejects CronJob names over 52 because the controller appends a timestamp suffix to derive Job names. Shorten the release name or the edge name." $cronName (len $cronName)) }}
+{{- end }}
+{{- /* files/prometheus-rules/cert-sync.yaml selects these CronJobs with
+       cronjob=~".+-cert-sync-.+". Renaming them here would leave that rule
+       matching nothing — an alert that cannot fire, which reads as coverage.
+       Checked at render time so the rename fails instead. */ -}}
+{{- if not (regexMatch ".+-cert-sync-.+" $cronName) }}
+  {{- fail (printf "cert-sync CronJob name %q no longer matches the selector .+-cert-sync-.+ used by CertSyncStale in files/prometheus-rules/cert-sync.yaml. Renaming the CronJob without updating that rule leaves an alert that can never fire." $cronName) }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-cert-sync
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+rules:
+  # The child cluster's admin kubeconfig. Named explicitly: this Role cannot
+  # read any other Secret in the site's namespace (the per-cluster CA and etcd
+  # key Secrets live here too).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: [{{ $kcSecret | quote }}]
+  # `list`, because the control-plane Service is found by label rather than by
+  # name. Hardcoding kmc-<name>-nodeport and the NodePort number would break
+  # the moment a site moves to ClusterIP + SNI (docs/hardening-decisions.md
+  # R4), and would reintroduce the list-position-derived port arithmetic that
+  # is already recorded as a defect. Services carry no credential.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-cert-sync
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-cert-sync
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-cert-sync
+    namespace: {{ $root.Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $cronName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+data:
+  # srcNamespace|srcName|dstNamespace|dstName|type|srcKey=dstKey,...
+  #
+  # `<edge>` is substituted in the source NAME, the destination NAME and the
+  # source KEY. The NAME substitution is what the per-site Loki push client
+  # certificate uses (`<edge>-loki-client`). The KEY substitution has no
+  # current user — it existed for the shared loki-push-auth password map, where
+  # each key WAS a username — and is kept because a Secret holding one entry
+  # per site is a shape this will meet again, and removing it is a template
+  # change plus a spec-format change for no gain.
+  # Names only. No credential value is ever templated — everything here is a
+  # pointer the job resolves at runtime against the API server.
+  secrets.list: |
+    {{- range $item := $cs.secrets }}
+    {{- $src := $item.source }}
+    {{- $dst := $item.destination }}
+    {{- $pairs := list }}
+    {{- range $sk, $dk := $src.keys }}{{- $pairs = append $pairs (printf "%s=%s" ($sk | replace "<edge>" $edge.name) $dk) }}{{- end }}
+    {{ $src.namespace | default $root.Release.Namespace }}|{{ $src.name | replace "<edge>" $edge.name }}|{{ $dst.namespace }}|{{ $dst.name | replace "<edge>" $edge.name }}|{{ $dst.type | default "Opaque" }}|{{ $pairs | sortAlpha | join "," }}
+    {{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $cronName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    app: cert-sync
+    component: cert-sync
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  schedule: {{ $cs.schedule | quote }}
+  # Two runs writing the same destination Secret concurrently would race on
+  # the compare-then-write. Forbid rather than Replace: a run killed between
+  # the compare and the apply leaves no record of what it was doing.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  # A failed run is the pod whose logs carry the sync_failed / sync_skipped
+  # reason. Losing it leaves the alert with no explanation attached.
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "mgmt.labels" $root | nindent 8 }}
+    spec:
+      # Retries are safe because every write is compare-then-apply, and a
+      # transient API blip should not leave a site unsynced until the next
+      # scheduled run. A site that is genuinely down still ends the Job
+      # failed, which is what CertSyncStale needs.
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            {{- include "mgmt.labels" $root | nindent 12 }}
+            app: cert-sync
+            # LOAD-BEARING LABELS. mgmt Vector turns these pod labels into the
+            # Loki stream labels (namespace / app / component / cluster).
+            # Renaming component detaches every cert-sync log line from the
+            # queries an operator would use to investigate an alert.
+            component: cert-sync
+          annotations:
+            checksum/script: {{ $root.Files.Get "files/cert-sync.sh" | sha256sum }}
+            {{- with $root.Values.podAnnotations }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        spec:
+          serviceAccountName: {{ $fullname }}-cert-sync
+          # Needed, unlike every other job in this chart: this one talks to the
+          # management API server to read the kubeconfig and the source
+          # Secrets. The Role above is what bounds it.
+          automountServiceAccountToken: true
+          restartPolicy: Never
+          {{- if $root.Values.domain.mgmtNodeIP }}
+          # Only used when certSync.apiEndpoint is `kubeconfig`, or when
+          # in-cluster Service discovery finds nothing and the job falls back
+          # to the address k0smotron published. That address is the external
+          # ingress hostname (measured: https://k0s.<domain>:443), which
+          # cluster DNS does not resolve.
+          hostAliases:
+            - ip: {{ $root.Values.domain.mgmtNodeIP | quote }}
+              hostnames:
+                - {{ include "mgmt.k0sApiHost" $root | quote }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            # Makes the memory-backed emptyDir below group-writable by the
+            # non-root user, which is what lets decoded Secret material stay
+            # off the node's disk instead of needing a writable root.
+            fsGroup: 65532
+            seccompProfile: {type: RuntimeDefault}
+          {{- include "mgmt.schedulingRules" $root | nindent 10 }}
+          containers:
+            - name: cert-sync
+              image: "{{ $cs.image.repository }}:{{ $cs.image.tag }}"
+              imagePullPolicy: {{ $cs.image.pullPolicy | default "IfNotPresent" }}
+              command: ["/bin/sh", "/scripts/cert-sync.sh"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              env:
+                - name: EDGE_NAME
+                  value: {{ $edge.name | quote }}
+                - name: EDGE_NAMESPACE
+                  value: {{ $edgeNs | quote }}
+                # k0smotron publishes the child kubeconfig here. Verified on
+                # the live management cluster: Secret edge-dev-kubeconfig in
+                # namespace edge-dev, type cluster.x-k8s.io/secret, one data
+                # key `value`, ownerReference Cluster/edge-dev.
+                - name: KUBECONFIG_SECRET
+                  value: {{ $kcSecret | quote }}
+                - name: API_ENDPOINT_MODE
+                  value: {{ $cs.apiEndpoint | quote }}
+                - name: REQUEST_TIMEOUT
+                  value: {{ printf "%ds" (int $cs.requestTimeoutSeconds) | quote }}
+                - name: SPEC_FILE
+                  value: /spec/secrets.list
+                - name: WORK_DIR
+                  value: /work
+                # readOnlyRootFilesystem: kubectl needs a writable HOME for its
+                # discovery cache, and both point at the tmpfs.
+                - name: HOME
+                  value: /work
+                - name: KUBECACHEDIR
+                  value: /work/cache
+                - name: TMPDIR
+                  value: /work
+              resources:
+                requests: {memory: 64Mi, cpu: 50m}
+                limits:   {memory: 192Mi, cpu: 500m}
+              volumeMounts:
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: spec,    mountPath: /spec,    readOnly: true}
+                - {name: work,    mountPath: /work}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ $fullname }}-cert-sync
+                defaultMode: 0555
+            - name: spec
+              configMap:
+                name: {{ $cronName }}
+                defaultMode: 0444
+            # medium: Memory is a tmpfs, so the decoded certificate and token
+            # bytes the job handles are not written to the node's disk. It
+            # counts against the container's memory limit, hence the small
+            # sizeLimit.
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 8Mi
+{{- end }}
+{{- end }}

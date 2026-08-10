@@ -129,5 +129,11 @@ kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=2
 - Rate-limiting per source IP on the public-facing routes
 - WAF (ModSecurity) on the Grafana route to harden against direct
   internet exposure
-- Ingress-level mTLS verification for edge → mgmt (require a client
-  cert, not just the bearer token + S3 access key)
+
+**Done since:** Ingress-level mTLS on the Loki push route. `charts/mgmt`
+renders `auth-tls-secret` / `auth-tls-verify-client: on` /
+`auth-tls-verify-depth: 2` / `auth-tls-match-cn` on the `loki.<domain>`
+Ingress, and each edge presents a cert-manager certificate with its own name
+as the CN. `ssl_verify_client` is a server-block directive, so it applies to
+that hostname alone — Grafana and the S3 route are untouched. The S3 route
+still authenticates with an access key.

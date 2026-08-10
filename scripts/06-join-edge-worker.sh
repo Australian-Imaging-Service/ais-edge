@@ -11,7 +11,27 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-parse_edge_entry "$1"
+# When install.sh has already exported this edge's configuration from
+# sites/<site>/values.yaml, the argument is just the edge NAME and there is
+# nothing to parse. Calling parse_edge_entry on it would fail ("expected 6
+# pipe-separated fields, got 1") and, worse, a successful parse would
+# OVERWRITE the exported values with whatever config/edge-nodes.env still
+# says — the second source of truth this was meant to remove.
+if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
+    : "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
+    # parse_edge_entry also DERIVES these two from the primitives; do the same
+    # here so both call styles leave the script with identical variables.
+    # `~` is expanded explicitly: it comes from a YAML value, so the shell
+    # never sees it in a position where tilde expansion happens, and ssh would
+    # be handed a literal "~/.ssh/id_ed25519" that does not exist.
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    EDGE_SSH="${SSH_USER}@${NODE_IP}"
+    SSH_KEY_OPT=""
+    [ -n "${SSH_KEY:-}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
+    EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
+else
+    parse_edge_entry "$1"
+fi
 
 echo "=== 06: Installing k0s worker on ${NODE_IP} for ${CLUSTER_NAME} ==="
 
@@ -115,7 +135,19 @@ ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
 scp ${SSH_KEY_OPT} "${REPO_DIR}/join-token-${CLUSTER_NAME}" "${EDGE_SSH}:/tmp/join-token"
 
 # Install and start worker
-ssh ${SSH_KEY_OPT} "${EDGE_SSH}" bash -s <<'WORKER_SCRIPT'
+# dataPolicy.telemetry.podLogFiles, enforced by the kubelet itself. The kubelet
+# has no time-based log retention, so the bound is size x count: a container can
+# hold at most maxSize x maxFiles on disk before the oldest rotation is dropped.
+#
+# JOIN-TIME ONLY. `k0s install worker` writes the systemd unit, so this applies
+# to workers installed from here on; an already-joined node keeps whatever it was
+# installed with until the service is reinstalled. Said plainly because a values
+# change that silently does not reach an existing node is the failure mode this
+# repo keeps finding.
+KUBELET_EXTRA_ARGS="--container-log-max-size=${KUBELET_LOG_MAX_SIZE:-10Mi} --container-log-max-files=${KUBELET_LOG_MAX_FILES:-5}"
+echo "  kubelet log rotation: ${KUBELET_EXTRA_ARGS}"
+
+ssh ${SSH_KEY_OPT} "${EDGE_SSH}" KUBELET_EXTRA_ARGS="${KUBELET_EXTRA_ARGS}" bash -s <<'WORKER_SCRIPT'
 set -euo pipefail
 command -v k0s &>/dev/null || { curl -sSLf https://get.k0s.sh | sudo sh; }
 echo "k0s: $(k0s version)"
@@ -124,7 +156,8 @@ if ! sudo systemctl is-active k0sworker &>/dev/null; then
     sudo cp /tmp/join-token /etc/k0s/join-token
     sudo chmod 600 /etc/k0s/join-token
     rm -f /tmp/join-token
-    sudo k0s install worker --force --token-file /etc/k0s/join-token
+    sudo k0s install worker --force --token-file /etc/k0s/join-token \
+        --kubelet-extra-args="${KUBELET_EXTRA_ARGS}"
     sudo systemctl reset-failed k0sworker 2>/dev/null || true
     sudo k0s start
 fi

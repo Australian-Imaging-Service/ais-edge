@@ -1,0 +1,126 @@
+{{- /*
+Storage for an edge site.
+
+(The chart's render-time guards used to be invoked from here. They now live in
+templates/validate.yaml, which renders unconditionally — see that file.)
+
+TWO volumes, deliberately:
+
+  pipeline        working data — orthanc-storage/, grouped/, assigned/,
+                  incoming/, LOGS/, tmp/. Every stage mounts this ONE claim,
+                  because group-orthanc and assign hardlink between those
+                  directories and a hardlink cannot cross a filesystem
+                  boundary (EXDEV). Splitting them would silently degrade
+                  hardlink_or_copy into a full byte copy of every study.
+
+  facilityBackup  the archive of record — identifiable DICOM exactly as it
+                  arrived, plus the unmapped-AET quarantine. Separate from
+                  the pipeline volume so that a full or wedged pipeline
+                  volume cannot take the originals with it, and because the
+                  two have completely different retention.
+
+Both carry Retain + helm.sh/resource-policy: keep, so `helm uninstall`
+cannot remove received DICOM. Removing the data has to be a separate,
+deliberate act. This is the structural replacement for the `rm -rf
+/data/xnat-ingest` that scripts/uninstall.sh used to do behind a prompt.
+*/ -}}
+{{- if .Values.storage.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storage.storageClass.name }}
+  annotations:
+    # Cluster-scoped and shared: a second release in the same cluster must
+    # not delete it out from under the first.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: {{ .Values.storage.reclaimPolicy }}
+---
+{{- end }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  # PVs are cluster-scoped, so the name carries the release name to let two
+  # sites coexist in one cluster.
+  name: {{ include "edge.pipelinePvc" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: {{ .Values.storage.pipeline.capacity }}
+  hostPath:
+    path: {{ .Values.storage.pipeline.hostPath }}
+    type: DirectoryOrCreate
+  persistentVolumeReclaimPolicy: {{ .Values.storage.reclaimPolicy }}
+  storageClassName: {{ .Values.storage.storageClass.name }}
+  volumeMode: Filesystem
+  claimRef:
+    name: {{ include "edge.pipelinePvc" . }}
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "edge.pipelinePvc" . }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ .Values.storage.storageClass.name }}
+  volumeName: {{ include "edge.pipelinePvc" . }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.pipeline.capacity }}
+{{- if .Values.storage.facilityBackup.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "edge.facilityBackupPvc" . }}
+  annotations:
+    # The archive of record. Nothing in this chart is permitted to delete it.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    ais-edge.org/data-class: original
+spec:
+  accessModes: [ReadWriteMany]
+  capacity:
+    storage: {{ .Values.storage.facilityBackup.capacity }}
+  hostPath:
+    path: {{ .Values.storage.facilityBackup.hostPath }}
+    type: DirectoryOrCreate
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Values.storage.storageClass.name }}
+  volumeMode: Filesystem
+  claimRef:
+    name: {{ include "edge.facilityBackupPvc" . }}
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "edge.facilityBackupPvc" . }}
+  namespace: {{ .Values.namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    ais-edge.org/data-class: original
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: {{ .Values.storage.storageClass.name }}
+  volumeName: {{ include "edge.facilityBackupPvc" . }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.facilityBackup.capacity }}
+{{- end }}

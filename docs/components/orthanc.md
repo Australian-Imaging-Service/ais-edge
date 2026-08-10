@@ -60,9 +60,8 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
 ## Where it runs
 
 Single pod (`Recreate` strategy — hostPath isn't shareable across
-replicas), one per edge worker. Deployed by
-`scripts/07c-deploy-edge-orthanc.sh`. Manifest at
-[`manifests/02-edge/orthanc.yaml.tpl`](../../manifests/02-edge/orthanc.yaml.tpl).
+replicas), one per edge worker. Deployed by the edge chart; template at
+[`charts/edge/templates/orthanc-deployment.yaml`](../../charts/edge/templates/orthanc-deployment.yaml).
 
 REST API exposed as a ClusterIP Service `orthanc.xnat-ingest.svc.cluster.local:8042`.
 DICOM port 4242 is exposed via `hostPort` directly on the edge node IP
@@ -108,5 +107,5 @@ storescu -aec AISEDGE -aet TEST_MOD <edge-ip> 4242 /path/to/study/*.dcm
 - **Pure-Lua salted hash instead of true HMAC** for SubjectHash / SessionHash, because `jodogne/orthanc-plugins` doesn't expose `Compute*` crypto in Lua. Adequate for research deid; switch to `jodogne/orthanc-python` for HMAC-grade.
 - **Profile authoring is by hand** — no validation that referenced DICOM tags exist in Orthanc's dictionary before deployment. `07c` prompts the site admin for explicit confirmation of the AETMap + profile before applying.
 - **Hardlinks require shared filesystem** — `/data/xnat-ingest/orthanc-storage` and `/data/xnat-ingest/staging` must live on the same physical mount, or group-orthanc fails with EXDEV.
-- **Modalities with unmapped CalledAETs are rejected** — instances are deleted and a REJECT line is logged. Keep `routing.json` AETMap up to date.
+- **Modalities with unmapped CalledAETs are rejected for ingest, but not discarded** — the original instance is written to `<FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm` and only then removed from Orthanc. If that quarantine write fails the instance is kept in Orthanc instead, and if no `FacilityBackupDir` is configured the hook aborts without deleting anything. A `REJECT: no project mapped for CalledAET <AET>` line is logged, which is what the `DICOMRejectedUnmappedAET` alert matches. Add the AET to `routing.json` AETMap and re-send to ingest the quarantined studies.
 - **`AIS_DEID_HMAC_SALT` rotation breaks subject linkage** — rotating the salt produces a different SubjectHash for the same patient. Rotate only deliberately.

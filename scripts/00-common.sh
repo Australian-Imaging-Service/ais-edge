@@ -6,14 +6,33 @@
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load config
-for cfg in "${REPO_DIR}/config/management.env" "${REPO_DIR}/config/edge-nodes.env"; do
-    if [ ! -f "$cfg" ]; then
-        echo "ERROR: $cfg not found. Copy from template:"
-        echo "  cp ${cfg}.template ${cfg}"
-        exit 1
-    fi
-    source "$cfg"
-done
+#
+# SKIPPED when install.sh has already supplied the configuration from
+# sites/<site>/values.yaml, which is the normal path now. Sourcing these files
+# in that case would be actively harmful, not merely redundant: `source`
+# assigns unconditionally, so a stale config/management.env would OVERWRITE the
+# values install.sh just exported from the site file, and the scripts below
+# would quietly act on different hostnames, a different node IP or a different
+# edge than the charts were rendered with. The single source of truth has to be
+# single at the point of use, not just on paper.
+#
+# Running one of these scripts standalone still works: nothing sets
+# AIS_CONFIG_FROM_SITE, so the files load exactly as before.
+if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
+    : "${MGMT_NODE_IP:?install.sh must export MGMT_NODE_IP when AIS_CONFIG_FROM_SITE=1}"
+else
+    for cfg in "${REPO_DIR}/config/management.env" "${REPO_DIR}/config/edge-nodes.env"; do
+        if [ ! -f "$cfg" ]; then
+            echo "ERROR: $cfg not found. Copy from template:"
+            echo "  cp ${cfg}.template ${cfg}"
+            echo
+            echo "Or install from a site file instead, which is the supported path:"
+            echo "  ./install.sh <site>        # reads sites/<site>/values.yaml"
+            exit 1
+        fi
+        source "$cfg"
+    done
+fi
 
 # Template renderer: replaces {{KEY}} with value.
 render() {

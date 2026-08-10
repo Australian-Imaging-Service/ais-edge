@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Stub `curl` for the reclaimer harness.
+#
+# Handles the three things the reclaimer uses curl for: the filer readiness
+# probe, the filer DELETE, and the XNAT REST queries.
+#
+# THE DELETE IS RECORDED, and that recording is the point of the whole
+# harness. Almost every assertion is ultimately "did a DELETE happen for this
+# session, yes or no" — the log line is secondary, because a reclaimer that
+# logs `reclaim_kept` and deletes anyway is the failure that matters.
+set -uo pipefail
+S="${SCENARIO:?SCENARIO required}"
+CALLS="${S}/calls.log"
+DELETES="${S}/deletes.log"
+
+url=""; method="GET"
+args=("$@")
+i=0
+while [ $i -lt ${#args[@]} ]; do
+    a="${args[$i]}"
+    case "$a" in
+        -X) i=$((i+1)); method="${args[$i]}" ;;
+        http://*|https://*) url="$a" ;;
+    esac
+    i=$((i+1))
+done
+echo "curl $method $url" >> "$CALLS"
+
+emit() { printf '%s' "$1"; printf '\n%s' "$2"; }   # body then \n<code>, matching -w
+
+# ---- filer -----------------------------------------------------------------
+case "$url" in
+*:8888*)
+    if [ "$method" = "DELETE" ]; then
+        [ -f "$S/filer-delete.fail" ] && { printf 'HTTP 500'; printf '\n500'; exit 0; }
+        # Record the session whose prefix was deleted.
+        printf '%s\n' "$url" | sed 's#.*/staged/##; s#?.*##' >> "$DELETES"
+        printf ''; printf '\n204'; exit 0
+    fi
+    # readiness probe (-w '%{http_code}' only, no body)
+    [ -f "$S/filer-down.fail" ] && exit 1
+    [ -f "$S/filer-500" ] && { printf '500'; exit 0; }
+    printf '200'; exit 0 ;;
+esac
+
+# ---- XNAT ------------------------------------------------------------------
+case "$url" in
+*/data/projects\?format=json*)
+    [ -f "$S/xnat-auth.fail" ] && { emit '<html>401</html>' '401'; exit 0; }
+    emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
+
+*/experiments\?format=json*)
+    sub=$(printf '%s' "$url" | sed 's#.*/subjects/##; s#/experiments.*##')
+    [ -f "$S/xnat-exp.${sub}.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
+    if [ -f "$S/xnat-exp.${sub}.json" ]; then
+        emit "$(cat "$S/xnat-exp.${sub}.json")" '200'; exit 0
+    fi
+    emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
+
+*/scans/ALL/files\?format=json*)
+    exp=$(printf '%s' "$url" | sed 's#.*/experiments/##; s#/scans.*##')
+    [ -f "$S/xnat-files.${exp}.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
+    if [ -f "$S/xnat-files.${exp}.json" ]; then
+        emit "$(cat "$S/xnat-files.${exp}.json")" '200'; exit 0
+    fi
+    emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
+esac
+
+emit '' '404'
+exit 0

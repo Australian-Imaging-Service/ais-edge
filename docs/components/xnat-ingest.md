@@ -66,19 +66,19 @@ local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
 upstream, so no local rebuild is needed: the image is pulled directly and
 imported into k0s containerd via `ctr image import` on the management host
-and each edge worker. Override `XNAT_INGEST_IMAGE` in
-`config/management.env` to pin a different tag.
+and each edge worker. Override the tag via `xnatUpload.image.tag` in
+`charts/mgmt/values.yaml` (mgmt side) or `ingest.image.tag` in
+`charts/edge/values.yaml` (edge side).
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/xnat-upload.yaml.tpl` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
-| `manifests/02-edge/xnat-ingest.yaml.tpl` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
-| `scripts/04-deploy-xnat-upload.sh` | apply mgmt-side Deployment |
-| `scripts/07-deploy-edge-ingest.sh` | apply edge-side Deployments + push CA bundle |
-| `config/management.env` | `XNAT_URL`, `XNAT_USER`, `XNAT_PASS` |
-| `config/edge-nodes.env` | per-edge `INGEST_LOOP_SECONDS`, `INGEST_WAIT_PERIOD` (destination project comes from `config/orthanc/routing.json`) |
+| `charts/mgmt/templates/xnat-upload.yaml` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
+| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
+| `install.sh` | installs both charts; cert-sync (CronJob) pushes the CA bundle into each edge |
+| `sites/<site>/secrets.enc.yaml` (`xnat-credentials`) | server URL, username, password — SOPS-encrypted |
+| `sites/<edge>/values.yaml` (`ingest:`) | per-edge loop intervals; the AET-to-project map is `orthanc.deid.aetMap` in the same file |
 
 Important env vars on each pod:
 - `AIS_LOG_FORMAT=json` — enable JSON structured log output (now
@@ -89,7 +89,7 @@ Important env vars on each pod:
 ### s3-uploader event schema
 
 Every state change in the upload loop emits one JSON line via the
-`jlog()` shell helper in `manifests/02-edge/xnat-ingest.yaml.tpl`. The
+`jlog()` shell helper in `charts/edge/files/s3-uploader.sh`. The
 shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 
 ```jsonc
@@ -108,7 +108,7 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 ```
 
 The `dicoms` vs `files` split exists because xnat-ingest assign
-auto-generates a `MANIFEST.json` per session and the s3-uploader writes
+auto-generates a `__MANIFEST__.json` per RESOURCE (not per session) and the s3-uploader writes
 it to S3 alongside the DICOMs. Dashboards / alerts that want a true
 DICOM count must read `dicoms`; ones that want "S3 PUT count" or
 "objects written" use `files`. Both fields are computed in busybox-only
@@ -137,10 +137,12 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 
 ## Benefits
 
-- **Battle-tested DICOM parsing** — handles edge cases (missing
+- **DICOM parsing already handles our edge cases** — (missing
   AccessionNumber, multi-frame, multi-series) that we don't want to
   re-implement
-- **Idempotent** — re-running upload skips sessions already in XNAT
+- **Idempotent** — re-running upload skips sessions already in XNAT. It really
+  does skip the transfer; it just does not *say* so. See "Known upstream
+  defects" below before building anything on its log output.
 - **Loop mode with label tracking** — group-orthanc marks each pulled
   study `xnat-ingest-processed`, so subsequent loops skip it → no
   double-ingest
@@ -153,10 +155,116 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 |---|---|---|
 | DICOM missing AccessionNumber | Routes to `__invalid__/` | Manual rename + move; alert (`DICOMValidationFailureSpike`) fires when this happens >10x/h |
 | XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
-| XNAT down | uploads queue in SeaweedFS; backlog grows | `XNATBacklogGrowing` alert fires after 30 min |
+| XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
+
+## Known upstream defects (candidate reports)
+
+Both were found by measurement on the dev deployment, both are in the uploader,
+and both are in the same file as the de-identification issue already raised with
+kirsty-UoN. Neither is dangerous — no data is lost or duplicated in XNAT — but
+each makes the uploader's output lie about what it did, and anything monitoring
+that output inherits the lie.
+
+### 1. The success line is logged on the SKIP path
+
+`Successfully uploaded all files in '<session>'` is emitted on **every** `--loop`
+pass, including the passes where the uploader checks XNAT, finds the session
+already present, and correctly skips the transfer.
+
+Measured over 30 minutes on a single already-uploaded session:
+
+```
+30  "Successfully uploaded all files in 'test_project.65DDEFA8D833.8607324A38C9'"
+14  "already exists"
+14  "Skipping"
+```
+
+Emission gaps: `1, 61, 1, 62, 1, 61, ...` — two lines per loop, one loop every
+~62s, continuing for as long as the session remains in S3 staging. With
+retention disabled that is forever.
+
+So the line is a **level, not an event**: it means "this session is in XNAT",
+re-asserted indefinitely, not "this session was just uploaded".
+
+**What it cost us.** An alert keyed on that string with a `[1m]` range against a
+~62s emission period had its series go empty between passes, so it resolved and
+re-fired every minute — one notification per loop, forever. Diagnosing it took
+three wrong attempts. Our fix was to widen the range past the loop period
+(`charts/mgmt/files/loki-ruler-rules.yaml`), which works but is a workaround for
+a message that should not be there.
+
+**Suggested upstream fix.** Emit a distinct message on the skip path — e.g.
+`Session '<session>' already in XNAT, skipping` — or drop the success line to
+debug when nothing was transferred. Either makes the successful-upload line an
+event again, which is what every consumer assumes it is.
+
+**It also blocks a real backlog alert.** `XNATBacklogGrowing` tried to measure
+"arriving in S3 faster than being pushed to XNAT" by subtracting a count of
+this string from a count of edge `upload_completed` events. Because the
+string is a level, its count grows with however many sessions are sitting in
+static backlog, not with new arrivals in the window — so a genuine backlog
+makes the subtraction more negative, not more positive, and the alert could
+never fire in the direction it was meant to. Removed rather than shipped as
+false coverage; a real version needs the fix above, or a distinct
+"session confirmed in XNAT" event with no level-persistence problem.
+
+### 2. The XNAT listing is cached for the lifetime of a `--loop` run
+
+`xnat-ingest upload --loop` opens one XNAT connection and xnatpy caches the
+project/experiment listing on it. A connection opened while a session does not
+yet exist keeps returning that stale view for the life of the process, so the
+uploader cannot see its own writes.
+
+It is a **state** bug, not a logic bug: restarting the pod clears it, and with a
+fresh connection the deduplication is correct.
+
+**Operational consequence, worth knowing even if upstream never changes it:** if
+you ever clear XNAT by hand, **restart the uploader**. Otherwise it keeps
+deciding against a snapshot that no longer matches reality — it will skip
+everything staged, and report success while doing it.
+
+**Suggested upstream fix.** Refresh the listing once per loop iteration, or
+expose the cache TTL as a flag.
+
+### 3. A benign checksum mismatch logs at ERROR, every loop, until XNAT catches up
+
+Measured with a synthetic drop (`scripts/site-secrets.sh` §"synthetic DICOM
+drop" in `docs/TOUR.md`): for several minutes right after a session first
+lands in XNAT, every `--loop` pass re-logs
+
+```
+ERROR "'DICOM' resource in '<session>' already exists on XNAT with different
+checksums. Please delete on XNAT to overwrite: {'<file>.dcm': ('', '<md5>')}"
+```
+
+immediately followed by `INFO "Skipping ... resource as it is already
+uploaded"` and `INFO "Successfully uploaded all files"` — so the pass still
+ends in success. The left side of that tuple, `''`, is XNAT's own catalog
+entry for the file's checksum; it is empty because XNAT has not finished
+computing it yet, not because the bytes actually differ. A session running
+for hours (`test_project.65DDEFA8D833.8607324A38C9`) shows zero occurrences
+of this line — it stops once XNAT's own checksum catches up — but a
+freshly-arrived session repeats it on every ~60s pass in the meantime.
+
+Not dangerous today: no alert rule matches on log text or level for the
+`xnat-upload` namespace (checked — `grep -i "checksum\|already exists"
+charts/mgmt/files/loki-ruler-rules.yaml` returns nothing), so this currently
+produces noise in `kubectl logs` and nothing else. It is the same trap as
+defect 1 above, one severity level worse: an ERROR-labelled line that means
+nothing is wrong, re-emitted every loop for as long as the session is
+freshly staged. **If anyone ever adds a rule that alerts on `level="ERROR"`
+in this namespace without reading the message first, this line will fire it
+on every normal upload** — the exact failure mode that made
+`OrthancStorageGrowing` and `XNATBacklogGrowing` (deleted this session, see
+`docs/TOUR.md` §9.9) look like coverage while measuring nothing.
+
+**Suggested upstream fix.** Either skip the checksum comparison (and this
+log line) when XNAT's stored checksum is empty/unset — that state means "not
+computed yet", not "computed and different" — or log it at INFO/DEBUG, since
+the pass's own outcome is already success.
 
 ## Replacements / future
 

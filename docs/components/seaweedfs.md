@@ -30,8 +30,14 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
 - Cluster: management cluster only
 - Namespace: `seaweedfs`
 - Workload: Deployment `seaweedfs` (single replica, all-in-one)
-- Image: `chrislusf/seaweedfs:3.99` (last 3.x stable; pinned to avoid
-  the 4.18/4.19 filer memory regression)
+- Image: `chrislusf/seaweedfs:4.34` (was 3.99 — moved off it because 3.99 is
+  vulnerable to CVE-2026-54917, CVE-2026-58372 and CVE-2026-55874: three S3
+  path traversals that let one site's key read, copy and *delete* across
+  another site's bucket. 4.34 is the lowest version clean of all six published
+  SeaweedFS advisories. Issue #9035, the 4.18/4.19 filer memory regression the
+  old pin avoided, is closed — but see the risk table for #10253, which is not.
+  The Iceberg REST Catalog 4.x turns on by default is disabled explicitly with
+  `-s3.port.iceberg=0`.)
 - Service: `seaweedfs.seaweedfs.svc.cluster.local` (ClusterIP only)
 - External: nginx-ingress route `https://seaweedfs.aisedge.local:443`
   (TLS-terminated, signed by ais-edge-ca)
@@ -41,10 +47,8 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/seaweedfs.yaml.tpl` | Deployment, ClusterIP Service, metrics Service, hostPath volume |
-| `manifests/01-management/seaweedfs-tls-cert.yaml.tpl` | server cert (Certificate signed by ais-edge-ca-issuer) |
-| `manifests/01-management/seaweedfs-ingress.yaml.tpl` | nginx Ingress for `seaweedfs.aisedge.local` |
-| `scripts/03-deploy-seaweedfs.sh` | renders s3.json from EDGE_NODES + Loki creds, applies all of the above, creates `ingest-bucket` and `logs-bucket` |
+| `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook |
+| `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, per-site bucket toggle, image tag |
 | `config/management.env` | `S3_ADMIN_*`, `S3_BUCKET`, `LOGS_BUCKET`, `LOKI_S3_*`, `SEAWEEDFS_HOSTNAME` |
 
 ## Operations
@@ -63,9 +67,26 @@ kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master
 kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
 
 # Re-render s3.json after editing edge-nodes.env
-bash scripts/03-deploy-seaweedfs.sh
+helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 # (idempotent — recomputes the config-hash annotation, rolls the pod)
 ```
+
+### Deletion must go through the filer, never `aws s3 rm`
+
+Measured on SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it)
+removes the objects but leaves a 0-byte directory entry, which `aws s3 ls`
+still reports as `PRE <session>/`. An empty prefix is exactly what makes the
+uploader log a bogus success every cycle — switching S3 client does not fix
+it, only the filer can remove a directory entry:
+
+```
+DELETE http://<filer>:8888/buckets/<bucket>/<prefix>/<session>?recursive=true
+```
+
+Measured: returns 204 and the entry is genuinely gone, where the same session
+deleted with `aws s3 rm --recursive` still lists. This is why
+`charts/mgmt/files/reclaim-staged.sh` deletes through the filer HTTP API and
+never shells out to `aws s3 rm`.
 
 ## Benefits
 
@@ -84,7 +105,8 @@ bash scripts/03-deploy-seaweedfs.sh
 | `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` alert at 80%; retention CronJob (TODO) deletes uploaded sessions |
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
 | `s3-config` ConfigMap drift | Auth fails | Re-running script 03 regenerates it; config-hash annotation rolls the pod |
-| 4.x filer memory regression | Memory growth | We pin to 3.99 explicitly; revisit when 4.x is stable |
+| Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
+| ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | — | Was only ever measured against 3.99. Re-measured live against 4.34's real S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
 
 ## Replacements / future
 
@@ -104,6 +126,7 @@ bash scripts/03-deploy-seaweedfs.sh
   `ingest-bucket/staged/` after XNAT confirms
 - Dedicated metrics service-monitor (currently the metrics port is
   exposed but Prometheus discovery via ServiceMonitor needs verification
-  against the 3.99 metrics format)
+  against the 3.99 metrics format; re-checked on 4.34 — the three
+  `SeaweedFS_volumeServer_*` series these read are unchanged, 4.x only adds)
 - Replication: 3-master HA with Raft, separate volume/filer/s3
   deployments

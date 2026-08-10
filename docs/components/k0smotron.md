@@ -49,7 +49,7 @@ For each edge declared in `config/edge-nodes.env`:
 | File | Purpose |
 |---|---|
 | `manifests/01-management/edge-cluster.yaml.tpl` | the `Cluster` CR — replicas, version, externalAddress, service, ingress, k0sConfig SANs |
-| `scripts/02-install-k0smotron.sh` | installs k0smotron + cert-manager prerequisite |
+| `install.sh` (step 2) | installs cert-manager + the k0smotron operator as prerequisites |
 | `scripts/05-setup-edge-cluster.sh` | applies the Cluster CR, extracts kubeconfig, generates JoinTokenRequest with rewritten URL |
 | `scripts/06-join-edge-worker.sh` | SSH-installs k0s worker, stages haproxy certs, patches CoreDNS |
 

@@ -1,0 +1,292 @@
+{{- /*
+cert-manager issuers for the management plane.
+
+(Render-time guards now run from templates/validate.yaml, which is
+unconditional. Do not re-add an include here.)
+
+TWO CA MODES, selected by certManager.ca.mode.
+
+  selfSigned    (default) cert-manager generates a self-signed root in the
+                cluster, and that root signs every leaf certificate directly.
+                One tier, one key, and the key is in a Secret on the
+                management node.
+
+  intermediate  the root is generated OUT OF BAND and its key is kept offline.
+                The cluster holds only an intermediate, supplied as an
+                existing Secret, and cert-manager issues from that. The chart
+                cannot and does not generate the root in this mode: the key it
+                would need is deliberately not here.
+
+WHAT THE SPLIT BUYS, stated narrowly. If the management node is compromised
+the attacker already holds the staged imaging, the XNAT credentials and every
+child cluster kubeconfig. The CA is not the crown jewel and moving the root
+offline does not protect any of that. What it buys is RECOVERABILITY: edges
+trust the ROOT, so replacing a compromised or expiring intermediate is an
+in-cluster operation they never observe, instead of hand-carrying a new trust
+anchor to every site. That is a smaller claim than "the root is protected",
+and it is the only one made here.
+
+THE CA PATH IS ALWAYS RENDERED, even when certManager.issuer selects Let's
+Encrypt. Two reasons, both learned the hard way:
+
+  * the internal CA is what a nip.io / wildcard-resolver dev domain has to
+    use — Let's Encrypt refuses those names outright, and DNS-01 cannot be
+    satisfied for a domain nobody delegates to us;
+  * the CA's public half is distributed to every edge as the `ca-bundle`
+    Secret. If this chart stopped emitting the CA the moment an operator
+    switched the issuer, every edge would keep a bundle for a CA that no
+    longer signs anything, and the failure would surface days later as TLS
+    errors on the Loki push and the S3 upload rather than at install time.
+
+THE CA RESOURCES ALL CARRY helm.sh/resource-policy: keep.
+The CA private key lives in a Secret cert-manager owns and Helm never sees —
+but deleting the Certificate or the bootstrap Issuer is just as destructive in
+slow motion: at renewal cert-manager needs the bootstrap Issuer to re-sign,
+and a regenerated root invalidates every ca-bundle already shipped to every
+edge. Recovering means re-distributing the bundle to every site by hand.
+`helm uninstall` must not be able to start that.
+
+NAMING, deliberately inconsistent and here is why:
+  * selfsigned bootstrap  -> release-scoped. Nothing outside this file ever
+                             references it, so it gets the normal Helm
+                             treatment and two releases cannot collide. Only
+                             exists in selfSigned mode — it is the thing that
+                             generates the root, and in intermediate mode
+                             there is no root to generate.
+  * CA ClusterIssuer      -> named from .Values.certManager.issuer. Every
+                             Certificate in this chart sets
+                             issuerRef.name: {{ .Values.certManager.issuer }},
+                             and a dangling issuerRef does not error — the
+                             Certificate simply stays Pending forever and the
+                             Ingress quietly serves nginx's default self-
+                             signed cert. The name IS the values contract.
+                             Its name does NOT change with the mode, so
+                             switching modes does not re-point every
+                             Certificate in the chart.
+  * Certificate ais-edge-ca -> fixed. scripts/02b-bootstrap-ca.sh waits on
+                             `certificate/ais-edge-ca` and exports the CA from
+                             it; the operator runbook and rotate-ca.sh use the
+                             same name.
+
+The guards below live in this file rather than in templates/validate.yaml
+because they guard these resources specifically and read locals computed here.
+That is safe for the same reason validate.yaml is: this template is
+unconditional — it renders on every install, so no values change can skip it.
+If this file is ever made conditional, move the guards to validate.yaml first.
+
+The out-of-band ceremony for intermediate mode is docs/ca-ceremony.md.
+*/ -}}
+{{- $issuer := .Values.certManager.issuer -}}
+{{- $isAcme := hasPrefix "letsencrypt-" $issuer -}}
+{{- /* The CA ClusterIssuer takes the issuer name unless the operator picked
+       Let's Encrypt, in which case the CA path still exists but under its
+       own well-known name. */ -}}
+{{- /* The bootstrap issuer's NAME is configurable because it appears in the
+       CA Certificate's issuerRef, and issuerRef is part of the spec: changing
+       it makes cert-manager RE-ISSUE the root CA, which invalidates every
+       ca-bundle already distributed to every edge — a fleet-wide TLS outage
+       from a rename.
+
+       Default is release-prefixed, which is right for a new cluster. A
+       brownfield cluster sets it to whatever it already has. On
+       stream-2-ab-dev that is `selfsigned-bootstrap`, created by the
+       imperative installer; adopting the CA Certificate with the default name
+       would have rewritten its issuerRef. Caught by diffing the live object
+       against the rendered one before adopting. */ -}}
+{{- $bootstrapIssuer := .Values.certManager.ca.bootstrapIssuerName | default (printf "%s-selfsigned-bootstrap" (include "mgmt.fullname" .)) }}
+{{- /* Shared with observability.yaml, which issues the Loki push client certs
+       from this same issuer. Two copies of the ternary is how those certs
+       would end up signed by a CA the push Ingress does not verify against. */ -}}
+{{- $caIssuerName := include "mgmt.caIssuerName" . -}}
+{{- $ca := .Values.certManager.ca -}}
+{{- $mode := $ca.mode -}}
+
+{{- /* ------------------------------------------------------------------ */ -}}
+{{- /* Guards. Every one of these fails SILENTLY at runtime if unchecked:  */ -}}
+{{- /* a Certificate that stays Pending, or a root that is regenerated.    */ -}}
+{{- /* ------------------------------------------------------------------ */ -}}
+{{- if not (has $mode (list "selfSigned" "intermediate")) }}
+  {{- fail (printf "certManager.ca.mode must be 'selfSigned' or 'intermediate', got %q. See docs/ca-ceremony.md." $mode) }}
+{{- end }}
+
+{{- /* commonName is the SUBJECT of the trust anchor every edge has already
+       pinned. cert-manager treats it as desired state, so in selfSigned mode
+       changing this string re-issues the root at the next `helm upgrade`, and
+       every ca-bundle Secret already distributed then verifies against a CA
+       that no longer signs anything — every edge's S3 upload and Loki push
+       fails TLS validation at once. Verified on the live management cluster:
+       the deployed root is CN="AIS Edge Root CA"
+       (openssl x509 -in ais-edge-ca.crt -subject). In intermediate mode the
+       same string is the CN the offline ceremony must use, so it is pinned in
+       both modes and for the same reason. */ -}}
+{{- if and (ne $ca.commonName "AIS Edge Root CA") (not $ca.allowCommonNameChange) }}
+  {{- fail (printf "certManager.ca.commonName is %q, but the root CA deployed on this fleet is CN=\"AIS Edge Root CA\". cert-manager treats commonName as desired state: changing it re-issues the root on the next upgrade and every ca-bundle already distributed to every edge stops verifying, so every site's S3 upload and Loki push fails TLS at the same moment. This is a fleet-wide outage caused by a cosmetic-looking string. If you are genuinely building a NEW fleet with no distributed bundles, set certManager.ca.allowCommonNameChange=true." $ca.commonName) }}
+{{- end }}
+
+{{- if eq $mode "intermediate" }}
+  {{- /* There is nothing to fall back to. With no Secret named here the CA
+         ClusterIssuer would reference an empty string, stay NotReady, and
+         every Certificate in the chart would sit Pending while the Ingresses
+         serve nginx's default self-signed certificate — which reads as a
+         browser warning, not as a misconfiguration. */ -}}
+  {{- if not $ca.intermediate.secretRef }}
+    {{- fail "certManager.ca.mode=intermediate but certManager.ca.intermediate.secretRef is empty. In this mode the chart does not generate a CA — the root key is offline by design — so it must be told which existing Secret holds the intermediate certificate and key. Create it with the ceremony in docs/ca-ceremony.md, then set intermediate.secretRef to its name. Leaving it empty leaves every Certificate Pending with no error." }}
+  {{- end }}
+  {{- /* Same Secret for both would mean that flipping back to selfSigned lets
+         cert-manager take ownership of the Secret holding the offline-signed
+         intermediate and overwrite it with a freshly generated root. The
+         offline key cannot re-sign what has been overwritten without another
+         ceremony. */ -}}
+  {{- if eq $ca.intermediate.secretRef $ca.secretName }}
+    {{- fail (printf "certManager.ca.intermediate.secretRef and certManager.ca.secretName are both %q. They must be different Secrets: secretName is the one cert-manager GENERATES into in selfSigned mode, so sharing it means a later switch back to selfSigned overwrites the offline-signed intermediate with a new self-signed root." $ca.secretName) }}
+  {{- end }}
+{{- end }}
+
+{{- /* WHERE cert-manager reads cluster-scoped resources from — its
+       --cluster-resource-namespace. This is the namespace the CA Secret must
+       live in, regardless of which namespace the Certificate that produced it
+       is in, and regardless of whether we installed cert-manager. Deriving it
+       from certManager.enabled ("did we install the subchart") is what put the
+       CA Certificate in a namespace cert-manager never reads: the ClusterIssuer
+       reported "secret not found" while the Certificate itself looked Ready. */ -}}
+{{- $cmNamespace := .Values.certManager.clusterResourceNamespace -}}
+{{- if not $cmNamespace }}
+  {{- fail "certManager.clusterResourceNamespace is empty. It must name the namespace the running cert-manager controller was started with (--cluster-resource-namespace); the CA Secret is read from there and nowhere else." }}
+{{- end }}
+{{- if and .Values.certManager.enabled (ne $cmNamespace .Release.Namespace) }}
+  {{- fail (printf "certManager.enabled=true installs the cert-manager subchart into the release namespace %q, so its --cluster-resource-namespace is %q, but certManager.clusterResourceNamespace is %q. The CA Secret would be written where the controller does not look, and the ClusterIssuer would report \"secret not found\" while the Certificate looked Ready. Set certManager.clusterResourceNamespace=%s, or leave certManager.enabled=false and point clusterResourceNamespace at the cert-manager that is already installed." .Release.Namespace .Release.Namespace $cmNamespace .Release.Namespace) }}
+{{- end }}
+
+{{- /* The Secret the CA ClusterIssuer signs from. Generated by us in
+       selfSigned mode; supplied by the ceremony in intermediate mode. */ -}}
+{{- $issuingSecret := ternary $ca.secretName $ca.intermediate.secretRef (eq $mode "selfSigned") -}}
+
+{{- if eq $mode "selfSigned" }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $bootstrapIssuer }}
+  annotations:
+    # Bootstrap-only, but not disposable: the root Certificate is re-signed
+    # through this Issuer at renewal, so it has to outlive an uninstall.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ais-edge-ca
+  namespace: {{ $cmNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  isCA: true
+  commonName: {{ $ca.commonName | quote }}
+  secretName: {{ $ca.secretName }}
+  duration: {{ $ca.durationHours }}h
+  # Renew at 90% of the lifetime rather than a fixed 8760h. The shell version
+  # hardcoded both numbers independently, so shortening the duration below a
+  # year would have produced renewBefore > duration, which cert-manager
+  # rejects and which leaves the CA unmanaged.
+  renewBefore: {{ max (div $ca.durationHours 10) 1 }}h
+  privateKey:
+    # A 10-year root. RSA-4096 is not a values key on purpose: it is a
+    # property of the trust anchor every edge pins, not a per-site tunable.
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: {{ $bootstrapIssuer }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- else }}
+{{- /*
+intermediate mode renders NO Certificate and NO bootstrap Issuer.
+
+That absence is the point: the root's private key is offline, so nothing in
+this cluster can sign a CA certificate, and a template that tried would either
+produce a second, unrelated root or fail. The Secret named below is created by
+hand from the ceremony in docs/ca-ceremony.md and is not owned by Helm — it is
+never templated, never in git, and `helm uninstall` cannot remove it.
+
+Expected keys in that Secret:
+  tls.crt   the intermediate certificate (signed by the offline root)
+  tls.key   the intermediate's private key
+  ca.crt    the ROOT certificate — what edges pin and keep trusting across
+            intermediate rotations
+
+It must live in namespace {{ $cmNamespace }} (cert-manager's
+--cluster-resource-namespace), because that is the only place a ClusterIssuer's
+spec.ca.secretName is resolved from.
+
+The chart cannot check any of this at render time: Helm cannot read cluster
+state, so a missing key or a certificate that is not a CA surfaces as a
+NotReady ClusterIssuer. docs/ca-ceremony.md carries the post-install
+verification commands, and they are not optional.
+*/ -}}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $caIssuerName }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    ais-edge/ca-mode: {{ $mode }}
+spec:
+  ca:
+    {{- if eq $mode "selfSigned" }}
+    # The root generated by the Certificate above. Resolved in
+    # {{ $cmNamespace }}, not in the namespace of the Certificate asking.
+    {{- else }}
+    # The offline-signed intermediate, created by hand in {{ $cmNamespace }}
+    # and not owned by Helm. See docs/ca-ceremony.md.
+    {{- end }}
+    secretName: {{ $issuingSecret }}
+{{- if $isAcme }}
+{{- /*
+Let's Encrypt. DNS-01 only: this chart runs the ingress with
+ssl-passthrough for the k0smotron API and konnectivity, so an HTTP-01
+challenge has no controller to terminate at. DNS-01 is also the only
+challenge that can produce the wildcard certs a multi-host SNI setup wants.
+
+The solver block is passed through with toYaml. The shell installer spliced
+the provider stub in with `sed 's/^/          /'` — a fixed ten-space indent
+that silently produced malformed YAML for any stub whose own nesting did not
+happen to match, and gave no clue why cert-manager then ignored the solver.
+*/}}
+{{- if not .Values.certManager.acme.dns01Solver }}
+  {{- fail (printf "certManager.issuer=%s but certManager.acme.dns01Solver is empty. A ClusterIssuer with no solver never solves a challenge: every Certificate stays Pending and the Ingress serves nginx's default self-signed cert, which looks like a browser warning rather than a misconfiguration. Configure the DNS-01 solver, or use issuer: ais-edge-ca." $issuer) }}
+{{- end }}
+{{- if and (eq $issuer "letsencrypt-staging") (contains "acme-v02.api.letsencrypt.org" .Values.certManager.acme.server) }}
+  {{- fail "certManager.issuer=letsencrypt-staging but certManager.acme.server still points at the PRODUCTION directory. Staging exists to test the DNS-01 plumbing without spending the real rate limit; leaving the prod URL here spends it while you believe you are testing. Set certManager.acme.server to https://acme-staging-v02.api.letsencrypt.org/directory." }}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $issuer }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+spec:
+  acme:
+    {{- with .Values.certManager.acme.email }}
+    email: {{ . | quote }}
+    {{- end }}
+    server: {{ .Values.certManager.acme.server | quote }}
+    privateKeySecretRef:
+      # The ACME account key. cert-manager creates it; re-registering after
+      # losing it is not free (account-per-IP rate limits), so it is left in
+      # place on uninstall by virtue of not being a Helm resource at all.
+      name: {{ $issuer }}-account
+    solvers:
+      - dns01:
+          {{- toYaml .Values.certManager.acme.dns01Solver | nindent 10 }}
+{{- end }}

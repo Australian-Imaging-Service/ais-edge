@@ -10,14 +10,51 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <edge-entry>"
     echo "  edge-entry format: CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|ACCESS_KEY|SECRET_KEY"
+    echo "  (install.sh instead exports the config and passes just the edge name)"
     exit 1
 fi
 
-parse_edge_entry "$1"
+# When install.sh has already exported this edge's configuration from
+# sites/<site>/values.yaml, the argument is just the edge NAME and there is
+# nothing to parse. Calling parse_edge_entry on it would fail ("expected 6
+# pipe-separated fields, got 1") and, worse, a successful parse would
+# OVERWRITE the exported values with whatever config/edge-nodes.env still
+# says — the second source of truth this was meant to remove.
+if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
+    : "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
+    # parse_edge_entry also DERIVES these two from the primitives; do the same
+    # here so both call styles leave the script with identical variables.
+    # `~` is expanded explicitly: it comes from a YAML value, so the shell
+    # never sees it in a position where tilde expansion happens, and ssh would
+    # be handed a literal "~/.ssh/id_ed25519" that does not exist.
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    EDGE_SSH="${SSH_USER}@${NODE_IP}"
+    SSH_KEY_OPT=""
+    [ -n "${SSH_KEY:-}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
+    EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
+else
+    parse_edge_entry "$1"
+fi
 
 echo "=== 05: Creating hosted cluster '${CLUSTER_NAME}' ==="
 
-# Create namespace and cluster
+# Create namespace and cluster.
+#
+# SKIPPED when charts/mgmt owns the Cluster object, which is the normal path
+# now: templates/edge-clusters.yaml renders one per entry in `edges`, with the
+# per-site NodePorts and hostnames the hardcoded template below cannot express
+# (it pins apiPort 30443 / konnectivityPort 30132, so a second site is
+# impossible, and persistence emptyDir, which the chart refuses). Re-applying
+# this here would fight Helm for ownership of the same object.
+#
+# The REST of this script is still required and has no Helm equivalent: the
+# control-plane wait, the child kubeconfig with its server: rewritten to the
+# ingress, the mgmt-node /etc/hosts entries, and above all the join token,
+# which is decoded, re-pointed at the ingress and re-encoded. A Helm-rendered
+# token would be re-minted on every upgrade.
+if [ "${CLUSTER_CR_MANAGED_BY_HELM:-0}" = "1" ]; then
+    echo "05: Cluster object is managed by charts/mgmt — skipping create, using it as-is"
+else
 kubectl create namespace "${CLUSTER_NAME}" --dry-run=client -o yaml | kubectl apply -f -
 render "${REPO_DIR}/manifests/01-management/edge-cluster.yaml.tpl" \
     CLUSTER_NAME "$CLUSTER_NAME" \
@@ -26,6 +63,7 @@ render "${REPO_DIR}/manifests/01-management/edge-cluster.yaml.tpl" \
     KONNECTIVITY_HOSTNAME "$KONNECTIVITY_HOSTNAME" \
     INGRESS_PORT "$INGRESS_PORT" \
     | kubectl apply -f -
+fi
 
 # Wait for control plane
 echo "Waiting for control plane pods (may take 2-3 min first time)..."
@@ -62,7 +100,12 @@ echo "Kubeconfig: kubeconfig-${CLUSTER_NAME}  (server: https://${K0S_API_HOSTNAM
 if [ "${INSTALL_TOPOLOGY:-onprem}" = "onprem" ]; then
     HOSTS_MARKER="# ais-edge phase2 tls hostnames"
     HOSTS_LINE="${MGMT_NODE_IP} ${SEAWEEDFS_HOSTNAME} ${K0S_API_HOSTNAME} ${KONNECTIVITY_HOSTNAME}"
-    if ! grep -qF "${HOSTS_MARKER}" /etc/hosts; then
+    # Check for the ENTRY, not the marker. A marker left behind by an
+    # incomplete teardown would otherwise make this skip, and the node then
+    # cannot resolve its own child-cluster API — which surfaces much later as
+    # the worker join timing out.
+    if ! grep -qF "${K0S_API_HOSTNAME}" /etc/hosts; then
+        sudo sed -i "\|${HOSTS_MARKER}|d" /etc/hosts 2>/dev/null || true
         echo "Adding Phase 2 hostnames to management /etc/hosts (sudo)..."
         echo -e "${HOSTS_MARKER}\n${HOSTS_LINE}" | sudo tee -a /etc/hosts >/dev/null
     fi

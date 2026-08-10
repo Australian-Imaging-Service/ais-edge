@@ -1,0 +1,296 @@
+# =============================================================================
+# EXAMPLE MANAGEMENT SITE — non-secret configuration
+# =============================================================================
+# This is the config for THE MANAGEMENT NODE: the one machine that runs
+# SeaweedFS, Loki, Prometheus, Alertmanager, Grafana, cert-manager, the
+# k0smotron hosted control planes, the XNAT uploader and the S3 reclaimer.
+#
+# There is exactly ONE of these per deployment. Each EDGE gets its own
+# directory alongside this one, from sites/example-edge/.
+#
+#   scripts/site-secrets.sh new <name> mgmt     # copies this directory
+#   $EDITOR sites/<name>/values.yaml            # <- everything below
+#   $EDITOR sites/<name>/secrets.enc.yaml       # still plaintext at this point
+#   scripts/site-secrets.sh encrypt <name>      # do not commit before this
+#   ./install.sh <name>
+#
+# HOW HELM SEES THIS FILE. You never edit charts/mgmt/values.yaml or
+# charts/edge/values.yaml. Those hold the defaults and the reasoning behind
+# them; this file holds the handful of facts that are true of YOUR site, and
+# Helm layers it on top:
+#
+#   management chart:  -f sites/<name>/values.yaml
+#   edge chart:        -f sites/<name>/values.yaml  -f sites/<edge>/values.yaml
+#
+# So this file reaches BOTH charts. That is deliberate: a fact that means the
+# same thing on both sides — the internal domain, the data policy, the
+# management node's IP — is written HERE, exactly once, and the edge derives
+# its endpoints from it. Anything genuinely local to one edge goes in that
+# edge's own file, which is passed last and therefore wins.
+# =============================================================================
+
+# Short name for this deployment. Becomes a label on every log line and metric,
+# and appears in alert routing.
+clusterLabel: mgmt
+
+# fresh     install.sh installs k0s, kubectl, helm and local-path here from
+#           nothing. This is what you want on a new machine.
+# existing  k0s is already running on this node; install.sh verifies instead of
+#           building. Only for adopting a cluster that predates these charts.
+installMode: fresh
+
+domain:
+  # Internal DNS suffix. The edges resolve the hostnames below through
+  # /etc/hosts entries that install.sh writes, not through real DNS, so this
+  # name does NOT have to be registered anywhere.
+  internal: aisedge.local
+  # The address every edge node reaches this management node on.
+  mgmtNodeIP: "10.0.0.1"
+
+hostnames:
+  seaweedfs: seaweedfs.aisedge.local
+  grafana: grafana.aisedge.local
+  loki: loki.aisedge.local
+# The child-cluster API and konnectivity hostnames are NOT here, and the chart
+# REFUSES to render if you add them. They used to live at this level, which gave
+# every edge the same two names — so the second site's Ingress claimed a
+# hostname the first already owned and the fleet could not grow past one site.
+# They are per-edge now: pin them on the `edges` entry below, or omit them and
+# take the generated <apiPrefix>-<name>.<domain>.
+
+# -----------------------------------------------------------------------------
+# Platform components
+# -----------------------------------------------------------------------------
+# install.sh installs cert-manager and the k0smotron operator as PREREQUISITES,
+# before this chart, in that order. You do not do any of it by hand.
+certManager:
+  # FALSE, and required to be. The per-edge Cluster objects this chart creates
+  # need k0smotron's conversion webhook; the operator serving that webhook needs
+  # a cert-manager-issued certificate; so cert-manager cannot come from this
+  # same release. Setting this true fails the install on the first Cluster
+  # object with "connection refused" from the conversion webhook — which reads
+  # as a network problem rather than the ordering problem it is.
+  enabled: false
+  # The namespace the running cert-manager was started with
+  # (--cluster-resource-namespace). install.sh puts it in its own namespace, and
+  # it runs --cluster-resource-namespace=$(POD_NAMESPACE). The CA Secret is read
+  # from here and nowhere else, so certSync.secrets[].source.namespace below
+  # must match. Both charts refuse to render on a mismatch.
+  clusterResourceNamespace: cert-manager
+
+ingressNginx:
+  enabled: true
+
+# The k0smotron OPERATOR is not a subchart — it is applied out of band and its
+# CRDs must exist before these Cluster objects can be created. install.sh
+# handles the ordering.
+k0smotron:
+  enabled: true
+
+seaweedfs:
+  storage:
+    hostPath: /data/seaweedfs
+  # One bucket per edge site. SeaweedFS matches actions as "<action>:<bucket>"
+  # with no prefix scoping, so the bucket is the ONLY isolation boundary
+  # available — a shared bucket would let any edge's credential read every
+  # other edge's staged patient data.
+  perSiteBuckets: true
+
+observability:
+  alerting:
+    emailTo: alerts@example.org
+    emailFrom: ais-edge@example.org
+    smtpHost: smtp.example.org
+    smtpPort: 587
+    # For Gmail this must be an App Password. A 2FA account rejects the account
+    # password with 535 BadCredentials, and the only symptom is alerts that
+    # never arrive.
+    smtpUsername: ais-edge@example.org
+
+# -----------------------------------------------------------------------------
+# Edge sites
+# -----------------------------------------------------------------------------
+# One entry per edge. Each gets its own hosted control plane, S3 bucket, S3
+# identity, uploader and reclaimer on this node.
+#
+# ADDING A SECOND EDGE: add an entry here, create sites/<edge>/ from
+# sites/example-edge/, then re-run install.sh. Nothing else changes — the new
+# edge can differ from the first in every edge-local respect (AE titles, XNAT
+# project mapping, de-identification profile, disk paths) because those live in
+# its own file.
+#
+# Measured cost: ~231Mi per uploader. On a 16Gi management node that is a
+# practical ceiling around 15 sites.
+edges:
+  - name: edge-dev
+    nodeIP: "10.0.0.2"
+    # install.sh joins the worker over SSH — there is no API server on the edge
+    # until it has — so the connection details belong with the edge.
+    sshUser: ubuntu
+    sshKey: ~/.ssh/id_ed25519
+    # Names of Secrets in sites/<this site>/secrets.enc.yaml. The charts never
+    # contain credentials; they reference them by name only.
+    s3SecretRef: edge-dev-s3
+    uploadSecretRef: seaweedfs-upload
+    # sni      ClusterIP behind the :443 ssl-passthrough Ingress. NO cluster-wide
+    #          port allocation, so sites cannot collide and adding one needs no
+    #          port assignment at all. Use this.
+    # nodePort Reserves a port on every node, fleet-wide. Only for adopting a
+    #          site already running that way.
+    exposure: sni
+
+# Where the CA bundle and each edge's Loki push credential are copied from, into
+# every edge cluster, by the cert-sync CronJob.
+certSync:
+  secrets:
+    - source:
+        # MUST equal certManager.clusterResourceNamespace above. cert-manager
+        # writes the CA Secret into the namespace it runs in; point this one
+        # namespace away and cert-sync logs sync_failed forever while the edge
+        # pods that mount ca-bundle never start. Both charts refuse to render on
+        # a mismatch rather than let that happen.
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys:
+          ca.crt: ca.crt
+      destination:
+        namespace: xnat-ingest
+        name: ca-bundle
+        type: Opaque
+    - source:
+        # This edge's Loki push CLIENT CERTIFICATE. cert-manager issues one per
+        # entry in `edges` above, from the same CA as the ca-bundle, into this
+        # namespace as `<edge>-loki-client` — the name is fixed by the chart
+        # and the chart refuses to render if this entry does not match it.
+        # Adding a site therefore provisions its push identity automatically;
+        # there is nothing to generate, write down or keep in step.
+        namespace: ais-mgmt
+        name: "<edge>-loki-client"
+        keys:
+          tls.crt: tls.crt
+          tls.key: tls.key
+      destination:
+        namespace: xnat-ingest
+        # Must equal observability.loki.clientCertSecret in the EDGE site
+        # values. A mismatch leaves Vector in CreateContainerConfigError.
+        name: loki-push-client-tls
+        type: kubernetes.io/tls
+    - source:
+        # THIS EDGE'S S3 KEY PAIR, WRITTEN ONCE AND DELIVERED FROM HERE.
+        #
+        # It used to be typed into two files with identical values: the
+        # `<edge>-s3` Secret on this side, which SeaweedFS builds its identity
+        # list from, and `s3-edge-credentials` in the edge's own secrets file,
+        # which its uploader authenticates with. Nobody cares what the string
+        # is, only that both copies match — so making a human the consistency
+        # mechanism was the bug. A mismatch stalls the pipeline at upload with
+        # an S3 403 and nothing says why.
+        #
+        # The name must stay `<edge>-s3` so it matches edges[].s3SecretRef;
+        # cert-sync substitutes <edge> and nothing else, and the chart refuses
+        # to render if the two disagree.
+        namespace: ais-mgmt
+        name: "<edge>-s3"
+        keys:
+          access-key: access-key
+          secret-key: secret-key
+      destination:
+        namespace: xnat-ingest
+        name: s3-edge-credentials
+        type: Opaque
+
+# =============================================================================
+# Data policy — WRITTEN ONCE, HERE, FOR THE WHOLE SITE
+# =============================================================================
+# This block reaches BOTH charts, because Helm passes this file to each of them.
+# That is the point: the management node and every edge then agree on what may
+# be deleted and when, and cannot be half-enabled.
+#
+# Do NOT copy this block into an edge's own file. An edge file is passed last
+# and would override it silently for that edge only — the management reclaimer
+# would free staged objects while the edge kept everything, or the reverse. If
+# one site genuinely needs a different policy, set it there deliberately and
+# write down why.
+#
+# Nothing expires on a fresh install. Run with dryRun for a week and read the
+# decisions it logs before enabling it.
+# =============================================================================
+dataPolicy:
+  # MASTER SWITCHES. Both must be flipped before anything is ever deleted.
+  enabled: false      # false | true   — false: nothing is ever reclaimed
+  dryRun: true        # true | false   — true: decisions are logged, not acted on
+
+  # ---------------------------------------------------------------------------
+  # originals — the archive of record. Nothing downstream can recreate these.
+  # ---------------------------------------------------------------------------
+  originals:
+    # The DICOM exactly as it arrived, written BEFORE de-identification.
+    facilityBackup:
+      retain: forever             # forever | 30d | 90d | 1y | 7y  (any duration)
+      minFreeDiskPercent: 10      # 0 disables the free-space guard
+
+    # Studies whose calling AE title is not in the aetMap. They are HELD, not
+    # dropped, so an operator can map the AET and re-send them.
+    quarantine:
+      retain: forever             # forever | <duration>
+      alertAfter: 24h             # <duration> — how long before it nags
+
+    # Files dropped into a watched directory (no Orthanc copy behind them).
+    fileDrop:
+      reclaim: never              # never   — and the chart REFUSES anything else
+                                  #           while ingest.fileDrop is on: that
+                                  #           directory is the only copy
+      minAge: 30d                 # <duration>
+
+  # ---------------------------------------------------------------------------
+  # derived — reproducible from the originals, so these may be reclaimed.
+  #
+  # EVERY RULE IS (condition AND minAge) — BOTH must hold. A pure age rule would
+  # expire a session that never reached XNAT because a credential was wrong. A
+  # pure condition rule frees nothing the moment the signal breaks.
+  #
+  # Setting any `reclaim: never` is always safe; you just keep more data.
+  # ---------------------------------------------------------------------------
+  derived:
+    # Orthanc's own copy, after group-orthanc has pulled the study out.
+    orthancStorage:
+      reclaim: onGrouped          # never | onGrouped
+      minAge: 7d                  # <duration>
+      maximumStorageSizeMB: 0     # 0 = unlimited
+      maximumPatientCount: 0      # 0 = unlimited
+
+    # /data/grouped, once assign has built the session.
+    grouped:
+      reclaim: onAssigned         # never | onAssigned
+
+    # /data/assigned, once the s3-uploader has shipped it.
+    assigned:
+      reclaim: onUploaded         # never | onUploaded
+      minAge: 0                   # <duration>
+
+    # The S3 staging prefix on the management node. This is the ONLY rule that
+    # deletes data the edge no longer holds, so it verifies before acting:
+    # onXnatConfirmed re-queries XNAT and matches every filename AND checksum
+    # against the staged manifest. "The experiment exists" is not enough — XNAT
+    # creates it on the first resource POST, so that is true of a PARTIAL upload.
+    s3Staged:
+      reclaim: onXnatConfirmed    # never | onXnatConfirmed
+      minAge: 1d                  # <duration> — also gates the
+                                  #   SessionStagedNotConfirmedInXNAT alert;
+                                  #   raise that alert's offset if you raise this
+      verifyAgainstXnat: true     # true | false — false removes the only proof
+                                  #   of delivery; do not
+      schedule: "17 * * * *"      # cron — how often the reclaimer runs
+      maxRemovals: 50             # int — cap per run, bounds a bug that decided
+                                  #   "delete everything"
+
+  # ---------------------------------------------------------------------------
+  # telemetry — logs and metrics, never patient data.
+  # ---------------------------------------------------------------------------
+  telemetry:
+    # Loki/Prometheus retention is NOT set here — see charts/mgmt/values.yaml.
+    # Edit kube-prometheus-stack.prometheus.prometheusSpec.retention and
+    # loki.loki.limits_config.retention_period instead. Setting them here is
+    # rejected at render rather than silently ignored.
+    # kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi per container.
+    podLogFiles: {maxSize: 10Mi, maxFiles: 5}

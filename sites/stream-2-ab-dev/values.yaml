@@ -1,0 +1,170 @@
+# =============================================================================
+# stream-2-ab-dev — the development management node
+# =============================================================================
+# Non-secret site configuration. Passed to BOTH charts so the dataPolicy block
+# has one answer per site. Secrets live in secrets.enc.yaml alongside this.
+# =============================================================================
+clusterLabel: mgmt
+
+# fresh    install.sh installs k0s, kubectl, helm and local-path on this node
+# existing k0s is already running here; install.sh verifies it instead
+#
+# `fresh`: install.sh installs k0s, kubectl, helm and the local-path
+# provisioner on this node from nothing. Use `existing` only when adopting a
+# cluster that is already running — it makes step 1 verify instead of build.
+installMode: fresh
+
+domain:
+  internal: aisedge.local
+  mgmtNodeIP: "203.101.224.240"
+
+# k0sApi / konnectivity are deliberately ABSENT. They used to live here, which
+# gave every edge the same two hostnames, so a second site's Ingress claimed a
+# name the first already owned. They are per-edge now and are pinned on the
+# `edges` entry below. The chart rejects them here rather than ignoring them.
+hostnames:
+  seaweedfs: seaweedfs.aisedge.local
+  grafana: grafana.aisedge.local
+  loki: loki.aisedge.local
+
+# This node was fully torn down and rebuilt from these charts, so the chart
+# owns cert-manager and ingress-nginx outright at their pinned versions. The
+# imperative installer's `/latest/` and `/stable/` URLs are gone with it.
+#
+# ADOPTING A NODE THAT ALREADY HAS THEM IS DIFFERENT — set `enabled: false`
+# and pin `issuer` / `ca.bootstrapIssuerName` to the names already in the
+# cluster, because issuerRef is part of the CA Certificate's spec and a rename
+# makes cert-manager re-issue the root. See scripts/adopt-existing.sh.
+certManager:
+  # FALSE, and that is not a leftover from adoption — it is required.
+  # install.sh installs cert-manager BEFORE this chart, because the chart's
+  # per-edge Cluster objects need k0smotron's conversion webhook, the operator
+  # that serves it needs a cert-manager-issued certificate, and cert-manager
+  # cannot therefore come from this same release. Setting this true makes the
+  # install fail on the first Cluster object with a "connection refused" from
+  # the conversion webhook.
+  enabled: false
+  # WITH enabled:true THIS MUST BE THE RELEASE NAMESPACE. The subchart installs
+  # cert-manager into the release namespace, and its controller runs
+  # --cluster-resource-namespace=$(POD_NAMESPACE) — so the CA Secret is written
+  # to ais-mgmt, not to a namespace called "cert-manager". The chart's default
+  # (cert-manager) is right for the brownfield case where cert-manager was
+  # installed out of band into its own namespace, and wrong here. Both
+  # cert-issuers.yaml and cert-sync.yaml refuse to render on a mismatch rather
+  # than let the CA be written where nothing looks for it.
+  # Where the cert-manager controller reads cluster-scoped resources from.
+  # install.sh puts cert-manager in its own namespace, and it runs
+  # --cluster-resource-namespace=$(POD_NAMESPACE), so this is "cert-manager".
+  clusterResourceNamespace: cert-manager
+ingressNginx:
+  enabled: true
+
+# Must track certManager.clusterResourceNamespace above — this is where the
+# per-edge ca-bundle is copied FROM.
+certSync:
+  secrets:
+    - source:
+        # Must equal certManager.clusterResourceNamespace above — cert-manager
+        # writes the CA Secret into the namespace it runs in, and cert-sync
+        # would otherwise log sync_failed forever for a Secret one namespace
+        # away. Both charts refuse to render on a mismatch.
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys:
+          ca.crt: ca.crt
+      destination:
+        namespace: xnat-ingest
+        name: ca-bundle
+        type: Opaque
+    - source:
+        # This edge's Loki push CLIENT CERTIFICATE. cert-manager issues one
+        # per entry in `edges` below, from the same CA as the ca-bundle
+        # above, into this namespace as `<edge>-loki-client`. The name is
+        # fixed by the chart, which refuses to render if this entry does not
+        # match it — the push Ingress would otherwise demand a certificate
+        # nothing delivers, and every edge's logs would stop with no symptom
+        # except silence.
+        namespace: ais-mgmt
+        name: "<edge>-loki-client"
+        keys:
+          tls.crt: tls.crt
+          tls.key: tls.key
+      destination:
+        namespace: xnat-ingest
+        # Must equal observability.loki.clientCertSecret in
+        # sites/edge-dev/values.yaml.
+        name: loki-push-client-tls
+        type: kubernetes.io/tls
+    - source:
+        # THIS EDGE'S S3 KEY PAIR, WRITTEN ONCE AND DELIVERED FROM HERE.
+        #
+        # It used to be typed into two files with identical values: the
+        # `<edge>-s3` Secret on this side, which SeaweedFS builds its identity
+        # list from, and `s3-edge-credentials` in the edge's own secrets file,
+        # which its uploader authenticates with. Nobody cares what the string
+        # is, only that both copies match — so making a human the consistency
+        # mechanism was the bug. A mismatch stalls the pipeline at upload with
+        # an S3 403 and nothing says why.
+        #
+        # The name must stay `<edge>-s3` so it matches edges[].s3SecretRef;
+        # cert-sync substitutes <edge> and nothing else, and the chart refuses
+        # to render if the two disagree.
+        namespace: ais-mgmt
+        name: "<edge>-s3"
+        keys:
+          access-key: access-key
+          secret-key: secret-key
+      destination:
+        namespace: xnat-ingest
+        name: s3-edge-credentials
+        type: Opaque
+
+# Hosted control planes for every entry in `edges` below.
+#
+# INSTALL ORDER: the k0smotron OPERATOR is not a subchart — it is applied out
+# of band (scripts/02-install-k0smotron.sh), and its CRDs must exist before
+# these Cluster objects can be created. On a greenfield node install once with
+# `--set k0smotron.enabled=false`, apply the operator, then upgrade with it
+# true. Brownfield nodes already have the CRDs and can go straight through.
+k0smotron:
+  enabled: true
+
+seaweedfs:
+  storage:
+    hostPath: /data/seaweedfs
+  # One bucket per edge site. The shared-bucket layout only existed to migrate
+  # running sites one at a time; nothing here predates this install.
+  perSiteBuckets: true
+
+observability:
+  alerting:
+    emailTo: akshitbeniwal26@gmail.com
+    emailFrom: backupsync7@gmail.com
+    smtpHost: smtp.gmail.com
+    smtpPort: 587
+    smtpUsername: backupsync7@gmail.com
+
+edges:
+  - name: edge-dev
+    nodeIP: "203.101.230.171"
+    # How install.sh reaches this node to join it as a k0s worker. The join
+    # is SSH by necessity — there is no API server on the edge until it has
+    # happened — so these live here rather than in a second config file.
+    sshUser: ubuntu
+    sshKey: ~/.ssh/id_ed25519
+    # Pinned to the names this site already ran, and the names
+    # config/management.env hands to scripts/06-join-edge-worker.sh.
+    # A new site omits these and takes <apiPrefix>-<name>.<domain>.
+    apiHost: k0s.aisedge.local
+    konnectivityHost: konnect.aisedge.local
+    s3SecretRef: edge-dev-s3
+    uploadSecretRef: seaweedfs-upload
+    # sni: ClusterIP Service reached only through the ssl-passthrough Ingress
+    # on :443 — already how the worker connects. No cluster-wide port
+    # allocation, so adding a site needs no port assignment at all.
+    exposure: sni
+
+# Nothing expires on a fresh install. Watch dryRun decisions first.
+dataPolicy:
+  enabled: false
+  dryRun: true

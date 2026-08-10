@@ -1,0 +1,40 @@
+{{/*
+=============================================================================
+The only job of this file is to run mgmt.validate.
+=============================================================================
+Every guard in `mgmt.validate` (charts/mgmt/templates/_helpers.tpl) catches a
+misconfiguration that produces NO error at runtime: alerts evaluated and then
+discarded, two sites merged under one cluster label, a child cluster whose
+datastore does not survive a pod restart.
+
+They used to be invoked from line 1 of cert-issuers.yaml, seaweedfs.yaml and
+observability.yaml, each above that file's own `{{ if }}`, so all three did
+run. The fragility was structural rather than active: two of those files are
+nothing BUT a conditional below line 1 — observability.yaml is wrapped in
+`if .Values.observability.enabled`, seaweedfs.yaml in `if .Values.seaweedfs.enabled`
+— so an edit that moves the gate up one line, or removes a component's
+template entirely (a management node that runs neither is a supported
+configuration), takes an invocation with it and the render still succeeds.
+Three copies of the same line also means "is validation still wired up" has
+three answers instead of one.
+
+This file has no other content and no condition, so it renders on every
+`helm template`, `helm install` and `helm upgrade`. It exists to be dull.
+
+It deliberately emits NO Kubernetes object: `fail` aborts the render, and a
+template that produces only comments and whitespace is dropped by Helm, so
+this adds nothing to the cluster.
+
+TO PROVE THE GUARDS STILL FIRE (run after changing anything in this chart):
+
+  helm template mgmt charts/mgmt -f <your values> --set domain.internal=""
+
+must fail, and the error must name THIS file:
+  Error: execution error at (ais-mgmt/templates/validate.yaml:...): domain.internal
+  must be set — ...
+
+If it names some other template, the invocation has moved and this file is no
+longer what is running the guards.
+=============================================================================
+*/}}
+{{- include "mgmt.validate" . -}}

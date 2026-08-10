@@ -1,0 +1,141 @@
+# =============================================================================
+# promtool unit tests — cert-sync rules
+# =============================================================================
+#   promtool test rules charts/mgmt/files/prometheus-rules/tests/*_test.yaml
+#
+# These prove the LOGIC of the rules: given these series, do they fire when
+# they should and stay quiet when they should not. They cannot prove the
+# series exist in our cluster — that is what scripts/check-alert-inputs.sh is
+# for, and the input situation for kube_cronjob_* is written down in full at
+# the top of ../cert-sync.yaml.
+#
+# Two things are pinned here on purpose:
+#
+#   * THE CRONJOB NAME SHAPE. The rules select cronjob=~".+-cert-sync-.+",
+#     which is the name templates/cert-sync.yaml renders
+#     (<release>-cert-sync-<edge>). The tests use real-looking names,
+#     mgmt-cert-sync-edge-dev and mgmt-cert-sync-edge-two, and a decoy
+#     (mgmt-reclaim-edge-dev) that must NOT match — otherwise the reclaimer
+#     CronJob next door would inherit a cert-sync alert.
+#
+#   * THE "NEVER SUCCEEDED" CASE. kube_cronjob_status_last_successful_time
+#     simply does not exist for a CronJob that has never had a successful run,
+#     so a threshold rule over it is blind to exactly the site where sync has
+#     never once worked. CertSyncNeverSucceeded covers that, and this test is
+#     what stops someone "simplifying" it away.
+#
+# promtool's clock starts at unix 0, so a series whose value is 0 means "last
+# succeeded at t=0" and `time() - 0` is simply the eval_time in seconds.
+# 86400 is therefore crossed at eval_time 24h.
+# =============================================================================
+rule_files:
+  - ../cert-sync.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # ---------------------------------------------------------------------
+  - interval: 5m
+    name: CertSyncStale fires per edge after 24h, and only for the stale edge
+    input_series:
+      # edge-dev last succeeded at t=0 and never again.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="observability",cronjob="mgmt-cert-sync-edge-dev"}'
+        values: "0+0x400"
+      # edge-two keeps succeeding: its last-success timestamp tracks the
+      # clock, one 5m step behind.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="observability",cronjob="mgmt-cert-sync-edge-two"}'
+        values: "0+300x400"
+    alert_rule_test:
+      # 12h — under the window for both.
+      - eval_time: 12h
+        alertname: CertSyncStale
+        exp_alerts: []
+      # 24h exactly is not yet > 86400, and the 30m `for:` has not elapsed.
+      - eval_time: 24h
+        alertname: CertSyncStale
+        exp_alerts: []
+      # 25h: edge-dev is 25h stale and has been over the threshold for an
+      # hour. edge-two is 5m stale and must stay quiet — the per-edge label is
+      # the whole point of one CronJob per site.
+      - eval_time: 25h
+        alertname: CertSyncStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: observability
+              cronjob: mgmt-cert-sync-edge-dev
+            exp_annotations:
+              summary: "cert-sync has not succeeded for mgmt-cert-sync-edge-dev in over 24h"
+              description: |
+                The CronJob observability/mgmt-cert-sync-edge-dev has not
+                recorded a successful run for more than 24 hours, so that edge is
+                holding whatever certificate and credential material it was last
+                given. Nothing breaks until those expire, which is why this is
+                worth acting on now rather than at the expiry date.
+
+                Why it is not syncing:
+                  kubectl -n observability logs job/<latest job of mgmt-cert-sync-edge-dev>
+                or in Loki:
+                  {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
+
+  # ---------------------------------------------------------------------
+  - interval: 5m
+    name: CertSyncStale does not select other CronJobs in the release
+    input_series:
+      # The s3 reclaimer, stale for days. It has its own failure modes and
+      # must not arrive labelled as a certificate problem.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="xnat-upload",cronjob="mgmt-reclaim-edge-dev"}'
+        values: "0+0x400"
+    alert_rule_test:
+      - eval_time: 30h
+        alertname: CertSyncStale
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------
+  - interval: 5m
+    name: CertSyncNeverSucceeded fires when there is no last-success series at all
+    input_series:
+      # Two cert-sync CronJobs exist. Only edge-two has ever succeeded.
+      - series: 'kube_cronjob_info{namespace="observability",cronjob="mgmt-cert-sync-edge-dev",schedule="23 */6 * * *"}'
+        values: "1+0x400"
+      - series: 'kube_cronjob_info{namespace="observability",cronjob="mgmt-cert-sync-edge-two",schedule="23 */6 * * *"}'
+        values: "1+0x400"
+      - series: 'kube_cronjob_status_last_successful_time{namespace="observability",cronjob="mgmt-cert-sync-edge-two"}'
+        values: "0+300x400"
+    alert_rule_test:
+      # Under the 2h `for:`.
+      - eval_time: 1h
+        alertname: CertSyncNeverSucceeded
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: CertSyncNeverSucceeded
+        exp_alerts:
+          # `unless on (namespace, cronjob)` keeps the left-hand series' full
+          # label set, including `schedule` from kube_cronjob_info.
+          - exp_labels:
+              severity: critical
+              namespace: observability
+              cronjob: mgmt-cert-sync-edge-dev
+              schedule: "23 */6 * * *"
+            exp_annotations:
+              summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-dev"
+              description: |
+                observability/mgmt-cert-sync-edge-dev exists but has no
+                successful run on record. That edge has never received a synced
+                copy of the management Secrets, so anything depending on rotation
+                there is running on whatever was pushed at build time by hand.
+                Check RBAC on the edge namespace and whether the child API server
+                is reachable from the management cluster.
+
+  # ---------------------------------------------------------------------
+  - interval: 5m
+    name: CertSyncNeverSucceeded stays quiet once a run has succeeded
+    input_series:
+      - series: 'kube_cronjob_info{namespace="observability",cronjob="mgmt-cert-sync-edge-dev",schedule="23 */6 * * *"}'
+        values: "1+0x400"
+      - series: 'kube_cronjob_status_last_successful_time{namespace="observability",cronjob="mgmt-cert-sync-edge-dev"}'
+        values: "0+300x400"
+    alert_rule_test:
+      - eval_time: 5h
+        alertname: CertSyncNeverSucceeded
+        exp_alerts: []

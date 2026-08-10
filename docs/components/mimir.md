@@ -97,7 +97,7 @@ points at Mimir. No alert / dashboard changes (PromQL is identical).
 - **Better compression** — chunked + indexed storage is more efficient
   than Prometheus' TSDB at scale
 - **Continuity at scale** — Cortex / Thanos / Mimir is the
-  industry-standard step up from Prometheus alone
+  well-trodden step up from Prometheus alone
 
 ## Risks of switching
 

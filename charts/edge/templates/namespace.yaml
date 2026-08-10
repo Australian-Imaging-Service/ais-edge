@@ -1,0 +1,23 @@
+{{- /*
+THIS CHART DOES NOT CREATE ITS NAMESPACE, DELIBERATELY.
+
+The namespace holds credentials this chart references but does not create:
+orthanc-deid-salt and s3-edge-credentials arrive SOPS-encrypted from
+sites/<edge>/secrets.enc.yaml, and ca-bundle / loki-push-client-tls are
+delivered by cert-sync from the management cluster.
+
+A Secret must exist BEFORE the workload that mounts it starts, or the pod sits
+in CreateContainerConfigError. That ordering is only possible if the namespace
+exists before this release does — and a namespace pre-created by hand then
+aborts `helm install` with "invalid ownership metadata", while `helm
+--create-namespace` on top of a chart-rendered Namespace fails with
+"namespaces \"xnat-ingest\" already exists". Both were hit on a real install.
+
+So the rule is uniform across both charts: NAMESPACES AND SECRETS FIRST,
+WORKLOADS SECOND. `scripts/site-secrets.sh apply <edge>` creates any namespace
+its Secrets name, and install.sh runs it against the child cluster before this
+release.
+
+Not creating it also means `helm uninstall` cannot take the credentials with
+it, which is what the old resource-policy annotation was for.
+*/ -}}

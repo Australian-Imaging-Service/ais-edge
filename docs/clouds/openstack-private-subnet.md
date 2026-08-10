@@ -158,7 +158,7 @@ openstack port show <lb-vip-port-id> -f value -c security_group_ids
 - Standard `Service type=LoadBalancer` + FIP pattern that every CCM
   (AWS, GCP, Azure, OpenStack) implements the same way.
 - No Nectar-specific workarounds — same codepath as managed K8s.
-- Production-grade: explicit network boundaries, attack surface
+- Explicit network boundaries, smaller attack surface
   scoped to the tenant subnet.
 
 **Cons:**
