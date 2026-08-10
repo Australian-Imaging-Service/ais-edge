@@ -1,0 +1,96 @@
+# =============================================================================
+# Info alerts  —  routine informational events. Never page.
+# =============================================================================
+# "Slack-only, do not email" is NOT true of the shipped defaults, and believing
+# it is how these three alerts came to be silently destroyed: the severity=info
+# route pointed at a Slack receiver whose api_url_file named a Secret nothing
+# creates, and Alertmanager treats that as an unrecoverable send error.
+#
+# Where these actually go now (charts/mgmt/files/alertmanager-config.yaml):
+#   slackWebhookSecretRef set    →  slack-only
+#   slackWebhookSecretRef empty  →  info-email, the DEFAULT on every site here
+#
+# So an info alert added below DOES cost the operator's inbox. It is bounded —
+# info-email sets send_resolved: false and the route sets repeat_interval: 720h,
+# so a steady condition costs about one mail a month — but "info is free" is
+# wrong. An alert nobody would want mailed does not belong at severity=info.
+# =============================================================================
+groups:
+  - name: ais-edge-info
+    interval: 5m
+    rules:
+      - alert: CARotationDue
+        # Hard-coded threshold: ais-edge-ca is 10y; warn at year 9.
+        expr: |
+          (certmanager_certificate_expiration_timestamp_seconds{name="ais-edge-ca"}
+            - time()) / 86400 < 365
+        for: 1h
+        labels: { severity: info }
+        annotations:
+          summary: "Root CA ais-edge-ca expires within 1 year"
+          description: "Plan a rotation cycle. Use scripts/rotate-ca.sh --phase=1 to issue a successor and distribute the bundle."
+
+      - alert: CertificateRenewed
+        expr: |
+          changes(certmanager_certificate_renewal_timestamp_seconds[1h]) > 0
+        labels: { severity: info }
+        annotations:
+          summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} was renewed"
+          description: "cert-manager auto-renewed the certificate. No action required."
+
+      # -----------------------------------------------------------------------
+      # REMOVED — NewEdgeJoined, `changes(kube_node_info[10m]) > 0`
+      # -----------------------------------------------------------------------
+      # It could not fire, and it would not have earned its place if it could.
+      #
+      # WHY IT COULD NOT FIRE. kube_node_info is a kube-state-metrics JOIN
+      # metric: the value is the constant 1 and every fact about the node lives
+      # in a label. A node joining creates a NEW SERIES at 1; it never moves an
+      # existing value. changes() over a constant is 0, always. Measured on the
+      # live management Prometheus across its whole retention window:
+      #   max_over_time(changes(kube_node_info[10m])[27h:1m])  ->  0
+      #   ALERTS{alertname="NewEdgeJoined"}                    ->  no sample, ever
+      #
+      # The unit test that "covered" it fed kube_node_info the value 2, which
+      # kube-state-metrics does not emit, so it proved changes() works rather
+      # than that the alert does. Replayed through promtool with a series that
+      # APPEARS at 1 — what a real join looks like — the rule stays silent at
+      # every evaluation, including the one right after the series shows up.
+      #
+      # SECOND, INDEPENDENT REASON. This Prometheus scrapes the management
+      # cluster only. There is no kube-state-metrics on any child cluster and
+      # no federation or remote-write from one: docs/alerting-architecture.md
+      # rejected that path on purpose, which is why edge signals arrive as LOGS
+      # through Loki. kube_node_info here has exactly one series and it is the
+      # management node, so no expression over it can observe an edge at all.
+      # The old annotation's $labels.cluster rendered empty for the same
+      # reason — nothing in this Prometheus carries that label.
+      #
+      # WHY IT WAS NOT REPLACED. "If this was unplanned, investigate" assumes
+      # an edge can appear on its own. It cannot: a child cluster exists
+      # because someone added an `edges:` entry and ran ./install.sh, and a
+      # worker joins only with a token minted on this cluster by
+      # scripts/06-join-edge-worker.sh. What remains is a Slack line telling an
+      # operator about the thing they did a minute ago while they are reading
+      # the "Check it landed" checklist in docs/TOUR.md.
+      #
+      # The mgmt-side signals that WOULD work — a new
+      # kube_cronjob_created{cronjob=~".+-cert-sync-.+"} series, or a new
+      # <edge>-loki-client Certificate — answer a different question: "an edge
+      # was DECLARED in values". They go true at helm-upgrade time, before the
+      # worker has joined anything and whether or not the site ever comes up,
+      # and they go true again for EVERY existing edge when the release is
+      # reinstalled, so a rebuild announces the whole fleet as new. Announcing
+      # success at the moment the risky part has not happened yet is worse than
+      # saying nothing.
+      #
+      # The onboarding failure that does cost something is already covered:
+      # CertSyncNeverSucceeded in cert-sync.yaml fires when a site's Secrets
+      # have never once been delivered.
+      #
+      # scripts/ci/promtool.sh now rejects change-detecting functions over any
+      # *_info / *_labels / *_annotations metric, so this shape cannot come
+      # back unnoticed. promtool cannot pin an absence — a test asserting "no
+      # alert fires" passes just as happily once the broken rule is back — so
+      # the guard lives there rather than in tests/info_test.yaml.
+      # -----------------------------------------------------------------------

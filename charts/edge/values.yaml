@@ -796,6 +796,16 @@ kube-prometheus-stack:
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true
+    # READ THE OPERATOR'S SECRET, not a chart-generated one. Without this block
+    # the subchart mints its own <release>-grafana Secret and points
+    # GF_SECURITY_ADMIN_USER/PASSWORD at it — so grafana-admin-credentials,
+    # which sites/example-single/secrets.example.yaml tells the operator to
+    # fill in, is read by nothing and the password they set is silently
+    # ignored. Verified by rendering: 0 occurrences before this was added.
+    admin:
+      existingSecret: grafana-admin-credentials
+      userKey: admin-user
+      passwordKey: admin-password
     # initChownData runs as root and fails under a restricted PSS namespace;
     # the local-path PVC is already writable by the Grafana UID.
     initChownData: {enabled: false}
