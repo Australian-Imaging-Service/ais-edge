@@ -261,6 +261,13 @@ genuinely differs.
 
 {{- define "edge.lokiEndpoint" -}}
 {{- if .Values.observability.loki.endpoint }}{{ .Values.observability.loki.endpoint }}
+{{- else if .Values.observability.stack.enabled -}}
+  {{- /* TIER-1: Loki runs in this same cluster, so plain http to the Service.
+         No mTLS and no SNI — nothing leaves the node, so there is no transport
+         to protect and no management CA to verify against. `ais-loki` is the
+         subchart's fullnameOverride, pinned in values.yaml for exactly this
+         reason: the name has to be predictable from here. */ -}}
+  {{- printf "http://ais-loki.%s.svc.cluster.local:3100" .Release.Namespace }}
 {{- else -}}
   {{- with (include "edge.lokiHost" .) }}{{ printf "https://%s" . }}{{ end }}
 {{- end }}

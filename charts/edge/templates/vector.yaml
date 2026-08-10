@@ -59,7 +59,17 @@ data:
          own {{ field }} event templates; rendering it through Helm would
          resolve them to empty strings and strip every Loki stream label. */}}
   vector.yaml: |
+    {{- /* TIER-1 gets the variant with no tls: block. The file is loaded,
+           never templated — its body is full of Vector's own {{ }} syntax and
+           letting Helm evaluate it renders every stream label as an empty
+           string, which silently breaks every alert and dashboard that selects
+           on one. So the difference has to be a separate FILE, not a
+           conditional inside one. */ -}}
+    {{- if .Values.observability.stack.enabled }}
+    {{- .Files.Get "files/vector-local.yaml" | nindent 4 }}
+    {{- else }}
     {{- .Files.Get "files/vector.yaml" | nindent 4 }}
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -80,7 +90,7 @@ spec:
         {{- include "edge.labels" . | nindent 8 }}
         app: vector
       annotations:
-        checksum/config: {{ .Files.Get "files/vector.yaml" | sha256sum }}
+        checksum/config: {{ if .Values.observability.stack.enabled }}{{ .Files.Get "files/vector-local.yaml" | sha256sum }}{{ else }}{{ .Files.Get "files/vector.yaml" | sha256sum }}{{ end }}
     spec:
       serviceAccountName: {{ include "edge.fullname" . }}-vector
       hostNetwork: false
@@ -147,11 +157,20 @@ spec:
             - {name: data,           mountPath: /vector-data-dir}
             - {name: pod-logs,       mountPath: /var/log/pods,        readOnly: true}
             - {name: container-logs, mountPath: /var/log/containers,  readOnly: true}
+            {{- /* TIER-1 HAS NO CLIENT CERTIFICATE AND NO MANAGEMENT CA: its
+                   Loki runs in this same cluster over plain http, so neither
+                   Secret exists and neither ever will. Mounting them there
+                   would leave Vector in CreateContainerConfigError forever.
+                   Gated on clientCertSecret being set — a values fact this
+                   chart CAN see — so tier-2, where it is set, keeps the
+                   deliberately non-optional mounts described below. */ -}}
+            {{- if .Values.observability.loki.clientCertSecret }}
             - {name: ca-bundle,      mountPath: /etc/ssl/ais-edge-ca, readOnly: true}
             # Its OWN directory, not a subpath of /etc/vector: that path is
             # already a ConfigMap mount and nesting one volume inside another
             # depends on mount ordering the kubelet does not promise.
             - {name: loki-client,    mountPath: /etc/ssl/loki-client, readOnly: true}
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -168,6 +187,9 @@ spec:
           hostPath: {path: /var/log/pods}
         - name: container-logs
           hostPath: {path: /var/log/containers}
+        {{- /* Same gate as the mounts above: on tier-1 neither Secret
+               exists, because Loki is in-cluster over plain http. */ -}}
+        {{- if .Values.observability.loki.clientCertSecret }}
         - name: ca-bundle
           secret:
             secretName: {{ .Values.observability.loki.caBundleSecret }}
@@ -195,4 +217,5 @@ spec:
             # process cannot open fails the pod, which is the same outcome as
             # the bug being fixed here. The volume is a tmpfs visible only to
             # this pod, like ca-bundle beside it.
+        {{- end }}
 {{- end }}

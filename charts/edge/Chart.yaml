@@ -7,7 +7,7 @@ description: >-
 type: application
 
 # Chart version. Bump on every change to the templates or default values.
-version: 0.3.1
+version: 0.4.0
 
 # Version of xnat-ingest this chart's pipeline arguments are written against.
 # The CLI changed shape at 0.12 (sort -> group-orthanc + assign), so this is
@@ -24,3 +24,35 @@ sources:
   - https://github.com/Australian-Imaging-Service/ais-edge
 maintainers:
   - name: Australian Imaging Service
+
+# =============================================================================
+# Observability subcharts — TIER-1 ONLY, and off by default
+# =============================================================================
+# A tier-2 edge SHIPS ITS LOGS OFF THE BOX: Vector pushes to the management
+# cluster's Loki over mTLS, and Prometheus/Grafana/Alertmanager live in
+# charts/mgmt behind an ingress. None of that exists on tier-1 — no management
+# plane, no ingress, no cert-manager — so the stack runs on the node itself.
+#
+# Both are gated on `observability.stack.enabled`, which defaults to FALSE, so a
+# tier-2 edge renders byte-identically to before: Helm skips a dependency whose
+# condition is false.
+#
+# Vector is deliberately NOT a dependency, on either tier. templates/vector.yaml
+# is a hand-written DaemonSet, which avoids the subchart's tpl-over-customConfig
+# behaviour: charts/mgmt must write "{{`{{ cluster }}`}}" to stop Helm eating
+# Vector's own template syntax, whereas files/vector.yaml is loaded with
+# .Files.Get and needs no escaping. One less way to lose every stream label.
+#
+# Pinned and VENDORED under charts/. `helm dependency update` is not run at
+# install time: a hospital appliance must not need a working path to
+# grafana.github.io in order to reinstall.
+dependencies:
+  - name: kube-prometheus-stack
+    version: "87.19.2"          # app v0.92.1
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: observability.stack.enabled
+
+  - name: loki
+    version: "7.1.0"            # app 3.6.8
+    repository: https://grafana.github.io/helm-charts
+    condition: observability.stack.enabled

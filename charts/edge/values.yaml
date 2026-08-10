@@ -606,7 +606,67 @@ samba:
 # Off for standalone sites. On for tier-2, where the mgmt cluster runs Loki,
 # Grafana and Alertmanager.
 observability:
+  # Run Vector on this node. On tier-2 it pushes to the MANAGEMENT cluster's
+  # Loki over mTLS; on tier-1 it pushes to the Loki running beside it. Whether
+  # there is a local Loki at all is `stack.enabled` below — the two switches are
+  # orthogonal on purpose, and overloading `enabled` to mean both would make
+  # "ship logs somewhere" and "host a log store" impossible to configure apart.
   enabled: false
+
+  # ---------------------------------------------------------------------------
+  # stack — the WHOLE observability stack, on this node. TIER-1.
+  # ---------------------------------------------------------------------------
+  # MUST STAY false BY DEFAULT. It gates the kube-prometheus-stack and loki
+  # dependencies in Chart.yaml, and a Helm dependency whose condition path does
+  # not resolve is treated as ENABLED — so this key existing, and being false,
+  # is what keeps a tier-2 edge rendering exactly as it did before.
+  #
+  # Tier-2 leaves this false: its Prometheus/Loki/Grafana/Alertmanager live in
+  # charts/mgmt, behind an ingress, with Loki's chunks in SeaweedFS. Tier-1 has
+  # none of that, so it runs the stack locally with FILESYSTEM storage.
+  stack:
+    enabled: false
+
+    # Log and metric retention. Disk-bound — on tier-1 this node holds
+    # everything, and there is no object store to spill into.
+    retentionDays: 30
+
+    grafana:
+      # NO INGRESS ON TIER-1, so the UI is a NodePort: http://<nodeIP>:<port>.
+      # Must be inside the cluster's NodePort range (30000-32767 by default);
+      # the chart refuses to render otherwise, because an out-of-range value is
+      # only rejected at apply time, after the rest of the release installed.
+      nodePort: 30030
+      existingSecret: grafana-admin-credentials
+      persistence:
+        enabled: true
+        size: 5Gi
+        storageClass: local-path
+
+    prometheus:
+      persistence:
+        size: 20Gi
+        storageClass: local-path
+
+    lokiStorage:
+      # FILESYSTEM, not S3. charts/mgmt points Loki at SeaweedFS; there is no
+      # object store on a single node, so chunks land on a PVC. This is the one
+      # place the two tiers' observability genuinely diverges rather than just
+      # being wired differently.
+      size: 20Gi
+      storageClass: local-path
+
+    alerting:
+      # Leave emailTo empty to run the stack without mail routing — the
+      # dashboards and rules still work, nothing is sent.
+      emailTo: ""
+      emailFrom: ais-edge-alerts@example.org
+      smtpHost: ""
+      smtpPort: 587
+      smtpUsername: ""
+      requireTLS: true
+      existingSecret: alertmanager-smtp
+
   vector:
     image:
       repository: timberio/vector
@@ -649,3 +709,130 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+
+# =============================================================================
+# SUBCHART VALUES — only rendered when observability.stack.enabled is true
+# =============================================================================
+# These are the tier-1 local stack. They are inert on tier-2, because Chart.yaml
+# gates both dependencies on observability.stack.enabled and Helm does not
+# render a subchart whose condition is false.
+#
+# THE ONE REAL DIVERGENCE FROM charts/mgmt IS LOKI'S STORAGE. The management
+# Loki keeps chunks in SeaweedFS over S3; there is no object store on a single
+# node, so tier-1 uses the filesystem on a PVC. Everything else — SingleBinary,
+# the ruler, retention — is the same shape.
+loki:
+  # PINNED. files/vector-local.yaml names this Service literally (Helm never
+  # templates a .Files.Get file), so it cannot follow .Release.Name. Without the
+  # override the Service is <release>-loki, and a release named anything else
+  # would leave Vector retrying an address that never resolves — with logs
+  # silently never arriving, which looks exactly like a quiet site.
+  fullnameOverride: ais-loki
+  deploymentMode: SingleBinary
+  loki:
+    auth_enabled: false                   # single node, no tenants, no ingress
+    schemaConfig:
+      configs:
+        - from: 2024-04-01
+          store: tsdb
+          object_store: filesystem        # s3 on tier-2
+          schema: v13
+          index: {prefix: loki_index_, period: 24h}
+    storage:
+      type: filesystem                    # NO bucketNames, NO credentials
+    limits_config:
+      retention_period: 30d               # kept in step with stack.retentionDays
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+      max_global_streams_per_user: 10000
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+    compactor:
+      working_directory: /var/loki/compactor
+      retention_enabled: true
+      retention_delete_delay: 2h
+      retention_delete_worker_count: 150
+      delete_request_store: filesystem
+    commonConfig:
+      replication_factor: 1
+    # Evaluates the LogQL pipeline alerts and pushes to the local Alertmanager.
+    rulerConfig:
+      storage:
+        type: local
+        local: {directory: /etc/loki/rules}
+      rule_path: /var/loki/rules-runtime
+      # MUST MATCH the Alertmanager Service the kube-prometheus-stack subchart
+      # actually creates, which follows ITS fullnameOverride below — so this is
+      # `ais-kps-alertmanager`, not `<release>-kube-prometheus-stack-...`.
+      # Got this wrong once: the ruler pushed to a name that does not resolve,
+      # and every LogQL pipeline alert silently never fired while Loki, the
+      # rules and the dashboards all looked healthy.
+      # ci/runtime-templates.sh asserts this against the rendered Service.
+      alertmanager_url: http://ais-kps-alertmanager.{{ .Release.Namespace }}.svc.cluster.local:9093   # [tpl]
+      enable_alertmanager_v2: true
+      enable_api: true
+      ring: {kvstore: {store: inmemory}}
+  singleBinary:
+    replicas: 1
+    resources:
+      requests: {cpu: 200m, memory: 512Mi}
+      limits:   {cpu: 2,    memory: 2Gi}
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: local-path
+  # Off: one node, one replica, nothing to cache or distribute.
+  chunksCache: {enabled: false}
+  resultsCache: {enabled: false}
+  lokiCanary: {enabled: false}
+  test: {enabled: false}
+  gateway: {enabled: false}
+  backend: {replicas: 0}
+  read: {replicas: 0}
+  write: {replicas: 0}
+
+kube-prometheus-stack:
+  fullnameOverride: ais-kps
+  # No ingress on tier-1 — Grafana is reached on a NodePort instead.
+  grafana:
+    enabled: true
+    # initChownData runs as root and fails under a restricted PSS namespace;
+    # the local-path PVC is already writable by the Grafana UID.
+    initChownData: {enabled: false}
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClassName: local-path
+    service:
+      type: NodePort
+      nodePort: 30030
+  prometheus:
+    prometheusSpec:
+      retention: 30d
+      # SELECT EVERYTHING IN THIS RELEASE. The subchart defaults to selecting
+      # only rules carrying its own release label; the chart's own
+      # PrometheusRules set it explicitly instead.
+      ruleSelectorNilUsesHelmValues: false
+      serviceMonitorSelectorNilUsesHelmValues: false
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources: {requests: {storage: 20Gi}}
+  alertmanager:
+    alertmanagerSpec:
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: local-path
+            accessModes: ["ReadWriteOnce"]
+            resources: {requests: {storage: 5Gi}}
+  # Scrape targets that do not exist on a single k0s node. Left on, they produce
+  # permanently-firing "target down" noise that trains operators to ignore
+  # Alertmanager.
+  kubeControllerManager: {enabled: false}
+  kubeScheduler: {enabled: false}
+  kubeProxy: {enabled: false}
+  kubeEtcd: {enabled: false}
+  nodeExporter: {enabled: false}
