@@ -1,0 +1,105 @@
+AIS Edge — {{ .Values.clusterLabel }}  (release {{ .Release.Name }}, namespace {{ .Values.namespace }})
+
+INGEST
+  DICOM receiver   AET {{ .Values.orthanc.aet }} on port {{ .Values.orthanc.dicomPort }}
+{{- if has .Values.orthanc.expose.dicom (list "hostPort" "both") }}
+                   bound on the node IP (hostPort) — point modalities at <node-ip>:{{ .Values.orthanc.dicomPort }}
+{{- end }}
+{{- if has .Values.orthanc.expose.dicom (list "nodePort" "both") }}
+                   NodePort {{ .Values.orthanc.expose.nodePorts.dicom }}
+{{- end }}
+{{- if .Values.ingest.fileDrop.enabled }}
+  File drop        {{ .Values.ingest.fileDrop.inputGlob }}
+{{- end }}
+{{- if .Values.samba.enabled }}
+  SMB share        //<node-ip>/{{ .Values.samba.shareName }}  (exports only {{ .Values.samba.subPath }}/)
+{{- end }}
+
+DE-IDENTIFICATION
+{{- if .Values.orthanc.deid.enabled }}
+  Enabled. {{ len .Values.orthanc.deid.aetMap }} AE title(s) mapped:
+  {{- range $aet, $cfg := .Values.orthanc.deid.aetMap }}
+    {{ $aet }} -> XNAT project {{ $cfg.project }}
+  {{- end }}
+
+  Any OTHER AE title is rejected for ingest but NOT discarded: the original
+  is written to /facility-backup/__unmapped_aet__/<AET>/... and only then
+  removed from Orthanc. Add the AET above and re-send to ingest it.
+{{- else }}
+  *** DISABLED. Studies reach XNAT with PHI intact. ***
+{{- end }}
+
+UPLOAD
+{{- if eq .Values.upload.mode "s3" }}
+  Mode s3 — sessions are staged to s3://{{ .Values.upload.s3.bucket }}/{{ .Values.upload.s3.prefix }}/
+  at {{ .Values.upload.s3.endpoint }}, and the management cluster pushes them
+  into XNAT. This edge never talks to XNAT directly.
+{{- else }}
+  Mode direct — sessions are uploaded straight to XNAT. No management cluster
+  and no staging bucket are involved.
+{{- end }}
+
+DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun }}DRY RUN{{ else }}ENFORCING{{ end }}{{ else }}NOT ENFORCED{{ end }}
+{{- if not .Values.dataPolicy.enabled }}
+  dataPolicy.enabled is false, so nothing expires and nothing is reclaimed.
+  Disk will grow without bound. Set it once you have decided the retention
+  rules for this site.
+{{- else if .Values.dataPolicy.dryRun }}
+  dryRun is true: reclaim decisions are logged but not acted on. Watch a few
+  days of logs, confirm they match your expectations, then set dryRun: false.
+{{- end }}
+  originals   facility backup {{ .Values.dataPolicy.originals.facilityBackup.retain }} | quarantine {{ .Values.dataPolicy.originals.quarantine.retain }} | file drop reclaim {{ .Values.dataPolicy.originals.fileDrop.reclaim }}
+  derived     orthanc {{ .Values.dataPolicy.derived.orthancStorage.reclaim }} (min age {{ .Values.dataPolicy.derived.orthancStorage.minAge }}) | grouped {{ .Values.dataPolicy.derived.grouped.reclaim }} | assigned {{ .Values.dataPolicy.derived.assigned.reclaim }}
+{{- if eq .Values.dataPolicy.derived.grouped.reclaim "never" }}
+
+  NOTE: grouped.reclaim = never. `assign --loop` rebuilds its work list from
+  a live listing of /data/grouped every cycle, so the same sessions will be
+  re-assigned indefinitely — /data/assigned is repopulated, the uploader
+  re-stages, and the upload-success alert re-fires. /data/grouped holds
+  hardlinks, and the bytes also live in Orthanc storage and the facility
+  backup, so onAssigned deletes no data. Prefer onAssigned unless you have a
+  specific reason.
+{{- end }}
+
+SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace }}
+  (the chart references them; it never creates or contains credentials)
+{{- if .Values.orthanc.auth.enabled }}
+  {{ .Values.orthanc.auth.existingSecret }}   keys: users.json, orthanc-user, orthanc-password
+{{- end }}
+{{- if .Values.orthanc.deid.enabled }}
+  {{ .Values.orthanc.deid.existingSaltSecret }}   key: AIS_DEID_HMAC_SALT
+{{- end }}
+{{- if eq .Values.upload.mode "s3" }}
+  {{ .Values.upload.s3.existingSecret }}   keys: access-key, secret-key
+  {{- if .Values.upload.s3.caBundleSecret }}
+  {{ .Values.upload.s3.caBundleSecret }}   key: {{ .Values.upload.s3.caBundleKey }}
+  {{- end }}
+{{- else }}
+  {{ .Values.upload.direct.existingSecret }}   keys: server, username, password
+{{- end }}
+{{- if .Values.samba.enabled }}
+  {{ .Values.samba.existingSecret }}   keys: username, password
+{{- end }}
+{{- if .Values.observability.enabled }}
+  {{ .Values.observability.loki.clientCertSecret }}   keys: tls.crt, tls.key
+  {{ .Values.observability.loki.caBundleSecret }}   key: {{ .Values.observability.loki.caBundleKey }}
+{{- end }}
+
+CHECK IT IS WORKING
+  kubectl -n {{ .Values.namespace }} get pods
+  kubectl -n {{ .Values.namespace }} logs -l component=group     -f
+  kubectl -n {{ .Values.namespace }} logs -l component=assign    -f
+{{- if eq .Values.upload.mode "s3" }}
+  kubectl -n {{ .Values.namespace }} logs -l component=s3-uploader -f
+{{- else }}
+  kubectl -n {{ .Values.namespace }} logs -l component=upload    -f
+{{- end }}
+
+  Send a test study:
+    dcmsend <node-ip> {{ .Values.orthanc.dicomPort }} -aec {{ .Values.orthanc.aet }} /path/to/study/
+
+NOT REMOVED BY `helm uninstall`
+  The namespace, both PersistentVolumes and both PersistentVolumeClaims carry
+  helm.sh/resource-policy: keep and Retain. Uninstalling this release leaves
+  every received study, and the Secrets above, in place. Removing data is a
+  separate deliberate act.

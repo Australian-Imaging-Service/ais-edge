@@ -1,0 +1,174 @@
+{{- /*
+=============================================================================
+The data-policy engine — one component that enforces the whole dataPolicy block
+=============================================================================
+WHY THIS IS ITS OWN WORKLOAD AND NOT A SIDECAR.
+
+dataPolicy's rules used to be implemented inside whichever component was
+nearby: an `rm -rf` in the S3 uploader, a `--unlink-source` flag on
+xnat-ingest, a CronJob on the management side. Three stages, three mechanisms,
+each welded to one tool. That is why most of the block was never implemented
+(adding a rule meant writing a new program) and why replacing a component
+silently took its policy with it.
+
+Retention and disk are STORAGE concerns, so this attaches to VOLUMES. Putting
+it on the Orthanc pod — the obvious shortcut, since Orthanc already mounts both
+volumes — would mean that swapping the de-identifier for AIS-deid, or moving to
+a DICOMweb receiver, silently ends edge disk monitoring. Silently, because an
+absent reporter produces no logs, and no logs is indistinguishable from a quiet,
+healthy site. That is the exact failure mode this repo keeps finding.
+
+A DaemonSet, not a Deployment: the stores are node-local hostPath volumes, so
+one reporter per node is the correct cardinality, and it stays correct if an
+edge ever grows a second node.
+
+WHAT IT DOES TODAY: reports. It walks each declared stage and logs disk usage,
+entry count and the age of the oldest entry. It deletes NOTHING — reclaim is a
+later, separately-gated change. Keeping the two apart means the reporting can
+be trusted in production long before anything is permitted to remove a byte.
+*/ -}}
+{{- if .Values.dataPolicy.reporter.enabled }}
+{{- $fullName := printf "%s-data-policy" (include "edge.fullname" .) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, not an inline script: the engine is unit-tested directly
+         under busybox in CI, and a copy inlined here would drift from the
+         tested one. */}}
+  data-policy.sh: |
+    {{- .Files.Get "files/data-policy.sh" | nindent 4 }}
+  {{- /* The stage table IS the contract between the policy block and the
+         engine. Rendering it here is what lets a future ingest path (Prefect
+         for non-DICOM, say) declare a stage in values.yaml and get reporting
+         and retention with no new code. */}}
+  stages.tsv: |
+    {{- include "edge.dataPolicyStages" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+spec:
+  {{- /* SELECTOR LABELS ARE IDENTITY, NOT DESCRIPTION. Only immutable facts
+         go here — matching the Vector DaemonSet's shape. A version-bearing
+         label (helm.sh/chart, app.kubernetes.io/version) in a selector is
+         what took this fleet down once: the selector stops matching the pods
+         it created the moment the chart version changes. */}}
+  selector:
+    matchLabels:
+      app: data-policy
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: data-policy
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        # THE ALERTS ON THIS COMPONENT SELECT ON THIS LABEL.
+        #
+        # Vector builds the Loki stream label from the POD LABEL —
+        # `component: "{{`{{ kubernetes.pod_labels.component }}`}}"`, see
+        # files/vector.yaml — NOT from the `component` field inside the JSON log
+        # line. These pods emit `"component":"data-policy"` in every line but
+        # carried no such pod label, so the stream label was empty and both
+        # EdgeDiskLow and QuarantinedDataUnresolved selected
+        # {namespace="xnat-ingest", component="data-policy"}, matched no stream,
+        # and could never fire. Verified against the live cluster: the label
+        # simply did not exist on the pod.
+        #
+        # Safe to add: it is deliberately NOT in the selector above, which
+        # carries identity labels only.
+        component: data-policy
+      annotations:
+        # Roll the pod when either the engine or the stage table changes.
+        # Without this a policy edit renders a new ConfigMap and the running
+        # engine keeps walking the old stage list until something unrelated
+        # restarts it — the policy would appear applied while it was not.
+        checksum/config: {{ printf "%s%s" (.Files.Get "files/data-policy.sh") (include "edge.dataPolicyStages" .) | sha256sum }}
+    spec:
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      securityContext:
+        {{- toYaml .Values.dataPolicy.reporter.podSecurityContext | nindent 8 }}
+      containers:
+        - name: data-policy
+          image: "{{ .Values.dataPolicy.reporter.image.repository }}:{{ .Values.dataPolicy.reporter.image.tag }}"
+          imagePullPolicy: {{ .Values.dataPolicy.reporter.image.pullPolicy }}
+          command: ["sh", "/scripts/data-policy.sh"]
+          env:
+            - name: EDGE_NAME
+              value: {{ .Values.clusterLabel | quote }}
+            - name: STAGES_FILE
+              value: /etc/data-policy/stages.tsv
+            - name: INTERVAL
+              value: {{ .Values.dataPolicy.reporter.interval | quote }}
+            {{- /* Reclaim needs BOTH switches. Rendered explicitly rather than
+                   relying on the script's defaults so `helm get values` shows
+                   what the running engine was told. */}}
+            - name: RECLAIM_ENABLED
+              value: {{ .Values.dataPolicy.enabled | quote }}
+            - name: DRY_RUN
+              value: {{ .Values.dataPolicy.dryRun | quote }}
+            - name: MAX_REMOVALS
+              value: {{ .Values.dataPolicy.reporter.maxRemovals | quote }}
+            - name: SETTLE_MINUTES
+              value: {{ .Values.dataPolicy.reporter.settleMinutes | quote }}
+            {{- /* The two condition inputs. Both are DERIVED from other values
+                   rather than restated, so they cannot drift from where the
+                   uploader and assign actually write. */}}
+            - name: UPLOAD_STATE_DIR
+              value: {{ include "edge.uploaderStateDir" . | quote }}
+            - name: ASSIGNED_DIR
+              value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
+            {{- /* The third switch. Rendered even when false so `helm get values`
+                   shows what the running engine was told. */}}
+            - name: ALLOW_ORIGINAL_EXPIRY
+              value: {{ .Values.dataPolicy.originals.allowExpiry | quote }}
+            {{- /* Only read by a stage that declares backend: orthanc-rest.
+                   Derived from the same expression ingest-pipeline.yaml uses, so
+                   the adapter and group-orthanc cannot end up pointed at
+                   different Orthancs. */}}
+            - name: ORTHANC_URL
+              value: "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
+            - name: ORTHANC_PROCESSED_LABEL
+              value: {{ .Values.ingest.orthancGroup.processedLabel | quote }}
+          {{- /* THE MOUNT IS THE REAL ENFORCEMENT, not the script's own checks.
+                 The pipeline volume is writable ONLY when dataPolicy.enabled
+                 AND dryRun is false — so in report-only and dry-run modes the
+                 kernel refuses a delete even if the logic above were wrong.
+                 A guard you can reason about beats a guard you have to trust.
+
+                 The facility backup stays read-only in EVERY mode: originals
+                 are never removed by this engine, and the mount says so. */}}
+          {{- $armed := and .Values.dataPolicy.enabled (not .Values.dataPolicy.dryRun) }}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: stages, mountPath: /etc/data-policy, readOnly: true}
+            - {name: pipeline, mountPath: /data, readOnly: {{ not $armed }}}
+            {{- if .Values.storage.facilityBackup.enabled }}
+            {{- /* The archive of record stays read-only until ALL THREE line up:
+                   enabled, not dryRun, and allowExpiry. Two switches govern
+                   derived data; originals need the third, and the mount is what
+                   enforces it rather than the script's own check. */}}
+            - {name: facility-backup, mountPath: /facility-backup, readOnly: {{ not (and $armed .Values.dataPolicy.originals.allowExpiry) }}}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.dataPolicy.reporter.resources | nindent 12 }}
+      volumes:
+        - name: scripts
+          configMap: {name: {{ $fullName }}, defaultMode: 0755}
+        - name: stages
+          configMap: {name: {{ $fullName }}}
+        - name: pipeline
+          persistentVolumeClaim: {claimName: {{ include "edge.pipelinePvc" . }}}
+        {{- if .Values.storage.facilityBackup.enabled }}
+        - name: facility-backup
+          persistentVolumeClaim: {claimName: {{ include "edge.facilityBackupPvc" . }}}
+        {{- end }}
+{{- end }}

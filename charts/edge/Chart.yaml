@@ -1,0 +1,26 @@
+apiVersion: v2
+name: ais-edge
+description: >-
+  AIS Edge site: Orthanc DICOM receiver with de-identification, the
+  xnat-ingest group/assign pipeline, and upload to XNAT either via a central
+  S3 staging bucket (tier-2) or directly (tier-1).
+type: application
+
+# Chart version. Bump on every change to the templates or default values.
+version: 0.3.1
+
+# Version of xnat-ingest this chart's pipeline arguments are written against.
+# The CLI changed shape at 0.12 (sort -> group-orthanc + assign), so this is
+# not a cosmetic field.
+appVersion: "0.12.3"
+
+keywords:
+  - dicom
+  - orthanc
+  - xnat
+  - deidentification
+home: https://github.com/Australian-Imaging-Service/ais-edge
+sources:
+  - https://github.com/Australian-Imaging-Service/ais-edge
+maintainers:
+  - name: Australian Imaging Service

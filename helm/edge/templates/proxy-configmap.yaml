@@ -1,9 +1,0 @@
-# Empty ConfigMap required by all xnat-ingest pods.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: proxy-config
-  namespace: {{ .Values.namespace }}
-  labels:
-    {{- include "edge.labels" . | nindent 4 }}
-data: {}
