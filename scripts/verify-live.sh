@@ -220,6 +220,40 @@ print((d or {}).get('namespace') or 'xnat-ingest')" 2>/dev/null || echo xnat-ing
             "$(echo "$eb" | sed 's/\t/ -> /' | paste -sd'; ') — CreateContainerConfigError here usually means a cert-sync Secret has not arrived"
     fi
 
+    # dataPolicy.telemetry.podLogFiles is applied by `k0s install worker`, so it
+    # takes effect at JOIN TIME and an already-joined node keeps whatever it was
+    # installed with. Editing the value on a running system therefore changes
+    # nothing — silently, which is precisely the failure this repo keeps
+    # removing. A comment cannot catch that; comparing the declared value with
+    # the kubelet's own running config can.
+    want=$(python3 -c "
+import yaml
+try:
+    d = yaml.safe_load(open('${REPO_DIR}/charts/mgmt/values.yaml'))['dataPolicy']['telemetry']['podLogFiles']
+    print(str(d.get('maxSize')) + ' ' + str(d.get('maxFiles')))
+except Exception:
+    print('')" 2>/dev/null)
+    node=$($EK get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -z "$want" ] || [ -z "$node" ]; then
+        skip "edge ${EDGE}: pod log rotation" "could not read the declared value or the node name"
+    else
+        got=$($EK get --raw "/api/v1/nodes/${node}/proxy/configz" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    k = json.load(sys.stdin)['kubeletconfig']
+    print(str(k.get('containerLogMaxSize')) + ' ' + str(k.get('containerLogMaxFiles')))
+except Exception:
+    print('')" 2>/dev/null)
+        if [ -z "$got" ]; then
+            skip "edge ${EDGE}: pod log rotation" "kubelet configz not readable on ${node}"
+        elif [ "$got" = "$want" ]; then
+            ok "edge ${EDGE}: pod log rotation matches the policy (${want% *} x ${want#* })"
+        else
+            bad "edge ${EDGE}: pod log rotation DRIFT — policy says '${want}', kubelet is running '${got}'" \
+                "dataPolicy.telemetry.podLogFiles is applied by k0s install worker at JOIN time, so editing it does not reach a node that is already joined. Reinstall the k0s worker service on ${node} to apply it, or revert the values change."
+        fi
+    fi
+
     miss=""
     for s in ca-bundle loki-push-client-tls s3-edge-credentials; do
         $EK -n "$ENS" get secret "$s" >/dev/null 2>&1 || miss="${miss} ${s}"

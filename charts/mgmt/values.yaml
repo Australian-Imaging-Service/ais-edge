@@ -143,6 +143,11 @@ dataPolicy:
     # worker is installed. CAUTION: it is a JOIN-TIME setting, so changing it
     # affects workers joined afterwards; an existing node needs its k0s worker
     # service reinstalled to pick it up.
+    #
+    # THAT NO-OP IS CHECKED, not merely documented. `make verify-live` compares
+    # this against each node's running kubelet config and FAILS on a mismatch,
+    # so editing it on a live system cannot quietly do nothing — which is the
+    # failure this block spent a long time being cleaned of.
     podLogFiles: {maxSize: 10Mi, maxFiles: 5}
 
 
