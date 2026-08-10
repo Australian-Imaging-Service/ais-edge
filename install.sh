@@ -94,6 +94,14 @@ RELEASE="${AIS_RELEASE:-$SITE}"
 # management-side reclaimer that do not exist here, and the failure is silent:
 # the uploader would retry an endpoint that never answers while the pipeline
 # quietly filled the disk.
+# The old installer checked every required value up front and named the missing
+# one. Without this, an empty nodeIP surfaces much later inside a sourced library
+# as "MGMT_NODE_IP: install.sh must export MGMT_NODE_IP" — a message that blames
+# the installer rather than the site file.
+[ -n "$NODE_IP" ] || die "nodeIP is not set in sites/${SITE}/values.yaml.
+       It is this machine's address: modalities C-STORE to it, and it is what
+       the installer prints as the DICOM endpoint."
+
 [ "$UPLOAD_MODE" = "direct" ] || die "upload.mode is '${UPLOAD_MODE}' — tier-1 requires 'direct'.
        upload.mode: s3 needs the tier-2 management plane (SeaweedFS, staging
        bucket, management-side reclaimer). None of that exists on a single node."
@@ -121,7 +129,13 @@ echo "============================================"
 # which every correct site still carries. Decrypt to a pipe and check the VALUES.
 if [ -f "$SECRETS" ]; then
     grep -q '^sops:' "$SECRETS" || die "sites/${SITE}/secrets.enc.yaml is NOT encrypted. Run: scripts/site-secrets.sh encrypt ${SITE}"
-    if command -v sops >/dev/null 2>&1; then
+    # NOT `if command -v sops` — that made the placeholder check silently
+    # conditional on a tool being present, so on a box without sops an unfilled
+    # REPLACE_XNAT_PASSWORD sailed through and step 2 failed only AFTER k0s had
+    # been installed. sops is required to apply the secrets at all.
+    command -v sops >/dev/null 2>&1 || die "sops is required — the site secrets are SOPS-encrypted.
+       https://github.com/getsops/sops/releases"
+    if true; then
         UNFILLED="$(sops --config "${SCRIPT_DIR}/.sops.yaml" -d "$SECRETS" 2>/dev/null \
                     | grep -nE '^[[:space:]]*[A-Za-z0-9_.-]+:[[:space:]]*REPLACE_' || true)"
         [ -n "$UNFILLED" ] && die "sites/${SITE}/secrets.enc.yaml still has unfilled placeholder VALUES:
@@ -129,7 +143,13 @@ ${UNFILLED}
        Fix with: scripts/site-secrets.sh edit ${SITE}"
     fi
 else
-    info "WARNING: no sites/${SITE}/secrets.enc.yaml — the chart references Secrets by name and pods will not start without them"
+    die "no sites/${SITE}/secrets.enc.yaml.
+       The chart references xnat-credentials and orthanc-deid-salt BY NAME and
+       creates neither, so every pipeline pod would sit in
+       CreateContainerConfigError while helm --wait blocked for ten minutes.
+       The old installer refused up front for exactly this reason.
+         scripts/site-secrets.sh new ${SITE} single
+         scripts/site-secrets.sh encrypt ${SITE}"
 fi
 
 [ -n "${MISSING:-}" ] && [ "$INSTALL_MODE" != "fresh" ] && die "missing required tools:${MISSING}"
@@ -161,8 +181,22 @@ if step "1/3  single-node k0s (k0s, kubectl, helm, local-path)"; then
     #
     # The flag is 00-common.sh's own documented escape hatch; it then requires
     # MGMT_NODE_IP, which on tier-1 is the site's nodeIP.
+    # INSTALL_MODE IS NOT OPTIONAL HERE. 01-install-k0s.sh runs under
+    # `set -euo pipefail` and branches on "${INSTALL_MODE}" with no default, so
+    # an unset variable aborts the whole install on its line 8 with
+    # `INSTALL_MODE: unbound variable` — before k0s, kubectl, helm or local-path
+    # are touched. The old installer never hit this because 00-common.sh sourced
+    # config/management.env, whose template exports it; the AIS_CONFIG_FROM_SITE
+    # branch deliberately does not source that file.
+    #
+    # Passing it also makes `installMode: existing` mean something again: it
+    # selects 01's verify-instead-of-build branch, so a site file can say "there
+    # is already a cluster here" without an operator having to remember to
+    # answer `s` at the prompt — and without `-y` running
+    # `k0s install controller --single` on a host that already runs Kubernetes.
     AIS_CONFIG_FROM_SITE=1 \
     MGMT_NODE_IP="$NODE_IP" \
+    INSTALL_MODE="$INSTALL_MODE" \
     INSTALL_TOPOLOGY=onprem \
         bash "${SCRIPT_DIR}/scripts/01-install-k0s.sh"
 fi
