@@ -71,6 +71,21 @@ spec:
       labels:
         app: data-policy
         app.kubernetes.io/instance: {{ .Release.Name }}
+        # THE ALERTS ON THIS COMPONENT SELECT ON THIS LABEL.
+        #
+        # Vector builds the Loki stream label from the POD LABEL —
+        # `component: "{{`{{ kubernetes.pod_labels.component }}`}}"`, see
+        # files/vector.yaml — NOT from the `component` field inside the JSON log
+        # line. These pods emit `"component":"data-policy"` in every line but
+        # carried no such pod label, so the stream label was empty and both
+        # EdgeDiskLow and QuarantinedDataUnresolved selected
+        # {namespace="xnat-ingest", component="data-policy"}, matched no stream,
+        # and could never fire. Verified against the live cluster: the label
+        # simply did not exist on the pod.
+        #
+        # Safe to add: it is deliberately NOT in the selector above, which
+        # carries identity labels only.
+        component: data-policy
       annotations:
         # Roll the pod when either the engine or the stage table changes.
         # Without this a policy edit renders a new ConfigMap and the running
