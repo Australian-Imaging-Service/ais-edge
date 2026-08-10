@@ -1,0 +1,38 @@
+# promtool unit tests for files/prometheus-rules/info.yaml
+#
+# THESE EXIST BECAUSE SYNTAX-CHECKING IS NOT ENOUGH. A rule can parse perfectly
+# and still select a metric series that never exists, or apply a function whose
+# result is constant — it then stays green for its whole life while alerting on
+# nothing. NodeCountChanged was exactly that: `changes(kube_node_info[10m])`
+# parses, but that metric's VALUE is the constant 1, so a node joining creates a
+# new SERIES rather than changing a value and the expression was identically 0.
+# A unit test that feeds it a second node catches that; promtool check does not.
+rule_files:
+  - ../info.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # One node for 5 minutes, a second node appears at 6m. The alert must fire
+  # only after the change.
+  - interval: 1m
+    input_series:
+      - series: 'kube_node_info{node="node-a"}'
+        values: '1x15'
+      - series: 'kube_node_info{node="node-b"}'
+        values: '_ _ _ _ _ _ 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NodeCountChanged
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: NodeCountChanged
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: Node inventory changed on the tier-1 host
+              description: >-
+                The number of nodes in this cluster changed in the last 10
+                minutes. On a tier-1 appliance there is exactly one node, so
+                this should never fire.

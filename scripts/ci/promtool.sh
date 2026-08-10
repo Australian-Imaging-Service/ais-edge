@@ -93,7 +93,13 @@ done
 
 # -----------------------------------------------------------------------------
 ci_heading "promtool check rules (as rendered into PrometheusRule objects)"
-render="$CI_RENDER_DIR/mgmt-defaults.yaml"
+# Which render carries the PrometheusRule objects depends on the tier: tier-2
+# renders them from charts/mgmt, tier-1 from charts/edge.
+if [ -s "$CI_RENDER_DIR/mgmt-defaults.yaml" ]; then
+  render="$CI_RENDER_DIR/mgmt-defaults.yaml"
+else
+  render="$CI_RENDER_DIR/edge-everything-on.yaml"
+fi
 if [ ! -s "$render" ]; then
   ci_fail "no render at $render — run scripts/ci/render.sh first (make ci does)"
 else
@@ -389,7 +395,7 @@ rules = {r["alert"]: r for g in doc.get("groups", []) for r in g.get("rules", []
 import os
 _ABS = os.environ.get("ABSENCE_ALERTS", "SessionStagedNotConfirmedInXNAT").split()
 if not _ABS:
-    print("SKIP absence-alert check — this tier has no reclaimer, so no rule of that shape exists")
+    print("SKIP absence-alert check: this tier has no reclaimer, so no rule of that shape exists")
     raise SystemExit
 _absname = _ABS[0]
 absence = rules.get(_absname)
@@ -443,6 +449,7 @@ else
     case "$line" in
       PASS\ *) ci_pass "${line#PASS }" ;;
       FAIL\ *) ci_fail "${line#FAIL }" ;;
+      SKIP\ *) ci_skip "${line#SKIP }" ;;
       *)       ci_fail "reclaimer silence check error: $line" ;;
     esac
   done < "$CI_WORK_DIR/reclaimer-silence.txt"

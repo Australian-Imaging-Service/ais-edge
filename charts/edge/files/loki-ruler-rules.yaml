@@ -64,9 +64,9 @@ groups:
   interval: 1m
   rules:
   - alert: XNATUploadFailingForAllSessions
-    expr: "(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\"\
-      \ [15m])) > 0)\nand ignoring (cluster)\n(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"\
-      upload\"}\n  |~ \"Successfully uploaded all files in\" [15m])) == 0)\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\"\
+      \ [15m])) > 0\nunless\nsum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~\
+      \ \"Successfully uploaded all files in\" [15m])) > 0\n"
     for: 15m
     labels:
       severity: critical
@@ -129,8 +129,8 @@ groups:
   interval: 30s
   rules:
   - alert: XNATUploadSuccess
-    expr: "sum by (cluster) (\n  rate({namespace=\"xnat-ingest\"}\n       |~ \"Successfully uploaded all files in\" [30s])\n\
-      ) > 0\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  |~ \"Successfully uploaded all files in\"\
+      \ [5m])) > 0\n"
     for: 0s
     labels:
       severity: info
