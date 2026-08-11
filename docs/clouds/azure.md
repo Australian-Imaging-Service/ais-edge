@@ -12,7 +12,7 @@ az aks create --resource-group ais-edge-rg --name ais-edge-mgmt \
   --enable-managed-identity --generate-ssh-keys
 az network public-ip create --resource-group ais-edge-rg \
   --name ais-edge-lb-ip --sku Standard --allocation-method Static
-# Edit config/management.env (CLOUD_PROVIDER=azure, INSTALL_MODE=existing, etc.)
+# Edit sites/<site>/values.yaml (topology: cloud, installMode: existing, etc.)
 ./install.sh -y
 ```
 
@@ -95,7 +95,7 @@ az network dns record-set a add-record \
 
 ## Step 4 — Config
 
-`config/management.env`:
+`sites/<site>/values.yaml`:
 
 ```bash
 export CLOUD_PROVIDER="azure"

@@ -14,7 +14,7 @@ gcloud container clusters create ais-edge-mgmt \
   --release-channel=stable
 gcloud compute addresses create ais-edge-lb \
   --region=australia-southeast1   # reserves a static regional IP
-# Edit config/management.env (CLOUD_PROVIDER=gcp, INSTALL_MODE=existing, etc.)
+# Edit sites/<site>/values.yaml (topology: cloud, installMode: existing, etc.)
 ./install.sh -y
 ```
 
@@ -83,7 +83,7 @@ gcloud dns managed-zones create aisedge \
 
 ## Step 4 — Config
 
-`config/management.env`:
+`sites/<site>/values.yaml`:
 
 ```bash
 export CLOUD_PROVIDER="gcp"

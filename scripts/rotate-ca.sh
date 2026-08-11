@@ -26,26 +26,64 @@
 #     mount sees Secret updates within ~1 minute (kubelet sync interval).
 #     We still trigger a rollout-restart for determinism.
 #   - This script touches BOTH the management cluster (CA Issuer + Cert)
-#     AND every edge cluster's ca-bundle Secret. It iterates EDGE_NODES
-#     from config/edge-nodes.env.
+#     AND every edge cluster's ca-bundle Secret. It iterates the `edges:`
+#     list in sites/<site>/values.yaml — the SAME list install.sh rendered
+#     the charts from, so it can never rotate a different set of edges than
+#     the deployment actually has.
 # =============================================================================
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
+# Only the helpers: the edge list comes from the site file below, so loading
+# any other configuration here could only contradict it.
+AIS_NO_CONFIG=1 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 
 DRY_RUN=false
 PHASE=""
+SITE=""
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --phase=1) PHASE=1 ;;
         --phase=2) PHASE=2 ;;
-        *) echo "Unknown arg: $arg"; exit 1 ;;
+        -*) echo "Unknown arg: $arg"; exit 1 ;;
+        *)  SITE="$arg" ;;
     esac
 done
 
-if [ -z "$PHASE" ]; then
-    echo "Usage: $0 --phase=1 [--dry-run]   issue new CA, push bundle"
-    echo "       $0 --phase=2 [--dry-run]   switch Issuer, drop old CA"
+if [ -z "$PHASE" ] || [ -z "$SITE" ]; then
+    echo "Usage: $0 <site> --phase=1 [--dry-run]   issue new CA, push bundle"
+    echo "       $0 <site> --phase=2 [--dry-run]   switch Issuer, drop old CA"
+    echo
+    echo "  <site> is a directory under sites/ — the same one install.sh takes."
+    echo "  Its edges: list is what gets rotated."
+    exit 1
+fi
+
+# --- the edge list, from the SITE FILE ---------------------------------------
+# Read once, up front, so a malformed or empty edges: list fails before any CA
+# has been issued. A rotation that gets halfway — new CA minted, only some
+# edges holding the new bundle — leaves the fleet unable to verify each other.
+VALUES="${REPO_DIR}/sites/${SITE}/values.yaml"
+[ -f "$VALUES" ] || { echo "ERROR: no such site: ${VALUES}" >&2; exit 1; }
+
+mapfile -t EDGE_NAMES < <(python3 - "$VALUES" <<'PY'
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1])) or {}
+for e in (v.get("edges") or []):
+    n = (e or {}).get("name")
+    if n:
+        print(n)
+PY
+)
+if [ "${#EDGE_NAMES[@]}" -eq 0 ]; then
+    echo "ERROR: sites/${SITE}/values.yaml lists no edges." >&2
+    echo >&2
+    echo "       The \`edges:\` list lives in the MANAGEMENT site, not an edge" >&2
+    echo "       site. If you passed an edge here, pass the management one" >&2
+    echo "       instead — it is the site that knows the whole fleet." >&2
+    echo >&2
+    echo "       Refusing to continue: rotating the management CA without" >&2
+    echo "       pushing the bundle to every edge leaves the fleet unable to" >&2
+    echo "       verify it." >&2
     exit 1
 fi
 
@@ -108,8 +146,8 @@ MANIFEST
     fi
 
     # 3. Push the bundle to every edge cluster's ca-bundle Secret + restart
-    for entry in "${EDGE_NODES[@]}"; do
-        parse_edge_entry "$entry"
+    for CLUSTER_NAME in "${EDGE_NAMES[@]}"; do
+        EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
         echo ""
         echo "--- Updating edge: ${CLUSTER_NAME} ---"
         if [ ! -f "${EDGE_KC}" ]; then
@@ -180,8 +218,8 @@ MANIFEST
     fi
 
     # 4. Push the new-only bundle to edges + restart consumers
-    for entry in "${EDGE_NODES[@]}"; do
-        parse_edge_entry "$entry"
+    for CLUSTER_NAME in "${EDGE_NAMES[@]}"; do
+        EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
         echo ""
         echo "--- Finalising edge: ${CLUSTER_NAME} ---"
         if [ ! -f "${EDGE_KC}" ]; then

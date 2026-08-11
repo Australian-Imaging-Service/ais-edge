@@ -58,7 +58,7 @@ the exact commands to substitute.
    empty — see the per-cloud doc.
 3. **Set DNS** to point at that IP. Use `nip.io` for dev,
    your own zone for prod.
-4. **Edit `config/management.env`** with the per-cloud values.
+4. **Edit `sites/<site>/values.yaml`** with the per-cloud values.
 5. **Run `./install.sh -y`** with the credentials sourced in your shell
    (or `CLOUD_CREDENTIALS_FILE` pointing at the openrc/aws/etc. file).
 

@@ -39,7 +39,7 @@ openstack server add floating ip mgmt-vm $MGMT_FIP
 LB_FIP=$(openstack floating ip create $EXTNET -f value -c floating_ip_address)
 echo "LB FIP: $LB_FIP   — point your DNS at this"
 
-# 5. Subnet ID for management.env
+# 5. Subnet ID for the site file
 LB_SUBNET=$(openstack subnet show aisedge-internal-sub -f value -c id)
 echo "LB_SUBNET_ID=$LB_SUBNET"
 ```
@@ -47,7 +47,7 @@ echo "LB_SUBNET_ID=$LB_SUBNET"
 Then:
 
 ```bash
-# config/management.env
+# sites/<site>/values.yaml
 export INSTALL_TOPOLOGY="cloud"
 export CLOUD_PROVIDER="openstack"
 export CLOUD_CREDENTIALS_FILE="/path/to/openrc.sh"
@@ -116,7 +116,7 @@ shared-network arrangement is the outlier.
 ## What `00a-precreate-lb.sh` looks like on this topology
 
 It runs but **does nothing** — `LB_PUBLIC_IP` is already set in
-`management.env`, so 00a's "skip if LB_PUBLIC_IP is pinned" guard
+the site file, so 00a's "skip if LB_PUBLIC_IP is pinned" guard
 fires:
 
 ```
@@ -176,7 +176,7 @@ You can't move a VM between networks live. Plan a maintenance window:
 2. Snapshot the mgmt VM disk (`openstack server image create mgmt-vm`).
 3. Boot a new mgmt VM from the snapshot on the new tenant subnet.
 4. Re-allocate the FIP (or allocate a fresh one) and update DNS.
-5. Update `config/management.env` to the new IDs.
+5. Update `sites/<site>/values.yaml` to the new IDs.
 6. Run `./install.sh -y` on the new VM — it provisions fresh from the
    snapshotted state.
 

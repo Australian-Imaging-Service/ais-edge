@@ -5,33 +5,52 @@
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Load config
+# Config contract
 #
-# SKIPPED when install.sh has already supplied the configuration from
-# sites/<site>/values.yaml, which is the normal path now. Sourcing these files
-# in that case would be actively harmful, not merely redundant: `source`
-# assigns unconditionally, so a stale config/management.env would OVERWRITE the
-# values install.sh just exported from the site file, and the scripts below
-# would quietly act on different hostnames, a different node IP or a different
-# edge than the charts were rendered with. The single source of truth has to be
-# single at the point of use, not just on paper.
+# Configuration comes from sites/<site>/values.yaml. Nothing else. Callers say
+# which of the two ways they satisfy that:
 #
-# Running one of these scripts standalone still works: nothing sets
-# AIS_CONFIG_FROM_SITE, so the files load exactly as before.
-if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
+#   AIS_CONFIG_FROM_SITE=1   install.sh has already read the site file and
+#                            exported the values. The numbered install steps
+#                            (01, 05, 06, 06b, 06c) run this way.
+#   AIS_NO_CONFIG=1          the caller takes a <site> argument and reads the
+#                            site file itself, and wants only the helpers
+#                            below. rotate-ca.sh and clear-staged-s3.sh.
+#
+# Neither set is an error, not a fallback — see the comment on that branch.
+if [ "${AIS_NO_CONFIG:-0}" = "1" ]; then
+    # The caller resolves its own configuration from sites/<site>/values.yaml
+    # and wants only the helper functions below. scripts/rotate-ca.sh and
+    # scripts/clear-staged-s3.sh do this: they take a <site> argument, so
+    # loading anything here could only contradict what they already read.
+    :
+elif [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
     : "${MGMT_NODE_IP:?install.sh must export MGMT_NODE_IP when AIS_CONFIG_FROM_SITE=1}"
 else
-    for cfg in "${REPO_DIR}/config/management.env" "${REPO_DIR}/config/edge-nodes.env"; do
-        if [ ! -f "$cfg" ]; then
-            echo "ERROR: $cfg not found. Copy from template:"
-            echo "  cp ${cfg}.template ${cfg}"
-            echo
-            echo "Or install from a site file instead, which is the supported path:"
-            echo "  ./install.sh <site>        # reads sites/<site>/values.yaml"
-            exit 1
-        fi
-        source "$cfg"
-    done
+    # THERE IS ONLY ONE SOURCE OF CONFIGURATION, and it is the site file.
+    #
+    # This branch used to `source config/management.env` and
+    # config/edge-nodes.env. That was a SECOND source of truth for the same
+    # facts, and `source` assigns unconditionally — so a stale env file left
+    # over from before the Helm consolidation would silently overwrite the
+    # values install.sh had just exported from sites/<site>/values.yaml, and
+    # every script below would act on a different node IP, hostname or edge
+    # than the charts were rendered with.
+    #
+    # It is not enough to guard against that at each call site (05, 06, 06b and
+    # 06c each had an `if AIS_CONFIG_FROM_SITE ... else parse_edge_entry` pair
+    # for exactly this reason). While the files can still be loaded at all,
+    # the second source exists and someone will reach it.
+    echo "ERROR: no configuration. These scripts are steps of an install and" >&2
+    echo "       take their configuration from a site file:" >&2
+    echo >&2
+    echo "         ./install.sh <site>        # reads sites/<site>/values.yaml" >&2
+    echo >&2
+    echo "       config/management.env and config/edge-nodes.env are gone. They" >&2
+    echo "       duplicated the site file and could silently override it." >&2
+    echo "       Everything they held now lives in sites/<site>/values.yaml and" >&2
+    echo "       sites/<site>/secrets.enc.yaml." >&2
+    exit 1
 fi
 
 # Template renderer: replaces {{KEY}} with value.
@@ -85,49 +104,6 @@ render_with_topology() {
             {print}
         '
     fi
-}
-
-# Parse an EDGE_NODES entry into variables.
-#
-# THE canonical parser — every script must call this rather than running its
-# own `IFS='|' read`. scripts/03 used to carry a second, 7-field copy of this
-# line while this one read 6; against a 6-field entry that silently produced
-# accessKey=<the secret> / secretKey="" in the SeaweedFS identities file, so
-# the edge uploader and the S3 gateway ended up with different credentials.
-# The failure was invisible until step 03 was re-run. One parser, one shape.
-#
-# Layout (6 fields):
-#   CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|S3_ACCESS_KEY|S3_SECRET_KEY
-#
-# There is no PROJECT field. Older example lines in edge-nodes.env.template
-# carried one in position 5; project/subject/session are now derived from the
-# DICOM ClinicalTrial* tags, so a 7-field line is stale config and is rejected.
-parse_edge_entry() {
-    local entry="$1"
-
-    # Fail loudly on the wrong shape rather than binding empty credentials.
-    local _n
-    _n=$(awk -F'|' '{print NF}' <<< "$entry")
-    if [ "$_n" -ne 6 ]; then
-        echo "ERROR: malformed EDGE_NODES entry — expected 6 pipe-separated fields, got ${_n}:" >&2
-        echo "         ${entry}" >&2
-        echo "       Expected: CLUSTER_NAME|NODE_IP|SSH_USER|SSH_KEY|S3_ACCESS_KEY|S3_SECRET_KEY" >&2
-        [ "$_n" -eq 7 ] && echo "       (7 fields = stale PROJECT field in position 5; delete it.)" >&2
-        exit 1
-    fi
-
-    IFS='|' read -r CLUSTER_NAME NODE_IP SSH_USER SSH_KEY EDGE_ACCESS_KEY EDGE_SECRET_KEY <<< "$entry"
-
-    if [ -z "$CLUSTER_NAME" ] || [ -z "$EDGE_ACCESS_KEY" ] || [ -z "$EDGE_SECRET_KEY" ]; then
-        echo "ERROR: EDGE_NODES entry has an empty CLUSTER_NAME or S3 key:" >&2
-        echo "         ${entry}" >&2
-        exit 1
-    fi
-
-    EDGE_SSH="${SSH_USER}@${NODE_IP}"
-    SSH_KEY_OPT=""
-    [ -n "${SSH_KEY}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
-    EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
 }
 
 # =============================================================================

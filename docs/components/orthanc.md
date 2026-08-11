@@ -69,18 +69,21 @@ so modalities can reach it without an in-cluster Service.
 
 ## Configuration
 
-Site-shipped files live in [`config/orthanc/`](../../config/orthanc/)
-and are turned into ConfigMaps by the deploy script. Four files:
+Nothing here is edited as a file. [`charts/edge/templates/orthanc-config.yaml`](../../charts/edge/templates/orthanc-config.yaml)
+renders three ConfigMaps from `sites/<site>/values.yaml`, so the site file is
+the only thing you change. (These used to be hand-edited copies under
+`config/orthanc/`; that directory is gone — it fed nothing, and editing the
+copy of the Lua script it held changed nothing at all.)
 
-| File | What it does |
-|---|---|
-| `orthanc.json` | Daemon config: AET, ports, storage path, `StableAge=30`, points at the Lua script |
-| `deidentify-and-forward.lua` | The deid + label hook. **Identical across all AIS-Edge deployments** — no site-specific bits |
-| `routing.json` | **Per-site**: maps modality AETs → recipe + XNAT project. Edit this for every new site |
+| Rendered file | Built from | What it does |
+|---|---|---|
+| `orthanc.json` | `orthanc.*` and `dataPolicy.derived.orthancStorage.*` | Daemon config: AET, ports, storage path, `StableAge`, points at the Lua script |
+| `deidentify-and-forward.lua` | `.Files.Get "files/deidentify-and-forward.lua"` | The deid + label hook. **Identical across all AIS-Edge deployments** — no site-specific bits, which is why it is a chart file and not a value |
+| `routing.json` | `orthanc.deid.aetMap` | **Per-site**: maps modality AETs → XNAT project. Set one entry per modality; an unmapped AET is quarantined, not dropped |
 | `deidentification-profile.json` | The site's deid contract. Replace + Keep blocks following Orthanc's `/modify` API. Ships as `.template`; gitignored after copy. Applied to every accepted study |
 
 The single per-deployment Secret is `AIS_DEID_HMAC_SALT`, set in
-`config/management.env`. Generate with `openssl rand -hex 32`.
+the edge site's `orthanc-deid-salt` Secret in `sites/<site>/secrets.enc.yaml`. Generate with `openssl rand -hex 32`.
 Rotating it means a different deid'd identity for the same patient,
 so only rotate deliberately.
 

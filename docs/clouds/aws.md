@@ -11,7 +11,7 @@
 ```bash
 eksctl create cluster --name ais-edge-mgmt --region ap-southeast-2 --managed
 aws ec2 allocate-address --domain vpc                         # returns ElasticIP
-# Edit config/management.env with CLOUD_PROVIDER=aws, INSTALL_MODE=existing,
+# Edit sites/<site>/values.yaml with topology: cloud, installMode: existing,
 # LB_PUBLIC_IP=<eip>, INTERNAL_DOMAIN=<your zone or nip.io>
 ./install.sh -y
 ```
@@ -100,7 +100,7 @@ aws route53 change-resource-record-sets \
 
 ## Step 4 — Config
 
-`config/management.env`:
+`sites/<site>/values.yaml`:
 
 ```bash
 export CLOUD_PROVIDER="aws"
@@ -115,7 +115,7 @@ export DNS_PROVIDER="route53"                  # for cert-manager DNS-01
 # (see manifests/01-management/dns01-solvers/)
 ```
 
-`config/edge-nodes.env`: same as on-prem, one entry per edge VM. Edges
+The `edges:` list in `sites/<site>/values.yaml`: same as on-prem, one entry per edge VM. Edges
 don't need to be in AWS — they reach the mgmt cluster via the LB hostname
 over public DNS + :443. Most often they're on-prem at the clinic site.
 

@@ -17,7 +17,7 @@ same dashboards, same alerts.
 
 ## One env var picks the topology
 
-`config/management.env`:
+`sites/<site>/values.yaml`:
 ```bash
 export INSTALL_TOPOLOGY="cloud"               # vs "onprem"
 export CLOUD_PROVIDER="openstack"             # openstack | aws | gcp | azure | none
@@ -115,7 +115,7 @@ Step 02c renders `nginx-ingress-values-cloud.yaml.tpl` with
 Operator runs:
   $ openstack floating ip create qld    # → 203.101.227.222
                           ↓
-  config/management.env:
+  sites/<site>/values.yaml:
     LB_PUBLIC_IP=203.101.227.222
                           ↓
   Step 01b: openstack-cloud-controller-manager + cloud.conf Secret

@@ -50,7 +50,13 @@
 # rather than doing nothing quietly.
 # =============================================================================
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
+# Helpers only. This script resolves the edge and its bucket from
+# sites/<site>/values.yaml below, so there is nothing for the common config
+# loader to contribute — and while it still loaded config/management.env, this
+# script could not start at all on a checkout that had none. It is the
+# documented remediation for a staged-data alert, so "exits 1 before doing
+# anything" was the worst possible failure mode.
+AIS_NO_CONFIG=1 source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 
 MGMT_NS="ais-mgmt"
 UPLOAD_NS="xnat-upload"

@@ -49,7 +49,8 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
 |---|---|
 | `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook |
 | `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, per-site bucket toggle, image tag |
-| `config/management.env` | `S3_ADMIN_*`, `S3_BUCKET`, `LOGS_BUCKET`, `LOKI_S3_*`, `SEAWEEDFS_HOSTNAME` |
+| `sites/<site>/values.yaml` | `hostnames.seaweedfs`, `seaweedfs.buckets.ingest`, `seaweedfs.buckets.logs` |
+| `sites/<site>/secrets.enc.yaml` | the `seaweedfs-admin` and `loki-s3-credentials` Secrets — named by `seaweedfs.adminSecretRef` and `observability.loki.s3SecretRef` |
 
 ## Operations
 
@@ -66,7 +67,7 @@ mc ls seaweed/ingest-bucket/staged/    # see staged sessions
 kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master
 kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
 
-# Re-render s3.json after editing edge-nodes.env
+# s3.json is rendered by charts/mgmt from the edges: list — re-run the install
 helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 # (idempotent — recomputes the config-hash annotation, rolls the pod)
 ```

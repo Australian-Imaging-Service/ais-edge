@@ -96,4 +96,43 @@ done < <(
 )
 [ "$pipe_yes" -eq 0 ] && ci_pass "no \`yes |\` pipelines under pipefail"
 
+# =============================================================================
+# There is exactly ONE source of configuration, and it is the site file.
+# =============================================================================
+# config/management.env and config/edge-nodes.env were a second one. `source`
+# assigns unconditionally, so a stale copy left over from before the Helm
+# consolidation silently overwrote the values install.sh had just exported from
+# sites/<site>/values.yaml, and the install steps then acted on a different node
+# IP, hostname or edge than the charts were rendered with. Nothing failed; the
+# wrong thing was configured.
+#
+# Guarding each call site was not enough — 05, 06, 06b and 06c each grew an
+# `if AIS_CONFIG_FROM_SITE ... else` pair for exactly this, and the second
+# source still existed for anyone who ran a script directly. So the files are
+# gone, and this keeps them gone.
+ci_heading "one source of configuration"
+
+cfg_bad=0
+while IFS= read -r f; do
+  [ -e "$f" ] || continue
+  # `source`/`.` of anything under config/ — the mechanism itself.
+  if grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*config/[A-Za-z0-9_.-]+\.env' "$f" >/dev/null; then
+    ci_fail "$(basename "$f") sources a config/*.env file — that is a second source of truth that can silently override sites/<site>/values.yaml"
+    cfg_bad=1
+  fi
+done < <(
+  find "$REPO_ROOT/scripts" -type f -name '*.sh' 2>/dev/null
+  find "$REPO_ROOT" -maxdepth 1 -type f -name '*.sh' 2>/dev/null
+)
+
+# And the files themselves must not come back.
+for dead in config/management.env.template config/edge-nodes.env.template config/orthanc; do
+  if [ -e "$REPO_ROOT/$dead" ]; then
+    ci_fail "$dead is back. Configuration belongs in sites/<site>/values.yaml and sites/<site>/secrets.enc.yaml; config/ holds only k0s-controller.yaml, which install.sh copies to /etc/k0s/k0s.yaml"
+    cfg_bad=1
+  fi
+done
+
+[ "$cfg_bad" -eq 0 ] && ci_pass "config/ holds only k0s-controller.yaml, and no script sources a config/*.env"
+
 ci_summary "shell syntax"
