@@ -564,7 +564,21 @@ def norm(o):
     # The ONLY legitimate difference: tier-2 splits upload into its own
     # namespace, tier-1 has exactly one.
     return yaml.safe_dump(o, sort_keys=True).replace('xnat-upload', 'xnat-ingest')
-bad = [n for n in sorted(set(t1) & set(t2)) if norm(t1[n]) != norm(t2[n])]
+# Divergences forced by the single-namespace collapse, not drift. Tier-2's
+# xnat-upload namespace holds only the uploader; tier-1's one namespace also
+# holds Loki, Grafana and Prometheus, so these two must select the component.
+# Listed by name and PRINTED, so an exemption can never be silent.
+FORCED = {
+    "XNATUploadSuccess": "scoped to component=upload — a bare namespace selector matched Loki's own ruler-query log, which contains both the success phrase and the regexp, and fired an alert about its own evaluation",
+    "XNATAuthFailure":   "scoped to component=upload — a bare namespace selector matched a 401/403 logged by any pod in the namespace",
+}
+bad = [n for n in sorted(set(t1) & set(t2))
+       if n not in FORCED and norm(t1[n]) != norm(t2[n])]
+# To STDERR: stdout is the verdict this check is parsed from, and a NOTE on it
+# made the caller read "NOTE ..." as the result instead of PASS.
+for n in sorted(FORCED):
+    if n in t1:
+        print(f"    note: {n} — {FORCED[n]}", file=sys.stderr)
 shared = len(set(t1) & set(t2))
 if bad:
     print("FAIL " + ", ".join(bad))
@@ -577,5 +591,38 @@ PY
     *)     ci_fail "these alerts exist on both tiers but differ by more than the namespace: ${out#FAIL }. Port the tier-2 rule verbatim and change only the namespace, or give the divergence a reason in the file header." ;;
   esac
 fi
+
+
+# =============================================================================
+# No tier-1 Loki rule may select the whole namespace.
+# =============================================================================
+# Tier-1 runs the pipeline AND the observability stack in one namespace, so
+# {namespace="xnat-ingest"} with no component matches Loki, Grafana, Prometheus
+# and Alertmanager as well as the pipeline. That is how XNATUploadSuccess came
+# to match Loki logging its own ruler query and fire an alert whose session
+# label was the regexp pattern.
+ci_heading "no Loki rule selects the whole namespace"
+
+for rules_file in "$REPO_ROOT"/charts/edge/files/loki-ruler-rules.yaml; do
+  [ -e "$rules_file" ] || continue
+  [ -d "$REPO_ROOT/charts/mgmt" ] && { ci_skip "tier-2 keeps the pipeline in its own namespace — this only applies to a single-node checkout"; continue; }
+  out="$(python3 - "$rules_file" <<'PY'
+import sys, re, yaml
+d = yaml.safe_load(open(sys.argv[1])) or {}
+bad = []
+for g in d.get("groups", []):
+    for r in (g.get("rules") or []):
+        expr = " ".join(str(r.get("expr", "")).split())
+        for sel in re.findall(r"\{[^}]*\}", expr):
+            if "namespace=" in sel and "component=" not in sel and "app=" not in sel:
+                bad.append(f"{r.get('alert')} {sel}")
+print(("FAIL " + "; ".join(sorted(set(bad)))) if bad else "PASS every selector names a component or app")
+PY
+)"
+  case "$out" in
+    PASS*) ci_pass "${out#PASS }" ;;
+    *)     ci_fail "these rules select the whole namespace, which on one node also matches Loki/Grafana/Prometheus logs: ${out#FAIL }" ;;
+  esac
+done
 
 ci_summary "promtool"

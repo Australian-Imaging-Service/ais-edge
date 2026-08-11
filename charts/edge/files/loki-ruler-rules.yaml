@@ -58,6 +58,24 @@
 # nested inside a ConfigMap: the sidecar would have written a file containing
 # Kubernetes YAML where rule groups belong, and Loki would have loaded NO
 # rules at all while everything looked healthy.
+#
+# TIER-1 SCOPING: XNATUploadSuccess and XNATAuthFailure select
+# component="upload", where tier-2 selects the whole xnat-upload namespace.
+# That is not gratuitous drift — it is forced by the single-namespace collapse.
+#
+# On tier-2, namespace xnat-upload contains ONLY the uploader. On tier-1 the
+# one namespace also holds Loki, Grafana, Prometheus and Alertmanager, so a
+# bare {namespace="xnat-ingest"} selector matches THEIR logs too. Measured on
+# the live install:
+#
+#   * Loki logs each ruler query at INFO, and that query text contains both
+#     "Successfully uploaded all files in" and the regexp pattern. The rule
+#     therefore matched the ruler evaluating the rule, and fired a second
+#     XNATUploadSuccess whose session label was the literal
+#         (?P<session>[^
+#     A self-sustaining alert about its own evaluation.
+#   * XNATAuthFailure would match a 401/403 logged by ANY pod in the namespace,
+#     not just the uploader.
 
 groups:
 - name: ais-edge-pipeline-critical
@@ -122,16 +140,16 @@ groups:
       description: "Session {{ $labels.session }} landed in XNAT (pushed by\nxnat-ingest-upload on cluster {{ $labels.cluster }}).\nVerify in the pod logs:\n  kubectl -n xnat-ingest logs deploy/xnat-ingest-upload\
         \ --tail=30\n"
       summary: "XNAT upload completed \u2014 {{ $labels.session }}"
-    expr: "sum by (cluster, session) (\n  count_over_time(\n    {namespace=\"xnat-ingest\"}\n    |~ \"Successfully uploaded all files in\"\n    | regexp \"Successfully uploaded all files in '(?P<session>[^']+)'\"\
-      \n    [10m]\n  )\n) > 0\n"
+    expr: "sum by (cluster, session) (\n  count_over_time(\n    {namespace=\"xnat-ingest\", component=\"upload\"}\n    |~ \"Successfully uploaded all files in\"\n    | regexp \"Successfully uploaded all\
+      \ files in '(?P<session>[^']+)'\"\n    [10m]\n  )\n) > 0\n"
     for: 0s
     labels:
       category: pipeline-success
       severity: info
       source: loki-ruler
   - alert: XNATAuthFailure
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\"\
-      \ [15m])) > 3\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\
+      \\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\" [15m])) > 3\n"
     for: 0s
     labels:
       category: xnat-auth
