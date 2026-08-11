@@ -64,73 +64,62 @@ groups:
   interval: 1m
   rules:
   - alert: XNATUploadFailingForAllSessions
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\"\
-      \ [15m])) > 0\nunless\nsum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~\
-      \ \"Successfully uploaded all files in\" [15m])) > 0\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\" [15m])) > 0\nunless\nsum by (cluster) (count_over_time(\n\
+      \  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files in\" [15m])) > 0\n"
     for: 15m
     labels:
       severity: critical
       source: loki-ruler
     annotations:
       summary: All XNAT upload attempts have failed for 15+ minutes on {{ $labels.cluster }}
-      description: No successful XNAT uploads while errors keep coming. Likely a network / XNAT / credential break. Check
-        `kubectl logs -n xnat-upload -l component=upload`.
+      description: No successful XNAT uploads while errors keep coming. Likely a network / XNAT / credential break. Check `kubectl logs -n xnat-ingest -l component=upload`.
 - name: ais-edge-pipeline-warning
   interval: 1m
   rules:
   - alert: XNATUploadRetryStorm
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\"\
-      \ [10m])) > 5\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\" [10m])) > 5\n"
     for: 2m
     labels:
       severity: warning
       source: loki-ruler
     annotations:
       summary: '>5 XNAT upload errors in 10 minutes on {{ $labels.cluster }}'
-      description: xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n
-        xnat-upload -l component=upload` for the actual error.
+      description: xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n xnat-ingest -l component=upload` for the actual error.
   - alert: SessionUploadStalled
-    expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  | json | session\
-      \ != \"\" [15m])) > 0)\nunless on (cluster, session)\n(sum by (cluster, session) (count_over_time(\n  {namespace=\"\
-      xnat-ingest\", component=\"upload\"}\n  | json | session != \"\" |~ \"Successfully uploaded all files in\" [15m])) >\
-      \ 0)\n"
+    expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  | json | session != \"\" [15m])) > 0)\nunless on (cluster, session)\n(sum by (cluster, session)\
+      \ (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  | json | session != \"\" |~ \"Successfully uploaded all files in\" [15m])) > 0)\n"
     for: 5m
     labels:
       severity: warning
       source: loki-ruler
     annotations:
       summary: Session {{ $labels.session }} on {{ $labels.cluster }} has been parked for 15+ minutes
-      description: assign staged this session but upload did not confirm it to XNAT within the expected window. Could be a
-        slow network, large session, or stuck retry. Check `kubectl logs -n xnat-upload -l component=upload`.
+      description: assign staged this session but upload did not confirm it to XNAT within the expected window. Could be a slow network, large session, or stuck retry. Check `kubectl logs -n xnat-ingest
+        -l component=upload`.
   - alert: XNATBacklogGrowing
-    expr: "(sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  | json | session != \"\" [30m]))\n\
-      \ -\n sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files\
-      \ in\" [30m]))\n) > 3\n"
+    expr: "(sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  | json | session != \"\" [30m]))\n -\n sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n\
+      \  |~ \"Successfully uploaded all files in\" [30m]))\n) > 3\n"
     for: 30m
     labels:
       severity: warning
       source: loki-ruler
     annotations:
       summary: XNAT upload backlog is growing
-      description: "Sessions are being staged faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or\
-        \ partially failing \u2014 check `kubectl logs -n xnat-upload -l component=upload`."
+      description: "Sessions are being staged faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing \u2014 check `kubectl logs -n xnat-ingest -l component=upload`."
   - alert: DICOMValidationFailureSpike
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  |~ \"(?i)invalid|validation.*fail\"\
-      \ [1h])) > 10\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  |~ \"(?i)invalid|validation.*fail\" [1h])) > 10\n"
     for: 5m
     labels:
       severity: warning
       source: loki-ruler
     annotations:
       summary: '>10 invalid DICOM sessions on {{ $labels.cluster }} in last hour'
-      description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber \u2014\
-        \ check scanner config."
+      description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber \u2014 check scanner config."
 - name: ais-edge-pipeline-info
   interval: 30s
   rules:
   - alert: XNATUploadSuccess
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  |~ \"Successfully uploaded all files in\"\
-      \ [5m])) > 0\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  |~ \"Successfully uploaded all files in\" [5m])) > 0\n"
     for: 0s
     labels:
       severity: info
@@ -138,30 +127,26 @@ groups:
       category: pipeline-success
     annotations:
       summary: XNAT upload completed
-      description: "xnat-ingest-upload successfully pushed at least one session\nto XNAT in the last 30 seconds. Check the\
-        \ pod logs for the\nexact session ID:\n  kubectl -n xnat-upload logs deploy/xnat-ingest-upload --tail=30\n"
+      description: "xnat-ingest-upload successfully pushed at least one session\nto XNAT in the last 30 seconds. Check the pod logs for the\nexact session ID:\n  kubectl -n xnat-ingest logs deploy/xnat-ingest-upload\
+        \ --tail=30\n"
   - alert: XNATAuthFailure
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  |~ \"(?i)\\\\b(401|403|unauthorized|forbidden)\\\
-      \\b\" [5m])) > 0\n"
-    for: 1m
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\"\
+      \ [15m])) > 3\n"
+    for: 0s
     labels:
+      category: xnat-auth
       severity: warning
       source: loki-ruler
-      category: xnat-auth
     annotations:
-      summary: XNAT rejected authenticated calls from xnat-ingest-upload
-      description: 'The xnat-ingest-upload pod hit a 401/403 from XNAT in the
-
-        last 5 minutes. Check XNAT_URL/USER/PASS in the
-
-        xnat-credentials Secret and that the XNAT admin account
-
-        isn''t locked.
-
-        '
+      description: "More than 3 authentication rejections (401/403) from XNAT in 15\nminutes \u2014 so this is NOT the routine session-cookie expiry, which\nthe uploader recovers from by itself within one\
+        \ ~62s loop and which\ncan never reach this threshold.\n\nCheck, in order:\n  1. Is XNAT up at all? A 5xx outage produces a 401 afterwards\n     because the pre-outage session id is no longer known.\
+        \ This rule\n     cannot see 5xx, so rule it out first:\n       kubectl -n xnat-ingest logs deploy/mgmt-upload-{{ $labels.cluster }} --tail=100 | grep -E \"50[0-9]|Connection\"\n  2. Did the credential\
+        \ change under the running pod? The uploader\n     reads xnat-credentials once at startup and holds one connection:\n       kubectl -n xnat-ingest rollout restart deploy/mgmt-upload-{{ $labels.cluster\
+        \ }}\n     If a restart fixes it, the Secret was rotated without one.\n  3. Is the account locked or the role revoked? Verify the\n     username/password in the xnat-credentials Secret against XNAT\n\
+        \     directly before assuming the Secret is wrong.\n\nNothing is lost while this fires: sessions stay in S3 staging and\nthe reclaimer refuses to remove anything it cannot confirm.\n"
+      summary: XNAT kept rejecting authenticated calls from the uploader on {{ $labels.cluster }}
   - alert: OrthancDeidLuaError
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)lua.*error|traceback|stack\\\
-      \\s+traceback\" [10m])) > 0\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)lua.*error|traceback|stack\\\\s+traceback\" [10m])) > 0\n"
     for: 1m
     labels:
       severity: warning
@@ -177,8 +162,7 @@ groups:
 
         '
   - alert: OrthancStorageGrowing
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\"\
-      \ [1h])) > 1000\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\" [1h])) > 1000\n"
     for: 5m
     labels:
       severity: warning
@@ -194,8 +178,7 @@ groups:
 
         '
 - alert: EdgeDiskLow
-  expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"\
-    stage_report\"\n  | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0\n"
+  expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0\n"
   for: 5m
   labels:
     severity: warning
@@ -203,15 +186,12 @@ groups:
     category: edge-storage
   annotations:
     summary: Edge {{ $labels.cluster }} is low on disk at {{ $labels.stage }}
-    description: "The data-policy engine reports less free space than\ndataPolicy.originals.facilityBackup.minFreeDiskPercent\
-      \ allows on\n{{ $labels.cluster }}, for stage {{ $labels.stage }}.\n\nNOTHING IS DELETED BECAUSE OF THIS. Originals\
-      \ are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\
-      \n  kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\
-      \nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the dry-run\
-      \ decisions.\n"
+    description: "The data-policy engine reports less free space than\ndataPolicy.originals.facilityBackup.minFreeDiskPercent allows on\n{{ $labels.cluster }}, for stage {{ $labels.stage }}.\n\nNOTHING\
+      \ IS DELETED BECAUSE OF THIS. Originals are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\n  kubectl --kubeconfig kubeconfig-{{ $labels.cluster\
+      \ }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the dry-run decisions.\n"
 - alert: QuarantinedDataUnresolved
-  expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"\
-    stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__ [15m])) > 0\n"
+  expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__\
+    \ [15m])) > 0\n"
   for: 5m
   labels:
     severity: warning
@@ -241,8 +221,7 @@ groups:
   interval: 5m
   rules:
   - alert: EdgeDiskLow
-    expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json |\
-      \ event=\"stage_report\"\n  | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0\n"
+    expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0\n"
     for: 5m
     labels:
       severity: warning
@@ -250,15 +229,13 @@ groups:
       category: edge-storage
     annotations:
       summary: Edge {{ $labels.cluster }} is low on disk at {{ $labels.stage }}
-      description: "The data-policy engine reports less free space than\ndataPolicy.originals.facilityBackup.minFreeDiskPercent\
-        \ allows on\n{{ $labels.cluster }}, for stage {{ $labels.stage }}.\n\nNOTHING IS DELETED BECAUSE OF THIS. Originals\
-        \ are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\
-        \n  kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\
-        \nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the\
+      description: "The data-policy engine reports less free space than\ndataPolicy.originals.facilityBackup.minFreeDiskPercent allows on\n{{ $labels.cluster }}, for stage {{ $labels.stage }}.\n\nNOTHING\
+        \ IS DELETED BECAUSE OF THIS. Originals are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\n  kubectl --kubeconfig kubeconfig-{{\
+        \ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the\
         \ dry-run decisions.\n"
   - alert: QuarantinedDataUnresolved
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"\
-      stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__ [15m])) > 0\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__\
+      \ [15m])) > 0\n"
     for: 5m
     labels:
       severity: warning

@@ -31,7 +31,18 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-RULES="${REPO_ROOT}/charts/mgmt/files/loki-ruler-rules.yaml"
+# WHICH CHART SHIPS THE RULES depends on the tier: tier-2 keeps them in
+# charts/mgmt, tier-1 in charts/edge (there is no management chart on a single
+# node). Resolved rather than hardcoded so the same harness exercises both.
+if [ -d "${REPO_ROOT}/charts/mgmt" ]; then
+  OBS_CHART="charts/mgmt"
+else
+  OBS_CHART="charts/edge"
+fi
+# Tier-2 splits upload into its own namespace; tier-1 has exactly one.
+TIER_NS="$(grep -m1 '^namespace:' "${REPO_ROOT}/${OBS_CHART}/values.yaml" | awk '{print $2}')"
+TIER_NS="${TIER_NS:-xnat-upload}"
+RULES="${REPO_ROOT}/${OBS_CHART}/files/loki-ruler-rules.yaml"
 PORT="${LOKI_TEST_PORT:-33100}"
 NAME="loki-rule-test"
 WORK="$(mktemp -d)"
@@ -40,6 +51,8 @@ _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
 PASS=0; FAIL=0; FAILED=()
 pass() { PASS=$((PASS+1)); printf '  %sPASS%s  %-38s %s\n' "$_G" "$_O" "$1" "$2"; }
 fail() { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '  %sFAIL%s  %-38s %s\n' "$_R" "$_O" "$1" "$2"; }
+SKIP=0
+skip() { SKIP=$((SKIP+1)); printf '  %sSKIP%s  %-38s %s\n' "$_Y" "$_O" "$1" "$2"; }
 
 cleanup() {
     [ "${LOKI_KEEP:-0}" = "1" ] || docker rm -f "$NAME" >/dev/null 2>&1
@@ -59,7 +72,7 @@ fi
 
 # Version comes from the pinned dependency's own comment (`version: "7.1.0"
 # # app 3.6.8`), so bumping the subchart moves the tests with it.
-LOKI_APP="$(python3 - "$REPO_ROOT/charts/mgmt/Chart.yaml" <<'PY'
+LOKI_APP="$(python3 - "$REPO_ROOT/$OBS_CHART/Chart.yaml" <<'PY'
 import re, sys
 txt = open(sys.argv[1]).read()
 m = re.search(r'-\s*name:\s*loki\s*\n\s*version:\s*"[^"]+"\s*#\s*app\s*([0-9][0-9.]*)', txt)
@@ -201,7 +214,7 @@ total = sum(len(v) for v in streams.values())
 open(sys.argv[3], "w").write(str(total))
 print("  pushed %d lines across %d streams" % (total, len(streams)))
 PY
-fixtures | python3 "$WORK/mkpush.py" "$NOW_NS" "$WORK/push.json" "$WORK/expected_count" || {
+fixtures | sed "s/\"namespace\":\"xnat-upload\"/\"namespace\":\"${TIER_NS}\"/g" | python3 "$WORK/mkpush.py" "$NOW_NS" "$WORK/push.json" "$WORK/expected_count" || {
     echo "could not build the push payload" >&2; exit 2; }
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:${PORT}/loki/api/v1/push" \
@@ -247,7 +260,16 @@ printf '  %sPASS%s  %-38s all %s fixture lines queryable\n' "$_G" "$_O" "fixture
 # --- evaluate -----------------------------------------------------------------
 while IFS=$'\t' read -r name alert cluster expect desc; do
     [ -n "${name:-}" ] || continue
-    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/charts/mgmt/values.yaml" <<'PY'
+    # An alert that does not exist ON THIS TIER is not a failure: tier-1 has no
+    # S3 reclaimer and no staging bucket, so ReclaimerRunUnavailable and
+    # SessionStagedNotConfirmedInXNAT are absent by design. Skipped with a
+    # reason rather than deleted, so the same table serves both tiers.
+    if ! grep -q "alert: ${alert}\b" "$RULES"; then
+        skip "$name" "$alert is not in this tier's ruleset"
+        continue
+    fi
+    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" <<'PY'
+
 import sys, re, yaml
 
 d = yaml.safe_load(open(sys.argv[1]))
@@ -308,6 +330,6 @@ print('fire' if any(s['metric'].get('cluster') == want for s in d['data']['resul
     fi
 done < <(cases)
 
-printf '\n%sloki-rules: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
+printf '\n%sloki-rules: %d passed, %d failed, %d skipped (not in %s)%s\n' "$_B" "$PASS" "$FAIL" "$SKIP" "$OBS_CHART" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi
 exit 0
