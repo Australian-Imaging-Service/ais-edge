@@ -68,6 +68,31 @@ DECLARED_NOT_ENFORCED = {
     "dataPolicy.originals.fileDrop.minAge",
 }
 
+# TIER-2 ONLY. charts/edge is shared by both tiers, so it carries keys that only
+# the tier-2 shape can consume. On a single node these have no reader and never
+# will — not because they are unimplemented, but because the component that
+# would read them does not exist here.
+#
+# A SEPARATE CATEGORY ON PURPOSE. Putting them in KNOWN_DEAD would call them
+# debt and invite someone to "fix" them by deleting keys tier-2 depends on;
+# leaving them unlisted fails the build on a branch where they are correct. Both
+# are wrong, so they are named and printed.
+import os as _os
+_HAS_MGMT = _os.path.isdir(_os.path.join(REPO, "charts", "mgmt")) if "REPO" in dir() else True
+TIER2_ONLY = {
+    # The S3 staging reclaimer runs on the MANAGEMENT side. Tier-1 uploads
+    # straight to XNAT, so there is no staging prefix to reclaim.
+    "dataPolicy.derived.s3Staged.reclaim",
+    "dataPolicy.derived.s3Staged.minAge",
+    "dataPolicy.derived.s3Staged.verifyAgainstXnat",
+    "dataPolicy.derived.s3Staged.schedule",
+    "dataPolicy.derived.s3Staged.maxRemovals",
+    # Applied by scripts/06 at worker-JOIN time, via kubelet flags. Tier-1 has
+    # no join step, so nothing carries these onto the node.
+    "dataPolicy.telemetry.podLogFiles.maxSize",
+    "dataPolicy.telemetry.podLogFiles.maxFiles",
+}
+
 # Keys with NO reader at all. Real debt, not an exemption on principle.
 # Shrinking this list is the point; adding to it needs a reason in the commit
 # message.
@@ -147,6 +172,7 @@ def is_advertised(key):
             if os.path.basename(f) in DISPLAY_ONLY]
 
 new_dead, revived, ok = [], [], 0
+tier2_unread = []
 for key in sorted(keys):
     if any(b in key for b in OPAQUE_BLOCKS):
         continue
@@ -156,8 +182,17 @@ for key in sorted(keys):
         if key in KNOWN_DEAD:
             revived.append((key, readers))
     else:
-        if key not in KNOWN_DEAD:
+        # TIER2_ONLY keys legitimately have no reader on this branch: the
+        # component that would read them is tier-2's. Counted separately so the
+        # exemption is visible rather than hidden inside KNOWN_DEAD.
+        if key in TIER2_ONLY:
+            tier2_unread.append(key)
+        elif key not in KNOWN_DEAD:
             new_dead.append(key)
+
+if tier2_unread:
+    print("  NOTE  %d tier-2-only key(s) have no reader here, as expected on a single node:" % len(tier2_unread))
+    for k in tier2_unread: print("          %s" % k)
 
 for key in new_dead:
     print(f"  FAIL  {key}")
