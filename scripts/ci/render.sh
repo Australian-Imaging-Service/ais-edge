@@ -183,4 +183,54 @@ else
   done < "$CI_WORK_DIR/selector-labels.txt"
 fi
 
+# =============================================================================
+# Every component a dashboard queries must be one this chart actually deploys.
+# =============================================================================
+# A dashboard panel selecting a component that does not exist is not an error
+# anywhere: Grafana draws an empty graph, Loki answers "no data", and the
+# operator reads a blank "Upload failures" panel as "no failures". That is
+# strictly worse than a broken panel, because it looks like good news.
+#
+# This is how the dashboards arrived here: they were written for tier-2, whose
+# uploader is labelled `s3-uploader`. Tier-1 runs `upload`, so ten panels were
+# permanently blank on the tier where the pipeline's only uploader lives.
+ci_heading "dashboards query components that exist"
+
+DASH_DIR="$(ci_obs_chart)/files/dashboards"
+if [ ! -d "$REPO_ROOT/$DASH_DIR" ]; then
+  ci_skip "no dashboards in $(ci_obs_chart)"
+else
+  # Compared against THE CONFIGURATION THIS TIER ACTUALLY RUNS, rendered from
+  # the shipped example site — not against the union of every rendered case.
+  # The union was the first attempt and it silently passed: the render matrix
+  # includes upload.mode=s3 fixtures, so `s3-uploader` appeared "deployed" and
+  # the exact bug this check exists for went undetected on a green run.
+  SITE_VALUES=""
+  for cand in "$REPO_ROOT/sites/example-single/values.yaml" "$REPO_ROOT/sites/example-edge/values.yaml"; do
+    [ -f "$cand" ] && { SITE_VALUES="$cand"; break; }
+  done
+  deployed=""
+  if [ -n "$SITE_VALUES" ]; then
+    deployed="$(helm template ci "$REPO_ROOT/$(ci_obs_chart)" -f "$SITE_VALUES" \
+                  --set orthanc.deid.policyReviewed=true 2>/dev/null \
+                | grep -o 'component: [a-z0-9-]*' | sed 's/component: //' | sort -u)"
+  fi
+  if [ -z "$deployed" ]; then
+    ci_fail "dashboard-component check: could not render $(ci_obs_chart) from a site example to learn which components exist"
+  else
+    for f in "$REPO_ROOT/$DASH_DIR"/*.json; do
+      [ -e "$f" ] || continue
+      bad=""
+      for c in $(grep -oh 'component=\\*"[a-z0-9-]*' "$f" | sed 's/.*component=\\*"//' | sort -u); do
+        printf '%s\n' "$deployed" | grep -qx "$c" || bad="${bad} ${c}"
+      done
+      if [ -n "$bad" ]; then
+        ci_fail "$(basename "$f") queries component(s) this chart never deploys:${bad} — those panels are permanently blank, which reads as 'nothing wrong'"
+      else
+        ci_pass "$(basename "$f") queries only deployed components"
+      fi
+    done
+  fi
+fi
+
 ci_summary "render"
