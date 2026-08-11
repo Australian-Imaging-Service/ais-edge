@@ -385,8 +385,22 @@ If you already have a single-node Kubernetes cluster (k3s, kubeadm, MicroK8s, �
    a differently-named default class is not enough. Either provide `local-path`,
    or override the `storageClass` / `storageClassName` keys in the `loki:` and
    `kube-prometheus-stack:` blocks of your site file.
-5. Run `./install.sh <site>` and answer `s` to step 1 when it prompts. Do **not**
-   use `-y` here: it auto-confirms every step, including the k0s install.
+5. Run `./install.sh <site>`. Step 1 still prompts, but with
+   `installMode: existing` it no longer *builds* anything, so either answer is
+   safe and `-y` is safe: `install.sh` passes `INSTALL_MODE` into
+   `scripts/01-install-k0s.sh`, and that script's first branch prints
+   `=== 01: Using existing Kubernetes cluster ===`, runs
+   `kubectl get nodes -o wide` as a reachability check, warns if there is no
+   default StorageClass, and `exit 0`s — long before
+   `k0s install controller --single` is reached. Making
+   `-y` safe is the whole point of passing the variable: a site file can declare
+   "there is already a cluster here" without depending on an operator
+   remembering to answer `s`.
+
+   What to check instead of the prompt is the line step 1 actually printed. If
+   it says `=== 01: Installing k0s management cluster ===`, the site file did
+   not take `installMode: existing` — stop the run there rather than let it
+   install k0s on a host that already runs Kubernetes.
 
 Note that Orthanc uses `hostPort: 4242` and both volumes are `hostPath` PVs, so
 the DICOM modalities must be able to reach the node's IP and the node must have

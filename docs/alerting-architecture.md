@@ -104,23 +104,67 @@ matches nothing and can never fire. That is not hypothetical: it is why
 ## What the chart installs, and what it does not
 
 With `observability.stack.enabled: true` the release contains both rule
-**engines**, but not the same amount of rule **content**:
+**engines** and rule **content** for both. What differs between them is where
+that content comes from:
 
 - **Prometheus** gets kube-prometheus-stack's own default rules — the
   `KubeNodeNotReady` / `KubePodCrashLooping` / `KubePersistentVolumeFillingUp` /
-  `KubeletDown` families above all come from there. `charts/edge` adds no
-  `PrometheusRule` of its own.
-- **The Loki ruler starts with an empty rule set.** `charts/edge` ships no LogQL
-  rule content, so every pipeline-event row in the table above is something a
-  site adds (next section). The ruler is configured and running; it simply has
-  nothing to evaluate until then.
-- **Alertmanager runs kube-prometheus-stack's default configuration**, whose
-  route ends at the `null` receiver. `observability.stack.alerting.*` in the site
-  file and the `alertmanager-smtp` Secret are declared, but nothing in the chart
-  renders them into an Alertmanager config yet — filling them in does **not** by
-  itself send mail. To route mail today, set
-  `kube-prometheus-stack.alertmanager.config` in `sites/<site>/values.yaml`; that
-  is the values key that produces the `alertmanager-ais-kps-alertmanager` Secret.
+  `KubeletDown` families above all come from there — *plus* four
+  `PrometheusRule`s that `charts/edge` renders itself.
+  `charts/edge/templates/observability.yaml` globs
+  `files/prometheus-rules/*.yaml` and emits one object per severity file:
+  `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
+  `ais-edge-warning` (`IngestPodCrashLoop`) and `ais-edge-info`
+  (`NodeCountChanged`). Those objects deliberately carry **no** `release` label;
+  instead the template `fail`s the render unless
+  `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
+  is `false`. While it is `true` the operator selects only rules labelled with
+  its own release, so it would load none of these — silently, with nothing to
+  see in any log.
+- **The Loki ruler ships with a rule set.**
+  `charts/edge/files/loki-ruler-rules.yaml` holds 11 LogQL alerts in four groups
+  (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
+  — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
+  `XNATAuthFailure`, `OrthancDeidLuaError` and `OrthancStorageGrowing`, which
+  ship but are not tabulated.
+  `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
+  `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled
+  `loki_rule: "true"` — the **label**, not the name and not the namespace, is
+  what the Loki rules sidecar watches for. Two thresholds are substituted at
+  render time from `dataPolicy.originals` (`__DP_MIN_FREE_DISK_PCT__`,
+  `__DP_QUARANTINE_ALERT_AFTER_S__`), because LogQL cannot compare two extracted
+  fields; left unreplaced they are a rule-load syntax error and Loki drops the
+  whole group. The template `fail`s outright if the file is missing or empty. A
+  site adds rules of its own by applying a *second* ConfigMap in the same
+  namespace carrying the same label — not by editing this one (next section).
+- **Alertmanager runs the chart's own configuration, not the subchart's.**
+  `charts/edge/files/alertmanager-config.yaml` is loaded with `.Files.Get` and
+  rendered into the Secret `alertmanager-aisedge-config` by
+  `charts/edge/templates/observability.yaml`, and
+  `kube-prometheus-stack.alertmanager.alertmanagerSpec.configSecret` in
+  `charts/edge/values.yaml` points the operator at it. That pairing is guarded:
+  the render `fail`s if `configSecret` is anything else, because without it the
+  operator mounts the subchart's default `alertmanager.yaml` and routes every
+  alert this chart raises to a `null` receiver — a healthy-looking stack that
+  delivers nothing. The rendered config's root receiver is `email-primary`, with
+  severity-based routes onto `email-no-resolved`, `email-upload-success`,
+  `info-email`, and a deliberately empty `null-meta` for kube-prometheus-stack's
+  own meta-alerts. `observability.stack.alerting.*` from the site file is
+  substituted into it as `__SENTINEL__` tokens — a plain `replace`, never `tpl`,
+  because that file is full of Alertmanager's own `{{ }}` notification
+  templates, which Helm would evaluate against the *chart* context and render as
+  empty strings. The SMTP **password** is not in the manifest at all: the config
+  carries an `smtp_auth_password_file` pointing at
+  `/etc/alertmanager/secrets/<observability.stack.alerting.existingSecret>/password`
+  (default `alertmanager-smtp`), which the operator mounts from
+  `alertmanagerSpec.secrets` — and a second guard `fail`s the render if that
+  Secret is missing from the mount list. Setting
+  `kube-prometheus-stack.alertmanager.config` in `sites/<site>/values.yaml` has
+  **no effect**: it only writes the subchart's own
+  `alertmanager-ais-kps-alertmanager` Secret, which nothing mounts once
+  `configSecret` is set. To change the mail destination or SMTP server, set
+  `observability.stack.alerting.*` in the site file; to change routes or
+  receivers, edit `charts/edge/files/alertmanager-config.yaml`.
 
 Scrape targets that do not exist on a single k0s node are switched off
 deliberately — `nodeExporter`, `kubeControllerManager`, `kubeScheduler`,
@@ -131,34 +175,64 @@ present but never have series behind them.
 
 ## Where a LogQL rule has to land
 
-The ruler's store is local:
+The ruler's store is local, and it is a **pair** of paths that has to agree —
+where the ruler reads, and where the sidecar writes. Both are already set in the
+chart:
 
 ```yaml
 # charts/edge/values.yaml — loki.loki.rulerConfig.storage
 type: local
-local: {directory: /etc/loki/rules}
+local: {directory: /rules}
+
+# charts/edge/values.yaml — loki.sidecar.rules
+folder: /rules/fake
 ```
 
-On `deploymentMode: SingleBinary` — which is what tier-1 runs — **nothing is
-mounted at `/etc/loki/rules`**. Two mechanisms exist in the Loki chart and only
-one of them applies here:
+`/rules` is where the Loki chart mounts `sc-rules-volume`, an emptyDir shared by
+the `loki` and the `loki-sc-rules` containers. `fake` is the tenant
+subdirectory the local rule store demands: Loki treats every subdirectory of
+`storage.local.directory` as a tenant ID, and with `auth_enabled: false` the
+only tenant is literally `fake`. A rules file dropped at the *top* level of
+`/rules` is not an error — Loki finds no tenant directory, starts cleanly, and
+evaluates nothing, which is indistinguishable from a healthy site.
+
+`charts/edge/values.yaml` records why the ruler path is `/rules` and not the
+more obvious `/etc/loki/rules`, because that was the first attempt and it was
+measured: `/etc/loki` holds only read-only config and runtime-config mounts,
+Loki mkdir's the ruler directory at startup, and the result was
+
+```
+mkdir /etc/loki/rules: read-only file system
+error initialising module: ruler-storage
+```
+
+and a CrashLoop — no log storage, and, since every *pipeline* alert on this tier
+is Loki-sourced, no pipeline alerts either. No render check could have caught
+it: the path is wrong only relative to where the **subchart** mounts things,
+which is invisible to `helm template`.
+
+Two mechanisms exist in the Loki chart and only one of them applies here:
 
 - `loki.ruler.directories` is the obvious knob, and it is inert: its ConfigMaps
   and their `/etc/loki/rules/<tenant>` mounts are rendered **only** in the
   distributed deployment mode, which has a separate ruler StatefulSet. Setting it
-  on tier-1 produces no objects at all.
+  on tier-1 produces no objects at all — it is the lever that looks right and
+  moves nothing, so it is worth knowing about precisely so you do not reach for
+  it.
 - What the single binary does have is the `sidecar.rules` container (kiwigrid
   k8s-sidecar, on by default): it watches ConfigMaps labelled `loki_rule` and
-  writes them into `/rules`, an emptyDir mounted into both containers.
+  writes them into `/rules/fake`, inside that same emptyDir. That is how the
+  chart's own `<release>-loki-rules` ConfigMap arrives, and it is the route a
+  site's extra rules take too — apply another ConfigMap carrying the label.
 
-So a rule ConfigMap reaches the pod and the ruler still never sees it, because
-the two paths differ. Wiring it up means making them agree —
-`loki.loki.rulerConfig.storage.local.directory` and `loki.sidecar.rules.folder`
-— and giving the rules the per-tenant subdirectory the local store expects
-(`/etc/loki/rules/<tenant>` is the shape `ruler.directories` builds; the tenant
-is `fake` while `auth_enabled: false`). Verify by rendering, then by reading
-Loki's own `/loki/api/v1/rules`: a ruler with no rules loaded looks identical to
-a healthy one from the outside.
+Verify by reading Loki's own `/loki/api/v1/rules`, not by checking that the pod
+is up: a ruler with nothing loaded looks identical from the outside to a healthy
+one. `scripts/ci/promtool.sh` guards the neighbouring silent failure under its
+"Loki ruler file matches rulefmt.RuleGroup" heading — a rule indented out of its
+group is still valid YAML, but Loki then rejects the **entire** file
+(`error parsing /rules/fake/ais-edge-rules.yaml: field alert not found in type
+rulefmt.RuleGroup`) and all 11 alerts disappear together, not just the one that
+was mis-indented.
 
 [`alerting-diy.md`](alerting-diy.md) covers writing the rule expression itself.
 

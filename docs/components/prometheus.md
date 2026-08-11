@@ -46,11 +46,40 @@ What it deliberately does *not* scrape matters as much:
   ships to Loki. Prometheus therefore sees the pipeline only as Kubernetes object
   state, through kube-state-metrics.
 
-It evaluates the `PrometheusRule` objects **kube-prometheus-stack itself ships** —
-the `KubeNodeNotReady` / `KubePodCrashLooping` / `KubePodNotReady` /
-`KubePersistentVolumeFillingUp` families — and pushes firing alerts to
-`ais-kps-alertmanager`, which the Prometheus object names explicitly.
-`charts/edge` adds no `PrometheusRule` of its own. Pipeline-event alerts (upload
+It evaluates **two** sets of `PrometheusRule` objects. First, the ones
+**kube-prometheus-stack itself ships** — the `KubeNodeNotReady` /
+`KubePodCrashLooping` / `KubePodNotReady` / `KubePersistentVolumeFillingUp`
+families. Second, three that **`charts/edge` adds itself**, rendered by
+[`charts/edge/templates/observability.yaml`](../../charts/edge/templates/observability.yaml),
+which emits one `PrometheusRule` per file in `charts/edge/files/prometheus-rules/`
+— one object per severity, matching how the rules are authored, so the object
+names are the same at every site:
+
+| Object | Source file | Alerts |
+|---|---|---|
+| `ais-edge-critical` | `files/prometheus-rules/critical.yaml` | `KubernetesAPIServerDown`, `NodeNotReady` |
+| `ais-edge-warning` | `files/prometheus-rules/warning.yaml` | `IngestPodCrashLoop` |
+| `ais-edge-info` | `files/prometheus-rules/info.yaml` | `NodeCountChanged` |
+
+Those files are **bare `groups:` fragments**, not whole manifests: the template
+supplies `apiVersion` / `kind` / `metadata` and injects the namespace from
+`namespace` in the site values. That indirection is deliberate — an earlier copy
+hardcoded `namespace: observability`, which does not exist on the consolidated
+single node. They are rendered inside the same `observability.stack.enabled`
+gate as Prometheus itself, so a site without the stack has neither the evaluator
+nor the rules.
+
+They deliberately carry **no `release` label**, which only works because
+`ruleSelector` is empty here (see Configuration below). That coupling is
+enforced at render time rather than left to a comment: `observability.yaml`
+fails the template outright unless
+`kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
+is `false`, because with it true Prometheus would select only rules labelled
+`release=<release>` and would load none of these — silently, with no error
+anywhere, which is the one failure this stack cannot afford.
+
+Firing alerts from both sets are pushed to `ais-kps-alertmanager`, which the
+Prometheus object names explicitly. Pipeline-event alerts (upload
 failures, invalid sessions, backlog, disk) are LogQL over the JSON log stream and
 are evaluated by the Loki ruler instead — see
 [`alerting-architecture.md`](../alerting-architecture.md) for the split, and
@@ -98,6 +127,7 @@ are evaluated by the Loki ruler instead — see
 | `sites/<site>/values.yaml`, `observability.stack.enabled` | whether Prometheus exists at all |
 | `sites/<site>/values.yaml`, a `kube-prometheus-stack:` block | per-site overrides of anything above — the site file is merged over the chart defaults like any Helm values file |
 | Per-component `ServiceMonitor` / `PodMonitor` / `PrometheusRule` objects | tell Prometheus what to scrape and what to evaluate |
+| `charts/edge/files/prometheus-rules/{critical,warning,info}.yaml` | this chart's own alert rules, as bare `groups:` fragments. Edit these, not a rendered manifest — `observability.yaml` globs the directory, so a new severity file becomes a new `ais-edge-<name>` object with no template change |
 
 `observability.stack.retentionDays` and `observability.stack.prometheus.*` are the
 *intended* site-level surface and are **not yet consumed by any template**.

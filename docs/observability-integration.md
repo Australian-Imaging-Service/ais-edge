@@ -1,6 +1,8 @@
 # Observability integration & swap guide
 
-**Ground truth:** branch `tier-1-solution` @ `fc96936`. The emitted log schemas were verified against the live single-node deployment (2026-07-08) and re-checked against the code that emits them; everything about the stack itself is verified against `charts/edge` as it renders today (§7 has the render command).
+**Ground truth:** branch `tier-1-solution`. The emitted log schemas were verified against the live single-node deployment (2026-07-08) and re-checked against the code that emits them; everything about the stack itself is verified against `charts/edge` as it renders today (§7 has the render command).
+
+This page used to pin a commit hash here. It no longer does, deliberately: the pin went stale while the alert rules, the Alertmanager config and the observability template all moved underneath it, and a stale hash reads as a *stronger* guarantee than no hash at all — it tells you the page was checked, without telling you it was checked against something that no longer exists. The §7 render command is the guarantee instead. Re-run it and compare rather than trusting this sentence.
 
 This note is for a platform/monitoring team who want to **replace the bundled observability stack with their own** (Splunk, Elastic/OpenSearch, Datadog, an institutional Prometheus/Grafana, etc.). The bundled stack — Loki + Prometheus + Grafana + Alertmanager + Vector — is a **reference default, not a hard dependency**. The DICOM→XNAT pipeline is instrumented in a vendor-neutral way; this document is the contract you build against.
 
@@ -37,14 +39,16 @@ So integration has three postures:
 |---|---|
 | `observability.enabled` | Vector DaemonSet on/off ([`charts/edge/templates/vector.yaml`](../charts/edge/templates/vector.yaml)) |
 | `observability.stack.enabled` | both subcharts on/off |
-| `observability.stack.grafana.nodePort` | the port `install.sh` prints as `http://<nodeIP>:<port>` |
-| `observability.stack.retentionDays` | the site's stated retention |
-| `observability.stack.alerting.{emailTo,emailFrom,smtpHost,smtpPort,smtpUsername}` | alert mail routing; SMTP password is the `alertmanager-smtp` Secret |
+| `observability.stack.grafana.nodePort` | **display only.** `install.sh` reads it to print `http://<nodeIP>:<port>` at the end of the run (default 30030). It does **not** open the port — see the caution below |
+| `observability.stack.alerting.{emailTo,emailFrom,smtpHost,smtpPort,smtpUsername,requireTLS,existingSecret}` | alert mail routing — genuinely consumed, substituted into the Alertmanager config by `templates/observability.yaml`; SMTP password is the `alertmanager-smtp` Secret |
+| retention (logs / metrics) | **not a site-level `observability` key.** There was an `observability.stack.retentionDays`; it did nothing and was deleted. Set `loki.loki.limits_config.retention_period` and `kube-prometheus-stack.prometheus.prometheusSpec.retention` in the subchart blocks instead — see the caution below |
 | `nodeIP` | the address Grafana is reached on |
 
 Grafana's admin login is the `grafana-admin-credentials` Secret and the SMTP password is `alertmanager-smtp` — both SOPS-encrypted in `sites/<site>/secrets.enc.yaml`, both in namespace `xnat-ingest`, never in the values file.
 
-> **Read this before you tune retention or the NodePort:** the *enforcing* values are the subchart blocks at the bottom of [`charts/edge/values.yaml`](../charts/edge/values.yaml) — `loki.loki.limits_config.retention_period`, `kube-prometheus-stack.prometheus.prometheusSpec.retention`, `kube-prometheus-stack.grafana.service.nodePort`. Helm does not template subchart values, so the site-level keys above state intent and the subchart values must be kept in step by hand. Change one, change the other.
+> **Read this before you tune retention or the NodePort:** the *only* values that enforce anything are the subchart blocks at the bottom of [`charts/edge/values.yaml`](../charts/edge/values.yaml) — `loki.loki.limits_config.retention_period` (logs), `kube-prometheus-stack.prometheus.prometheusSpec.retention` (metrics), `kube-prometheus-stack.grafana.service.nodePort` (the port that actually opens, default 30030). Helm cannot template subchart values: no template in `charts/edge` can read a parent key and push it down into a subchart. A friendly parent key here would be read, trusted, and silently ignored, so the friendly parent keys that used to sit under `observability.stack` — `retentionDays`, `grafana.nodePort`, `lokiStorage` — were **removed from the chart** rather than left as decoration. `charts/edge/values.yaml` records the measurement that settled it: `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.
+>
+> One residue survives, and it is the trap: `install.sh` still reads `observability.stack.grafana.nodePort` from the site file to build the URL it prints. That is its whole effect. Move the port in the subchart block and the printed link points at a closed port unless you set the site-level key to the same number; set only the site-level key and you have changed nothing but the link.
 
 ---
 
@@ -132,7 +136,11 @@ Fields: `ts, component, edge, event, stage, message` on every line; `stage_repor
 | **Disk headroom** (per stage) | data-policy | `\| json \| event="stage_report"` → `free_pct` vs `min_free_pct` |
 | Unmapped-AET data sitting in quarantine | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
 
-> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages). Two bundled rules (`SessionUploadStalled`, `XNATBacklogGrowing`) use `component="assign" | json | session` — they work best when correlated against the Orthanc event; treat them as best-effort until assign/upload emit `session` as a first-class field.
+> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages).
+>
+> **Three bundled rules are broken by this, not merely approximate.** `SessionUploadStalled` and `XNATUploadFailingForAllSessions` (`charts/edge/files/loki-ruler-rules.yaml`) still select `{namespace="xnat-ingest", component="s3-uploader"} | json | event="upload_started"/"upload_completed"/"upload_failed"`. That component belonged to the S3 hop, which tier-1 does not have: `charts/edge/templates/upload.yaml` renders `component: s3-uploader` only under `upload.mode: s3`, and tier-1 is `upload.mode: direct`, which labels the pod `component: upload` and emits no `event` key at all. Neither the label nor those JSON fields ever exist here, so both rules select nothing and can never fire — and `XNATUploadFailingForAllSessions`' remediation text still tells the operator to run `logs -l component=s3-uploader`, a selector that matches no pod. `XNATBacklogGrowing` fails for the neighbouring reason: it counts `{component="assign"} | json | session != ""`, but assign emits only `ts, level, logger, message` (above), so `| json` extracts no `session` and the staged term is always zero — `0 − uploaded > 3` cannot become true either.
+>
+> Retarget all three onto `{component="upload"}` and the message text `Successfully uploaded all files in '<session>'`, recovering the session with `| regexp "Successfully uploaded all files in '(?P<session>[^']+)'"` — the pattern `XNATUploadSuccess` already uses — before relying on them. Until then, per-session correlation should anchor on the Orthanc de-id event, which is the only place `session` is a first-class field.
 
 ### 2d. Swapping the log path
 
@@ -181,19 +189,19 @@ Two engines, one Alertmanager.
 
 Mail routing is stated in `observability.stack.alerting.*`, with the password in the `alertmanager-smtp` Secret.
 
-> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources — the pipeline rule bodies below are **not** in `charts/edge` and must be supplied. Two things to get right when you do: (1) the ruler reads `/etc/loki/rules`, while the loki subchart's rules sidecar watches ConfigMaps labelled `loki_rule` and writes them to `/rules` — point one at the other, or the rules load as nothing and nothing says so; (2) Alertmanager ships with kube-prometheus-stack's default route to the `null` receiver, so a receiver has to exist before any of this reaches a mailbox. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
+> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources — **and the rule bodies below, which are shipped, not left to you**. `charts/edge/templates/observability.yaml` reads `files/loki-ruler-rules.yaml` with `.Files.Get` (hard-`fail`ing the render if it is missing or empty) into ConfigMap `<release>-loki-rules` labelled `loki_rule: "true"`, substituting `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` from `dataPolicy.originals`; and it globs `files/prometheus-rules/*.yaml` into the PrometheusRules `ais-edge-critical` / `-warning` / `-info`. Both are gated on `observability.stack.enabled`. Three things follow: (1) the ruler path and the sidecar path already agree — `/rules` and `/rules/fake`, the tenant sub-directory, set together in `charts/edge/values.yaml`; adding a rule means applying an *additional* ConfigMap with the `loki_rule` label, not repointing anything; (2) Alertmanager runs the chart's own config, rendered from `files/alertmanager-config.yaml` into the Secret `alertmanager-aisedge-config` and pinned via `alertmanagerSpec.configSecret`, with a real `email-primary` root receiver — `kube-prometheus-stack.alertmanager.config` is inert once that pin is set; (3) what you must still supply is the **mail destination**: `observability.stack.alerting.*` ships empty, so a fresh site renders a valid config that addresses nowhere. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
 
 The table below is the **inventory** — read it as the set of signals worth alerting on, in whichever engine you use.
 
 | Alert | Sev | Engine | Fires when (the underlying signal) |
 |---|---|---|---|
-| `XNATUploadFailingForAllSessions` | critical | Loki | upload errors present **and** zero `Successfully uploaded…` for 15m |
-| `XNATUploadRetryStorm` | warning | Loki | >5 upload errors in 10m |
-| `SessionUploadStalled` | warning | Loki | a staged session with no matching upload-success in 15m *(session-field caveat, §2c)* |
-| `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m |
-| `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation lines from assign in 1h |
-| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded…` in 30s (audit/heartbeat) |
-| `XNATAuthFailure` | warning | Loki | 401/403/unauthorized/forbidden from upload in 5m |
+| `XNATUploadFailingForAllSessions` | critical | Loki | `event="upload_failed"` present **and** no `event="upload_completed"` over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
+| `XNATUploadRetryStorm` | warning | Loki | >5 error/failed/exception/traceback lines from `component="upload"` in 10m |
+| `SessionUploadStalled` | warning | Loki | `event="upload_started"` with no matching `event="upload_completed"` per session over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
+| `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m. **Cannot fire** — the staged term is `{component="assign"} \| json \| session != ""` and assign emits no `session` key, so it is always zero, §2c |
+| `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation-fail lines from assign in 1h |
+| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened |
+| `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from orthanc in 10m (deid stalled) |
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
@@ -203,7 +211,9 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `IngestPodCrashLoop` | warning | Prom | >3 restarts/1h in the release namespace |
 | `NodeCountChanged` | info | Prom | `kube_node_info` changed in 10m |
 
-**Swap:** re-express these in your platform's query language. The *definitions* are portable — each row's "fires when" column is the signal; the LogQL/PromQL is just one encoding of it. The log rules map cleanly to Splunk SPL / Elastic EQL / Datadog log monitors; the metric rules are plain PromQL over standard kube-state-metrics/apiserver series, so they run as-is on any Prometheus.
+Two alertnames appear in the shipped Alertmanager routing but in **no rule on this tier**: `DICOMRejectedUnmappedAET` and `SessionStagedNotConfirmedInXNAT` both have matchers in `charts/edge/files/alertmanager-config.yaml` (routed to `email-no-resolved`, because a "[RESOLVED]" mail for either would be false reassurance) and nothing that raises them. Those routes are currently inert. Do not read the Alertmanager config as an inventory — it is the wider fleet's routing table, and this tier fills in part of it.
+
+**Swap:** re-express these in your platform's query language. The *definitions* are portable — each row's "fires when" column is the signal; the LogQL/PromQL is just one encoding of it. The log rules map cleanly to Splunk SPL / Elastic EQL / Datadog log monitors; the metric rules are plain PromQL over standard kube-state-metrics/apiserver series, so they run as-is on any Prometheus. Where a row is flagged as not firing on tier-1, port the *signal* rather than the shipped expression — the intent is right, the selector is stale.
 
 ---
 
@@ -214,8 +224,8 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | **Vector** | hand-written DaemonSet, `observability.enabled` | Fluent Bit, Fluentd, Splunk fwd, Filebeat, Datadog, Alloy | collector config (source `/var/log/pods`, keep `namespace/app/component` labels) |
 | **Loki** | `ais-loki`, SingleBinary, **filesystem** storage on a PVC | Splunk, Elastic/OpenSearch, Datadog Logs, your Loki | the LogQL rules in §4 → your query language |
 | **Prometheus** | `ais-kps-prometheus`, PVC-backed | your Prometheus, VictoriaMetrics, Alloy, Datadog | nothing (standard scrape targets); PromQL rules port 1:1 to another Prometheus |
-| **Alertmanager** | `ais-kps-alertmanager`; both engines push here | your Alertmanager, PagerDuty, Opsgenie, Datadog monitors | receiver/routing config — the default route is the `null` receiver |
-| **Grafana** | `<release>-grafana`, **NodePort** at `http://<nodeIP>:<observability.stack.grafana.nodePort>` | your Grafana | add a Loki datasource (`http://ais-loki.<ns>.svc.cluster.local:3100` — only Prometheus and Alertmanager are provisioned); the pipeline dashboards (`pipeline-overview`, `session-timeline`, `edge-drilldown`) are LogQL over §2 — supply them as ConfigMaps labelled `grafana_dashboard=1`, or rebuild them in your own tool |
+| **Alertmanager** | `ais-kps-alertmanager`; both engines push here. It runs `charts/edge/files/alertmanager-config.yaml`, rendered into Secret `alertmanager-aisedge-config` and pinned by `alertmanagerSpec.configSecret` | your Alertmanager, PagerDuty, Opsgenie, Datadog monitors | the routes and receivers in that file — root `email-primary`, plus `email-no-resolved` / `email-upload-success` / `info-email` and a deliberately empty `null-meta` for the subchart's own always-firing meta-alerts. Port the *severity → destination* mapping, not the YAML |
+| **Grafana** | `<release>-grafana`, **NodePort** at `http://<nodeIP>:<kube-prometheus-stack.grafana.service.nodePort>`, default 30030 | your Grafana | add a **Loki datasource** — only Prometheus and Alertmanager are provisioned (`ais-kps-grafana-datasource`), while all three pipeline dashboards reference datasource uid `loki`, so they render empty until you add `http://ais-loki.<ns>.svc.cluster.local:3100` with `uid: loki`. The dashboards themselves (`pipeline-overview`, `session-timeline`, `edge-drilldown`) are **already shipped** — `charts/edge/templates/observability.yaml` renders `files/dashboards/*.json` as one ConfigMap each, `<release>-dashboard-<name>`, labelled `grafana_dashboard: "1"`. In your own tool you re-implement their LogQL over §2; in your own Grafana you can apply the same ConfigMaps unchanged |
 
 **Why Loki uses the filesystem and not S3:** there is no object store on a single node. This is the one place tier-1's observability genuinely diverges from a fleet deployment rather than just being wired differently — chunks, the index and the ruler's rules all land on a local-path PVC, which means retention is bounded by this node's disk and nothing spills anywhere.
 

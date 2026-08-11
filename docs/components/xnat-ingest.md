@@ -133,7 +133,7 @@ xnat-ingest group-orthanc \
   /data/orthanc-storage                    # Orthanc storage dir (as mounted)
   /data/grouped                            # output: grouped studies
   $(ORTHANC_USER) $(ORTHANC_PASSWORD)      # orthanc-credentials, or literal orthanc/orthanc when auth is off
-  --to-process-label   xnat-ingest-ready         # ingest.orthancGroup.toProcessLabel
+  --to-process-label   xnat-ingest-ready         # ingest.orthancGroup.toProcessLabel (fixed string — see below)
   --processed-label    xnat-ingest-processed     # ingest.orthancGroup.processedLabel
   --copy-mode          hardlink_or_copy          # ingest.orthancGroup.copyMode
   --wait-period        60                        # ingest.orthancGroup.waitPeriod
@@ -146,6 +146,28 @@ up and the instance de-identified. Clearing it while deid is on would pull
 everything; leaving it set while deid is **off** means nothing applies the label
 and the pipeline stalls with data sitting in Orthanc and no error anywhere —
 which the chart refuses to render.
+
+**It is a two-state switch, not a free-text value.** Only the CONSUMER reads the
+key: `charts/edge/templates/ingest-pipeline.yaml` renders
+`--to-process-label <ingest.orthancGroup.toProcessLabel>` into the group-orthanc
+args. The PRODUCER does not — the Lua hook PUTs the literal string
+(`RestApiPut("/studies/" .. studyId .. "/labels/xnat-ingest-ready", "")` in
+`charts/edge/files/deidentify-and-forward.lua`), with no env var and no
+`routing.json` key behind it. Set `toProcessLabel` to any other string and you
+get exactly the silent stall described above — Orthanc keeps labelling studies
+`xnat-ingest-ready` while group-orthanc filters for something else, so every
+pod is healthy and nothing moves — except that this time the render-time guard
+in `charts/edge/templates/_helpers.tpl` does **not** catch it: it only tests
+empty-vs-non-empty against `orthanc.deid.enabled`, never the value. The two
+supported values are therefore `xnat-ingest-ready` (deid on, the chart default)
+and `""` (deid off — `scripts/ci/values.sh` clears it for the no-deid CI case).
+Changing the string means editing the Lua hook in the same commit.
+
+`processedLabel` carries no such constraint, and the difference is worth knowing
+before you assume symmetry: group-orthanc applies that one itself via
+`--processed-label`, and `charts/edge/templates/data-policy.yaml` hands the same
+value to the reclaimer as `ORTHANC_PROCESSED_LABEL`, so both ends of that
+handshake read the one values key and stay in step by construction.
 
 ### assign arguments
 
@@ -236,6 +258,7 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
+| `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
 | `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
 
 ## Replacements / future

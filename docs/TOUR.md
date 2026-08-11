@@ -79,8 +79,19 @@ helm upgrade --install <site> charts/edge -f sites/<site>/values.yaml
 
 Helm merges maps key by key, so you only state what differs from the default.
 One consequence catches people out: **lists are replaced wholesale, not merged.**
-If you override `orthanc.deid.profile.Keep`, you replace the entire list — the
-chart's four UID entries are gone unless you restate them.
+Override `orthanc.plugins` to add one plugin and you have not added it — you
+have replaced all four chart defaults, and the DicomWeb and GDCM plugins stop
+loading. Restate the entries you still want alongside the new one.
+
+Note that `orthanc.deid.profile` is *not* an example of this, even though it
+looks like the obvious candidate. It has no chart default to lose:
+`charts/edge/values.yaml` ships `profile: {}` (and `aetMap: {}`), and the chart
+refuses to render while the profile is empty — so your site file always states
+the whole profile anyway, copied from
+`charts/edge/files/deidentification-profile.example.json`, four retained UID
+`Keep` entries included. There is no merge to get wrong there, by design: a
+de-identification policy that could be *partially* inherited is a policy nobody
+can read off one page.
 
 A second consequence matters for observability and is called out again in
 section 6: **Helm cannot template subchart values.** Loki, Prometheus, Grafana
@@ -190,11 +201,22 @@ you have read the profile below and the AE-title map above and agree that they
 are *your site's policy* — not the example's.
 
 **The AE-title map** is the most site-specific thing in the file. It answers:
-when a study arrives from calling AE title X, which XNAT project does it belong
-to? An AET that is **not** listed is *quarantined, not dropped* — it lands under
-the quarantine subdirectory so you can add the mapping and re-send it. (An
-earlier version of this pipeline deleted unmapped instances outright. It does
-not any more, and that is deliberate.)
+when a study arrives addressed to **called** AE title X, which XNAT project does
+it belong to? Read that carefully — the key is the AET the modality sends *to*,
+which is this Orthanc's own `orthanc.aet`, not the AET the scanner calls itself
+from. `charts/edge/files/deidentify-and-forward.lua` looks up
+`routing.AETMap[origin.CalledAet]` and logs
+`REJECT: no project mapped for CalledAET` when it misses, and the generated
+`routing.json` says the same in its `_README`. That is why the example above
+maps `AISEDGE` — the value of `orthanc.aet` two blocks up — rather than a
+scanner name. Routing several projects off one node therefore means giving
+Orthanc several called AE titles and pointing each scanner at the right one, not
+enumerating the scanners.
+
+An AET that is **not** listed is *quarantined, not dropped* — it lands under the
+quarantine subdirectory so you can add the mapping and re-send it. (An earlier
+version of this pipeline deleted unmapped instances outright. It does not any
+more, and that is deliberate.)
 
 **The profile** is passed to Orthanc's de-identification and applied to every
 incoming study. Three things about it are worth understanding rather than
@@ -282,7 +304,19 @@ can see that `xnat-credentials` has a `password` without seeing the password.
 | `grafana-admin-credentials` | `admin-user`, `admin-password` | Grafana |
 | `alertmanager-smtp` | `username`, `password` | Alertmanager, for alert email |
 
-The last two are only needed if `observability.enabled` is true.
+The last two are needed whenever **`observability.stack.enabled`** is true — not
+`observability.enabled`, which only decides whether Vector runs. The two
+switches are orthogonal on purpose (§6), so a site that ships logs off-box needs
+neither Secret, and a site that hosts the stack without Vector needs both.
+
+`alertmanager-smtp` must exist even before you configure any SMTP server. The
+chart names it in `kube-prometheus-stack.alertmanager.alertmanagerSpec.secrets`,
+and the operator mounts it as an ordinary, non-optional volume — a missing
+Secret leaves Alertmanager stuck in `ContainerCreating` with `FailedMount`, not
+running-but-silent. `grafana-admin-credentials` is read as an env `secretKeyRef`
+instead, so its absence surfaces differently: `CreateContainerConfigError` on
+the Grafana pod. Neither failure mentions observability, which is why they are
+worth recognising by shape.
 
 ### Step A — once per operator, on a new machine
 
@@ -485,7 +519,16 @@ plane per edge, an object store and a CA, then joins a worker over the network.
 Tier-1 is one machine:
 
 1. **k0s** — installs k0s single-node, kubectl, helm, and the local-path
-   provisioner if observability is on. The k0s version is pinned deliberately:
+   provisioner. local-path goes on **unconditionally**, even though the pipeline
+   does not need it: `charts/edge` creates its own static hostPath PVs on the
+   `hostpath-pipeline` StorageClass (`provisioner: kubernetes.io/no-provisioner`),
+   and only the optional observability PVCs — Loki, Grafana, Prometheus,
+   Alertmanager — bind against local-path. Gating it on `observability.enabled`
+   would mean that turning observability on later silently produces Pending
+   PVCs, so the installer pays for one small Deployment instead. It is skipped
+   when a `local-path` StorageClass already exists (the step is idempotent), and
+   the whole step is skipped under `installMode: existing`, which verifies a
+   cluster rather than building one. The k0s version is pinned deliberately:
    this is an appliance handed to a hospital, and two installs a fortnight apart
    landing on different k0s minors is a support problem nobody can reproduce.
 2. **Secrets** — decrypts `secrets.enc.yaml` with SOPS and applies it straight
@@ -531,9 +574,9 @@ matter. The exit code is the number of failures.
 | Sessions land in `assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...` | **Read the group stage's log before touching the profile.** This name is also what you get when *grouping* failed and handed assign an empty session, and the two causes look identical from here. Grouping raises `ImagingSessionParseError: Did not find 'SeriesDescription' field` on a study missing a tag it needs — the DICOM never reaches assign, so assign correctly reports no metadata. Confirm which it is by checking Orthanc directly: `curl localhost:8042/instances/<id>/simplified-tags` on the receiver pod shows whether de-identification really did set the three tags. |
 | Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` — `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Set `upload.direct.verifySsl: false` for the site, and set it back the moment XNAT gets a real one. |
 | `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | Usually benign: the uploader runs on a loop, and a session already delivered is found again on the next pass. It is logged at ERROR, so it inflates the "Upload errors (last 1h)" panel without anything being wrong. Look for a matching "Successfully uploaded all files in" line for the same session — if it is there, the session is delivered. |
-| Nothing arrives at all | Firewall on port 4242, or the modality's calling AE title is not in `aetMap` — check the quarantine directory. |
+| Nothing arrives at all | Firewall on port 4242, or the **called** AE title the modality is sending to is not in `aetMap` — that is this Orthanc's `orthanc.aet`, not the scanner's own AET. Check the quarantine directory. |
 | Vector in `CreateContainerConfigError` | `observability.loki.clientCertSecret` is not empty. Section 6. |
-| Loki `CrashLoopBackOff`, `mkdir ...: read-only file system` / `error initialising module: ruler-storage` | The ruler's `storage.local.directory` must be the path the chart's rules sidecar mounts (`/rules`), and the sidecar must write into the tenant subdirectory (`/rules/fake`, since `auth_enabled` is false). Both are set in `charts/edge/values.yaml`; if you override either, override both. Loki refusing to start means no log storage **and** no pipeline alerts, since every alert on this tier is Loki-sourced. |
+| Loki `CrashLoopBackOff`, `mkdir ...: read-only file system` / `error initialising module: ruler-storage` | The ruler's `storage.local.directory` must be the path the chart's rules sidecar mounts (`/rules`), and the sidecar must write into the tenant subdirectory (`/rules/fake`, since `auth_enabled` is false). Both are set in `charts/edge/values.yaml`; if you override either, override both. Loki refusing to start means no log storage **and** no pipeline alerts, since every *pipeline* alert on this tier is Loki-sourced — the four K8s-state alerts in `files/prometheus-rules/` keep evaluating in Prometheus, so a green Alertmanager is not evidence that Loki is up. |
 
 ---
 
@@ -543,8 +586,9 @@ matter. The exit code is the number of failures.
    instances in its own storage directory.
 2. **De-identification** runs inside Orthanc, driven by your profile. The
    original is written to the facility backup first; what continues down the
-   pipeline is de-identified. If the calling AE title is not in `aetMap`, the
-   study goes to quarantine instead and stops here.
+   pipeline is de-identified. If the **called** AE title — the one the modality
+   addressed, which the hook reads as `origin.CalledAet` — is not in `aetMap`,
+   the study goes to quarantine instead and stops here.
 3. **group-orthanc** runs on a 60-second loop, finds instances labelled
    `xnat-ingest-ready`, and hardlinks them into `grouped/` organised by study.
    It relabels them `xnat-ingest-processed` so the next pass skips them.
@@ -587,10 +631,20 @@ observability:
 shared with tier-2, where Vector ships logs *off* the edge to a management Loki
 over mutual TLS, and the defaults are the tier-2 secret names that a management
 cluster's cert-sync delivers. There is no management cluster here, so nothing
-ever creates them — and the chart mounts them non-optionally, so Vector would
-sit in `CreateContainerConfigError` indefinitely. Empty also selects
-`files/vector-local.yaml`, the Vector config without the sink's `tls:` block,
-because tier-1's Loki is in the same cluster over plain HTTP.
+ever creates them. The gate is `clientCertSecret`: `charts/edge/templates/vector.yaml`
+renders the client-cert and CA volumes and their mounts only while that name is
+non-empty, so leaving the tier-2 default in place mounts Secrets nothing on this
+node creates and Vector sits in `CreateContainerConfigError` indefinitely.
+(`caBundleSecret: ""` is not a second gate — it is inert once `clientCertSecret`
+is empty — but it is set to match, so the pair reads as one decision.)
+
+What selects the *config file* is a different switch: `stack.enabled: true`
+picks `files/vector-local.yaml`, the Vector config with the sink's `tls:` block
+removed, because tier-1's Loki is in the same cluster over plain HTTP.
+`stack.enabled: false` picks `files/vector.yaml`, which keeps the block for a
+remote management Loki. Two separate mechanisms, easy to conflate: emptying the
+Secret names does not change which file is mounted, and turning the stack off
+does not stop the certs being mounted.
 
 `stack.enabled` hosts the whole store on this node: Loki (filesystem storage on
 a PVC, *not* S3 — there is no object store), Prometheus, Alertmanager, and
@@ -617,10 +671,19 @@ observability:
 The password comes from the `alertmanager-smtp` Secret in `secrets.enc.yaml`.
 Only the password is read from a file — Alertmanager has no
 `smtp_auth_username_file` — which is why the username sits in values.yaml and
-its password does not. Until `smtpHost` is set, that Secret is simply unused.
+its password does not. Until `smtpHost` is set, the password in that Secret is
+simply unused — but **the Secret itself must still exist**, because it is
+mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
+the same as absent.
 
-Dashboards and alert rules ship with the chart. Eleven alerts are defined, and
-the ones specific to this tier are:
+Dashboards and alert rules ship with the chart. It defines **fifteen** alerts of
+its own — eleven log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and four metric rules evaluated by Prometheus
+(`files/prometheus-rules/{critical,warning,info}.yaml`:
+`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
+`NodeCountChanged`) — on top of kube-prometheus-stack's own default rule set,
+which contributes roughly another 130 and is left enabled. The ones specific to
+this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
