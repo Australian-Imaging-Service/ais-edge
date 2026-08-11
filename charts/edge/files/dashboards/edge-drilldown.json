@@ -50,7 +50,7 @@
     {
       "type": "stat",
       "title": "Completed uploads (last 10m, cluster=$cluster / node=$node)",
-      "description": "Count of upload_completed events in the last 10 minutes, scoped by the dashboard's cluster + node filters. 0 with active scanners likely means the pipeline is stuck \u2014 drill into the panels below.",
+      "description": "Sessions whose upload finished in the last 10 minutes, scoped by the dashboard's cluster and node filters. Matched on the uploader's terminal \"Successfully uploaded all files in\" line.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -187,7 +187,7 @@
     },
     {
       "type": "stat",
-      "title": "Upload failures (last 1h, cluster=$cluster / node=$node)",
+      "title": "Upload errors (last 1h, cluster=$cluster / node=$node)",
       "description": "Count of error lines from the upload stage. Matches the same pattern as the XNATUploadFailingForAllSessions alert, so the panel and the alert can never disagree. Loki-derived. Prolonged non-zero means the edge cannot reach SeaweedFS or the bucket credentials are wrong; see also the Loki ruler alert S3UploaderRetryStorm.",
       "gridPos": {
         "h": 4,
@@ -341,7 +341,7 @@
             "uid": "loki"
           },
           "refId": "A",
-          "expr": "{cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{.message}}\""
+          "expr": "{cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}]{{if .session}} session={{.session}}{{end}} {{.message}}\""
         }
       ],
       "fieldConfig": {
@@ -364,7 +364,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Pipeline log volume per minute (by stage)",
+      "title": "Upload log lines per minute (by level)",
       "description": "",
       "gridPos": {
         "h": 9,
@@ -384,8 +384,8 @@
             "uid": "loki"
           },
           "refId": "A",
-          "legendFormat": "{{event}}",
-          "expr": "sum by (component) (count_over_time({cluster=\"$cluster\",node=~\"$node\"} [1m]))"
+          "legendFormat": "{{level}}",
+          "expr": "sum by (level) (count_over_time({cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\",component=\"upload\"}[1m]))"
         }
       ],
       "fieldConfig": {

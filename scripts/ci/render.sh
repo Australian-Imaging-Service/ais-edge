@@ -224,8 +224,19 @@ else
       for c in $(grep -oh 'component=\\*"[a-z0-9-]*' "$f" | sed 's/.*component=\\*"//' | sort -u); do
         printf '%s\n' "$deployed" | grep -qx "$c" || bad="${bad} ${c}"
       done
+      # docs/dashboards.md: "There is no `event` field on tier-1, and no panel
+      # may depend on one." event=upload_started|completed|failed is the
+      # convention of files/s3-uploader.sh, which only runs under
+      # upload.mode: s3. A panel filtering on it here returns nothing, forever.
+      # Enforced rather than trusted, because the blank panel looks identical
+      # to a quiet site.
+      if [ "$(ci_obs_chart)" = "charts/edge" ] && [ ! -d "$REPO_ROOT/charts/mgmt" ]; then
+        if grep -q 'event *!=\|event=\\"upload_\|{{event}}' "$f"; then
+          bad="${bad} <depends-on-the-'event'-field>"
+        fi
+      fi
       if [ -n "$bad" ]; then
-        ci_fail "$(basename "$f") queries component(s) this chart never deploys:${bad} — those panels are permanently blank, which reads as 'nothing wrong'"
+        ci_fail "$(basename "$f") queries component(s)/field(s) this tier never produces:${bad} — those panels are permanently blank, which reads as 'nothing wrong'"
       else
         ci_pass "$(basename "$f") queries only deployed components"
       fi

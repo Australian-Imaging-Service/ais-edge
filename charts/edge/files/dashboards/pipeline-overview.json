@@ -12,7 +12,7 @@
     {
       "type": "stat",
       "title": "Sessions uploaded (last 1h)",
-      "description": "Count of upload_completed events. One per session that finished mc mirror with exit 0. Each session contains 1 or more DICOMs plus 1 MANIFEST.json.",
+      "description": "One count per session that `xnat-ingest upload` finished, matched on its terminal log line \"Successfully uploaded all files in\". Sessions, not files or DICOM instances \u2014 tier-1 uploads straight to XNAT and emits no per-object counters.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -51,8 +51,8 @@
     },
     {
       "type": "stat",
-      "title": "Upload failures (last 1h)",
-      "description": "Count of upload_failed events (mc mirror returned non-zero). 0 = pipeline healthy.",
+      "title": "Upload errors (last 1h)",
+      "description": "A LINE count, not a session count: matches error/failed/exception/traceback in the upload pod's logs. One failing session can produce several lines, so read it as a trend, not a tally. Same pattern as the XNATUploadFailingForAllSessions alert.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -190,7 +190,7 @@
     },
     {
       "type": "stat",
-      "title": "Active edge sites",
+      "title": "Pipeline liveness (assign loop logging)",
       "description": "Distinct cluster labels seen in Loki in the last hour, excluding the management cluster. Grows by 1 each time a new edge starts shipping logs.",
       "gridPos": {
         "h": 4,
@@ -204,7 +204,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (cluster) (count_over_time({cluster!=\"\",cluster!=\"mgmt\"}[1h]))) or vector(0)",
+          "expr": "(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"}[1h]) > bool 0) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -258,7 +258,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Pipeline log volume per minute (by stage)",
+      "title": "Pipeline log lines per minute (by component)",
       "gridPos": {
         "h": 9,
         "w": 24,
@@ -271,8 +271,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (component) (count_over_time({namespace=\"xnat-ingest\"} [1m]))",
-          "legendFormat": "{{event}}",
+          "expr": "sum by (component) (count_over_time({namespace=\"xnat-ingest\",app=\"xnat-ingest\"}[1m]))",
+          "legendFormat": "{{component}}",
           "refId": "A"
         }
       ],
@@ -315,8 +315,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"upload\"} |~ \"Successfully uploaded all files in\" [1m]))",
-          "legendFormat": "{{cluster}}",
+          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"upload\"} |~ \"Successfully uploaded all files in\" [1m]))",
+          "legendFormat": "sessions/min",
           "refId": "A"
         }
       ],
@@ -328,7 +328,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Upload error-line rate (errors / all upload lines)",
+      "title": "Upload error lines per minute",
       "gridPos": {
         "h": 9,
         "w": 12,
@@ -341,8 +341,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"upload\"} |~ \"(?i)error|failed|exception|traceback\" [15m])) / clamp_min(sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"upload\"} [15m])), 1)",
-          "legendFormat": "{{cluster}}",
+          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"upload\"} |~ \"(?i)error|failed|exception|traceback\" [1m]))",
+          "legendFormat": "error lines/min",
           "refId": "A"
         }
       ],
@@ -369,7 +369,7 @@
       },
       "targets": [
         {
-          "expr": "{namespace=\"xnat-ingest\"} | json | event != \"\" | line_format \"[{{.cluster}}/{{.component}}] event={{.event}}{{if .session}} session={{.session}}{{end}}{{if .duration_s}} duration={{.duration_s}}s{{end}}{{if .files}} files={{.files}}{{end}}{{if .bytes}} bytes={{.bytes}}{{end}} \u2014 {{.message}}\"",
+          "expr": "{namespace=\"xnat-ingest\",app=\"xnat-ingest\"} | json | line_format \"[{{.component}}]{{if .session}} session={{.session}}{{end}} \u2014 {{.message}}\"",
           "refId": "A"
         }
       ],
