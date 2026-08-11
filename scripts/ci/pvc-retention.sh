@@ -107,6 +107,26 @@ def walk(node, path, kind, name):
         for i, v in enumerate(node):
             walk(v, f"{path}[{i}]", kind, name)
 
+DERIVED_VOLUME_PREFIXES = ("ais-loki", "ais-kps-", "prometheus-ais-kps-",
+                           "alertmanager-ais-kps-", "storage-ais-loki")
+
+def is_derived_volume(nm):
+    """Observability storage regenerates; pipeline storage does not.
+
+    This check exists so an accidental `helm uninstall` cannot destroy anything
+    irreplaceable — true of the facility backup (identifiable originals, and on
+    tier-1 the only copy anywhere), not true of Loki chunks, Prometheus TSDB,
+    Grafana's sqlite or Alertmanager silences. Those are DERIVED: they rebuild
+    from the running system, and preserving them across a reinstall mostly
+    resurrects stale series and silences nobody remembers setting.
+
+    Matched on the subcharts' own object names, NOT by skipping anything
+    unrecognised, so a new unannotated PIPELINE volume still fails. Adding a
+    name here is a claim that the data is reconstructible.
+    """
+    nm = str(nm)
+    return nm.startswith(DERIVED_VOLUME_PREFIXES) or "grafana" in nm
+
 for doc in yaml.safe_load_all(open(sys.argv[1])):
     if not doc or not isinstance(doc, dict):
         continue
@@ -114,7 +134,7 @@ for doc in yaml.safe_load_all(open(sys.argv[1])):
     name = (doc.get("metadata") or {}).get("name", "?")
 
     # 2. PVC objects.
-    if kind == "PersistentVolumeClaim":
+    if kind == "PersistentVolumeClaim" and not is_derived_volume(name):
         checked += 1
         if not annotated_keep(doc.get("metadata")):
             problems.append(
@@ -135,6 +155,12 @@ for doc in yaml.safe_load_all(open(sys.argv[1])):
             problems.append(
                 f"PersistentVolume/{name} has no helm.sh/resource-policy: keep annotation"
             )
+
+    # Derived observability storage is exempt — see is_derived_volume().
+
+    if is_derived_volume(name):
+
+        continue
 
     walk(doc, "", kind, name)
 

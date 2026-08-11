@@ -288,7 +288,10 @@ if [ -d "$REPO_ROOT/charts/mgmt" ]; then
   install_case mgmt ais-mgmt 1 charts/mgmt mgmt-base.yaml mgmt-two-edges.yaml && mgmt_ok=1
 else
   ci_skip "greenfield install: mgmt — this branch ships no charts/mgmt (single node)"
-  mgmt_ok=1
+  # NOT mgmt_ok=1. That would make the k0smotron-Cluster assertion below run and
+  # fail, because a chart that was never installed creates no Cluster objects.
+  # A skipped install must not read as a successful one.
+  mgmt_ok=0
 fi
 edge_ok=0
 install_case edge default 0 charts/edge edge-base.yaml && edge_ok=1
