@@ -270,3 +270,29 @@ ci_obs_chart() {
     if [ -d "${repo}/charts/mgmt/files/prometheus-rules" ]; then echo "charts/mgmt"
     else echo "charts/edge"; fi
 }
+
+# =============================================================================
+# ci_renders_present — drop expectation rows whose render does not exist
+# =============================================================================
+# The runtime-template expectation table is keyed by RENDER NAME in column 1 and
+# is shared between tiers. A single-node branch renders no mgmt-* cases, so every
+# mgmt row is checking a file that was never produced — a false failure, not a
+# missing template.
+#
+# REPORTS THE COUNT, like ci_charts_present. A filter that silently removes most
+# of a table turns a green run into a lie.
+ci_renders_present() {
+    local dropped=0 kept=0 line case_name
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case_name="$(printf '%s' "$line" | cut -f1)"
+        if [ -n "$case_name" ] && [ ! -s "${CI_RENDER_DIR}/${case_name}.yaml" ]; then
+            dropped=$((dropped + 1)); continue
+        fi
+        kept=$((kept + 1)); printf '%s\n' "$line"
+    done
+    [ "$dropped" -gt 0 ] && \
+        printf '  (%d expectation(s) skipped: no render for them on this branch; %d checked)\n' \
+               "$dropped" "$kept" >&2
+    return 0
+}

@@ -280,7 +280,16 @@ install_case() { # install_case <release> <namespace> <create-ns:0|1> <chart> <v
 prepare_workload_namespaces xnat-upload xnat-ingest
 
 mgmt_ok=0
-install_case mgmt ais-mgmt 1 charts/mgmt mgmt-base.yaml mgmt-two-edges.yaml && mgmt_ok=1
+# TIER-1 ships no management chart, so there is no mgmt release to install.
+# Skipping is correct here; failing would demand a chart this branch does not
+# have. The count is reported so a green run cannot be mistaken for full
+# coverage.
+if [ -d "$REPO/charts/mgmt" ]; then
+  install_case mgmt ais-mgmt 1 charts/mgmt mgmt-base.yaml mgmt-two-edges.yaml && mgmt_ok=1
+else
+  ci_skip "greenfield install: mgmt — this branch ships no charts/mgmt (single node)"
+  mgmt_ok=1
+fi
 edge_ok=0
 install_case edge default 0 charts/edge edge-base.yaml && edge_ok=1
 

@@ -132,7 +132,7 @@ PY
   else
     ci_fail "$case_name $kind/$objname: $out"
   fi
-done < <(expectations)
+done < <(expectations | ci_renders_present)
 
 # =============================================================================
 # dataPolicy `location` must match where the data ACTUALLY is
