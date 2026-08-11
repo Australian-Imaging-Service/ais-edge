@@ -39,11 +39,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/00-common.sh"
 
 [ $# -ge 1 ] || { echo "Usage: $0 <edge-name>" >&2; exit 1; }
 
-if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
-    : "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
-else
-    parse_edge_entry "$1"
-fi
+# Configuration comes from sites/<site>/values.yaml, exported by install.sh.
+# There is no second source: the `else parse_edge_entry "$1"` branch that used
+# to sit here read config/edge-nodes.env, which could contradict the site file
+# the charts were rendered from.
+: "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
 
 OUT="${REPO_DIR}/${CLUSTER_NAME}-join.sh"
 JOIN_SRC="${REPO_DIR}/scripts/files/edge-join.sh"

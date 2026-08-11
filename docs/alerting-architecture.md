@@ -8,7 +8,7 @@ LogQL queries against the JSON event stream. K8s/cert-manager-derived alerts
 (node NotReady, pod crashlooping, certificate expiry, SeaweedFS down) stay in
 **Prometheus** as `PrometheusRule` objects. Both fire into the existing
 **kube-prometheus-stack Alertmanager**, which routes via the
-`ALERT_*` env vars in `config/management.env`.
+`observability.alerting.*` in `sites/<site>/values.yaml` (the SMTP password and any Slack webhook come from Secrets in `sites/<site>/secrets.enc.yaml`).
 
 ## Why not just Prometheus for everything?
 

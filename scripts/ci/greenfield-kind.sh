@@ -288,10 +288,31 @@ install_case edge default 0 charts/edge edge-base.yaml && edge_ok=1
 # exist unowned on the live management cluster (§8). Creating them here from
 # nothing is the greenfield claim.
 if [ "$mgmt_ok" = 1 ]; then
-  if "$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null | grep -q .; then
+  # RETRIED, because a single `get` here is a coin flip under load.
+  #
+  # The install above runs with --wait=false, and reading a Cluster back goes
+  # through k0smotron's CONVERSION WEBHOOK (v1beta1 -> v1beta2 — see the CRD
+  # note earlier in this file). While that webhook's endpoint is still settling,
+  # `get` returns nothing and exits 0, which is indistinguishable from "the
+  # chart created no Cluster". Measured: this stage passed on a freshly created
+  # kind cluster and failed when run straight after a previous full CI run, on
+  # BOTH an unmodified main and a branch that changes no chart — a flake, but
+  # one that reads as a hard product failure and would send the next person
+  # hunting a chart bug that is not there.
+  #
+  # `get` is retried rather than the whole assertion relaxed: a genuinely
+  # missing Cluster still fails, it just has to be missing for 60s first.
+  k0s_cluster_found=0
+  for _ in $(seq 1 30); do
+    if "$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null | grep -q .; then
+      k0s_cluster_found=1; break
+    fi
+    sleep 2
+  done
+  if [ "$k0s_cluster_found" = 1 ]; then
     ci_pass "k0smotron Cluster objects created from the chart alone"
   else
-    ci_fail "no k0smotron Cluster object was created — the per-edge control planes did not come from the chart"
+    ci_fail "no k0smotron Cluster object was created after 60s — the per-edge control planes did not come from the chart"
   fi
 fi
 

@@ -19,7 +19,7 @@ the appropriate message to each configured receiver.
 
 - **In-cluster network** — receives webhook posts from Prometheus
 - **Outbound SMTP** to the `ALERT_SMTP_HOST` configured in
-  `config/management.env`
+  `sites/<site>/values.yaml`
 - **Outbound HTTPS** to `ALERT_SLACK_WEBHOOK` if Slack is enabled
 - **Persistent volume (2Gi)** for silence/notification state
 - **A Secret** `alertmanager-aisedge-config` containing the rendered
@@ -92,7 +92,8 @@ paging about pods being NotReady when the whole cluster is gone).
 | File | Purpose |
 |---|---|
 | `charts/mgmt/files/alertmanager-config.yaml` | rendered into the config Secret at install |
-| `config/management.env` | `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `ALERT_SMTP_*`, `ALERT_SLACK_WEBHOOK` |
+| `sites/<site>/values.yaml` | `observability.alerting.emailTo`, `.emailFrom`, `.smtpHost`, `.smtpPort`, `.smtpUsername` |
+| `sites/<site>/secrets.enc.yaml` | the `alertmanager-smtp` Secret (`username`, `password`), and a Slack webhook Secret named by `observability.alerting.slackWebhookSecretRef` |
 | `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | `alertmanagerSpec.configSecret = alertmanager-aisedge-config` |
 | `charts/mgmt/files/prometheus-rules/*.yaml` | the PrometheusRule files that produce the alerts (see `prometheus.md`) |
 
@@ -132,7 +133,7 @@ kubectl -n observability rollout restart statefulset/alertmanager-kube-prometheu
 | Risk | Impact | Mitigation |
 |---|---|---|
 | SMTP relay unreachable | Alerts queue up; eventually drop after `notify.deadline` | Configure a fallback receiver (Slack); monitor Alertmanager's own metrics for delivery failures |
-| Slack webhook revoked | Slack notifications silently drop | Alertmanager logs the error; rotate the webhook in `config/management.env` and re-run 02d |
+| Slack webhook revoked | Slack notifications silently drop | Alertmanager logs the error; rotate the webhook Secret named by `observability.alerting.slackWebhookSecretRef` in `sites/<site>/secrets.enc.yaml` and re-run 02d |
 | SMTP password leak | Attacker can send mail-as-us | Stored as Secret; rotate by editing config and re-running 02d |
 | Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the existing rule only inhibits when `ManagementClusterDown` is firing |
 | Alertmanager pod restart | Brief delivery gap | StatefulSet replicas: 1 today; bump to 3 with peer config for HA |

@@ -40,7 +40,8 @@ data interactively while triaging an incident.
 | `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | helm values — datasources, sidecar, persistence, admin user from Secret |
 | `charts/mgmt/files/dashboards/*.json` | pre-built dashboards (loaded as ConfigMaps with `grafana_dashboard=1`) |
 | `charts/mgmt/templates/observability.yaml` | Ingress for `grafana.aisedge.local`, `grafana-tls` Certificate |
-| `config/management.env` | `GRAFANA_HOSTNAME`, `GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD` |
+| `sites/<site>/values.yaml` | `hostnames.grafana` |
+| `sites/<site>/secrets.enc.yaml` | the `grafana-admin-credentials` Secret — `admin-user`, `admin-password`; named by `observability.grafana.adminSecretRef` |
 
 The dashboard sidecar pattern: a tiny container watches all ConfigMaps
 in the `observability` namespace with label `grafana_dashboard=1`, and
@@ -89,7 +90,7 @@ kubectl -n observability rollout restart deployment/kube-prometheus-stack-grafan
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Browser-side: self-signed CA | Browsers warn unless ais-edge-ca.crt installed in trust store | Distribute the CA cert to operators along with the kubeconfig |
-| Default admin password unchanged | Anyone who reaches Grafana logs in as admin | Set `GRAFANA_ADMIN_PASSWORD` in `config/management.env` to a strong value before install |
+| Default admin password unchanged | Anyone who reaches Grafana logs in as admin | Set `admin-password` in the `grafana-admin-credentials` Secret in `sites/<site>/secrets.enc.yaml` (SOPS-env` to a strong value before install |
 | Datasource credential leak | Read-only access to Prometheus/Loki — no privilege escalation possible from there | Limited blast radius; rotate by re-running 02d |
 | Dashboard ConfigMap collision | Another team accidentally labels a CM `grafana_dashboard=1` | Sidecar `searchNamespace` is scoped to `observability` only |
 | PV lost | User prefs + alert silences gone, dashboards survive (they reload from ConfigMaps) | Backup PV if customisations matter |

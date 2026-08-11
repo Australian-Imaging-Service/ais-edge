@@ -112,7 +112,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
 | Risk | Impact | Mitigation |
 |---|---|---|
 | `ca-bundle` Secret missing | TLS verify fails: "x509: cert signed by unknown authority" | Pushed by cert-sync (CronJob); verifiable with `kubectl exec ... -- mc alias set edge ...` |
-| Wrong S3 access key | 403 Forbidden | Each edge has its own scoped identity; rotated by editing `edge-nodes.env` and re-running script 03 |
+| Wrong S3 access key | 403 Forbidden | Each edge has its own scoped identity; rotated by editing the `<edge>-s3` Secret in `sites/<site>/secrets.enc.yaml` and re-running the install |
 | Endpoint hostname unresolvable | "no such host" | `hostAliases` injected at pod-spec time |
 | Disk full on edge | mc mirror fails with no-space | `/data/xnat-ingest` is the worker's hostPath; size accordingly |
 | Deletes the wrong session | Data loss | We only `rm -rf` after `mc mirror` returns success; idempotent re-runs are safe |

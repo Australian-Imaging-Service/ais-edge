@@ -14,27 +14,19 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-# When install.sh has already exported this edge's configuration from
-# sites/<site>/values.yaml, the argument is just the edge NAME and there is
-# nothing to parse. Calling parse_edge_entry on it would fail ("expected 6
-# pipe-separated fields, got 1") and, worse, a successful parse would
-# OVERWRITE the exported values with whatever config/edge-nodes.env still
-# says — the second source of truth this was meant to remove.
-if [ "${AIS_CONFIG_FROM_SITE:-0}" = "1" ]; then
-    : "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
-    # parse_edge_entry also DERIVES these two from the primitives; do the same
-    # here so both call styles leave the script with identical variables.
-    # `~` is expanded explicitly: it comes from a YAML value, so the shell
-    # never sees it in a position where tilde expansion happens, and ssh would
-    # be handed a literal "~/.ssh/id_ed25519" that does not exist.
-    SSH_KEY="${SSH_KEY/#\~/$HOME}"
-    EDGE_SSH="${SSH_USER}@${NODE_IP}"
-    SSH_KEY_OPT=""
-    [ -n "${SSH_KEY:-}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
-    EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
-else
-    parse_edge_entry "$1"
-fi
+# Configuration comes from sites/<site>/values.yaml, exported by install.sh.
+# There is no second source: the `else parse_edge_entry "$1"` branch that used
+# to sit here read config/edge-nodes.env, which could contradict the site file
+# the charts were rendered from.
+: "${CLUSTER_NAME:?install.sh must export CLUSTER_NAME}"
+# `~` is expanded explicitly: it comes from a YAML value, so the shell never
+# sees it in a position where tilde expansion happens, and ssh would be handed
+# a literal "~/.ssh/id_ed25519" that does not exist.
+SSH_KEY="${SSH_KEY/#\~/$HOME}"
+EDGE_SSH="${SSH_USER}@${NODE_IP}"
+SSH_KEY_OPT=""
+[ -n "${SSH_KEY:-}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
+EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
 
 echo "=== 05: Creating hosted cluster '${CLUSTER_NAME}' ==="
 
@@ -186,9 +178,9 @@ open(out, "w").write("%d\n" % (time.time() + total))
 PY
 echo "Join token saved (valid for ${JOIN_TOKEN_TTL})"
 
-# Note: SeaweedFS S3 identities for edge users are provisioned by step 03
-# (the s3.json ConfigMap is built from edge-nodes.env at install time).
-# No per-edge step here — credentials defined in edge-nodes.env are already
-# active in SeaweedFS by the time we reach this step.
+# Note: SeaweedFS S3 identities for edge users are provisioned by charts/mgmt,
+# which renders the s3.json ConfigMap from the `edges:` list in
+# sites/<site>/values.yaml. No per-edge step here — every identity in that list
+# is already active in SeaweedFS by the time we reach this step.
 
 echo "=== 05: Complete for ${CLUSTER_NAME} ==="

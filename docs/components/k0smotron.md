@@ -33,7 +33,7 @@ management node.
 - Workload: Deployment `k0smotron-controller-manager`
 - Installed via `kubectl apply --server-side -f https://docs.k0smotron.io/stable/install.yaml`
 
-For each edge declared in `config/edge-nodes.env`:
+For each edge in the `edges:` list in `sites/<site>/values.yaml`:
 - A namespace named after the cluster
 - A StatefulSet `kmc-<cluster>-0` (the k0s API + konnectivity)
 - A StatefulSet `kmc-<cluster>-etcd-0` (etcd, with PVC)

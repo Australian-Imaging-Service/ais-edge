@@ -18,7 +18,7 @@ DNS is a `nip.io` wildcard for dev, switchable to your own zone for prod.
 
 ## Minimum config
 
-Edit `config/management.env`:
+Edit `sites/<site>/values.yaml`:
 
 ```bash
 export INSTALL_TOPOLOGY="cloud"

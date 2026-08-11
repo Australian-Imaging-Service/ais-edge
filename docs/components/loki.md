@@ -43,7 +43,8 @@ journey, debug a failing edge, or audit who uploaded what when.
 |---|---|
 | `charts/mgmt/values.yaml` (`loki:`) | helm chart values; deployment mode, S3 backend, retention |
 | `charts/mgmt/templates/observability.yaml` | Ingress for `loki.aisedge.local`, `loki-tls` Certificate |
-| `config/management.env` | `LOKI_HOSTNAME`, `LOGS_BUCKET`, `LOKI_S3_ACCESS_KEY/SECRET`, `OBSERVABILITY_RETENTION_DAYS` |
+| `sites/<site>/values.yaml` | `hostnames.loki`, `seaweedfs.buckets.logs`, `observability.loki.*` (retention lives in the chart's `loki:` block) |
+| `sites/<site>/secrets.enc.yaml` | the `loki-s3-credentials` Secret — `access-key`, `secret-key`; named by `observability.loki.s3SecretRef` |
 
 Key tuning knobs in the values file:
 - `deploymentMode: SingleBinary` — one pod runs all roles. Switch to
