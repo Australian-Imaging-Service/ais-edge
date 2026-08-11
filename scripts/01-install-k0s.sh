@@ -22,11 +22,27 @@ if ! command -v k0s &>/dev/null; then
 fi
 echo "k0s: $(k0s version)"
 
+# Where k0s keeps its state: containerd's image store, etcd/kine, and kubelet's
+# root-dir, which k0s places under <data-dir>/kubelet. One flag moves all three.
+#
+# INSTALL-TIME ONLY. `k0s install controller --help` says "DO NOT CHANGE for an
+# existing setup, things will break!" — it is baked into the systemd unit, so it
+# cannot retrofit a running cluster. That is why it sits inside the `k0s status`
+# guard: on a node that already has k0s, this block is skipped entirely and the
+# existing data-dir stays authoritative.
+K0S_DATA_DIR="${DATA_ROOT:+${DATA_ROOT}/k0s}"
+
 # Start cluster
 if ! sudo k0s status &>/dev/null; then
     sudo mkdir -p /etc/k0s
     sudo cp "${REPO_DIR}/config/k0s-controller.yaml" /etc/k0s/k0s.yaml
-    sudo k0s install controller --single -c /etc/k0s/k0s.yaml
+    if [ -n "$K0S_DATA_DIR" ]; then
+        echo "  k0s data-dir: ${K0S_DATA_DIR}  (root filesystem holds the OS only)"
+        sudo mkdir -p "$K0S_DATA_DIR"
+        sudo k0s install controller --single -c /etc/k0s/k0s.yaml --data-dir "$K0S_DATA_DIR"
+    else
+        sudo k0s install controller --single -c /etc/k0s/k0s.yaml
+    fi
     sudo k0s start
     echo "Waiting for k0s to start..."
     sleep 15
@@ -78,6 +94,25 @@ if ! kubectl get sc local-path &>/dev/null; then
     kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.36/deploy/local-path-storage.yaml
     kubectl patch storageclass local-path \
         -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+
+    # Every PVC on this node lands under this path — Prometheus 20Gi, Loki 10Gi,
+    # Grafana, Alertmanager, each hosted control plane's etcd. The upstream
+    # default is /opt/local-path-provisioner, i.e. the root disk. Point it at
+    # the data volume instead when one is configured.
+    #
+    # This is the provisioner's own nodePathMap setting, not a mount: the PV
+    # path is written into each PV object, so it must be set BEFORE the first
+    # PVC binds. Changing it later strands existing volumes at the old path.
+    if [ -n "${DATA_ROOT:-}" ]; then
+        echo "  local-path PVC root: ${DATA_ROOT}/local-path"
+        sudo mkdir -p "${DATA_ROOT}/local-path"
+        kubectl -n local-path-storage patch configmap local-path-config --type merge \
+            -p "$(printf '{"data":{"config.json":"{\\n  \\"nodePathMap\\":[\\n    {\\"node\\":\\"DEFAULT_PATH_FOR_NON_LISTED_NODES\\",\\"paths\\":[\\"%s/local-path\\"]}\\n  ]\\n}\\n"}}' "$DATA_ROOT")"
+        # The provisioner reads config.json at startup and watches it, but a
+        # restart makes the change deterministic rather than eventually-applied.
+        kubectl -n local-path-storage rollout restart deploy/local-path-provisioner
+        kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=120s
+    fi
 fi
 
 echo "=== 01: Complete ==="

@@ -39,6 +39,24 @@ clusterLabel: mgmt
 #           building. Only for adopting a cluster that predates these charts.
 installMode: fresh
 
+storage:
+  # Where k0s state and every PVC live on this node. Read by install.sh only.
+  #
+  # ""       everything on the root filesystem (k0s default /var/lib/k0s,
+  #          PVCs in /opt/local-path-provisioner). Right for a single-disk host.
+  # /data    a mounted data volume. Use this whenever the root disk is small —
+  #          the container image store alone does not fit in a 30G root.
+  #
+  # Applied as native settings: `k0s install --data-dir` and the
+  # local-path-provisioner nodePathMap. NOT bind mounts — an earlier deployment
+  # used fstab binds, and deleting /data left them dangling so the node failed
+  # its next boot into an emergency shell. See docs/storage.md.
+  #
+  # INSTALL-TIME ONLY. k0s bakes the data-dir into its systemd unit and PV
+  # objects record their host path, so changing this after install strands the
+  # existing state where it is. Set it before the first install.
+  dataRoot: ""
+
 domain:
   # Internal DNS suffix. The edges resolve the hostnames below through
   # /etc/hosts entries that install.sh writes, not through real DNS, so this

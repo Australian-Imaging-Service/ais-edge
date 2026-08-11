@@ -15,6 +15,12 @@ age-key*.txt
 keys.txt
 
 # Generated during install
+# GENERATED ON THE MANAGEMENT NODE by install.sh. They exist only there, and a
+# repo sync must not remove them: an `rsync --delete` from a dev checkout wiped
+# these mid-install once, and the edge helm upgrade then failed with
+#   Kubernetes cluster unreachable: stat ./kubeconfig-cai-lfs3
+# If you sync this repo onto a live management node, exclude them explicitly —
+# being gitignored does not protect a file from rsync --delete.
 kubeconfig-*
 join-token-*
 ais-edge-ca.crt

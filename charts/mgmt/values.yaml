@@ -972,6 +972,29 @@ vector:
           if err == null && is_object(parsed) {
             . = merge!(., parsed)
           }
+          # A Loki label template referencing a missing field does not render
+          # empty — Vector DROPS the event and counts a `template_failed`. The
+          # `level` label below exists only on lines a pod emits as JSON, so
+          # every plain-stdout line was discarded before reaching Loki.
+          # Observed on cai-lfs3: 31 template_failed in a 200-line window, and
+          # the warning about it was itself rate-limited, so the loss was
+          # nearly invisible. Default the field rather than dropping the
+          # label — every alert rule and dashboard panel selects on it.
+          if !exists(.level) {
+            .level = "unknown"
+          }
+          # Same failure, different fields. `app` and `component` come from the
+          # POD'S OWN LABELS, which only this chart's workloads carry — so every
+          # line from coredns, kube-proxy, metrics-server, cert-manager and the
+          # kube-prometheus-stack pods was dropped for want of a label they were
+          # never going to have. That absence looks exactly like those pods
+          # being quiet, which is why it went unnoticed.
+          if !exists(.kubernetes.pod_labels.app) {
+            .kubernetes.pod_labels.app = "unknown"
+          }
+          if !exists(.kubernetes.pod_labels.component) {
+            .kubernetes.pod_labels.component = "unknown"
+          }
     sinks:
       loki:
         type: loki

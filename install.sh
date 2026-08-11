@@ -152,6 +152,18 @@ KUBELET_LOG_MAX_SIZE="$(cfg dataPolicy.telemetry.podLogFiles.maxSize 10Mi)"
 KUBELET_LOG_MAX_FILES="$(cfg dataPolicy.telemetry.podLogFiles.maxFiles 5)"
 export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
 
+# Where the heavy state goes. Blank (the default) keeps k0s and the PVCs on the
+# root filesystem, which is right for a single-disk host.
+#
+# Set it to a mounted data volume when the root disk is small — the typical
+# Nectar VM is 30G root plus a 500G volume, and the container image store alone
+# does not fit in 30G. Both consumers below take a native path setting, so this
+# needs no bind mounts and leaves /etc/fstab alone. An earlier deployment did
+# use fstab binds for this; deleting /data then left the mounts dangling and the
+# node failed its next boot into an emergency shell. See docs/storage.md.
+DATA_ROOT="$(cfg storage.dataRoot)"
+export DATA_ROOT
+
 export MGMT_NODE_IP INTERNAL_DOMAIN INGRESS_PORT INSTALL_TOPOLOGY INSTALL_MODE
 export SEAWEEDFS_HOSTNAME GRAFANA_HOSTNAME LOKI_HOSTNAME
 

@@ -86,6 +86,11 @@ EDGE_COUNT="$(python3 -c "import json;print(len(json.loads('''$EDGES_JSON''')))"
 MGMT_NS="$(cfg namespace ais-mgmt)"; MGMT_NS="ais-mgmt"
 EDGE_NS="$(cfg namespace xnat-ingest)"
 INTERNAL_DOMAIN="$(cfg domain.internal)"
+# Must match what install.sh gave `k0s install controller --data-dir`. `k0s
+# reset` takes the same flag and defaults it to /var/lib/k0s independently of
+# how the node was installed — so on a relocated install a bare `k0s reset`
+# cleans a directory that was never used and leaves the real state behind.
+DATA_ROOT="$(cfg storage.dataRoot)"
 
 # --- confirm -----------------------------------------------------------------
 echo "============================================"
@@ -283,10 +288,15 @@ info "generated artefacts"
 rm -f "${SCRIPT_DIR}"/kubeconfig-* "${SCRIPT_DIR}"/join-token-* "${SCRIPT_DIR}"/ais-edge-ca.crt 2>/dev/null || true
 
 if [ "$KEEP_CLUSTER" = false ]; then
-    info "k0s reset on this node"
+    info "k0s reset on this node${DATA_ROOT:+ (data-dir ${DATA_ROOT}/k0s)}"
     sudo k0s stop 2>/dev/null || true
-    sudo k0s reset 2>/dev/null || true
-    sudo rm -rf /var/lib/k0s /etc/k0s /run/k0s 2>/dev/null || true
+    # shellcheck disable=SC2086
+    sudo k0s reset ${DATA_ROOT:+--data-dir "${DATA_ROOT}/k0s"} 2>/dev/null || true
+    # Both layouts: /var/lib/k0s is the default location, ${DATA_ROOT}/k0s the
+    # relocated one. The /data wipe above already covers the latter, but a site
+    # whose dataRoot changed between install and uninstall would otherwise leave
+    # the older of the two behind.
+    sudo rm -rf /var/lib/k0s /etc/k0s /run/k0s ${DATA_ROOT:+"${DATA_ROOT}/k0s"} 2>/dev/null || true
     rm -f "$HOME/.kube/config" 2>/dev/null || true
 fi
 

@@ -48,6 +48,33 @@ transforms:
       if err == null && is_object(parsed) {
         . = merge!(., parsed)
       }
+      # A Loki label template that references a missing field does not render
+      # empty — Vector DROPS the whole event and counts a `template_failed`.
+      # `level` below is only present on lines the pods emit as JSON, so every
+      # plain-stdout line (tqdm progress bars, tracebacks, anything a library
+      # prints directly) was being discarded before it reached Loki. Observed
+      # on cai-lfs3: 31 template_failed in a 200-line window, with the internal
+      # log itself rate-limited — so the loss was reported only in a warning
+      # that was itself being suppressed.
+      #
+      # Defaulting the field keeps those lines, labelled honestly as unknown.
+      # Do not drop the label instead: every alert rule and dashboard panel
+      # selects on it.
+      if !exists(.level) {
+        .level = "unknown"
+      }
+      # Same failure, different fields. `app` and `component` come from the
+      # POD'S OWN LABELS, which only this chart's workloads carry — so every
+      # log line from coredns, kube-proxy, kube-router, metrics-server and
+      # konnectivity-agent was being dropped for want of a label they were
+      # never going to have. That is the entire system-pod log stream, and its
+      # absence looks identical to those pods simply being quiet.
+      if !exists(.kubernetes.pod_labels.app) {
+        .kubernetes.pod_labels.app = "unknown"
+      }
+      if !exists(.kubernetes.pod_labels.component) {
+        .kubernetes.pod_labels.component = "unknown"
+      }
 
 sinks:
   loki:
