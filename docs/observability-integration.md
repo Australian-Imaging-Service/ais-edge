@@ -198,8 +198,8 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (an unmapped AET nobody has mapped) |
-| `ManagementClusterDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
-| `EdgeWorkerDisconnected` | critical | Prom | node `Ready` condition != true for 5m |
+| `KubernetesAPIServerDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
+| `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |
 | `IngestPodCrashLoop` | warning | Prom | >3 restarts/1h in the release namespace |
 | `NodeCountChanged` | info | Prom | `kube_node_info` changed in 10m |
 
@@ -258,4 +258,3 @@ helm template t1 charts/edge -n xnat-ingest -f sites/example-single/values.yaml 
 - Pipeline ServiceMonitors: **none** (no custom pipeline metrics). The eight that render belong to kube-prometheus-stack.
 - Log format: pipeline pods run with `AIS_LOG_FORMAT=json` (`ingest.logFormat`, a functional setting — turning it off breaks monitoring, not just formatting). Orthanc mixes JSON hook events with native C++ server logs.
 - Grafana is reached at `http://<nodeIP>:<nodePort>` — there is no ingress and no cert-manager on tier-1, so there is no TLS in front of it. Treat it as a LAN-only UI.
-- Naming leftover to be aware of: the metric alert `EdgeWorkerDisconnected` is really "this node NotReady" on a single-node appliance (cosmetic name from the two-node era).

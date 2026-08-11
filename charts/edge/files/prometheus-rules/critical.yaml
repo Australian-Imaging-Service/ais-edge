@@ -17,21 +17,21 @@ groups:
 - name: ais-edge-critical
   interval: 30s
   rules:
-  - alert: ManagementClusterDown
+  - alert: KubernetesAPIServerDown
     expr: up{job="apiserver"} == 0
     for: 5m
     labels:
       severity: critical
     annotations:
-      summary: Management API server unreachable
+      summary: Kubernetes API server unreachable on the tier-1 host
       description: kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane
         is down or partitioned.
-  - alert: EdgeWorkerDisconnected
+  - alert: NodeNotReady
     expr: kube_node_status_condition{condition="Ready",status="true"} == 0
     for: 5m
     labels:
       severity: critical
     annotations:
-      summary: Edge worker {{ $labels.node }} NotReady for 5+ minutes
+      summary: Node {{ $labels.node }} NotReady for 5+ minutes
       description: kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged
         sessions cannot upload.

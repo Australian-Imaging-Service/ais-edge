@@ -319,34 +319,26 @@ receivers:
 __ALERT_SLACK_RECEIVERS__
 
 inhibit_rules:
-  # If the mgmt apiserver is unreachable, suppress the other mgmt-plane
-  # alerts that share its fate — cert-manager and SeaweedFS both run there,
-  # so their alerts are noise (or unreliable) for the same outage.
+  # If the API server is unreachable, node readiness cannot be evaluated —
+  # kube-state-metrics reads it THROUGH that same API server. NodeNotReady is
+  # then a symptom of the outage already being reported, so it is suppressed
+  # to keep one incident to one page.
   #
-  # CAUTION: matched by ALERTNAME, not by `equal: ["cluster"]` as it read
-  # before. Nothing in this stack sets a `cluster` label on either side of
-  # that comparison — Prometheus rules here never set one statically, and
-  # none of their underlying metrics (KSM, cert-manager, SeaweedFS) carry
-  # one either. Alertmanager treats an absent label as an empty string for
-  # `equal`, so both sides compared "" == "" and the rule likely inhibited
-  # by ACCIDENT rather than by the cluster scoping it was written to express
-  # — fragile, and it would have started doing nothing the day either side
-  # gained a real cluster label.
-  #
-  # The alertname list below is exhaustive on purpose, not a pattern: it is
-  # every current severity=warning|info Prometheus alert, and each is
-  # genuinely mgmt-plane (SeaweedFS and cert-manager both run only on mgmt).
-  # `EdgePodCrashLoop` and `KonnectivityTunnelFlapping` used to also match
-  # `severity =~ "warning|info"` here — deleted from prometheus-rules/
-  # warning.yaml (see docs/TOUR.md §9): mgmt Prometheus has zero series for
-  # either selector, because it cannot scrape edge-cluster namespaces at
-  # all. Naming alerts explicitly, rather than matching by severity, means
-  # this inhibit rule can never accidentally reach into a Loki-sourced
-  # severity=info alert about an EDGE (XNATUploadSuccess, CARotationDue if a
-  # future per-edge cert lands there) just because a regex happened to match.
+  # This block previously suppressed SeaweedFSDiskFull, CertificateExpiringSoon,
+  # CARotationDue and CertificateRenewed on ManagementClusterDown. All four are
+  # management-plane alerts that no tier-1 rule file defines, and the source
+  # alert did not exist under that name either, so the whole block was inert.
   - source_matchers:
-      - alertname = "ManagementClusterDown"
+      - alertname = "KubernetesAPIServerDown"
     target_matchers:
-      - alertname =~ "SeaweedFSDiskFull|CertificateExpiringSoon|CARotationDue|CertificateRenewed"
+      - alertname = "NodeNotReady"
+    # No `equal:` clause. It would normally scope the suppression to one
+    # cluster, but these are Prometheus-sourced alerts and prometheusSpec
+    # externalLabels is unset, so neither alert carries a `cluster` label —
+    # Helm cannot template subchart values, so the parent's clusterLabel
+    # cannot reach it. Matching on a label that is absent on both sides
+    # happens to work (empty equals empty) but reads as a constraint that is
+    # being enforced when nothing is. Tier-1 is one node and one API server,
+    # so there is genuinely nothing to disambiguate.
 
 templates: []
