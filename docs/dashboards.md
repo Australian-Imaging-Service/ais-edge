@@ -180,6 +180,7 @@ are what a fleet pushing into one Loki needs unchanged.
 | **Completed uploads (last 10m)** | `sum(count_over_time({cluster="$cluster",node=~"$node",namespace="xnat-ingest",component="upload"} \|~ "Successfully uploaded all files in" [10m]))` | Last-10-min session count for the selected scope. Threshold red below 1, green above. 0 while scanners are sending means the pipeline is stuck — but 0 overnight is also normal, so read it next to the throughput graph, never alone. |
 | **Assign errors (last 1h)** | Same shape as "Invalid sessions" above, plus the `cluster`/`node` selectors | DICOM metadata validation failures. |
 | **Upload errors (last 1h)** | Same shape as Pipeline Overview's "Upload errors", plus the `cluster`/`node` selectors | Error-level noise from the uploader. |
+| **DICOM rejected — unmapped AE title (last 1h)** | `sum(count_over_time({cluster="$cluster",node=~"$node",app="orthanc"} \|~ "REJECT: no project mapped for CalledAET" [1h]))` | Studies whose calling AE title is not in `orthanc.deid.aetMap`. They are QUARANTINED, not dropped, so a non-zero count is a mapping to add and re-send — not data lost. Selects `app="orthanc"` because the line comes from the de-identification Lua hook, not a pipeline stage. |
 
 ### Time series + log tail
 
