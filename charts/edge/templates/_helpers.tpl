@@ -87,6 +87,37 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.existingSaltSecret }}
       {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
     {{- end }}
+    {{- /* THE PROFILE IS A CONTRACT WITH THE ASSIGN STAGE, not just a privacy
+           policy. assign reads project, subject and session from these three
+           tags and has no other source for them. Drop one while tightening
+           the profile — the obvious thing to do, since they look like trial
+           metadata nobody asked for — and de-identification still reports
+           success, upload never sees the study, and every session stalls at
+           assign with "missing metadata fields". The pipeline looks healthy
+           from both ends and the cause is in a file nobody edited that day. */ -}}
+    {{- $replace := (.Values.orthanc.deid.profile).Replace | default dict }}
+    {{- $missing := list }}
+    {{- range $tag := list "ClinicalTrialProtocolID" "ClinicalTrialSubjectID" "ClinicalTrialTimePointID" }}
+      {{- if not (get $replace $tag) }}
+        {{- $missing = append $missing $tag }}
+      {{- end }}
+    {{- end }}
+    {{- if $missing }}
+      {{- fail (printf "orthanc.deid.profile.Replace is missing %s. The assign stage reads project, subject and session from ClinicalTrialProtocolID, ClinicalTrialSubjectID and ClinicalTrialTimePointID — with any one absent, de-identification still succeeds and every session then stalls at assign with 'missing metadata fields'. Restore the tag(s) with their ${ProjectCode}/${SubjectHash}/${SessionHash} values." (join ", " $missing)) }}
+    {{- end }}
+    {{- /* XNAT rejects a project ID outside this charset at upload time, per
+           session, long after the study has been de-identified and grouped.
+           The AET map is where the ID is chosen, so it is where a typo is
+           still cheap to fix. */ -}}
+    {{- range $aet, $cfg := .Values.orthanc.deid.aetMap }}
+      {{- $project := ($cfg).project | default "" }}
+      {{- if not $project }}
+        {{- fail (printf "orthanc.deid.aetMap.%s has no project. Every study from that AE title would be de-identified and then have nowhere to go." $aet) }}
+      {{- end }}
+      {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_-]*$" $project) }}
+        {{- fail (printf "orthanc.deid.aetMap.%s.project is %q, which XNAT will not accept. Project IDs must start alphanumeric and contain only letters, digits, underscore and hyphen — no spaces, dots or slashes. XNAT rejects it per session at upload, after de-identification has already succeeded." $aet $project) }}
+      {{- end }}
+    {{- end }}
     {{- /* The hook writes the original to the facility backup and only then
            removes it from Orthanc. Without that volume there is no archive of
            record and no landing place for unmapped-AET quarantine. */ -}}
@@ -123,6 +154,41 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          dropping it is the exact defect this whole block is being cleaned of. */ -}}
   {{- if hasKey .Values.dataPolicy.derived.grouped "minAge" }}
     {{- fail "dataPolicy.derived.grouped.minAge was removed and setting it does nothing. `assign --unlink-source all` deletes each grouped tree at assign time, so a window measured from assign can never elapse; only trees assign FAILED to unlink reach the policy engine, and those are cleaned up immediately. Remove the key. If you want a post-upload recovery window, dataPolicy.derived.assigned.minAge is the one that works." }}
+  {{- end }}
+
+  {{- /* TIER-1 REACHES GRAFANA BY NodePort — there is no ingress here, so this
+         number is the only way in. Kubernetes only accepts one from the
+         service node-port range, and the rejection comes from the API server
+         at apply time with a message about the Service, several minutes into
+         an install that has already built the cluster and applied the
+         secrets. Cheaper to refuse before any of that. */ -}}
+  {{- if .Values.observability.stack.enabled }}
+    {{- $np := ((index .Values "kube-prometheus-stack").grafana.service).nodePort }}
+    {{- if $np }}
+      {{- if or (lt (int $np) 30000) (gt (int $np) 32767) }}
+        {{- fail (printf "kube-prometheus-stack.grafana.service.nodePort is %v, outside Kubernetes' node-port range 30000-32767. The API server rejects the Service, so Grafana gets no address at all — and on tier-1 the NodePort is the only way to reach it." $np) }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* THE RULER POSTS TO ALERTMANAGER BY NAME, and that name is built from
+         kube-prometheus-stack's fullnameOverride. The two are set in separate
+         subchart blocks with nothing tying them together, so overriding one
+         is the natural thing to do and breaks the other.
+         The failure is silent in the way that matters: Loki keeps evaluating
+         its rules and keeps firing them, into a URL that does not resolve. No
+         object is unhealthy, no pod restarts, Grafana still draws the graphs
+         — and every log-based alert (upload failure, auth failure, disk low,
+         quarantine) simply never arrives. */ -}}
+  {{- if .Values.observability.stack.enabled }}
+    {{- $kps := (index .Values "kube-prometheus-stack").fullnameOverride | default "" }}
+    {{- $url := (((.Values.loki).loki).rulerConfig).alertmanager_url | default "" }}
+    {{- if and $kps $url }}
+      {{- $want := printf "http://%s-alertmanager." $kps }}
+      {{- if not (hasPrefix $want $url) }}
+        {{- fail (printf "loki.loki.rulerConfig.alertmanager_url is %q but kube-prometheus-stack.fullnameOverride is %q, so the Alertmanager Service is named %s-alertmanager. The ruler would post every log-based alert to a hostname that does not resolve — nothing looks unhealthy and no alert ever arrives. Set the URL to start %q, or restore the fullnameOverride." $url $kps $kps $want) }}
+      {{- end }}
+    {{- end }}
   {{- end }}
 
   {{- if not .Values.clusterLabel }}

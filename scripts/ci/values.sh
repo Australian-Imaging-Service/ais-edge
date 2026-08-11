@@ -81,6 +81,15 @@ orthanc:
       Keep: ["StudyInstanceUID", "SeriesInstanceUID"]
       Replace:
         PatientName: "ANON"
+        # The assign stage reads project/subject/session from these three and
+        # has no other source, so a profile without them is not a valid site —
+        # it renders, de-identifies, and then stalls every session at assign.
+        # This base is the VALID baseline every negative case builds on: leave
+        # them out and each of those cases fails on this instead of on the one
+        # thing it is meant to be testing.
+        ClinicalTrialProtocolID: "${ProjectCode}"
+        ClinicalTrialSubjectID: "${SubjectHash}"
+        ClinicalTrialTimePointID: "${SessionHash}"
 EOF
 
 # =============================================================================
@@ -746,6 +755,69 @@ EOF
 printf 'hostAliases:\n  mgmtNodeIP: ""\n'                 >"$V/neg-edge-hostaliases-no-ip.yaml"
 printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clusterlabel.yaml"
 
+# -- the deid profile is a contract with assign, not only a privacy policy -----
+# Removing one ClinicalTrial* tag is the plausible mistake: they read as trial
+# bookkeeping, so tightening a profile invites deleting them. Nothing fails at
+# deid time; every session stalls at assign afterwards.
+cat >"$V/neg-edge-deid-missing-trial-tag.yaml" <<'EOF'
+orthanc:
+  deid:
+    profile:
+      Replace:
+        # EXPLICIT null, not omission. Helm MERGES maps, so an overlay that
+        # simply leaves the tag out inherits the base's value and the case
+        # renders — which is how this fixture first passed while testing
+        # nothing. null is the only way a values file deletes an inherited key.
+        ClinicalTrialSubjectID: null
+EOF
+
+# -- the AE title map names the XNAT project ----------------------------------
+cat >"$V/neg-edge-aetmap-no-project.yaml" <<'EOF'
+orthanc:
+  deid:
+    aetMap:
+      # A SECOND AE title, not an edit of the base's. Overlaying
+      # `SIEMENS_3T: {}` merges into the base entry and keeps its project, so
+      # the fixture rendered. The guard walks every entry, so an added one
+      # with no project is what actually exercises it — and it mirrors the
+      # real mistake: appending a modality and forgetting its project.
+      SIEMENS_3T: {project: CI_RESEARCH}
+      GE_MR750: {}
+EOF
+
+# A space and a dot: both are rejected by XNAT, per session, at upload time —
+# long after the study has been de-identified and grouped.
+cat >"$V/neg-edge-aetmap-bad-project.yaml" <<'EOF'
+orthanc:
+  deid:
+    aetMap:
+      SIEMENS_3T: {project: "my project.1"}
+EOF
+
+# -- Grafana is reachable ONLY by NodePort on tier-1 --------------------------
+cat >"$V/neg-edge-grafana-nodeport-range.yaml" <<'EOF'
+observability:
+  enabled: true
+  stack:
+    enabled: true
+kube-prometheus-stack:
+  grafana:
+    service:
+      nodePort: 8080
+EOF
+
+# -- ruler -> Alertmanager, two subchart blocks with nothing tying them --------
+# Overriding only the fullnameOverride leaves the ruler posting every log-based
+# alert to a name that no longer resolves. Nothing looks unhealthy.
+cat >"$V/neg-edge-ruler-am-drift.yaml" <<'EOF'
+observability:
+  enabled: true
+  stack:
+    enabled: true
+kube-prometheus-stack:
+  fullnameOverride: obs
+EOF
+
 
 # =============================================================================
 # Case tables
@@ -851,6 +923,11 @@ neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yam
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
+neg-edge-deid-missing-trial-tag	charts/edge	edge-base.yaml neg-edge-deid-missing-trial-tag.yaml	Restore the tag(s) with their
+neg-edge-aetmap-no-project	charts/edge	edge-base.yaml neg-edge-aetmap-no-project.yaml	has no project
+neg-edge-aetmap-bad-project	charts/edge	edge-base.yaml neg-edge-aetmap-bad-project.yaml	which XNAT will not accept
+neg-edge-grafana-nodeport-range	charts/edge	edge-base.yaml neg-edge-grafana-nodeport-range.yaml	outside Kubernetes' node-port range
+neg-edge-ruler-am-drift	charts/edge	edge-base.yaml neg-edge-ruler-am-drift.yaml	post every log-based alert to a hostname that does not resolve
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is

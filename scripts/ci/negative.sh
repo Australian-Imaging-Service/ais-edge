@@ -77,7 +77,7 @@ charts/mgmt/templates/cert-sync.yaml	13
 charts/mgmt/templates/edge-clusters.yaml	10
 charts/mgmt/templates/observability.yaml	10
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2
-charts/edge/templates/_helpers.tpl	15
+charts/edge/templates/_helpers.tpl	20
 EOF
 }
 
@@ -111,6 +111,15 @@ declare -A EXPECTED=()
 while IFS=$'\t' read -r f n; do [ -n "$f" ] && EXPECTED["$f"]="$n"; done < <(expected_census)
 
 census_bad=0
+# Only the chart dirs this branch actually ships. Naming charts/mgmt
+# unconditionally made `find` print an error to stderr on EVERY run of an
+# otherwise green tier-1 stage — and a stage that always prints an error is a
+# stage whose output stops being read. Absent files still count 0 against
+# expected_census, so tier-2's entries above stay meaningful on main.
+census_dirs=()
+for d in "$REPO_ROOT/charts/mgmt/templates" "$REPO_ROOT/charts/edge/templates"; do
+  [ -d "$d" ] && census_dirs+=("$d")
+done
 while IFS= read -r f; do
   rel="${f#"$REPO_ROOT"/}"
   n="$(grep -c '{{-\? *fail ' "$f" || true)"
@@ -119,7 +128,7 @@ while IFS= read -r f; do
     ci_fail "guard census: $rel has $n fail() call sites, expected $want — add a negative case to ci_negative_cases in scripts/ci/values.sh, then update expected_census in this file"
     census_bad=1
   fi
-done < <(find "$REPO_ROOT/charts/mgmt/templates" "$REPO_ROOT/charts/edge/templates" -type f | sort)
+done < <(find "${census_dirs[@]}" -type f | sort)
 
 if [ "$census_bad" -eq 0 ]; then
   total=0
