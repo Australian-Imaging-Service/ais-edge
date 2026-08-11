@@ -501,6 +501,28 @@ a PVC, *not* S3 — there is no object store), Prometheus, Alertmanager, and
 Grafana on a NodePort at **30030**, since there is no ingress. Log in with the
 credentials from `grafana-admin-credentials`.
 
+**Alerts are not mailed anywhere until you say where.** `observability.stack.alerting`
+ships empty, and that is a deliberate default rather than an oversight: the
+stack installs, the dashboards work, and nothing is sent. Every alert below is
+then visible only in Grafana, which nobody is watching at 3am. On a real
+deployment fill in three keys:
+
+```yaml
+observability:
+  stack:
+    alerting:
+      emailTo: imaging-ops@example.org
+      emailFrom: ""                     # defaults to emailTo
+      smtpHost: smtp.example.org
+      smtpPort: 587
+      smtpUsername: alerts@example.org  # must match `username` in the Secret
+```
+
+The password comes from the `alertmanager-smtp` Secret in `secrets.enc.yaml`.
+Only the password is read from a file — Alertmanager has no
+`smtp_auth_username_file` — which is why the username sits in values.yaml and
+its password does not. Until `smtpHost` is set, that Secret is simply unused.
+
 Dashboards and alert rules ship with the chart. Eleven alerts are defined, and
 the ones specific to this tier are:
 

@@ -190,6 +190,27 @@ observability:
     caBundleSecret: ""
 
   stack:
+    # -------------------------------------------------------------------------
+    # Where alerts are MAILED. Empty is allowed and is the shipped default: the
+    # stack installs, the dashboards work, and nothing is sent. Every alert this
+    # chart raises is then visible only in Grafana, which nobody is watching at
+    # 3am — so on a real deployment, fill these in.
+    #
+    # The credentials live in secrets.enc.yaml as the alertmanager-smtp Secret
+    # (username + password). Without the three keys below there is nowhere to
+    # send to, so that Secret sits unused — which is the state a fresh
+    # sites/ scaffold starts in.
+    #
+    # smtpUsername is here rather than in the Secret because Alertmanager has
+    # no smtp_auth_username_file; only the PASSWORD is read from a file.
+    alerting:
+      emailTo: ""            # e.g. imaging-ops@example.org
+      emailFrom: ""          # defaults to emailTo when left empty
+      smtpHost: ""           # e.g. smtp.example.org
+      smtpPort: 587
+      smtpUsername: ""       # must match `username` in the alertmanager-smtp Secret
+      requireTLS: true
+
     # Host the log/metric store HERE: Loki + Prometheus + Grafana + Alertmanager
     # on this same node. Tier-2 ships logs off the box to a management cluster;
     # tier-1 has nowhere to ship them, so it keeps them locally.
