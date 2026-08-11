@@ -69,6 +69,43 @@ transforms:
       if err == null && is_object(parsed) {
         . = merge!(., parsed)
       }
+      # A Loki label template that references a missing field does not render
+      # empty — Vector DROPS the whole event and counts a `template_failed`.
+      # `level` below is only present on lines the pods emit as JSON, so every
+      # plain-stdout line (tqdm progress bars, tracebacks, anything a library
+      # prints directly) was being discarded before it reached Loki. Observed
+      # on cai-lfs3: 31 template_failed in a 200-line window, with the internal
+      # log itself rate-limited — so the loss was reported only in a warning
+      # that was itself being suppressed.
+      #
+      # On THIS tier that loss is total: Loki is the only log store, and there
+      # is no management-side copy to fall back on.
+      #
+      # Defaulting the field keeps those lines, labelled honestly as unknown.
+      # Do not drop the label instead: every alert rule and dashboard panel
+      # selects on it.
+      if !exists(.level) {
+        .level = "unknown"
+      }
+      # SAME DEFECT, the other two label sources. `app` and `component` come from
+      # kubernetes.pod_labels.*, which subchart pods simply do not set — Grafana,
+      # Loki, kube-state-metrics, the prometheus-operator and its admission jobs
+      # all lack them. Every log line those pods emit was dropped.
+      #
+      # Found by applying the `level` fix on a live node and watching the
+      # template failures CONTINUE, naming a different label:
+      #   Failed to render template for "label_value
+      #   "{{ kubernetes.pod_labels.component }}" with label_key "component""
+      #
+      # Defaulting is right rather than dropping the labels: the pipeline's own
+      # alerts and dashboards select on component, and a stack pod labelled
+      # "unknown" is still searchable. Losing its logs is not.
+      if !exists(.kubernetes.pod_labels.app) {
+        .kubernetes.pod_labels.app = "unknown"
+      }
+      if !exists(.kubernetes.pod_labels.component) {
+        .kubernetes.pod_labels.component = "unknown"
+      }
 
 sinks:
   loki:
