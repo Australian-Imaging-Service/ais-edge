@@ -445,7 +445,18 @@ PY
     export CLUSTER_CR_MANAGED_BY_HELM=1
 
     if step "5/7  ${EDGE_NAME}: child kubeconfig + join token"; then
-        bash "${SCRIPT_DIR}/scripts/05-setup-edge-cluster.sh" "$EDGE_NAME"
+        # JOIN_TOKEN_TTL BELONGS HERE, because step 05 is where the token is
+        # actually minted (scripts/05-setup-edge-cluster.sh:128 reads it, :139
+        # writes it as the Secret's `expiry`).
+        #
+        # It used to be passed only to 06b on the bundle arm below, so
+        # edges[].joinTokenTTL reached the bundle BUILDER but never the MINTER,
+        # and every token was the 2h default no matter what the site asked for.
+        # Documented as a working knob in README and TOUR §4.1 — and advised
+        # there precisely for the bundle case, where a token has to survive being
+        # carried to a hospital by hand. That is the one case it silently failed.
+        JOIN_TOKEN_TTL="${EDGE_JOIN_TTL:-${JOIN_TOKEN_TTL:-2h}}" \
+            bash "${SCRIPT_DIR}/scripts/05-setup-edge-cluster.sh" "$EDGE_NAME"
     fi
 
     # HOW THE WORKER IS JOINED.

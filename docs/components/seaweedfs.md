@@ -8,28 +8,74 @@ sites and XNAT. Apache 2.0 licensed.
 
 ## Role in this stack
 
-The DICOM staging buffer. Edge sites upload session directories via S3
-PUT (`mc mirror`) into the `ingest-bucket` `staged/` prefix. The
-management-side `xnat-ingest-upload` pod polls the bucket and forwards
-new sessions to XNAT. SeaweedFS also stores the observability stack's
-logs (Loki writes chunked log data to a separate `logs-bucket`).
+The DICOM staging buffer. Edge sites upload session directories with
+`aws s3 sync` (`charts/edge/files/s3-uploader.sh` — the `minio/mc`
+implementation is gone) into the `staged/` prefix of **their own**
+bucket. With `seaweedfs.perSiteBuckets: true`, the default, that bucket
+is `ingest-<edge>`; the single shared `ingest-bucket` survives only for
+sites not yet migrated off it. The management-side `mgmt-upload-<edge>`
+pod polls that one bucket and forwards new sessions to XNAT. SeaweedFS
+also stores the observability stack's logs (Loki writes chunked log data
+to a separate `logs-bucket`).
+
+**Why a bucket per site.** SeaweedFS matches an identity's actions as
+`<action>:<bucket>`, so `Write:<bucket>/*` is bucket-wide — there is no
+prefix-level scoping. Measured on the live cluster: the `edge-dev` key
+lists its own bucket fine and gets `AccessDenied` on `logs-bucket`, so
+the bucket is the enforcement boundary, and only the bucket. While every
+site shared one bucket, any edge key could read, list and delete every
+other site's staged imaging. One bucket per site makes the enforcement
+boundary and the trust boundary the same thing, and it is what lets the
+uploader and reclaimer be per-site instead of a fleet-wide single point
+of failure.
 
 ## What SeaweedFS has access to
 
 - **hostPath `/data/seaweedfs`** on the management node (Haystack
-  volumes + filer leveldb)
+  volumes + filer leveldb), surfaced as a PV/PVC pair by the chart
 - **In-cluster network** (its own Service)
 - **No outbound network** — fully passive; only accepts requests
-- **S3 IAM identities** in the `s3-config` ConfigMap, scoped per writer:
-  - `admin` — full access to everything (used by mgmt mc + upload pod)
-  - `<edge-name>` — write+list scoped to `ingest-bucket` only
-  - `loki-writer` — read+write+list scoped to `logs-bucket` only
+- **S3 IAM identities**, four kinds, each scoped to what it actually
+  needs:
+  - `admin` — `Admin`/`Read`/`Write`/`List`/`Tagging` over the store.
+    Used by the bucket-creation hook, **not** by the upload pod
+  - `<edge-name>` — one per `edges[]` entry:
+    `Read`/`List`/`Write`/`Tagging` on **that site's own bucket** only
+  - `upload-<edge-name>` — one per edge, for the S3→XNAT uploader, same
+    scope. `Write` is what lets it remove a staged session once XNAT has
+    confirmed it: SeaweedFS folds object DELETE into that action
+  - `loki-writer` — `Read`/`List`/`Write`/`Tagging` on `logs-bucket`
+    only. Deliberately cannot see any ingest bucket; the log store has
+    no business holding a key that reads imaging data
+
+**There is no `s3-config` ConfigMap.** A Helm template cannot read a
+Secret's contents, so this chart cannot render `s3.json` at all — which
+is the point. The identity document is assembled **inside the pod** by
+the `build-s3-identities` init container, from the per-identity Secrets
+projected in by name, written with `umask 077` to a tmpfs
+`emptyDir{medium: Memory}`. Nothing secret is ever templated and nothing
+secret is written to a second object at rest. The predecessor,
+`scripts/03-deploy-seaweedfs.sh`, did `kubectl create configmap s3-config
+--from-file=s3.json` — every edge's S3 secret key in plaintext, readable
+by anything with configmap-read in the namespace and dumped in full by
+`kubectl get cm -o yaml`. It also mis-parsed `edge-nodes.env` with a
+7-field `IFS='|' read` where the rest of the scripts used 6, so every
+edge identity got an **empty** secretKey; SeaweedFS starts happily with
+one, and the edge just gets 403 on every PUT forever with nothing wrong
+on the management side. A missing or empty credential is now a hard
+init-container failure, naming the identity in the log.
 
 ## Where it runs
 
 - Cluster: management cluster only
-- Namespace: `seaweedfs`
-- Workload: Deployment `seaweedfs` (single replica, all-in-one)
+- Namespace: `ais-mgmt` — the management **release namespace**
+  (`MGMT_NS` in `install.sh`). Everything below renders into
+  `.Release.Namespace`; there is no `seaweedfs` namespace, and there has
+  not been one since the Helm migration
+- Workload: Deployment `mgmt-seaweedfs` (single replica, all-in-one).
+  The `mgmt-` prefix is the Helm release name (`MGMT_RELEASE`), applied
+  by `mgmt.fullname` — a site installed under a different release name
+  shifts every object below
 - Image: `chrislusf/seaweedfs:4.34` (was 3.99 — moved off it because 3.99 is
   vulnerable to CVE-2026-54917, CVE-2026-58372 and CVE-2026-55874: three S3
   path traversals that let one site's key read, copy and *delete* across
@@ -38,39 +84,63 @@ logs (Loki writes chunked log data to a separate `logs-bucket`).
   old pin avoided, is closed — but see the risk table for #10253, which is not.
   The Iceberg REST Catalog 4.x turns on by default is disabled explicitly with
   `-s3.port.iceberg=0`.)
-- Service: `seaweedfs.seaweedfs.svc.cluster.local` (ClusterIP only)
+- Service: `mgmt-seaweedfs.ais-mgmt.svc.cluster.local` (ClusterIP only).
+  In-cluster consumers get this address from the `mgmt.s3InternalEndpoint`
+  helper rather than a literal, so it follows the release name
 - External: nginx-ingress route `https://seaweedfs.aisedge.local:443`
-  (TLS-terminated, signed by ais-edge-ca)
-- Metrics Service: `seaweedfs-metrics.seaweedfs.svc:9324`
+  (TLS-terminated, signed by ais-edge-ca). This is the address **edges**
+  use; in-cluster traffic stays on plain http so the custom CA never has
+  to reach pods that have no other reason to trust one
+- Metrics Service: `mgmt-seaweedfs-metrics.ais-mgmt.svc:9324` — a
+  separate metrics-only Service so the ServiceMonitor can select it
+  without also matching the S3 Service above
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
 | `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook |
-| `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, per-site bucket toggle, image tag |
-| `sites/<site>/values.yaml` | `hostnames.seaweedfs`, `seaweedfs.buckets.ingest`, `seaweedfs.buckets.logs` |
+| `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, `perSiteBuckets` + `bucketPrefix`, image tag, resource limits |
+| `sites/<site>/values.yaml` | `hostnames.seaweedfs`, `seaweedfs.buckets.logs`, and `edges[].bucket` to pin one site's bucket name. `seaweedfs.buckets.ingest` only takes effect with `perSiteBuckets: false` — otherwise the name is `<bucketPrefix>-<edge name>`, computed by the `mgmt.edgeBucket` helper |
 | `sites/<site>/secrets.enc.yaml` | the `seaweedfs-admin` and `loki-s3-credentials` Secrets — named by `seaweedfs.adminSecretRef` and `observability.loki.s3SecretRef` |
 
 ## Operations
 
 ```bash
 # Pod state
-kubectl get pods -n seaweedfs
+kubectl get pods -n ais-mgmt -l app=seaweedfs
 
-# In-cluster S3 (admin)
-kubectl port-forward -n seaweedfs svc/seaweedfs 8333:8333 &
-mc alias set seaweed http://localhost:8333 seaweedadmin <secret>
-mc ls seaweed/ingest-bucket/staged/    # see staged sessions
+# In-cluster S3 (admin). The client is the AWS CLI now, not mc.
+kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 8333:8333 &
+export AWS_ENDPOINT_URL=http://localhost:8333 AWS_DEFAULT_REGION=us-east-1
+aws s3 ls s3://ingest-edge-dev/staged/   # one bucket per site
 
 # Master + filer admin UIs
-kubectl port-forward -n seaweedfs svc/seaweedfs 9333:9333 &  # master
-kubectl port-forward -n seaweedfs svc/seaweedfs 8888:8888 &  # filer
+kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 9333:9333 &  # master
+kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 8888:8888 &  # filer
 
-# s3.json is rendered by charts/mgmt from the edges: list — re-run the install
+# NOT the metrics port: `weed server -metricsPort=9324` binds the pod IP,
+# not 127.0.0.1, so port-forward to :9324 fails BY DESIGN while Prometheus
+# (which dials the Service IP) scrapes it fine. A failed port-forward here
+# is not evidence of broken metrics.
+
+# Adding or removing an entry in `edges` changes the projected volume and
+# the init script, so Helm rolls the pod by itself:
 helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
-# (idempotent — recomputes the config-hash annotation, rolls the pod)
 ```
+
+**After rotating a key inside an existing Secret, restart by hand.**
+That kind of edit does not change the pod spec, so Helm does not roll
+anything, and `weed server -s3.config` reads the assembled `s3.json`
+exactly once at startup — the pod keeps serving the old key indefinitely
+with no error anywhere:
+
+```bash
+kubectl rollout restart deploy/mgmt-seaweedfs -n ais-mgmt
+```
+
+The `S3_CONFIG_HASH` annotation the shell installer used to recompute for
+this is gone, along with the installer.
 
 ### Deletion must go through the filer, never `aws s3 rm`
 
@@ -103,11 +173,38 @@ never shells out to `aws s3 rm`.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Pod crash | Edge uploads + Loki writes pause | Pod auto-restarts; fast (~10s) |
-| `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` alert at 80%; retention CronJob (TODO) deletes uploaded sessions |
+| `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` at 80% of `SeaweedFS_volumeServer_resource`, plus the staged-data reclaimer described below — one CronJob per edge, no longer a TODO |
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
-| `s3-config` ConfigMap drift | Auth fails | Re-running script 03 regenerates it; config-hash annotation rolls the pod |
+| An S3 key is rotated inside its Secret | Nothing rolls; the pod keeps serving the old key until it restarts, and the edge gets 403 on every PUT with nothing wrong on the management side | `kubectl rollout restart deploy/mgmt-seaweedfs -n ais-mgmt` after the rotation. Adding or removing an `edges[]` entry *does* roll the pod by itself — only in-place key edits are invisible to Helm. A missing or empty credential is caught earlier: the init container fails hard, naming the identity |
 | Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
 | ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | — | Was only ever measured against 3.99. Re-measured live against 4.34's real S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
+
+## Staged-data reclaim (shipped, not future work)
+
+`xnat-ingest upload` has **no S3 retention of its own**: it rebuilds its
+work list from a live listing every `--loop` pass, so a delivered session
+stays in the bucket, is listed again, "uploaded" again and re-fires
+`XNATUploadSuccess` forever while staging grows without bound. The
+reclaimer is the only thing that deletes from staging.
+
+| Fact | Value |
+|---|---|
+| Object | CronJob `mgmt-reclaim-<edge>`, **one per `edges[]` entry**, namespace `xnat-upload` |
+| Driven by | `dataPolicy.derived.s3Staged` in `charts/mgmt/values.yaml` |
+| Schedule | `17 * * * *` |
+| Age gate | `minAge: 1d` |
+| Per-run cap | `maxRemovals: 50` — bounds a "delete everything" bug to 50 sessions per hour, while still draining ~1200/day if genuinely needed |
+| Confirmation | `verifyAgainstXnat: true` — re-queries XNAT before deleting, rather than trusting the uploader's exit code, which only means the call returned |
+| Deletion path | `DELETE <filer>/buckets/<bucket>/<prefix>/<session>?recursive=true` via `mgmt.filerInternalEndpoint`, never `aws s3 rm` — see the section above for why |
+| Opt out | `reclaim: never` renders **nothing** — not a suspended CronJob, not an empty ConfigMap, so there is no object left that could be resumed by accident |
+
+Metrics discovery is likewise done: `charts/mgmt/templates/observability.yaml`
+ships a ServiceMonitor for `mgmt-seaweedfs-metrics`, and the
+`SeaweedFS_volumeServer_resource` series it collects are what
+`SeaweedFSDiskFull` reads (measured on the live cluster). The rule
+replaced one built on `kubelet_volume_stats_used_bytes`, which publishes
+nothing for a hostPath volume — `count()` returned no series at all, and
+the alert had been green its entire life for want of an input.
 
 ## Replacements / future
 
@@ -123,11 +220,8 @@ never shells out to `aws s3 rm`.
 
 ## Future enhancements
 
-- S3 lifecycle rules to auto-delete sessions older than N days from
-  `ingest-bucket/staged/` after XNAT confirms
-- Dedicated metrics service-monitor (currently the metrics port is
-  exposed but Prometheus discovery via ServiceMonitor needs verification
-  against the 3.99 metrics format; re-checked on 4.34 — the three
-  `SeaweedFS_volumeServer_*` series these read are unchanged, 4.x only adds)
+- S3 lifecycle rules as a *second* line of defence under the reclaimer,
+  for objects it never learns about (an aborted multipart, a session
+  written by something outside the pipeline)
 - Replication: 3-master HA with Raft, separate volume/filer/s3
   deployments

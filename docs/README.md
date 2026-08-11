@@ -35,7 +35,17 @@ Operations → Risks → Replacements / Future).
 - [`cert-manager.md`](components/cert-manager.md) — issues server certs
   signed by ais-edge-ca
 
-### Observability stack (optional, install via `scripts/02d-...`)
+### Observability stack (optional — `observability.enabled` in `charts/mgmt`, installed at step 4/7 of `install.sh`)
+
+There is no separate observability installer any more: these are pinned
+subcharts of `charts/mgmt` (kube-prometheus-stack, loki, vector — see
+`charts/mgmt/Chart.yaml`), applied by `./install.sh <site>` in the same step
+as the rest of the management chart. It is still optional: the default is
+`observability.enabled: true`, and setting it to `false` in the **management**
+site's `sites/<mgmt-site>/values.yaml` omits the whole stack. Note that
+`charts/edge` has a *separate* `observability.enabled` (default `false`) that
+only turns on log shipping from that edge to the management cluster — so
+which values file you are editing matters.
 
 - [`loki.md`](components/loki.md) — log store
 - [`prometheus.md`](components/prometheus.md) — metrics store
@@ -49,6 +59,26 @@ Operations → Risks → Replacements / Future).
 
 ### System-level references
 
+- [`TOUR.md`](TOUR.md) — **start here.** The guided walkthrough, read start
+  to finish: what each machine is (§1), what you must decide before
+  installing (§2), secrets (§3), the install itself (§4), the hop-by-hop
+  path of a study (§5), `dataPolicy` — what actually deletes (§5c), and §9
+  Known shortcomings, which is the evidence trail behind the removed alerts
+  and the version pins. §4.1 is the only complete treatment of
+  `join: bundle`, the way to bring up an edge the management node cannot
+  SSH to (whitelisted-IP allowlist, VPN, GlobalProtect) — including the
+  bundle's self-defence guards and the teardown caveat.
+- [`hardening-decisions.md`](hardening-decisions.md) — the
+  findings-and-decisions log: each item states the finding, the
+  recommendation and what it costs, plus the R1-R6 revisions that amended
+  earlier calls. Broader than security alone — it also covers reclaimer
+  completeness, object counting, alerting correctness, retention, cluster
+  adoption and sizing/immutable fields. Items marked *(measured)* were
+  verified against the live cluster rather than reasoned from documentation.
+- [`ca-ceremony.md`](ca-ceremony.md) — the out-of-band offline-root CA
+  ceremony, required by `certManager.ca.mode: intermediate` (the chart fails
+  the render and points here when that mode is set without a `secretRef`).
+  Does not apply to the default `selfSigned` mode.
 - [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event
   alerts live in Loki ruler (LogQL) while K8s-level alerts stay in
   Prometheus, and the tradeoff against an edge-Prometheus remote-write
@@ -65,8 +95,10 @@ Operations → Risks → Replacements / Future).
   (EKS / GKE / AKS / Magnum / Nectar). Cloud LB + real DNS, the dev
   test on nip.io, and the dev-to-prod swap procedure.
 - [`clouds/`](clouds/README.md) — **per-cloud install guides**:
-  [openstack-nectar.md](clouds/openstack-nectar.md) (E2E tested),
-  [aws.md](clouds/aws.md), [gcp.md](clouds/gcp.md),
+  [openstack-private-subnet.md](clouds/openstack-private-subnet.md)
+  (recommended for production),
+  [openstack-nectar.md](clouds/openstack-nectar.md) (E2E tested, but
+  dev/test only), [aws.md](clouds/aws.md), [gcp.md](clouds/gcp.md),
   [azure.md](clouds/azure.md).
 
 ## How to add a new component doc

@@ -1,9 +1,31 @@
 # Hardening — findings, decisions, and a critique of how we got here
 
-Status: **the charts render and validate, but are NOT safe to install on the
-existing management cluster yet.** This document is the decision list that has
-to be settled first. Each item states the finding, what I recommend, and what
-that recommendation costs.
+Status: **superseded as a blocker list — most of it has shipped.** When this
+was written the charts rendered and validated but were not safe to install on
+the existing management cluster. They have since been installed on it: the
+adoption pass ran on 2026-08-05 against `https://203.101.224.240:6443`
+(`adoption-records/adopt-mgmt-ais-mgmt-20260805T031207Z.json`, `"mode":
+"applied"`, release `mgmt` in `ais-mgmt`), and the sections below have largely
+been implemented. Read it now as **the decision record** — what was found, what
+was decided, and what it cost — not as the list of things still to do. Each
+item states the finding, what I recommended, and what that recommendation cost;
+where a section has shipped, that is marked at the section itself.
+
+What shipped, in one place, so a reader does not have to infer it section by
+section:
+
+| § | Decision | Where it lives now |
+|---|---|---|
+| 0 | Bucket per edge site | `seaweedfs.perSiteBuckets: true`, `bucketPrefix: ingest` → `ingest-<edge>` |
+| 1 | mTLS on the Loki push path | shipped; see the status banner on §1 |
+| 2 | Per-edge hostnames, SNI | shipped in the amended both-modes form — `edges[].exposure: sni` |
+| 3 | Two-tier CA, root offline | optional per R5: `certManager.ca.mode: intermediate` + `docs/ca-ceremony.md`; the `certManager.enabled` conflation is fixed ("Independent of `enabled` on purpose") |
+| 4 | Reclaimer completeness | revised by R1 and implemented as the manifest-vs-XNAT check in `charts/mgmt/files/reclaim-staged.sh` |
+| 5 | Counting objects | `--output json, NOT --output text` in `reclaim-staged.sh` — `--output text` applies `--query` per page and silently truncates |
+| 6 | Alerting correctness | split by R6 into rule-input checking (`scripts/check-alert-inputs.sh`) and rule-logic tests (`promtool` + the Loki rule tests in CI) |
+| 7 | Data-retention guarantees | `enableStatefulSetAutoDeletePVC: false` plus the `scripts/ci/pvc-retention.sh` assertion |
+| 8 | Adopting the existing cluster | `scripts/adopt-existing.sh`, dry-run by default — "`--apply` is the only thing that writes" |
+| 9 | Sizing and immutable fields | separate `etcdPersistence.size: 1Gi`, because the etcd `volumeClaimTemplate` is immutable |
 
 Everything marked *(measured)* was verified against the live SeaweedFS 3.99 /
 cert-manager v1.20.3 / k0smotron v2.0.3 on stream-2-ab-dev, not reasoned from
@@ -115,6 +137,21 @@ distribution path". **That was wrong.** `scripts/07b` already runs
 `kubectl create secret ... ca-bundle` against the edge cluster. Distributing a
 client certificate is the same mechanism with one more Secret. The objection
 that made basic auth look pragmatic does not exist.
+
+> **Since then — both things this paragraph names are gone.** It is kept as
+> written because it is the argument that settled the decision, but neither
+> reference resolves today. `scripts/07b` no longer exists: `install.sh` records
+> that "Steps 4 and 7 replace what used to be scripts
+> 02b/02c/02d/03/04/07/07b/07c", so there is no `07*` script at all.
+> `loki-push-credentials` is gone too — the banner at the top of this section
+> records its removal along with the rest of the basic-auth path. What the
+> argument turned into is the **cert-sync CronJob** (`charts/mgmt/templates/cert-sync.yaml`,
+> configured under `certSync` in `charts/mgmt/values.yaml`), seeded once per
+> edge by `install.sh` immediately after the edge chart installs so a fresh
+> site does not wait up to six hours for its first sync. The reasoning held:
+> distributing the client certificate *was* the same mechanism with one more
+> Secret. Only the mechanism's name changed, and it changed from a one-shot
+> script to something that also handles renewal — see R2.
 
 Design:
 
@@ -450,16 +487,43 @@ trusted with real data.
 
 ## Structural things I would change
 
+> **Status: all three have since been done.** The findings are kept verbatim
+> below — they are an accurate record of what was wrong — with what each one
+> became noted underneath it.
+
 * `edge.validate` is invoked from exactly one template (`storage.yaml`). If
   that file is ever renamed or made conditional, **every guard silently stops
   running**. It should be invoked from a dedicated always-rendered template,
   or from every template.
+  *(Done. `charts/edge/templates/validate.yaml` is that template: its header
+  says "The only job of this file is to run edge.validate… This file has no
+  other content and no condition", the include is its last line, and
+  `grep -rn 'include "edge.validate"' charts/edge/templates/` returns that one
+  line and nothing in `storage.yaml`. The management chart has the matching
+  `charts/mgmt/templates/validate.yaml`. `make negative` in CI proves the
+  guards still fire, so a future rename cannot silence them quietly.)*
 * We now have **two edge charts**: `helm/edge` (James's, with my three fixes)
   and `charts/edge` (consolidated). That duplication has to be resolved before
   this merges, or sites will install the wrong one.
+  *(Done. There is no `helm/` directory any more; `charts/` holds exactly
+  `edge` and `mgmt`, and `install.sh` installs those two and nothing else.)*
 * There is no CI. Everything verified here was verified by hand in a session.
   `helm lint` + `helm template` + `bash -n` + the JSON/YAML parse checks +
   a `--dry-run=server` against a kind cluster should all run on every push.
+  *(Done, and it went further than the wish-list. `.github/workflows/ci.yml`
+  runs on every push: `helm lint + helm template (values matrix, both charts)`;
+  `Negative tests (every render guard must still fire)`; `promtool check rules
+  + test rules`; `bash -n (scripts/ and charts/*/files/)`; `PVC retention
+  (nothing holding data may be auto-deleted)`; `Runtime templates survive
+  rendering`; `Secret contract (namespaces and keys the charts actually
+  mount)`; `Values consumers (no key declares a behaviour nothing implements)`;
+  `Loki rule tests (real expressions against a real Loki)`; and `data-policy
+  engine tests (what actually got deleted)`. A second job, `greenfield install
+  (kind)`, installs both charts into an empty cluster — the `--dry-run=server`
+  idea, done for real. The harness is the scripts under `scripts/ci/`, driven
+  by the `Makefile`. The last three of those checks are the ones this
+  document could not have asked for, because they test claims rather than
+  syntax.)*
 
 ## Recommended order of work
 
@@ -534,6 +598,12 @@ here unless renewal is handled.
   is not extra complexity — it **replaces** the manual `scripts/07b`
   distribution step, and it can carry the CA bundle too. Net reduction in
   moving parts.
+  *(Shipped, and the replacement is total: `scripts/07b` no longer exists —
+  one CronJob per edge, `mgmt-cert-sync-<edge>`, on `23 */6 * * *`. `install.sh`
+  runs each one immediately after that edge's chart install with
+  `kubectl create job --from=cronjob`, because a fresh site would otherwise sit
+  without its `ca-bundle` and client certificate — neither optional, both
+  mounted — for up to six hours while the install reported success.)*
 * **mTLS must not ship before the log-absence alert** (§6). Without it, the
   failure mode is invisible. Sequencing matters more than either piece.
 

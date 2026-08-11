@@ -12,10 +12,15 @@ single `sort` command was split into two edge stages:
    the grouped DICOMs and stages them as a structured directory
 3. **`upload`** — pushes staged sessions to an XNAT server via REST
 
-We run these as three pods:
+We run these as three xnat-ingest pods, plus one non-xnat-ingest
+uploader that carries the sessions between the edge and the management
+node:
 - **`xnat-ingest group-orthanc`** and **`xnat-ingest assign`** on each
   edge VM
-- **`xnat-ingest upload`** on the management node
+- **`s3-uploader`** on each edge VM — an `aws s3 sync` loop, not
+  xnat-ingest at all (see "Where it runs")
+- **`xnat-ingest upload`** on the management node, rendered **once per
+  edge site** rather than once for the fleet
 
 > **De-identification is done in Orthanc** (the Lua hook), not in
 > xnat-ingest. Upstream 0.12.3 also ships a standalone, optional
@@ -28,54 +33,131 @@ The DICOM ingest engine. On each edge worker Orthanc receives and
 de-identifies studies (see [orthanc.md](orthanc.md)); `group-orthanc`
 REST-pulls the studies Orthanc has labelled `xnat-ingest-ready` and
 groups their DICOMs into `/data/grouped/<session>/`, then `assign`
-produces the `/data/staging/<project>.<subject>.<visit>/` hierarchy. The
-s3-uploader mirrors the staged dirs to SeaweedFS, and the management
-upload pod pulls from SeaweedFS (an `s3://` source) and pushes to XNAT.
+produces the `/data/assigned/<project>.<subject>.<visit>/` hierarchy —
+`xnat-ingest assign /data/grouped /data/assigned`
+(`charts/edge/templates/ingest-pipeline.yaml`), declared as
+`dataPolicy.derived.assigned.location` in `charts/edge/values.yaml`.
+There is **no `staging/` directory on the edge**: "staged" is the
+*S3-side* word for those same sessions once the s3-uploader has synced
+them under `s3://<bucket>/staged/`. The management upload pod pulls
+from SeaweedFS (an `s3://` source) and pushes to XNAT.
 
 ## What xnat-ingest has access to
 
 ### group-orthanc + assign pods (edge)
-- **hostPath `/data/xnat-ingest/`** — group-orthanc reads
-  `orthanc-storage/` and writes `grouped/`; assign reads `grouped/` and
-  writes `staging/`
+- **The pipeline PVC, mounted at `/data`** — one hostPath-backed claim
+  (`storage.pipeline.hostPath: /data/xnat-ingest`) that *every* stage
+  mounts at the same path. That is a requirement, not tidiness: the
+  stages hardlink between the directories and a hardlink cannot cross a
+  filesystem boundary, so splitting them makes `hardlink_or_copy`
+  silently degrade to a full byte copy of every study. group-orthanc
+  reads `orthanc-storage/` and writes `grouped/`; assign reads
+  `grouped/` and writes `assigned/`
 - **In-cluster HTTP to Orthanc** — group-orthanc REST-pulls from
-  `orthanc.xnat-ingest.svc.cluster.local:8042`; assign is purely local
-  filesystem work
+  `edge-orthanc.xnat-ingest.svc.cluster.local:8042` (release-prefixed —
+  see [orthanc.md](orthanc.md)); assign is purely local filesystem work
+- **Orthanc REST credentials** — group-orthanc reads `orthanc-user` and
+  `orthanc-password` from the `orthanc-credentials` Secret, because
+  Orthanc's API is authenticated (`orthanc.auth.enabled: true` by
+  default). If they disagree with the user in that Secret's
+  `users.json`, Orthanc answers 401 and the pipeline stalls silently
 - **No XNAT credentials** — neither edge stage talks to XNAT
 
+### s3-uploader pod (edge)
+- **The same pipeline PVC** — reads `assigned/`, and removes each
+  session after a verified sync when
+  `dataPolicy.derived.assigned.reclaim: onUploaded`
+- **Outbound HTTPS to SeaweedFS** — the `https://seaweedfs.<domain>`
+  Ingress on the management node, not the in-cluster Service; it
+  therefore needs the CA bundle (`ca-bundle` Secret, key `ca.crt`,
+  delivered by the cert-sync CronJob) as `AWS_CA_BUNDLE`
+- **One Secret** — `s3-edge-credentials` (`upload.s3.existingSecret`),
+  keys `access-key` / `secret-key`, scoped to this site's own bucket
+
 ### upload pod (mgmt)
-- **In-cluster S3** — `http://seaweedfs.seaweedfs.svc.cluster.local:8333`
-  via `boto3` honouring the `AWS_ENDPOINT_URL` env var
+- **In-cluster S3** —
+  `http://mgmt-seaweedfs.ais-mgmt.svc.cluster.local:8333` via `boto3`
+  honouring the `AWS_ENDPOINT_URL` env var. The address is **derived
+  from the release name**, not hardcoded (`mgmt.s3InternalEndpoint` in
+  `charts/mgmt/templates/_helpers.tpl`) — the imperative manifest's
+  literal `seaweedfs.seaweedfs` broke the moment the release was not
+  named `seaweedfs`. Plain http on purpose: this traffic never leaves
+  the node, so the custom CA never has to reach this pod
 - **Outbound HTTPS** to the configured XNAT server
 - **Two Secrets:**
-  - `xnat-credentials` — server URL, username, password
-  - `s3-credentials` — admin S3 access key/secret
+  - `xnat-credentials` (`xnatUpload.xnatSecretRef`) — server URL,
+    username, password
+  - `seaweedfs-upload` (`xnatUpload.s3SecretRef`, overridable per site
+    with `edges[].uploadSecretRef`) — S3 access key/secret. **Not the
+    admin identity:** the matching `upload-<edge>` S3 identity is scoped
+    to `Read`/`List`/`Write`/`Tagging` on that one edge's bucket
+    (`charts/mgmt/templates/seaweedfs.yaml`), so a leaked uploader key
+    cannot reach another site's staged imaging. `Write` is what lets it
+    delete a staged session once XNAT has confirmed it — SeaweedFS folds
+    object DELETE into that action
+
+xnat-ingest has no S3 env-var path of its own: it persists the keys into
+its own credential store on first run, so the same two values are also
+passed positionally as `--store-credentials $(S3_ACCESS_KEY)
+$(S3_SECRET_KEY)`. That is the only way to seed it.
 
 ## Where it runs
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `xnat-ingest-group` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
-| `xnat-ingest-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
-| `s3-uploader` | edge | `xnat-ingest` | `minio/mc:latest` (NOT xnat-ingest) |
-| `xnat-ingest-upload` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `edge-s3-uploader` | edge | `xnat-ingest` | `amazon/aws-cli:2.31.19` (NOT xnat-ingest) |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+
+Every name is **release-prefixed** by the chart's `fullname` helper, and
+`install.sh` installs the edge chart as release `edge` and the management
+chart as release `mgmt` — so the objects are `edge-assign` and
+`mgmt-upload-<edge>`, not the bare `xnat-ingest-*` names the imperative
+installer used. A site installed under a different release name shifts
+all four.
+
+The management uploader is **one Deployment per edge site**, not one for
+the fleet. Correctness first: with one staging bucket per site, a single
+uploader cannot serve them all, because `xnat-ingest upload` takes
+exactly one `s3://bucket/prefix`. Reliability second: a fleet-wide
+uploader means one site's poison session, stuck multipart or expired
+credential stops delivery for *every* site, and the failures are
+indistinguishable because they share one log stream. Per-site uploaders
+give per-site isolation, per-site alerting via the `edge` label, and let
+one site be paused without touching the others. Measured cost of a
+single uploader — 231Mi resident, 4m CPU — puts a practical ceiling
+around 15 sites on a 16Gi management node.
+
+A site can also skip S3 entirely with `upload.mode: direct`, which
+renders `edge-upload` (xnat-ingest `upload` straight from the edge to
+XNAT) instead of `edge-s3-uploader` and needs no management plane, no S3
+and no CA plumbing. The two modes are mutually exclusive and the chart
+refuses to render both — enabling both would push every session into
+XNAT twice.
 
 The `0.12.3` tag is the **merged-upstream** AIS build pulled from
 `ghcr.io/australian-imaging-service/xnat-ingest` — it replaces the earlier
 local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
-upstream, so no local rebuild is needed: the image is pulled directly and
-imported into k0s containerd via `ctr image import` on the management host
-and each edge worker. Override the tag via `xnatUpload.image.tag` in
-`charts/mgmt/values.yaml` (mgmt side) or `ingest.image.tag` in
-`charts/edge/values.yaml` (edge side).
+upstream, so no local rebuild is needed — and no image-import step
+either. Both charts set `imagePullPolicy: IfNotPresent`
+(`ingest.image.pullPolicy` in `charts/edge/values.yaml`,
+`xnatUpload.image.pullPolicy` in `charts/mgmt/values.yaml`), so each node
+pulls the tag from ghcr.io the first time a pod lands on it and reuses
+the cached layers afterwards. Nothing in `install.sh` or `scripts/`
+side-loads the image into the container runtime. Override the tag via
+`xnatUpload.image.tag` in `charts/mgmt/values.yaml` (mgmt side) or
+`ingest.image.tag` in `charts/edge/values.yaml` (edge side).
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `charts/mgmt/templates/xnat-upload.yaml` | upload Deployment, env vars, AIS_LOG_FORMAT=json |
-| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc + assign + s3-uploader Deployments, hostAliases |
+| `charts/mgmt/templates/xnat-upload.yaml` | one upload Deployment per `edges[]` entry, env vars, AIS_LOG_FORMAT=json |
+| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc + assign Deployments, hostAliases |
+| `charts/edge/templates/upload.yaml` | the edge uploader — `edge-s3-uploader` (mode `s3`) or `edge-upload` (mode `direct`); exactly one renders |
+| `charts/edge/files/s3-uploader.sh` | the `aws s3 sync` loop itself, plus the `jlog()` event schema below. A real file, not inline YAML, so `bash -n` can lint it in CI |
 | `install.sh` | installs both charts; cert-sync (CronJob) pushes the CA bundle into each edge |
 | `sites/<site>/secrets.enc.yaml` (`xnat-credentials`) | server URL, username, password — SOPS-encrypted |
 | `sites/<edge>/values.yaml` (`ingest:`) | per-edge loop intervals; the AET-to-project map is `orthanc.deid.aetMap` in the same file |
@@ -97,23 +179,66 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
   "ts":         "2026-05-14T07:16:50+00:00",
   "component":  "s3-uploader",
   "edge":       "edge-dev",            // CLUSTER_NAME — used as Vector's `cluster` label
-  "event":      "upload_completed",    // upload_started | upload_completed | upload_failed | startup | alias_configured
+  "event":      "upload_completed",    // one of nine — full list below
   "session":    "test-project.subject01.visit01",  // PROJECT.SUBJECT.VISIT
   "message":    "",                    // free-form; empty for the routine events
   "bytes":       538740,               // total session size on disk (du -sb)
-  "files":       2,                    // count of staged files: DICOMs + manifest + any other per-session metadata
+  "files":       2,                    // every object uploaded: DICOMs + __MANIFEST__.json + __METADATA__.json
   "dicoms":      1,                    // subset of `files` matching *.dcm / *.DCM
-  "duration_s":  0                     // mc-mirror wall time, present on upload_completed and upload_failed
+  "duration_s":  0                     // `aws s3 sync` wall time, present on upload_completed and upload_failed
 }
 ```
+
+The nine event names, and what each one means:
+
+| Event | Emitted when |
+|---|---|
+| `startup` | the loop starts; records endpoint, bucket, prefix and reclaim mode |
+| `endpoint_ready` | the `head-bucket` probe succeeded |
+| `endpoint_retrying` | probe failed; retrying (12 attempts over 60s) |
+| `endpoint_failed` | probe failed 12 times — refuses to enter the upload loop |
+| `upload_started` | a settled session is about to be synced |
+| `upload_completed` | `aws s3 sync` exited zero |
+| `upload_failed` | `aws s3 sync` exited non-zero; retried next cycle |
+| `upload_skipped` | dangling symlinks, or the endpoint went away mid-loop — the local copy is deliberately preserved rather than uploaded incomplete |
+| `reclaim_skipped` | uploaded, but `dataPolicy` is disabled or in dry-run, so the local copy stays |
+
+Only **`upload_started`, `upload_completed` and `upload_failed`** are
+matched by Loki ruler alerts (`EdgeUploadStalled`, `EdgeUploadsFailing`,
+`EdgeUploadRetrying`, `S3ToXNATBacklog`). Renaming one of those disables
+its alert *silently* — no error, just a rule that never fires again.
+The three `endpoint_*` events are operator diagnostics; they were called
+`alias_configured` / `alias_retrying` / `alias_failed` under the old
+`minio/mc` implementation, and were renamed because "alias" is an `mc`
+concept that does not exist now the client is the AWS CLI. Nothing
+matched the old names, which is what made that rename safe.
+
+An already-uploaded, unchanged session emits **nothing at all**. The
+uploader fingerprints each session directory and compares it against a
+state file under `/data/LOGS/s3-uploader-state/`; a per-cycle "still
+fine" event here is exactly what produced two days of duplicate
+upload-completed alert mail.
 
 The `dicoms` vs `files` split exists because xnat-ingest assign
 auto-generates a `__MANIFEST__.json` per RESOURCE (not per session) and the s3-uploader writes
 it to S3 alongside the DICOMs. Dashboards / alerts that want a true
 DICOM count must read `dicoms`; ones that want "S3 PUT count" or
-"objects written" use `files`. Both fields are computed in busybox-only
-bash (no `awk`/`find`/`grep`/`sed` in the minio/mc image): see the
-inline comments in the manifest for the `du -a | case`-pattern trick.
+"objects written" use `files` — which counts DICOMs **plus**
+`__MANIFEST__.json` **plus** `__METADATA__.json`, not just DICOMs and a
+manifest. Both are computed straightforwardly in
+`charts/edge/files/s3-uploader.sh`:
+
+```bash
+files=$(find -L "$session_dir" -type f | wc -l)
+dicoms=$(find -L "$session_dir" -type f \( -iname '*.dcm' \) | wc -l)
+```
+
+`-L` because the session tree is hardlinks and symlinks into
+`orthanc-storage/`, and `-iname` because scanners emit both `.dcm` and
+`.DCM`. The `du -a | case`-pattern trick that used to be documented here
+was a workaround for `minio/mc`, whose busybox base had no
+`find`/`awk`/`grep`/`sed` at all; it went away with the client, since
+`amazon/aws-cli` ships full findutils.
 
 ## Operations
 
@@ -124,16 +249,28 @@ KUBECONFIG=kubeconfig-edge-dev kubectl logs -n xnat-ingest \
 KUBECONFIG=kubeconfig-edge-dev kubectl logs -n xnat-ingest \
   -l component=assign -f | jq   # assign
 
-# Upload logs
-kubectl logs -n xnat-upload -l component=upload -f | jq
+# Edge S3 uploader (aws-cli, not xnat-ingest — one JSON line per event)
+KUBECONFIG=kubeconfig-edge-dev kubectl logs -n xnat-ingest \
+  -l component=s3-uploader -f | jq
 
-# Drop a test DICOM on edge
+# Upload logs. There is one uploader PER EDGE, so narrow by the `edge`
+# label unless you actually want every site interleaved.
+kubectl logs -n xnat-upload -l component=upload,edge=edge-dev -f | jq
+
+# Drop a test DICOM on edge (the optional `group (fs)` source watches
+# /data/incoming; the normal path is a C-STORE into Orthanc)
 ssh ubuntu@<edge-ip> "cp /home/ubuntu/MRBRAIN.DCM /data/xnat-ingest/incoming/"
 
-# Manually rename an invalid session to test promotion
-ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
-                              /data/xnat-ingest/staging/<project>.<subject>.<visit>"
+# Manually rename an invalid session to test promotion. On the host these
+# live under the pipeline volume's hostPath, /data/xnat-ingest, which the
+# pods see as /data — so /data/assigned is /data/xnat-ingest/assigned.
+ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/assigned/__invalid__/<dir> \
+                              /data/xnat-ingest/assigned/<project>.<subject>.<visit>"
 ```
+
+`__invalid__` is one of the reserved directory names the s3-uploader
+skips (alongside `__build__` and `__metadata__`), so a session sitting
+there is never uploaded — that is what makes the rename a promotion.
 
 ## Benefits
 
@@ -158,7 +295,8 @@ ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/staging/__invalid__/<dir> \
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
-| Image not present in containerd (after teardown) | `imagePullPolicy: Never` causes `ErrImageNeverPull` | `ctr image import` step in install |
+| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.12.3` keeps starting pods with no registry at all. There is deliberately no image-import step in `install.sh` — a genuinely air-gapped site has to seed the tag into each node's container runtime itself |
+| Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)
 
@@ -284,8 +422,15 @@ deliberately scoped out of the current change set:
 - **Native `prometheus_client` metrics** at `:9090/metrics`:
   counters like `xnat_ingest_files_received_total`,
   `xnat_ingest_sessions_staged_total`, histograms for upload duration.
-  Today we derive these from log-line counts via Vector's `log_to_metric`,
-  which is good enough but loses precision (no histogram buckets).
+  Today there are no pipeline *metrics* at all. Vector's `log_to_metric`
+  transform and its `:9598` Prometheus exporter were removed — the edge
+  Vector renders no Service (`charts/edge/templates/vector.yaml`) and the
+  mgmt one sets `service: {enabled: false}` — so everything below is
+  derived from **log lines** instead: Vector ships the JSON events to
+  Loki, and Loki's own ruler counts them
+  (`charts/mgmt/files/loki-ruler-rules.yaml`). Counting lines is accurate
+  for rates but has no histogram buckets, so upload-duration percentiles
+  have no source today.
 - **Custom pipeline-event names** in log lines — e.g. an `event` field
   with values `session_staged`, `xnat_upload_completed`, etc.
   Today the upload pod emits free-form messages that Vector can grep

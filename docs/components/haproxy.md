@@ -23,12 +23,21 @@ worker pod    ──►  10.96.0.1:443         (kubernetes Service ClusterIP)
 worker host   ──►  <edge-IP>:7443        (k0smotron-haproxy, hostNetwork)
                    │
                    │  haproxy: TLS terminate + open NEW outbound TLS conn
-                   ▼  with explicit SNI=k0s.aisedge.local
+                   ▼  with explicit SNI=k0s-edge-dev.aisedge.local
 mgmt host     ──►  203.x.x.x:443         (nginx-ingress, ssl-passthrough)
                    │
                    ▼
                    kmc-edge-dev-0        (k0s API)
 ```
+
+The upstream name is **per edge**, not fleet-wide. `charts/mgmt` derives it as
+`<apiPrefix>-<edge>.<domain.internal>` — `k0s-edge-dev.aisedge.local` for the
+site above (`charts/mgmt/templates/edge-clusters.yaml:24`, matching
+`install.sh:442`). It used to be a single `k0s.<domain>` for the whole fleet,
+which meant the second site's Ingress claimed a hostname the first already
+owned; the chart now refuses to render if the old fleet-wide
+`hostnames.k0sApi` is still set (`edge-clusters.yaml:86`). Pin a different name
+per site with `apiHost` on that edge's `edges[]` entry if you need one.
 
 ## What haproxy has access to
 
@@ -36,7 +45,9 @@ mgmt host     ──►  203.x.x.x:443         (nginx-ingress, ssl-passthrough)
 - **hostPath /etc/haproxy/certs**:
   - `server.pem` — frontend cert + key, **signed by the cluster's
     internal k0s CA** (so workload pods trust it via their projected
-    serviceaccount `ca.crt`). Pre-staged by `06-join-edge-worker.sh`.
+    serviceaccount `ca.crt`). Minted on the management node by
+    `stage_edge_join_payload()` in `scripts/00-common.sh`, then placed
+    here by `scripts/files/edge-join.sh` when the worker joins.
   - `ca.crt` — same cluster CA cert; haproxy uses it to verify the
     upstream nginx → k0s API chain
 - **No outbound network beyond mgmt:443** — strictly proxies TCP
@@ -57,19 +68,22 @@ We don't write its YAML — k0smotron does. But we DO control:
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/edge-cluster.yaml.tpl` | when `spec.ingress.deploy: true` is set, k0smotron generates the haproxy DS |
-| `scripts/06-join-edge-worker.sh` | extracts the cluster CA from Secret `<cluster>-ca`, mints a server cert with the right SANs (kubernetes / 10.96.0.1 / <node-ip> / localhost), pushes both to `/etc/haproxy/certs/` on the worker |
+| `sites/<site>/values.yaml` (`edges[]`) → `charts/mgmt/templates/edge-clusters.yaml` | the `Cluster` CR. `spec.ingress.deploy: true` (`edge-clusters.yaml:251`) is what makes k0smotron generate the haproxy DS at all; `apiHost` / `konnectivityHost` on the same block are the names haproxy dials upstream |
+| `manifests/01-management/edge-cluster.yaml.tpl` | **legacy, no longer applied.** `install.sh:445` exports `CLUSTER_CR_MANAGED_BY_HELM=1` and `scripts/05-setup-edge-cluster.sh:47` then skips rendering it. It hardcoded one fleet-wide NodePort pair (30443 / 30132), so a second site was impossible, and `persistence: emptyDir`, which the chart refuses. Edit the chart values, not this file |
+| `scripts/00-common.sh` → `stage_edge_join_payload()` | extracts the cluster CA from Secret `<cluster>-ca` in namespace `<cluster>`, mints the server cert with the right SANs (localhost / kubernetes[.default[.svc[.cluster.local]]] / 10.96.0.1 / `<node-ip>`, `-days 3650`), then shreds the CA private key — it signs cluster identities and must never leave the management node |
+| `scripts/06-join-edge-worker.sh` (`join: ssh`) and `scripts/06b-make-bootstrap.sh` (`join: bundle`) | delivery only. 06 scps `k0s-ca.crt` + `haproxy-server.pem` + `join-token` to the edge; 06b tars the same three files into the carry-over bundle. Both call the one function above, so an ssh-joined and a bundle-joined edge cannot end up with different certs |
+| `scripts/files/edge-join.sh` (step 5 of 6, runs **on** the edge) | `install -m 0644` puts them in place as `/etc/haproxy/certs/ca.crt` and `/etc/haproxy/certs/server.pem` |
 
-The auto-generated config:
+The auto-generated config (`edge-dev`; the upstream name is per-edge):
 ```
 frontend kubeapi_front
     bind [::]:7443 v4v6 ssl crt /etc/haproxy/certs/server.pem
     mode tcp
 backend kubeapi_back
     mode tcp
-    server kube_api k0s.aisedge.local:443 ssl verify required \
+    server kube_api k0s-edge-dev.aisedge.local:443 ssl verify required \
                     ca-file /etc/haproxy/certs/ca.crt \
-                    sni str(k0s.aisedge.local)
+                    sni str(k0s-edge-dev.aisedge.local)
 ```
 
 ## Operations
@@ -102,7 +116,7 @@ ssh edge "curl -kv https://127.0.0.1:7443/version 2>&1 | head -10"
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `server.pem` permissions wrong | Pod CrashLoops with "cannot open file" | We `install -m 0644` explicitly in 06; haproxy container runs as non-root |
+| `server.pem` permissions wrong | Pod CrashLoops with "cannot open file" | `scripts/files/edge-join.sh` step 5 does `install -m 0644` explicitly (and `chmod 0755` on the directory) — 0644 rather than 0600 because the haproxy container runs as non-root and must read them |
 | `server.pem` SANs missing critical names | Pods get "x509: cert valid for X, not Y" | We enumerate kubernetes / kubernetes.default[.svc[.cluster.local]] / 10.96.0.1 / 127.0.0.1 / `<node-ip>` |
 | `server.pem` signed by the wrong CA | Pods get "unknown authority" | We sign with the **cluster's** internal CA (extracted from Secret `<cluster>-ca`), not ais-edge-ca |
 | haproxy down | Every in-cluster API call fails; whole cluster degrades | Pod auto-restarts; on a single-worker edge there's no HA |
