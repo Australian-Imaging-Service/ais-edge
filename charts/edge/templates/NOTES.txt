@@ -1,3 +1,19 @@
+
+======================================================================
+FIRST, PROVE IT WORKS
+
+  make verify-live SITE=<site>
+
+  Helm having accepted these objects does not mean the deployment runs.
+  That script reads the same sites/<site>/values.yaml this install used —
+  nothing in it is hardcoded — and checks readiness rather than pod phase,
+  the CA and every Certificate from it, the S3 Service, each edge's hosted
+  control plane, and XNAT reachability. Exit code = number of failures.
+
+  It cannot see the edges' DICOM hostPort from inside the cluster, so it
+  reports that leg as SKIP rather than as a pass. Prove it with a real
+  C-STORE from a machine that will send studies.
+======================================================================
 AIS Edge — {{ .Values.clusterLabel }}  (release {{ .Release.Name }}, namespace {{ .Values.namespace }})
 
 INGEST

@@ -200,12 +200,45 @@ scripts/site-secrets.sh encrypt my-edge
 
 # 5. Install
 ./install.sh my-site
+
+# 6. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
+#    objects were accepted, not that the fleet is actually working.
+make verify-live SITE=my-site
 ```
 
 > **Back up `~/.config/sops/age/keys.txt`.** It is the only key that can decrypt
 > `sites/*/secrets.enc.yaml`, nothing can regenerate it, and losing it makes
 > every encrypted site file permanently unreadable. Put it in the team password
 > manager.
+
+### Then verify, every time
+
+```bash
+make verify-live SITE=my-site        # or: scripts/verify-live.sh my-site
+```
+
+This is the difference between "Helm accepted the manifests" and "a study sent
+to an edge will reach XNAT". It reads the SAME `sites/<site>/values.yaml` the
+install used, so it checks *your* hostnames, namespaces and edge list — nothing
+in it is hardcoded, and a deployment that keeps its data somewhere other than
+`/data` is checked where it actually lives.
+
+On this tier it walks the whole fleet: the management API server, node
+readiness, pod health per namespace, the `ais-edge-ca` Certificate and every
+Certificate derived from it, the SeaweedFS S3 Service, each edge's hosted
+control plane, and XNAT reachability. Its exit code is the number of failures.
+
+Run it:
+
+* after `install.sh`, always;
+* after adding an edge — a `join: bundle` edge in particular, because nothing
+  on the management side can tell you the operator actually ran the bundle;
+* after rotating a Secret or the CA;
+* after a reboot of the management node or any edge.
+
+> The edges' DICOM receivers listen on a **`hostPort`**, which is invisible from
+> inside the cluster, so verify-live cannot confirm them and does not pretend to.
+> Prove that leg with a real C-STORE from a machine that will send studies.
 
 ### What each step does, and why it is not all Helm
 
