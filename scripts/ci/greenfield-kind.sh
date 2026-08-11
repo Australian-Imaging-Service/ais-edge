@@ -73,7 +73,16 @@ HELM="$(ci_helm)"
 # Which kubectl, said out loud. ci_kubectl accepts a non-pinned one so the job
 # can run on a developer's machine; if that is what happened, the run should
 # not silently look identical to the pinned CI one.
-kubectl_ver="$("$KUBECTL" version --client 2>/dev/null | head -1)"
+# NO PIPE INTO head. `head -1` exits after the first line, kubectl gets SIGPIPE,
+# and `set -o pipefail` turns the substitution into exit 141 — which `set -e`
+# treats as fatal. It is a RACE: it only fires when head wins, so this stage
+# passes when run by hand and dies with a bare
+#     make[2]: *** [Makefile:163: greenfield] Error 141
+# and not one PASS line whenever the machine is busy. It surfaced here once
+# this node was also running a live tier-1 deployment. main already had this
+# fix; the tier-1 branch never received it.
+kubectl_ver="$("$KUBECTL" version --client 2>/dev/null || true)"
+kubectl_ver="${kubectl_ver%%$'\n'*}"
 case "$kubectl_ver" in
   *"$CI_PIN_KUBECTL_VERSION"*) ci_pass "kubectl $CI_PIN_KUBECTL_VERSION (pinned) at $KUBECTL" ;;
   *) ci_skip "kubectl is NOT the pinned $CI_PIN_KUBECTL_VERSION but ${kubectl_ver:-unknown} at $KUBECTL — the greenfield result is not from the pinned toolchain" ;;
@@ -106,7 +115,11 @@ else
 fi
 
 # Prove it really is empty of anything of ours before we start.
-if "$KUBECTL" get ns 2>/dev/null | grep -qE '^(ais-mgmt|xnat-ingest|edge-alpha)\b'; then
+# Captured first, then matched: `get ns | grep -q` lets grep exit on its first
+# match, SIGPIPE kubectl, and pipefail hand the `if` a 141 — so a cluster that
+# IS dirty could report clean, which is the one thing this check must not do.
+ns_list="$("$KUBECTL" get ns 2>/dev/null || true)"
+if printf '%s\n' "$ns_list" | grep -qE '^(ais-mgmt|xnat-ingest|edge-alpha)\b'; then
   ci_fail "the cluster is not empty — this test is meaningless unless it starts from nothing"
 else
   ci_pass "cluster is empty: no ais-mgmt / xnat-ingest / edge-* namespaces"
@@ -300,7 +313,19 @@ install_case edge default 0 charts/edge edge-base.yaml && edge_ok=1
 # exist unowned on the live management cluster (§8). Creating them here from
 # nothing is the greenfield claim.
 if [ "$mgmt_ok" = 1 ]; then
-  if "$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null | grep -q .; then
+    # CAPTURED then tested, and RETRIED. The pipe into `grep -q` could SIGPIPE
+    # kubectl and make a present Cluster look absent under load. The retry
+    # covers a second race: the install runs with --wait=false and reading a
+    # Cluster back goes through k0smotron's conversion webhook, which returns
+    # nothing while its endpoint is still settling. 60s, so a Cluster that
+    # never appears still fails — it just has to stay missing.
+    k0s_cluster_found=0
+    for _ in $(seq 1 30); do
+      k0s_out="$("$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null || true)"
+      if [ -n "$k0s_out" ]; then k0s_cluster_found=1; break; fi
+      sleep 2
+    done
+    if [ "$k0s_cluster_found" = 1 ]; then
     ci_pass "k0smotron Cluster objects created from the chart alone"
   else
     ci_fail "no k0smotron Cluster object was created — the per-edge control planes did not come from the chart"

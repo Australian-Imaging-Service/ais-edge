@@ -150,17 +150,17 @@ cat <<EOF
 90	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 30	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-ok"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 10	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-ok"}	{"component":"s3-reclaimer","event":"reclaim_finished","session":"","message":"examined=2 removed=0"}
-2	{"namespace":"xnat-upload","cluster":"auth-once"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-1	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-3	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-5	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-7	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-9	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
-1	{"namespace":"xnat-upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.71it/s]
-2	{"namespace":"xnat-upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 403.02it/s]
-3	{"namespace":"xnat-upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.10it/s]
-4	{"namespace":"xnat-upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 403.55it/s]
-5	{"namespace":"xnat-upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.99it/s]
+2	{"namespace":"xnat-upload","component":"upload","cluster":"auth-once"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+5	{"namespace":"xnat-upload","component":"upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+7	{"namespace":"xnat-upload","component":"upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+9	{"namespace":"xnat-upload","component":"upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.71it/s]
+2	{"namespace":"xnat-upload","component":"upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 403.02it/s]
+3	{"namespace":"xnat-upload","component":"upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.10it/s]
+4	{"namespace":"xnat-upload","component":"upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 403.55it/s]
+5	{"namespace":"xnat-upload","component":"upload","cluster":"auth-tqdm"}	Processing staged sessions: 100%|##########| 1/1 [00:00<00:00, 401.99it/s]
 3600	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-lost"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.SUBJ.SESS","message":"too young"}
 3600	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-ok"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.SUBJ.SESS","message":"too young"}
 60	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-ok"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"have=1"}
