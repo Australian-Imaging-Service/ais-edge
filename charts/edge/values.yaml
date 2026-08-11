@@ -720,6 +720,16 @@ podAnnotations: {}
 # node, so tier-1 uses the filesystem on a PVC. Everything else — SingleBinary,
 # the ruler, retention — is the same shape.
 loki:
+  # WHERE THE RULES SIDECAR WRITES. Loki's local rule store treats each
+  # subdirectory of storage.local.directory as a TENANT ID, and with
+  # auth_enabled: false the only tenant is literally "fake". At the chart's
+  # default (/rules) the sidecar drops ais-edge-rules.yaml at the top level,
+  # Loki finds no tenant directory, starts cleanly and evaluates NOTHING —
+  # indistinguishable from a healthy site where nothing is wrong.
+  sidecar:
+    rules:
+      folder: /rules/fake
+
   # PINNED. files/vector-local.yaml names this Service literally (Helm never
   # templates a .Files.Get file), so it cannot follow .Release.Name. Without the
   # override the Service is <release>-loki, and a release named anything else
@@ -757,7 +767,17 @@ loki:
     rulerConfig:
       storage:
         type: local
-        local: {directory: /etc/loki/rules}
+        # /rules, NOT /etc/loki/rules. MEASURED on a real install: the Loki
+        # chart mounts its rules sidecar volume at /rules, and /etc/loki holds
+        # only the read-only config and runtime-config mounts. Loki mkdir's the
+        # ruler directory at startup, so /etc/loki/rules produced
+        #   mkdir /etc/loki/rules: read-only file system
+        #   error initialising module: ruler-storage
+        # and Loki CRASHLOOPED — no log storage, and because every pipeline
+        # alert on this tier is Loki-sourced, no alerts at all. No render check
+        # could have caught it: the path is only wrong relative to where the
+        # SUBCHART mounts things, which is invisible to `helm template`.
+        local: {directory: /rules}
       rule_path: /var/loki/rules-runtime
       # MUST MATCH the Alertmanager Service the kube-prometheus-stack subchart
       # actually creates, which follows ITS fullnameOverride below — so this is

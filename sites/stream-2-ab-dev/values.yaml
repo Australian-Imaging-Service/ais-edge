@@ -1,0 +1,282 @@
+# =============================================================================
+# EXAMPLE TIER-1 SITE — one machine, non-secret configuration
+# =============================================================================
+# Tier-1 is a single-node appliance. ONE Ubuntu box runs the whole pipeline:
+#
+#   modality --C-STORE--> Orthanc (de-identify) --> group-orthanc --> assign
+#                     --> upload --> XNAT (HTTPS)
+#
+# There is no SeaweedFS, no S3 hop, no k0smotron child cluster, no konnectivity,
+# no second worker to join, no nginx-ingress and no cert-manager. Original
+# DICOMs never leave the node; only de-identified data goes to XNAT.
+#
+#   scripts/site-secrets.sh new <name> single    # copies this directory
+#   $EDITOR sites/<name>/values.yaml             # <- everything below
+#   $EDITOR sites/<name>/secrets.enc.yaml        # still PLAINTEXT at this point
+#   scripts/site-secrets.sh encrypt <name>       # do not commit before this
+#   ./install.sh <name>
+#
+# ONE FILE, ONE CHART. Tier-2 splits its config across a management site and one
+# file per edge, because it has many machines. Tier-1 has one machine, so this
+# is the whole configuration, and install.sh passes it to charts/edge alone:
+#
+#   helm upgrade --install <name> charts/edge -f sites/<name>/values.yaml
+#
+# You never edit charts/edge/values.yaml. That holds the defaults and the
+# reasoning behind them; this file holds the facts that are true of YOUR site.
+# =============================================================================
+
+# Short name for this deployment. Becomes a label on every log line and metric,
+# and appears in alert routing.
+clusterLabel: stream-2-ab-dev
+
+# All pipeline workloads live here. Tier-2 splits ingest (edge cluster) from
+# upload (management cluster) because they are different machines; on one node
+# there is nothing to split.
+namespace: xnat-ingest
+
+# onprem  resolves nothing externally — tier-1 talks only to XNAT, by its real
+#         DNS name, over the node's normal resolver. There are no management
+#         hostnames to pin, so no /etc/hosts entries and no hostAliases.
+topology: onprem
+
+# fresh     install.sh installs k0s, kubectl, helm and local-path from nothing.
+# existing  k0s is already running here; install.sh verifies instead of building.
+installMode: fresh
+
+# This machine's address. Used for the DICOM endpoint and the Grafana URL the
+# installer prints — NOT for cluster networking, which is all local.
+nodeIP: "203.101.224.240"
+
+# -----------------------------------------------------------------------------
+# Storage — where the bytes physically land
+# -----------------------------------------------------------------------------
+# All on ONE filesystem, deliberately: group-orthanc HARDLINKS instances out of
+# Orthanc's storage into grouped/, and a hardlink cannot cross a mount point.
+storage:
+  storageClass:
+    create: true
+    name: hostpath-pipeline
+  pipeline:
+    hostPath: /data/xnat-ingest
+    capacity: 500Gi
+  # THE ARCHIVE OF RECORD. Originals with real patient identifiers, written
+  # before de-identification, and the only copy that is never uploaded anywhere.
+  facilityBackup:
+    enabled: true
+    hostPath: /data/facility-backup
+    capacity: 500Gi
+
+# -----------------------------------------------------------------------------
+# Orthanc — the DICOM receiver and the de-identification contract
+# -----------------------------------------------------------------------------
+orthanc:
+  # The AE title modalities C-STORE to, on this node's port 4242.
+  aet: AISEDGE
+  auth:
+    enabled: false
+  deid:
+    enabled: true
+    # THE GATE. The chart refuses to render while this is false and deid is on.
+    # Set it only once you have read the profile and the AET map below and agree
+    # they are this site's policy. It is not a formality: nothing downstream
+    # re-checks what was removed.
+    policyReviewed: true
+    existingSaltSecret: orthanc-deid-salt
+
+    # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
+    # The most site-specific thing here. An AET that is NOT listed is
+    # quarantined, not dropped, so it can be mapped and re-sent.
+    aetMap:
+      AISEDGE:
+        project: test_project
+      STORESCU:
+        project: test_project
+      DCMTK_001:
+        project: test_project
+      AISTEST:
+        project: test_project
+      UNKNOWN:
+        project: test_project
+
+    # The de-identification profile applied to every incoming study.
+    # Start from charts/edge/files/deidentification-profile.example.json.
+    profile:
+      DeidMode: modify
+      Force: true
+      RemovePrivateTags: false
+      # UIDs are RETAINED so a study stays internally consistent across series;
+      # the identity fields are replaced below instead.
+      Keep:
+        - StudyInstanceUID
+        - SeriesInstanceUID
+        - SOPInstanceUID
+        - FrameOfReferenceUID
+      Replace:
+        PatientIdentityRemoved: 'YES'
+        DeidentificationMethod: AIS-Edge research-default v1; Retain UIDs Option
+        PatientName: ANONYMOUS
+        PatientID: ${ProjectCode}-${SubjectHash}
+        PatientBirthDate: ${BirthYearOnly}0101
+        AccessionNumber: ${SessionHash}
+        StudyID: ${SessionHash}
+        # THE ASSIGN STAGE READS THESE THREE. Removing any one of them stalls
+        # every study at assign with "missing metadata fields", after deid has
+        # already reported success.
+        ClinicalTrialProtocolID: ${ProjectCode}
+        ClinicalTrialSubjectID: ${SubjectHash}
+        ClinicalTrialTimePointID: ${SessionHash}
+        InstitutionName: AIS
+        InstitutionAddress: ''
+        ReferringPhysicianName: ''
+        PerformingPhysicianName: ''
+        OperatorsName: ''
+        PatientBirthName: ''
+        PatientAddress: ''
+        PatientTelephoneNumbers: ''
+        PatientComments: ''
+        StudyDescription: ''
+
+# -----------------------------------------------------------------------------
+# The pipeline
+# -----------------------------------------------------------------------------
+ingest:
+  orthancGroup:
+    enabled: true
+    interval: 60
+    toProcessLabel: xnat-ingest-ready
+    processedLabel: xnat-ingest-processed
+  assign:
+    interval: 60
+
+# -----------------------------------------------------------------------------
+# Upload — STRAIGHT TO XNAT
+# -----------------------------------------------------------------------------
+# direct  reads the assigned sessions off local disk and PUTs them to XNAT.
+#         This is what makes tier-1 a single node: no staging bucket, no
+#         management-side reclaimer, no S3 credential to distribute.
+# s3      tier-2 only. Requires SeaweedFS and a management plane.
+upload:
+  mode: direct
+  direct:
+    existingSecret: xnat-credentials
+    # Poll interval. Tier-1's old default was 60; the chart's is 300.
+    loop: 60
+    # Quiet period before a session is considered complete.
+    waitPeriod: 60
+    alwaysInclude: all
+    requireManifest: false
+    # true unless your XNAT presents a private or self-signed certificate.
+    #
+    # FALSE HERE, deliberately: xnat-test.ssdsorg.cloud.edu.au serves
+    # ingress-nginx's built-in "Kubernetes Ingress Controller Fake Certificate"
+    # (self-signed, Verify return code 18), so verification cannot succeed.
+    # The previous tier-2 deployment ran with --dont-verify-ssl for the same
+    # reason. Set this back to true the moment that XNAT gets a real
+    # certificate — this disables verification for the upload connection.
+    verifySsl: false
+
+# -----------------------------------------------------------------------------
+# Observability — OPTIONAL, and entirely local on tier-1
+# -----------------------------------------------------------------------------
+# Tier-2 ships logs off the edge to a management Loki over mTLS. There is no
+# management plane here, so the whole stack runs on this node:
+#   Loki       filesystem storage on a PVC (NOT S3 — there is no object store)
+#   Vector     tails pod logs and pushes to the in-cluster Loki over plain HTTP
+#   Grafana    on a NodePort, since there is no ingress
+#   Prometheus + Alertmanager as usual
+#
+# Turn the whole thing off and the pipeline is unaffected — it is observability,
+# not plumbing.
+observability:
+  # Run Vector on this node and ship logs to Loki.
+  enabled: true
+
+  loki:
+    # MUST BE EMPTY ON TIER-1. The chart defaults these to the tier-2 names
+    # (loki-push-client-tls / ca-bundle), which cert-sync delivers from a
+    # management cluster. There is no management cluster here, so nothing ever
+    # creates them — and the chart mounts them non-optionally, so Vector would
+    # sit in CreateContainerConfigError for good.
+    #
+    # Empty also selects files/vector-local.yaml, the config without the sink's
+    # tls: block, because tier-1's Loki is in this same cluster over plain http.
+    clientCertSecret: ""
+    caBundleSecret: ""
+
+  stack:
+    # -------------------------------------------------------------------------
+    # Where alerts are MAILED. Empty is allowed and is the shipped default: the
+    # stack installs, the dashboards work, and nothing is sent. Every alert this
+    # chart raises is then visible only in Grafana, which nobody is watching at
+    # 3am — so on a real deployment, fill these in.
+    #
+    # The credentials live in secrets.enc.yaml as the alertmanager-smtp Secret
+    # (username + password). Without the three keys below there is nowhere to
+    # send to, so that Secret sits unused — which is the state a fresh
+    # sites/ scaffold starts in.
+    #
+    # smtpUsername is here rather than in the Secret because Alertmanager has
+    # no smtp_auth_username_file; only the PASSWORD is read from a file.
+    alerting:
+      emailTo: akshitbeniwal26@gmail.com            # e.g. imaging-ops@example.org
+      emailFrom: backupsync7@gmail.com          # defaults to emailTo when left empty
+      smtpHost: smtp.gmail.com           # e.g. smtp.example.org
+      smtpPort: 587
+      smtpUsername: backupsync7@gmail.com       # must match `username` in the alertmanager-smtp Secret
+      requireTLS: true
+
+    # Host the log/metric store HERE: Loki + Prometheus + Grafana + Alertmanager
+    # on this same node. Tier-2 ships logs off the box to a management cluster;
+    # tier-1 has nowhere to ship them, so it keeps them locally.
+    #
+    # THIS IS THE ONLY KEY. Everything about HOW the stack is configured —
+    # retention, the Grafana NodePort, Loki's disk, alert routing — lives in the
+    # `loki:` and `kube-prometheus-stack:` blocks in charts/edge/values.yaml.
+    # Helm cannot template subchart values, so a friendly key here could not
+    # reach them: it would be read, trusted and silently ignored. Override those
+    # blocks from this file if you need to, e.g.
+    #
+    #   kube-prometheus-stack:
+    #     grafana:
+    #       service:
+    #         nodePort: 31000
+    #
+    # Grafana's login comes from the grafana-admin-credentials Secret in
+    # secrets.enc.yaml, which IS wired.
+    enabled: true
+
+# -----------------------------------------------------------------------------
+# Data policy — what is kept, and for how long
+# -----------------------------------------------------------------------------
+# Nothing expires on a fresh install. Run with dryRun for a week and read the
+# decisions it logs before enabling it.
+#
+# On tier-1 this matters MORE than on tier-2, not less: this node holds the only
+# copy of the facility backup, and there is no management-side reclaimer to fall
+# back on. EdgeDiskLow is the only disk-exhaustion alert in the system.
+dataPolicy:
+  enabled: false
+  dryRun: true
+  originals:
+    facilityBackup:
+      retain: forever
+      minFreeDiskPercent: 10
+    quarantine:
+      subPath: __unmapped_aet__
+      retain: forever
+      alertAfter: 24h
+    fileDrop:
+      reclaim: never
+      minAge: 30d
+  derived:
+    orthancStorage:
+      reclaim: onGrouped
+      minAge: 7d
+      maximumStorageSizeMB: 0
+      maximumPatientCount: 0
+    grouped:
+      reclaim: onAssigned
+    assigned:
+      reclaim: onUploaded
+      minAge: 0

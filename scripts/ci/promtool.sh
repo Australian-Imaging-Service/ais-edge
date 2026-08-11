@@ -455,4 +455,127 @@ else
   done < "$CI_WORK_DIR/reclaimer-silence.txt"
 fi
 
+
+# =============================================================================
+# The Loki ruler file must satisfy Loki's OWN schema, not merely be valid YAML.
+# =============================================================================
+# Loki parses each file into rulefmt.RuleGroup. A rule that escapes its group —
+# landing as a top-level entry under `groups:` with `alert`/`expr` keys instead
+# of inside a group's `rules:` — is still perfectly valid YAML, still counts as
+# an alert to anything that greps for `alert:`, and is what this repo produced
+# by appending two alerts to the file as text.
+#
+# Loki's reaction is total, not partial:
+#   unable to list rules ... error parsing /rules/fake/ais-edge-rules.yaml:
+#   field alert not found in type rulefmt.RuleGroup
+# It refuses the WHOLE file, so all 11 alerts stop existing — including the
+# nine that were formatted correctly. Found by installing for real; every
+# static check in this suite was green.
+ci_heading "Loki ruler file matches rulefmt.RuleGroup"
+
+for rules_file in "$REPO_ROOT"/charts/*/files/loki-ruler-rules.yaml; do
+  [ -e "$rules_file" ] || continue
+  rel="${rules_file#"$REPO_ROOT"/}"
+  out="$(python3 - "$rules_file" <<'PY'
+import sys, yaml
+ALLOWED = {"name", "interval", "limit", "rules"}
+try:
+    doc = yaml.safe_load(open(sys.argv[1]))
+except Exception as exc:
+    print(f"FAIL not parseable as YAML: {exc}"); raise SystemExit
+if not isinstance(doc, dict) or "groups" not in doc:
+    print("FAIL top level must be a mapping with a `groups:` key"); raise SystemExit
+groups = doc.get("groups") or []
+if not groups:
+    print("FAIL `groups:` is empty — Loki would evaluate nothing"); raise SystemExit
+total = 0
+for i, g in enumerate(groups):
+    if not isinstance(g, dict):
+        print(f"FAIL groups[{i}] is not a mapping"); raise SystemExit
+    stray = sorted(set(g) - ALLOWED)
+    if stray:
+        who = g.get("alert") or g.get("record") or "<unnamed>"
+        print(f"FAIL groups[{i}] ({who}) has keys Loki rejects on a RuleGroup: {stray}. "
+              f"A rule escaped its group — it belongs under some group's `rules:`. "
+              f"Loki refuses the ENTIRE file, so every other alert stops existing too.")
+        raise SystemExit
+    if not g.get("name"):
+        print(f"FAIL groups[{i}] has no name"); raise SystemExit
+    rules = g.get("rules") or []
+    if not rules:
+        print(f"FAIL group {g['name']!r} has no rules"); raise SystemExit
+    for r in rules:
+        if not (r.get("alert") or r.get("record")):
+            print(f"FAIL a rule in {g['name']!r} has neither alert nor record"); raise SystemExit
+        if not r.get("expr"):
+            print(f"FAIL {r.get('alert') or r.get('record')} has no expr"); raise SystemExit
+    total += len(rules)
+print(f"PASS {len(groups)} group(s), {total} rule(s), every group a valid RuleGroup")
+PY
+)"
+  case "$out" in
+    PASS*) ci_pass "$rel: ${out#PASS }" ;;
+    *)     ci_fail "$rel: ${out#FAIL }" ;;
+  esac
+done
+
+
+# =============================================================================
+# An alert that exists on BOTH tiers must differ only by namespace.
+# =============================================================================
+# The two tiers ship separate ruleset files because tier-2 has components
+# tier-1 does not (s3-uploader, s3-reclaimer, a staging bucket). That is a good
+# reason for the FILES to differ and a bad reason for a SHARED alert to.
+#
+# XNATUploadSuccess drifted exactly this way: tier-2 extracts the session with
+# `regexp` and groups `by (cluster, session)`, so each completed session pages
+# separately — which is the whole point, and what alertmanager-config.yaml's
+# group_by ["alertname","cluster","session"] is built around. The tier-1 copy
+# was rewritten to `by (cluster)` with no extraction while fixing an unrelated
+# range-vs-loop-period problem. It still fired, still said "XNAT upload
+# completed", and silently stopped naming the session — so every upload
+# collapsed into ONE alertmanager group instead of one per session.
+#
+# Compared against the tier-2 file on `main` when that ref is available; skipped
+# with a reason when it is not, so a shallow checkout cannot read as coverage.
+ci_heading "shared alerts match the other tier"
+
+t1_rules="$REPO_ROOT/charts/edge/files/loki-ruler-rules.yaml"
+if [ ! -f "$t1_rules" ] || [ -d "$REPO_ROOT/charts/mgmt" ]; then
+  ci_skip "not a single-node checkout — the cross-tier comparison runs from the tier-1 side"
+elif ! git -C "$REPO_ROOT" cat-file -e main:charts/mgmt/files/loki-ruler-rules.yaml 2>/dev/null; then
+  ci_skip "main:charts/mgmt/files/loki-ruler-rules.yaml is not fetched — cannot compare tiers"
+else
+  # The tier-2 file goes to a FILE, not a pipe. `python3 - <<'PY'` reads its
+  # SCRIPT from stdin, so piping into it replaces the data with the script and
+  # the comparison silently runs against nothing — the same trap this repo's
+  # Loki test harness documents, and it produced a check that printed no
+  # verdict at all rather than failing.
+  t2_rules="$CI_WORK_DIR/tier2-loki-rules.yaml"
+  git -C "$REPO_ROOT" show main:charts/mgmt/files/loki-ruler-rules.yaml > "$t2_rules" 2>/dev/null
+  out="$(python3 - "$t1_rules" "$t2_rules" <<'PY'
+import sys, yaml
+def index(doc):
+    return {x["alert"]: x for g in (doc or {}).get("groups", [])
+            for x in (g.get("rules") or []) if x.get("alert")}
+t1 = index(yaml.safe_load(open(sys.argv[1])))
+t2 = index(yaml.safe_load(open(sys.argv[2])))
+def norm(o):
+    # The ONLY legitimate difference: tier-2 splits upload into its own
+    # namespace, tier-1 has exactly one.
+    return yaml.safe_dump(o, sort_keys=True).replace('xnat-upload', 'xnat-ingest')
+bad = [n for n in sorted(set(t1) & set(t2)) if norm(t1[n]) != norm(t2[n])]
+shared = len(set(t1) & set(t2))
+if bad:
+    print("FAIL " + ", ".join(bad))
+else:
+    print(f"PASS {shared} shared alert(s) identical modulo namespace")
+PY
+)"
+  case "$out" in
+    PASS*) ci_pass "${out#PASS }" ;;
+    *)     ci_fail "these alerts exist on both tiers but differ by more than the namespace: ${out#FAIL }. Port the tier-2 rule verbatim and change only the namespace, or give the divergence a reason in the file header." ;;
+  esac
+fi
+
 ci_summary "promtool"
