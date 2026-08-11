@@ -89,6 +89,13 @@ spec:
       labels:
         {{- include "edge.labels" . | nindent 8 }}
         app: vector
+        # Vector derives every Loki stream's `component` from this label on the
+        # emitting pod. Without it here, Vector's OWN logs arrive with no
+        # component — so the one query pattern that works for every other stage
+        # fails for the component you need when logging itself is the problem.
+        # Pod-template label only: the selector above is identity and must not
+        # change on an existing DaemonSet.
+        component: vector
       annotations:
         checksum/config: {{ if .Values.observability.stack.enabled }}{{ .Files.Get "files/vector-local.yaml" | sha256sum }}{{ else }}{{ .Files.Get "files/vector.yaml" | sha256sum }}{{ end }}
     spec:
