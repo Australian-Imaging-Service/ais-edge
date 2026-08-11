@@ -284,7 +284,7 @@ mgmt_ok=0
 # Skipping is correct here; failing would demand a chart this branch does not
 # have. The count is reported so a green run cannot be mistaken for full
 # coverage.
-if [ -d "$REPO/charts/mgmt" ]; then
+if [ -d "$REPO_ROOT/charts/mgmt" ]; then
   install_case mgmt ais-mgmt 1 charts/mgmt mgmt-base.yaml mgmt-two-edges.yaml && mgmt_ok=1
 else
   ci_skip "greenfield install: mgmt — this branch ships no charts/mgmt (single node)"

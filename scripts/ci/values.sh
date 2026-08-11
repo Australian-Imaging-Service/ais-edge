@@ -185,6 +185,19 @@ observability:
   enabled: false
 EOF
 
+cat >"$V/edge-obsstack-on.yaml" <<'EOF'
+# TIER-1: the LOCAL observability stack. This is the only case that renders
+# the PrometheusRule / ruler-ConfigMap / Alertmanager-Secret objects, so it is
+# what the rendered-rules checks inspect on a single-node branch.
+observability:
+  enabled: true
+  stack:
+    enabled: true
+  loki:
+    clientCertSecret: ""
+    caBundleSecret: ""
+EOF
+
 cat >"$V/edge-observability-on.yaml" <<'EOF'
 observability:
   enabled: true
@@ -767,6 +780,7 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
+edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
 EOF
 }

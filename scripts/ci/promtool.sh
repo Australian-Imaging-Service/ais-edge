@@ -98,7 +98,7 @@ ci_heading "promtool check rules (as rendered into PrometheusRule objects)"
 if [ -s "$CI_RENDER_DIR/mgmt-defaults.yaml" ]; then
   render="$CI_RENDER_DIR/mgmt-defaults.yaml"
 else
-  render="$CI_RENDER_DIR/edge-everything-on.yaml"
+  render="$CI_RENDER_DIR/edge-obsstack-on.yaml"
 fi
 if [ ! -s "$render" ]; then
   ci_fail "no render at $render — run scripts/ci/render.sh first (make ci does)"
@@ -123,7 +123,7 @@ print(n)
 ' "$render" "$extract_dir" 2>&1)" || { ci_fail "extracting PrometheusRules: $count"; count=0; }
 
   if [ "$count" = "0" ]; then
-    ci_fail "the mgmt render contains NO PrometheusRule objects"
+    ci_fail "the render $(basename "$render") contains NO PrometheusRule objects"
   else
     for f in "$extract_dir"/*.yaml; do
       if out="$("$PROMTOOL" check rules "$f" 2>&1)"; then
