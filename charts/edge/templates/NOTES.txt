@@ -86,7 +86,21 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
 {{- end }}
 
 CHECK IT IS WORKING
-  kubectl -n {{ .Values.namespace }} get pods
+
+  FIRST, and after every upgrade:
+    scripts/verify-live.sh <site>
+
+  Helm having accepted these objects does not mean the pipeline runs. That
+  script checks readiness rather than pod phase, reaches XNAT from inside the
+  upload pod with the site's own credentials, and confirms the alert rules
+  actually loaded. Its exit code is the number of failures.
+
+  It cannot see DICOM port {{ .Values.orthanc.dicomPort }} — that is a hostPort,
+  invisible from inside the cluster — so it reports that one as SKIP. Prove it
+  with a real C-STORE, below.
+
+  By hand:
+    kubectl -n {{ .Values.namespace }} get pods
   kubectl -n {{ .Values.namespace }} logs -l component=group     -f
   kubectl -n {{ .Values.namespace }} logs -l component=assign    -f
 {{- if eq .Values.upload.mode "s3" }}

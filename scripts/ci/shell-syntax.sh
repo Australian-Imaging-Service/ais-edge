@@ -96,4 +96,57 @@ done < <(
 )
 [ "$pipe_yes" -eq 0 ] && ci_pass "no \`yes |\` pipelines under pipefail"
 
+
+# =============================================================================
+# verify-live's fallbacks must equal the chart's defaults.
+# =============================================================================
+# verify-live reads every path from sites/<site>/values.yaml — nothing is
+# hardcoded, which is what lets a production machine put /data somewhere else.
+# But each `cfg <path> <fallback>` carries a literal fallback for the case where
+# the site file omits the key, and that literal is a SECOND copy of the chart's
+# default.
+#
+# If the chart's default moves and the fallback does not, verify-live keeps
+# checking the OLD path on every site that omits the key — and reports PASS
+# against a directory the deployment no longer uses. A verifier that passes
+# while looking at the wrong place is worse than one that fails.
+ci_heading "verify-live fallbacks match the chart defaults"
+
+vl="$REPO_ROOT/scripts/verify-live.sh"
+chart_values="$REPO_ROOT/$(ci_obs_chart)/values.yaml"
+if [ ! -f "$vl" ] || [ ! -f "$chart_values" ]; then
+  ci_skip "no verify-live.sh or chart values in this checkout"
+else
+  out="$(python3 - "$vl" "$chart_values" <<'PY'
+import re, sys, yaml
+src = open(sys.argv[1]).read()
+vals = yaml.safe_load(open(sys.argv[2])) or {}
+def get(path):
+    cur = vals
+    for p in path.split("."):
+        cur = cur.get(p) if isinstance(cur, dict) else None
+        if cur is None:
+            return None
+    return cur
+bad, checked = [], 0
+for m in re.finditer(r'cfg ([a-zA-Z][\w.]*) ([^)"\n]+)\)', src):
+    path, fallback = m.group(1), m.group(2).strip()
+    actual = get(path)
+    if actual is None:
+        # A fallback for a key the chart does not declare at all: either the
+        # key was renamed or the fallback is guessing.
+        bad.append(f"{path} (fallback {fallback!r} but the chart declares no such key)")
+        continue
+    checked += 1
+    if str(actual).lower() != str(fallback).lower():
+        bad.append(f"{path} (chart {actual!r} vs fallback {fallback!r})")
+print(("FAIL " + "; ".join(bad)) if bad else f"PASS {checked} fallback(s) equal the chart default")
+PY
+)"
+  case "$out" in
+    PASS*) ci_pass "${out#PASS }" ;;
+    *)     ci_fail "verify-live would check the wrong value on any site that omits the key: ${out#FAIL }" ;;
+  esac
+fi
+
 ci_summary "shell syntax"

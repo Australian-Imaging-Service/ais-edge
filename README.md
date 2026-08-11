@@ -96,6 +96,10 @@ scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 chmod +x install.sh scripts/*.sh
 ./install.sh my-hospital          # interactive
 # or: ./install.sh -y my-hospital # non-interactive / CI (auto-confirm)
+
+# 7. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
+#    objects were accepted, not that anything is running or reachable.
+scripts/verify-live.sh my-hospital
 ```
 
 `install.sh` is three steps, and it reads `sites/<site>/values.yaml` for all of
@@ -110,6 +114,34 @@ them:
    that starts without its Secret sits in `CreateContainerConfigError`.
 3. **the chart** — `helm upgrade --install <site> charts/edge -n xnat-ingest
    --create-namespace -f sites/<site>/values.yaml`.
+
+### Then verify, every time
+
+```bash
+scripts/verify-live.sh <site>          # exit code = number of failures
+```
+
+`install.sh` prints this at the end, and it is the difference between "Helm
+accepted the manifests" and "this site can actually receive a study and deliver
+it". It reads the SAME `sites/<site>/values.yaml` the install used, so it checks
+*your* paths, namespace, AE title and node IP — nothing in it is hardcoded, and
+a site that keeps its data somewhere other than `/data` is checked where it
+actually lives. CI asserts that its fallbacks still match the chart's defaults,
+so a site that omits a key cannot be verified against a stale path.
+
+What it covers, and what it deliberately does not:
+
+| Checked | How |
+|---|---|
+| Secrets exist, and the de-id salt is not still the placeholder | reads them from the cluster |
+| Every PVC is `Bound`, and the facility backup shares the pipeline filesystem | the hardlink requirement in section 2.1 of the TOUR |
+| Each pipeline stage is **Ready**, not merely `Running` | a `Running` pod with a failing probe is not working |
+| XNAT is reachable **and the credentials are accepted** | from *inside* the upload pod, honouring the site's `upload.direct.verifySsl` |
+| Grafana answers on its NodePort | HTTP probe |
+| The alert rules actually loaded | counts the rule groups Prometheus holds |
+| DICOM port 4242 | **NOT checked** — it is a `hostPort`, invisible from inside the cluster. Reported as `SKIP`, never as a pass. Test it with a real C-STORE from a machine that will send studies. |
+
+Re-run it after any `helm upgrade`, after rotating a Secret, and after a reboot.
 
 Architecture, data flow, security model, and component-by-component reference are
 all below.
