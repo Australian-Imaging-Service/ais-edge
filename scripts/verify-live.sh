@@ -191,17 +191,28 @@ fi
 section "XNAT delivery path"
 # -----------------------------------------------------------------------------
 # The uploader is the ONLY component that talks to XNAT, so test from inside it.
+#
+# TLS verification follows THE SITE FILE, not an environment variable.
+# This probe used to read XINGEST_VERIFY_SSL from the pod. The chart never sets
+# it — it passes `--dont-verify-ssl` as a command-line ARG — so the variable was
+# always absent, the probe always verified, and on a site with
+# upload.direct.verifySsl: false it reported
+#   FAIL  XNAT unreachable from the uploader
+# while the uploader itself was authenticating fine. A verifier that fails on a
+# healthy system is worse than no verifier: it sends the operator to debug
+# egress that was never broken.
+VERIFY_SSL="$(cfg upload.direct.verifySsl true)"
 up=$($K get pods -n "$NS" -l component=upload -o name 2>/dev/null | head -1)
 if [ -z "$up" ]; then
     bad "no upload pod to test XNAT from"
 else
-    code=$($K exec -n "$NS" "$up" -- sh -c '
+    code=$($K exec -n "$NS" "$up" -- env AIS_VERIFY_SSL="$VERIFY_SSL" sh -c '
         python3 - <<'"'"'PY'"'"' 2>/dev/null
 import os, ssl, urllib.request, base64
 host=os.environ.get("XINGEST_HOST",""); u=os.environ.get("XINGEST_USER",""); p=os.environ.get("XINGEST_PASS","")
 if not host: print("000"); raise SystemExit
 ctx=ssl.create_default_context()
-if os.environ.get("XINGEST_VERIFY_SSL","true").lower()=="false":
+if os.environ.get("AIS_VERIFY_SSL","true").lower()=="false":
     ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
 r=urllib.request.Request(host.rstrip("/")+"/data/JSESSION")
 r.add_header("Authorization","Basic "+base64.b64encode(("%s:%s"%(u,p)).encode()).decode())
@@ -212,7 +223,7 @@ PY' 2>/dev/null | tr -d '[:space:]')
     case "$code" in
         200) ok "XNAT reachable and credentials accepted" ;;
         401|403) bad "XNAT rejected the credentials (HTTP $code)" "check xnat-credentials for ${SITE}" ;;
-        000|"") bad "XNAT unreachable from the uploader" "no session can be delivered; check egress and XINGEST_HOST" ;;
+        000|"") bad "XNAT unreachable from the uploader" "no session can be delivered; check egress and XINGEST_HOST (this probe verified TLS: upload.direct.verifySsl=${VERIFY_SSL})" ;;
         *) bad "XNAT returned HTTP $code" ;;
     esac
 fi

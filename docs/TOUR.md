@@ -436,8 +436,12 @@ matter. The exit code is the number of failures.
 | Pod in `CreateContainerConfigError` | A Secret name or namespace does not match. Section 3. |
 | Grouping fails per study, EXDEV in the logs | Pipeline and facility-backup paths on different filesystems. Section 2.1. |
 | Studies stall at assign, "missing metadata fields" | A `ClinicalTrial*` field was removed from the profile. Section 2.3. |
+| Sessions land in `assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...` | **Read the group stage's log before touching the profile.** This name is also what you get when *grouping* failed and handed assign an empty session, and the two causes look identical from here. Grouping raises `ImagingSessionParseError: Did not find 'SeriesDescription' field` on a study missing a tag it needs — the DICOM never reaches assign, so assign correctly reports no metadata. Confirm which it is by checking Orthanc directly: `curl localhost:8042/instances/<id>/simplified-tags` on the receiver pod shows whether de-identification really did set the three tags. |
+| Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` — `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Set `upload.direct.verifySsl: false` for the site, and set it back the moment XNAT gets a real one. |
+| `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | Usually benign: the uploader runs on a loop, and a session already delivered is found again on the next pass. It is logged at ERROR, so it inflates the "Upload errors (last 1h)" panel without anything being wrong. Look for a matching "Successfully uploaded all files in" line for the same session — if it is there, the session is delivered. |
 | Nothing arrives at all | Firewall on port 4242, or the modality's calling AE title is not in `aetMap` — check the quarantine directory. |
 | Vector in `CreateContainerConfigError` | `observability.loki.clientCertSecret` is not empty. Section 6. |
+| Loki `CrashLoopBackOff`, `mkdir ...: read-only file system` / `error initialising module: ruler-storage` | The ruler's `storage.local.directory` must be the path the chart's rules sidecar mounts (`/rules`), and the sidecar must write into the tenant subdirectory (`/rules/fake`, since `auth_enabled` is false). Both are set in `charts/edge/values.yaml`; if you override either, override both. Loki refusing to start means no log storage **and** no pipeline alerts, since every alert on this tier is Loki-sourced. |
 
 ---
 
@@ -566,6 +570,23 @@ machine.
 
 It deliberately keeps your age key, your `sites/<site>/` directory, and the k0s
 binary.
+
+**If you cannot reboot.** `k0s reset` leaves CNI interfaces and iptables rules
+in the kernel, and the script says a reboot is recommended. On a machine you
+cannot restart — which is most hospital appliances — the part that matters is
+the leftover NAT rules from the old cluster:
+
+```bash
+sudo iptables -t nat -L -n | grep -c 'KUBE-'    # ~34 on a torn-down box
+                                                # (a running cluster has far more —
+                                                #  count this BEFORE reinstalling)
+```
+
+They reference service VIPs and pod IPs that no longer exist. A fresh install's
+kube-proxy reconciles the chains it owns, so this is usually harmless — a
+tier-1 install on this exact box succeeded with them still present. Reboot when
+you can; if networking misbehaves after a reinstall, this is the first thing to
+rule out.
 
 ---
 
