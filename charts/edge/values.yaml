@@ -384,7 +384,26 @@ orthanc:
     # AuthenticationEnabled: false and was protected only by the accident of
     # being ClusterIP-only.
     enabled: true
-    existingSecret: orthanc-credentials   # keys: orthanc-user, orthanc-password
+    #
+    # THREE keys, not two. The Secret is consumed by two different things:
+    #
+    #   users.json        mounted at /etc/orthanc-credentials/users.json and
+    #                     named by RegisteredUsersFile. This is what Orthanc
+    #                     itself checks:
+    #                       {"RegisteredUsers":{"admin":"<password>"}}
+    #                     The password is PLAINTEXT inside that JSON, which is
+    #                     why this Secret belongs in secrets.enc.yaml and is
+    #                     SOPS-encrypted at rest.
+    #   orthanc-user      read by group-orthanc, which calls the REST API to
+    #   orthanc-password  list and label studies. If they do not match the user
+    #                     in users.json, Orthanc answers 401 and the pipeline
+    #                     stalls with data sitting in Orthanc and no error
+    #                     anywhere else.
+    #
+    # An earlier version of this comment named only the last two. A Secret
+    # built from it installs cleanly and then Orthanc fails to start, because
+    # RegisteredUsersFile points at a path the volume never supplied.
+    existingSecret: orthanc-credentials
 
   # Rewriting pixel data at receive time happens BEFORE the Lua hook runs, so
   # the facility backup would hold the transcoded copy rather than the wire

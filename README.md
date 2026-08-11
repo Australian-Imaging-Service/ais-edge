@@ -650,6 +650,98 @@ each site. `CertificateExpiringSoon` fires at 60 days.
 
 ---
 
+## Orthanc REST API Authentication
+
+The shipped edge site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
+`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
+accident of network placement, not a control. Anything running *inside* the
+cluster can call that API, and it can **delete studies**. Turn it on for any
+deployment where that matters.
+
+Three keys, all required, because two different things read this Secret:
+
+| Key | Read by | If it is wrong |
+| --- | --- | --- |
+| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
+| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
+| `orthanc-password` | `group-orthanc` | as above |
+
+`orthanc-user` / `orthanc-password` **must match** the user and password inside
+`users.json`. They are separate keys because Orthanc wants a file and
+`group-orthanc` wants environment variables; nothing reconciles them for you.
+
+**1. Generate a password and add the Secret.**
+
+```bash
+openssl rand -base64 24                       # use this as <password> below
+scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
+```
+
+Add this document (the template is already in your `secrets.enc.yaml`, commented
+out — uncomment and fill it in):
+
+```yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orthanc-credentials
+  namespace: xnat-ingest          # the EDGE site's namespace
+type: Opaque
+stringData:
+  users.json: '{"RegisteredUsers":{"admin":"<password>"}}'
+  orthanc-user: admin
+  orthanc-password: <password>
+```
+
+The password is **plaintext inside that JSON** — Orthanc has no hashed-password
+format here. That is precisely why this file is SOPS-encrypted before it is
+committed, and why `scripts/site-secrets.sh check` refuses a plaintext one.
+
+**2. Turn it on in the site file.**
+
+```yaml
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+```
+
+The chart refuses to render if `enabled: true` and `existingSecret` is empty —
+the deployment mounts that Secret non-optionally, so an empty name would fail
+as a confusing volume error rather than an auth one.
+
+**3. Apply, and restart what reads it.**
+
+```bash
+scripts/site-secrets.sh apply <site>
+./install.sh <site>
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+```
+
+Both restarts are needed: Kubernetes does not restart a pod when a Secret
+changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+
+**4. Verify.**
+
+```bash
+# from inside the cluster — should now be 401 without credentials
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# and 200 with them
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+```
+
+Then confirm the pipeline still moves: `group-orthanc`'s log should keep
+reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
+`orthanc-password` disagree with `users.json`.
+
+> **Do not expose port 8042 to the host or a NodePort just because auth is now
+> on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
+> layer here, not a replacement for keeping the API off the network.
+
 ## Uninstall
 
 ```bash
