@@ -84,7 +84,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
-    {{- if not .Values.orthanc.deid.existingSaltSecret }}
+    {{- /* Auth on with no Secret named is the one shape that cannot work: the
+         deployment mounts existingSecret non-optionally and Orthanc's
+         RegisteredUsersFile points inside it, so an empty name leaves the pod
+         unable to start with a message about a volume rather than about auth. */ -}}
+  {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
+    {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json (what Orthanc checks, via RegisteredUsersFile), plus orthanc-user and orthanc-password (what group-orthanc authenticates with). If they disagree, Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc." }}
+  {{- end }}
+
+  {{- if not .Values.orthanc.deid.existingSaltSecret }}
       {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
     {{- end }}
     {{- /* THE PROFILE IS A CONTRACT WITH THE ASSIGN STAGE, not just a privacy

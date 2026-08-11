@@ -755,6 +755,16 @@ EOF
 printf 'hostAliases:\n  mgmtNodeIP: ""\n'                 >"$V/neg-edge-hostaliases-no-ip.yaml"
 printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clusterlabel.yaml"
 
+# Orthanc auth on with nothing to authenticate against. The deployment mounts
+# existingSecret non-optionally, so an empty name fails as a volume error
+# rather than as an auth error.
+cat >"$V/neg-edge-auth-no-secret.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: ""
+EOF
+
 # -- the deid profile is a contract with assign, not only a privacy policy -----
 # Removing one ClinicalTrial* tag is the plausible mistake: they read as trial
 # bookkeeping, so tightening a profile invites deleting them. Nothing fails at
@@ -920,6 +930,7 @@ neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toproc
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
+neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
