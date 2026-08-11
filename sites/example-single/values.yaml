@@ -177,6 +177,18 @@ observability:
   # Run Vector on this node and ship logs to Loki.
   enabled: true
 
+  loki:
+    # MUST BE EMPTY ON TIER-1. The chart defaults these to the tier-2 names
+    # (loki-push-client-tls / ca-bundle), which cert-sync delivers from a
+    # management cluster. There is no management cluster here, so nothing ever
+    # creates them — and the chart mounts them non-optionally, so Vector would
+    # sit in CreateContainerConfigError for good.
+    #
+    # Empty also selects files/vector-local.yaml, the config without the sink's
+    # tls: block, because tier-1's Loki is in this same cluster over plain http.
+    clientCertSecret: ""
+    caBundleSecret: ""
+
   stack:
     # Host the log/metric store HERE: Loki + Prometheus + Grafana + Alertmanager
     # on this same node. Tier-2 ships logs off the box to a management cluster;

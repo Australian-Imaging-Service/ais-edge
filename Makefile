@@ -109,8 +109,12 @@ promtool: $(RENDER_DEP)
 pvc-retention: $(RENDER_DEP)
 	@scripts/ci/pvc-retention.sh
 
+# The S3 reclaimer is a MANAGEMENT-side component: it clears the staging bucket
+# after XNAT confirms a session. Tier-1 uploads straight to XNAT, so there is no
+# staging bucket, no reclaimer, and nothing for this harness to exercise.
 reclaimer:
-	@tests/reclaimer/run-tests.sh
+	@if [ -x tests/reclaimer/run-tests.sh ]; then tests/reclaimer/run-tests.sh; \
+	 else echo "  SKIP  reclaimer — no S3 reclaimer on this tier (single node, direct upload)"; fi
 
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,

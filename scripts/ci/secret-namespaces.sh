@@ -38,10 +38,29 @@ HELM="${HELM:-helm}"
 # secrets to a DIFFERENT cluster. `site-secrets.sh apply` sends a whole file to
 # whatever KUBECONFIG points at, so the management set and the edge set cannot
 # share a file without one of them landing on the wrong cluster.
-EXAMPLE_MGMT="$REPO/sites/example-mgmt/secrets.example.yaml"
-EXAMPLE_EDGE="$REPO/sites/example-edge/secrets.example.yaml"
-VALUES_MGMT="$REPO/sites/example-mgmt/values.yaml"
-VALUES_EDGE="$REPO/sites/example-edge/values.yaml"
+# WHICH EXAMPLE SITE FILES THIS BRANCH HAS.
+#
+# Tier-2 splits config into a management site plus one file per edge, and the
+# edge file alone cannot render: its S3 endpoint, staging bucket and Loki
+# endpoint are all DERIVED from the management file. Tier-1 has one machine and
+# one file, sites/example-single, which is self-contained.
+#
+# Keyed on whether charts/mgmt exists, NOT on whether example-edge does. Both
+# example dirs are present on the tier-1 branch because charts/edge is shared,
+# so a file-existence test picks the tier-2 pair and then fails to render with
+# "upload.mode=s3 needs an S3 endpoint" — which is correct, and not what this
+# stage is testing.
+if [ -d "$REPO/charts/mgmt" ]; then
+    EXAMPLE_MGMT="$REPO/sites/example-mgmt/secrets.example.yaml"
+    EXAMPLE_EDGE="$REPO/sites/example-edge/secrets.example.yaml"
+    VALUES_MGMT="$REPO/sites/example-mgmt/values.yaml"
+    VALUES_EDGE="$REPO/sites/example-edge/values.yaml"
+else
+    EXAMPLE_MGMT="$REPO/sites/example-single/secrets.example.yaml"
+    EXAMPLE_EDGE="$REPO/sites/example-single/secrets.example.yaml"
+    VALUES_MGMT="$REPO/sites/example-single/values.yaml"
+    VALUES_EDGE="$REPO/sites/example-single/values.yaml"
+fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -75,8 +94,20 @@ render() { # <name> <chart> <namespace> <values-file>... then [extra helm args]
 }
 
 rendered_ok=1
-render mgmt charts/mgmt ais-mgmt "$VALUES_MGMT" > "$WORK/mgmt.yaml"
-if [ ! -s "$WORK/mgmt.yaml" ]; then
+HAS_MGMT=1
+if [ -d "$REPO/charts/mgmt" ]; then
+  render mgmt charts/mgmt ais-mgmt "$VALUES_MGMT" > "$WORK/mgmt.yaml"
+else
+  HAS_MGMT=0
+  # TIER-1 ships no management chart. Its Secrets are all in the edge render,
+  # which is checked below; an empty file keeps the comparison honest rather
+  # than silently treating "no mgmt secrets" as "all mgmt secrets satisfied".
+  : > "$WORK/mgmt.yaml"
+  echo "  SKIP  management chart — this branch ships no charts/mgmt (single node)"
+fi
+# Only assert the mgmt render succeeded if there IS a mgmt chart. An empty file
+# is the correct result on tier-1, not a render failure.
+if [ "$HAS_MGMT" = 1 ] && [ ! -s "$WORK/mgmt.yaml" ]; then
     bad "management chart failed to render with sites/example-mgmt/values.yaml"
     sed 's/^/        /' "$WORK/mgmt.err" | head -20
     rendered_ok=0
@@ -207,6 +238,7 @@ for path in rendered:
 RUNTIME = {
     'mgmt-ingress-nginx-admission',            # ingress-nginx admission webhook cert
     'mgmt-kube-prometheus-stack-admission',    # prometheus-operator admission webhook cert
+    'ais-kps-admission',                       # same, under tier-1's fullnameOverride
     'ais-edge-ca-secret',                      # issued by the CA Certificate
 }
 
