@@ -94,8 +94,11 @@ new)
     # site scaffolded from the edge template would be missing every hostname the
     # edges derive their endpoints from.
     SITE="${2:-}"; ROLE="${3:-}"
-    if [ -z "$SITE" ] || [ -z "$ROLE" ]; then
-        die "usage: $0 new <name> <mgmt|edge>
+    # WHICH TIER IS THIS CHECKOUT? Same test CI uses: only tier-2 ships a
+    # management chart. Branching on it here keeps the usage text describing
+    # the roles that actually work in the tree the operator is standing in.
+    if [ -d "${REPO_DIR}/charts/mgmt" ]; then
+        ROLE_USAGE="usage: $0 new <name> <mgmt|edge>
 
   mgmt   the management node — SeaweedFS, observability, control planes,
          the XNAT uploader, the reclaimer, and the fleet-wide data policy.
@@ -107,13 +110,36 @@ new)
   values.yaml. That entry is the whole registration: the S3 identity, the
   hosted control plane and the Loki push client certificate are all derived
   from it. There is no per-edge credential to mint by hand."
+        VALID_ROLES="mgmt edge"
+    else
+        ROLE_USAGE="usage: $0 new <name> single
+
+  single   this machine — Orthanc, de-identification, the AE-title to
+           XNAT-project map, and the uploader that PUTs straight to XNAT.
+           Tier-1 is one box, so this is the only role and one file is the
+           whole configuration.
+
+  'mgmt' and 'edge' are TIER-2 roles and are refused here. sites/example-edge
+  is kept for reference only: it sets upload.mode: s3, which needs a SeaweedFS
+  and a management-side reclaimer that do not exist on this tier — install.sh
+  rejects it. Scaffolding from it would hand you a site that cannot install."
+        VALID_ROLES="single"
+    fi
+    if [ -z "$SITE" ] || [ -z "$ROLE" ]; then
+        die "$ROLE_USAGE"
     fi
     # mgmt / edge are the TIER-2 pair: one management site plus one file per
     # edge. `single` is TIER-1 — one machine, so one file is the whole
     # configuration and there is no management site to register it with.
-    case "$ROLE" in
-        mgmt|edge|single) ;;
-        *) die "unknown role '${ROLE}' — expected 'mgmt', 'edge' (tier-2) or 'single' (tier-1)" ;;
+    # Validated against the roles THIS TIER supports, not against the union of
+    # both. `new <name> edge` on tier-1 used to succeed and copy a template
+    # with upload.mode: s3 — a site that scaffolds cleanly, renders cleanly,
+    # and is then rejected by install.sh, which reads as an installer bug.
+    case " ${VALID_ROLES} " in
+        *" ${ROLE} "*) ;;
+        *) die "role '${ROLE}' is not available in this checkout.
+
+${ROLE_USAGE}" ;;
     esac
 
     TEMPLATE="${REPO_DIR}/sites/example-${ROLE}"
@@ -154,6 +180,20 @@ new)
     ;;
 
 add-edge)
+    # TIER-2 ONLY. Everything below writes into a MANAGEMENT site's values.yaml
+    # and secrets — an `edges:` entry, an `<edge>-s3` Secret, a Loki push client
+    # certificate. None of those files exist on tier-1, so without this guard
+    # the command fails partway through with a path error after having already
+    # touched the site directory.
+    if [ ! -d "${REPO_DIR}/charts/mgmt" ]; then
+        die "add-edge is a tier-2 command and this is a tier-1 checkout.
+
+  It registers an edge with a MANAGEMENT site: an entry under \`edges:\`, an
+  S3 key pair, and a Loki push client certificate. Tier-1 is one machine with
+  no management plane, so there is nothing to register with.
+
+  You want:  $0 new <name> single"
+    fi
     # ONE credential still has to exist twice: this edge's S3 key pair, once
     # as the `<edge>-s3` Secret on the management site (which SeaweedFS scopes
     # to that edge's bucket) and once as `s3-edge-credentials` in the edge's
