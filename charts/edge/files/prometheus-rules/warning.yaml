@@ -6,7 +6,6 @@
 # loki-ruler-rules.yaml — those are derived from JSON events in Loki, not
 # from any Prometheus metric.
 # =============================================================================
-
 # NOTE: this file is a BARE `groups:` fragment, not a whole
 # PrometheusRule. charts/edge/templates/observability.yaml supplies the
 # apiVersion/kind/metadata and the namespace, so the namespace is NOT
@@ -18,8 +17,9 @@ groups:
   interval: 30s
   rules:
   - alert: IngestPodCrashLoop
-    expr: 'increase(kube_pod_container_status_restarts_total{namespace=~"xnat-ingest|xnat-upload"}[1h])
-      > 3
+    expr: 'increase(kube_pod_container_status_restarts_total{namespace=~"xnat-ingest|xnat-upload"}[1h]) > 3
+
+      and on(pod, namespace) kube_pod_status_ready{condition="true"} == 0
 
       '
     for: 5m
@@ -27,5 +27,5 @@ groups:
       severity: warning
     annotations:
       summary: Ingest pod {{ $labels.pod }} crashlooping
-      description: '{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour.
-        New DICOMs may not be received, staged, or uploaded.'
+      description: '{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour AND is not ready now. New DICOMs may not be received, staged, or uploaded. The readiness clause is what
+        makes this clear on recovery: without it the alert kept paging for a full hour after the pod was healthy again, because the restarts stayed inside the 1h window.'
