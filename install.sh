@@ -164,6 +164,28 @@ export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
 DATA_ROOT="$(cfg storage.dataRoot)"
 export DATA_ROOT
 
+# ONE k0s VERSION FOR THE WHOLE DEPLOYMENT.
+#
+# The charts already pin what the hosted control planes are built from
+# (k0smotron.k0sVersion), and edge-clusters.yaml calls that "one value, both
+# ends". This makes it true of the MANAGEMENT node's own k0s as well, which was
+# still installed with a bare `curl get.k0s.sh | sh` — i.e. whatever upstream
+# published that day.
+#
+# The same class of bug that crash-looped an edge worker: nothing in the repo
+# chose the version, so two installs a fortnight apart differ while the operator
+# is told they are identical. Falls back to the chart default when a site does
+# not override it, and to unpinned only if the chart value is somehow absent.
+K0S_VERSION="$(cfg k0smotron.k0sVersion)"
+if [ -z "$K0S_VERSION" ] && [ -f "${SCRIPT_DIR}/charts/mgmt/values.yaml" ]; then
+    K0S_VERSION="$(python3 -c "
+import yaml,sys
+v=yaml.safe_load(open('${SCRIPT_DIR}/charts/mgmt/values.yaml')) or {}
+print((v.get('k0smotron') or {}).get('k0sVersion',''))" 2>/dev/null || true)"
+fi
+export K0S_VERSION
+[ -n "$K0S_VERSION" ] && echo "  k0s (this node + hosted control planes): ${K0S_VERSION}"
+
 export MGMT_NODE_IP INTERNAL_DOMAIN INGRESS_PORT INSTALL_TOPOLOGY INSTALL_MODE
 export SEAWEEDFS_HOSTNAME GRAFANA_HOSTNAME LOKI_HOSTNAME
 

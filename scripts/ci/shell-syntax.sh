@@ -135,4 +135,44 @@ done
 
 [ "$cfg_bad" -eq 0 ] && ci_pass "config/ holds only k0s-controller.yaml, and no script sources a config/*.env"
 
+
+# =============================================================================
+# k0s is never installed unpinned.
+# =============================================================================
+# A worker whose k0s MINOR differs from its control plane bootstraps fine, has
+# its CSR approved, then asks for `worker-config-default-<its minor>` — a
+# ConfigMap the older control plane never created, and whose RBAC does not cover
+# it. The Node authorizer denies it, k0s exits 1, systemd restarts it forever,
+# and the node never appears, so the installer just waits with nothing to show.
+#
+# It is a LATENT bug that activates on upstream's release schedule, not on any
+# change here: the charts pinned v1.35.2 months ago, `get.k0s.sh` started
+# serving 1.36, and the same unchanged script produced a broken node. Hit on
+# cai-lfs3.
+#
+# So: every k0s install must name a version. One deliberate fallback is marked
+# `# UNPINNED-OK` with its reasoning; anything else is a regression.
+ci_heading "k0s is never installed unpinned"
+
+k0s_bad=0
+while IFS= read -r f; do
+  [ -e "$f" ] || continue
+  # Lines that actually RUN the installer, not comments about it.
+  while IFS=: read -r n line; do
+    case "$line" in
+      *K0S_VERSION*) continue ;;
+    esac
+    prev="$(sed -n "$((n>4?n-4:1)),$((n-1))p" "$f" 2>/dev/null)"
+    case "$prev" in
+      *UNPINNED-OK*) continue ;;
+    esac
+    ci_fail "$(basename "$f"):$n installs k0s without a version. A worker one minor from its control plane crash-loops on a worker-config ConfigMap that does not exist, and the node never appears."
+    k0s_bad=1
+  done < <(grep -nE '^[^#]*curl[^#]*get\.k0s\.sh[^#]*\|' "$f" 2>/dev/null)
+done < <(
+  find "$REPO_ROOT/scripts" -type f -name '*.sh' 2>/dev/null
+  find "$REPO_ROOT" -maxdepth 1 -type f -name '*.sh' 2>/dev/null
+)
+[ "$k0s_bad" -eq 0 ] && ci_pass "every k0s install names a version (or is marked UNPINNED-OK with a reason)"
+
 ci_summary "shell syntax"
