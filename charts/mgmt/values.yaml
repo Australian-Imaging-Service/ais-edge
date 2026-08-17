@@ -550,10 +550,26 @@ ingress-nginx:
       limits:   {cpu: 1,    memory: 512Mi}
 
 ingressNginx:
+  # BOTH KEYS HERE ARE READ BY THIS CHART. Two more used to sit alongside them
+  # and were read by nothing:
+  #
+  #   loadBalancerIP   the key you reach for to pin a pre-allocated floating IP
+  #                    on cloud. It did nothing. A parent chart cannot push a
+  #                    value into a subchart, so the address has to be set on
+  #                    the subchart itself, in your SITE file:
+  #                        ingress-nginx:
+  #                          controller:
+  #                            service:
+  #                              loadBalancerIP: "203.0.113.50"
+  #   proxyBodySize    likewise. The real setting is the subchart's own
+  #                    controller.config.proxy-body-size, set to 50g above.
+  #
+  # Both were deleted rather than wired, because a key that reads as configured
+  # and is not is worse than no key: on cloud the first one would have been set
+  # to a floating IP, ignored, and the load balancer would have come up on a
+  # different address than domain.internal names — with nothing to say so.
   enabled: true
   sslPassthrough: true   # required — k0smotron traffic must not terminate here
-  loadBalancerIP: ""
-  proxyBodySize: 50g
 
 
 # =============================================================================

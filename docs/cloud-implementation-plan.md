@@ -81,9 +81,9 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with rea
       `ingress-nginx.controller.service.type: ClusterIP` → fail, same reason.
 - [x] **1.5** Negative CI cases for 1.3 and 1.4; update the guard census.
 
-### 2 — The dead `loadBalancerIP` key
+### 2 — The dead `loadBalancerIP` key  ·  DONE (both keys removed, 5 docs corrected)
 
-- [ ] **2.1** `charts/mgmt/values.yaml:555` declares
+- [x] **2.1** `charts/mgmt/values.yaml:555` declares
       `ingressNginx.loadBalancerIP: ""` and **no template consumes it**. It is
       exactly the key an operator reaches for to pin a pre-allocated floating
       IP, and it does nothing. Either wire it or delete it — do not leave a key
@@ -91,7 +91,7 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with rea
       Decision: **delete it**, and document the subchart path
       (`ingress-nginx.controller.service.loadBalancerIP`) in its place, because
       the parent cannot forward into the subchart.
-- [ ] **2.2** Same audit for `ingressNginx.proxyBodySize` — flagged as possibly
+- [x] **2.2** Same audit for `ingressNginx.proxyBodySize` — flagged as possibly
       dead by the earlier values-consumers work. Confirm and resolve.
 
 ### 3 — Load balancer address
@@ -169,6 +169,43 @@ IP:
 - [ ] **7.2** Negative cases for every guard added above.
 - [ ] **7.3** Check the cloud site example renders both charts, as the
       README block check does.
+
+## The test deployment — names and machines
+
+Fixed here so nothing drifts as this is built.
+
+| | |
+|---|---|
+| Site directory | `sites/cloud-test/` |
+| Management `clusterLabel` | `cloud-test` |
+| Management node | **203.101.224.240** — currently runs the tier-1 deployment |
+| Edge name (`edges[].name`) | `cloud-edge` |
+| Edge node | **203.101.230.171** |
+| DNS | `nip.io` wildcard off the load balancer's floating IP |
+| Issuer | `ais-edge-ca` — nip.io cannot satisfy DNS-01 |
+
+The edge name becomes a namespace, two hostnames and a bucket name, so it is
+short and cannot collide with the management `clusterLabel` (the chart refuses
+that collision).
+
+## Let's Encrypt later — what it will and will not touch
+
+Confirmed against the chart, because the assumption is worth writing down:
+**cert-manager never touches the k0s join path.** It issues the *terminated*
+endpoints only — SeaweedFS, Grafana and Loki ingress TLS, the Loki client CA,
+and the per-edge Loki client certificates. The k0s API and konnectivity
+certificates come from k0smotron's own cluster CA, which is exactly the mTLS
+that passes through nginx untouched. Switching issuers therefore cannot break a
+join, and moving from `ais-edge-ca` to Let's Encrypt later is `certManager.issuer`
+plus `acme.email` and a `dns01Solver`.
+
+- [ ] **5.4** ONE KNOWN WRINKLE, not zero work: `charts/edge/templates/_helpers.tpl:63`
+      refuses an `https` S3 endpoint with an empty `upload.s3.caBundleSecret`,
+      because an empty `AWS_CA_BUNDLE` *disables* verification rather than
+      falling back to the system trust store. With a publicly-trusted
+      certificate the right answer is system trust, so that guard needs an
+      explicit "use the system store" value rather than treating empty as a
+      mistake. Same question for `observability.loki.caBundleSecret`.
 
 ### 8 — Live test on OpenStack (Nectar)
 

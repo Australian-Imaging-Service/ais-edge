@@ -69,9 +69,9 @@ gcloud compute addresses describe ais-edge-lb \
 This is the address you pin in Step 4 as
 `ingress-nginx.controller.service.loadBalancerIP`; the K8s Service of type
 LoadBalancer attaches it to the auto-provisioned GCP network LB. (Do **not**
-use the top-level `ingressNginx.loadBalancerIP` key you will see in
-`charts/mgmt/values.yaml:555` — no template reads it, so setting it there is
-silently inert.)
+look for a top-level `ingressNginx.loadBalancerIP` key — it used to exist,
+was read by no template, and has been removed rather than wired. The address
+belongs on the subchart, because a parent chart cannot push values into one.)
 
 ## Step 3 — DNS
 

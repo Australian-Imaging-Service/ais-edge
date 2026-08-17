@@ -156,10 +156,10 @@ ingress-nginx:
 ```
 
 Two traps in that block:
-- Do **not** use the top-level `ingressNginx.loadBalancerIP` key
-  (`charts/mgmt/values.yaml:555`). It looks like the obvious place and no
-  template consumes it, so setting it fails silently. The LB address belongs
-  under `ingress-nginx.controller.service.loadBalancerIP`.
+- The LB address belongs under `ingress-nginx.controller.service.loadBalancerIP`.
+  A top-level `ingressNginx.loadBalancerIP` used to sit in the chart defaults
+  and was read by nothing; it has been removed rather than left looking like
+  the obvious place.
 - Override only the keys above. The inherited
   `controller.extraArgs.enable-ssl-passthrough: "true"` and
   `ingressNginx.sslPassthrough: true` must stay:

@@ -243,10 +243,12 @@ Keep `extraArgs.enable-ssl-passthrough: "true"` (the chart default): the k0s API
 and konnectivity are mTLS end to end and must not be terminated at nginx.
 
 > CAUTION — decoy key. The parent chart's top-level
-> `ingressNginx.loadBalancerIP` (charts/mgmt/values.yaml:555) is read by **no**
-> template; only `ingressNginx.enabled` and `ingressNginx.sslPassthrough` are
-> consumed. Setting the top-level one fails silently, which looks exactly like
-> a cloud that would not allocate you an address.
+> `ingressNginx` now carries only `enabled` and `sslPassthrough` — the two keys
+> this chart actually reads. A `loadBalancerIP` alongside them was read by no
+> template and has been removed: on cloud it would have been set to a floating
+> IP, ignored, and the load balancer would have come up on a different address
+> than `domain.internal` names, with nothing to say so. Set it on the subchart
+> instead: `ingress-nginx.controller.service.loadBalancerIP`.
 
 ```
 Operator runs:

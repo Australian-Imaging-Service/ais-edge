@@ -103,8 +103,9 @@ actually read, which is not what those docs still print.
    it as `ingress-nginx.controller.service.loadBalancerIP`. Some clouds
    (Nectar QLD) need this to be empty — see the per-cloud doc. There is no
    `LB_PUBLIC_IP`, and the intuitive-looking top-level
-   `ingressNginx.loadBalancerIP` (`charts/mgmt/values.yaml:555`) is consumed
-   by no template, so setting it there fails silently.
+   There is no top-level `ingressNginx.loadBalancerIP`: it existed, was read
+   by no template, and was removed. A parent chart cannot set a subchart's
+   values, so the address goes on the subchart itself.
 3. **Set DNS** to point at that IP. Use `nip.io` for dev,
    your own zone for prod (`domain.internal`). `nip.io` cannot satisfy
    Let's Encrypt, so dev stays on the default `certManager.issuer:
