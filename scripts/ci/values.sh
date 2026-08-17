@@ -162,6 +162,10 @@ EOF
 
 # Let's Encrypt staging with a DNS-01 solver. Exercises the ACME ClusterIssuer
 # branch, which is otherwise never rendered.
+# THE SHIPPED CLOUD SITE ITSELF. Not a hand-written fixture: sites/example-cloud
+# is what an operator copies, so if it stops rendering CI is what should notice.
+cp "$REPO_ROOT/sites/example-cloud/values.yaml" "$V/mgmt-cloud.yaml"
+
 cat >"$V/mgmt-letsencrypt.yaml" <<'EOF'
 certManager:
   issuer: letsencrypt-staging
@@ -733,6 +737,39 @@ EOF
 printf 'hostAliases:\n  mgmtNodeIP: ""\n'                 >"$V/neg-edge-hostaliases-no-ip.yaml"
 printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clusterlabel.yaml"
 
+# -- cloud ingress shape ------------------------------------------------------
+# The on-prem default left in place on cloud: binds the host's :443, never asks
+# for a load balancer, and the controller still reports 1/1 Running.
+cat >"$V/neg-mgmt-cloud-hostnetwork.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: true
+EOF
+
+# Reachable from nowhere outside the cluster.
+cat >"$V/neg-mgmt-cloud-clusterip.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: ClusterIP
+EOF
+
+# ClusterFirstWithHostNet without hostNetwork: the pod gets the HOST's
+# resolv.conf and loses its in-cluster upstreams.
+cat >"$V/neg-mgmt-cloud-dnspolicy.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirstWithHostNet
+    service:
+      type: LoadBalancer
+EOF
+
 # Orthanc auth on with nothing to authenticate against. The deployment mounts
 # existingSecret non-optionally, so an empty name fails as a volume error
 # rather than as an auth error.
@@ -766,6 +803,7 @@ mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
 mgmt-no-seaweedfs	charts/mgmt	mgmt-base.yaml mgmt-no-seaweedfs.yaml
 mgmt-shared-bucket	charts/mgmt	mgmt-base.yaml mgmt-shared-bucket.yaml
 mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
+mgmt-cloud	charts/mgmt	mgmt-cloud.yaml
 mgmt-slack	charts/mgmt	mgmt-base.yaml mgmt-slack.yaml
 mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-datapolicy-on.yaml
 edge-defaults	charts/edge	edge-base.yaml
@@ -844,6 +882,9 @@ neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toproc
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
+neg-mgmt-cloud-hostnetwork	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-hostnetwork.yaml	hostNetwork=true
+neg-mgmt-cloud-clusterip	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-clusterip.yaml	service.type=ClusterIP
+neg-mgmt-cloud-dnspolicy	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-dnspolicy.yaml	dnsPolicy=ClusterFirstWithHostNet without hostNetwork
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse

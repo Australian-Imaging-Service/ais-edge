@@ -111,6 +111,46 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
 {{/* Validation — all of these fail silently at runtime if wrong           */}}
 {{/* ===================================================================== */}}
 {{- define "mgmt.validate" -}}
+
+  {{- /* =====================================================================
+         CLOUD TOPOLOGY: THE INGRESS MUST ASK FOR A LOAD BALANCER
+         =====================================================================
+         The shipped defaults are the ON-PREM shape: hostNetwork binds the
+         management host's own :443 and the Service stays ClusterIP, because
+         there is no cloud controller to satisfy a LoadBalancer and the host's
+         port IS the entry point.
+
+         On cloud that shape produces a deployment that looks entirely healthy
+         and answers nothing: the controller pod reports 1/1 Running, no
+         LoadBalancer is ever requested, no external address exists, and every
+         fleet hostname — each edge's k0s API and konnectivity, SeaweedFS, the
+         Loki push endpoint — is simply unreachable. The first symptom is an
+         edge that will not join, at the far end of the link.
+
+         Helm cannot template a subchart's values from this chart, so these
+         cannot be set for the operator: they have to be written in the site
+         file, under the `ingress-nginx:` key. Failing here is how the operator
+         finds that out at install time rather than after the first join
+         attempt. */ -}}
+  {{- if and (eq .Values.topology "cloud") .Values.ingressNginx.enabled }}
+    {{- $c := (index .Values "ingress-nginx").controller | default dict }}
+    {{- if $c.hostNetwork }}
+      {{- fail "topology=cloud with ingress-nginx.controller.hostNetwork=true. That is the on-prem shape: it binds the management host's own :443 and never asks the cloud for a load balancer, so the controller reports 1/1 Running while no external address exists and every fleet hostname is unreachable. Set the following in your SITE file (a parent chart cannot push values into a subchart, so it has to be written there):\n\ningress-nginx:\n  controller:\n    hostNetwork: false\n    dnsPolicy: ClusterFirst\n    service:\n      type: LoadBalancer" }}
+    {{- end }}
+    {{- $svcType := (($c.service) | default dict).type | default "" }}
+    {{- if eq $svcType "ClusterIP" }}
+      {{- fail "topology=cloud with ingress-nginx.controller.service.type=ClusterIP. Nothing outside the cluster can reach a ClusterIP, so no edge can join and no site can stage imaging. Set service.type: LoadBalancer in your SITE file under the `ingress-nginx:` key. On OpenStack, pin it to a pre-allocated floating IP with service.loadBalancerIP so the address exists before domain.internal has to name it." }}
+    {{- end }}
+    {{- /* dnsPolicy is not independently fatal, but ClusterFirstWithHostNet
+           without hostNetwork gives the pod the HOST's resolv.conf and loses
+           every in-cluster upstream name — which surfaces as SeaweedFS and
+           Loki being unresolvable from inside the controller. */ -}}
+    {{- if eq ($c.dnsPolicy | default "") "ClusterFirstWithHostNet" }}
+      {{- if not $c.hostNetwork }}
+        {{- fail "ingress-nginx.controller.dnsPolicy=ClusterFirstWithHostNet without hostNetwork. That pairing hands the controller the HOST's resolv.conf and loses its in-cluster upstream names, so SeaweedFS and Loki stop resolving from inside it. On cloud use dnsPolicy: ClusterFirst." }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
   {{- /* Removed keys must FAIL, not be ignored. These two read exactly like
          policy and did nothing: Helm cannot template a subchart's values from
          here, so retention only ever came from the subchart blocks. Someone

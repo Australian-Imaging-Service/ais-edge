@@ -70,7 +70,7 @@ ci_heading "guard census"
 # file<TAB>expected fail-call-sites
 expected_census() {
   cat <<'EOF'
-charts/mgmt/templates/_helpers.tpl	19
+charts/mgmt/templates/_helpers.tpl	22
 charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	13
 charts/mgmt/templates/edge-clusters.yaml	10

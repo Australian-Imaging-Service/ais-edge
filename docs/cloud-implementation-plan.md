@@ -61,25 +61,25 @@ The ACME / DNS-01 `ClusterIssuer` is **fully implemented** in
 
 Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with reason.
 
-### 1 — Ingress shape follows topology
+### 1 — Ingress shape follows topology  ·  DONE, full CI green
 
-- [ ] **1.1** `charts/mgmt/values.yaml`: keep the on-prem defaults
+- [x] **1.1** `charts/mgmt/values.yaml`: keep the on-prem defaults
       (`hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`,
       `service.type: ClusterIP`) as the shipped values.
-- [ ] **1.2** Add a documented cloud block to a new
+- [x] **1.2** Add a documented cloud block to a new
       `sites/example-cloud/values.yaml` overriding the subchart:
       `hostNetwork: false`, `dnsPolicy: ClusterFirst`,
       `service: {type: LoadBalancer}`.
       Helm cannot template subchart values from a parent, so this MUST be
       written in the site file — a parent key that looks like it forwards would
       be read, trusted and silently ignored.
-- [ ] **1.3** Render guard: `topology: cloud` **and**
+- [x] **1.3** Render guard: `topology: cloud` **and**
       `ingress-nginx.controller.hostNetwork: true` → fail. On-prem's default
       binds the host's `:443` and never asks for a load balancer; left in place
       on cloud the controller reports `1/1 Running` and nothing answers.
-- [ ] **1.4** Render guard: `topology: cloud` **and**
+- [x] **1.4** Render guard: `topology: cloud` **and**
       `ingress-nginx.controller.service.type: ClusterIP` → fail, same reason.
-- [ ] **1.5** Negative CI cases for 1.3 and 1.4; update the guard census.
+- [x] **1.5** Negative CI cases for 1.3 and 1.4; update the guard census.
 
 ### 2 — The dead `loadBalancerIP` key
 
@@ -111,6 +111,28 @@ install creates the load balancer, and a `nip.io` name *embeds* it.
       `LoadBalancer` Service with no cloud controller sits `<pending>` forever
       and everything downstream times out with no explanation.
 
+### 3b — Octavia teardown ordering (OpenStack)
+
+Deleting a load balancer is **not** a single call: Octavia refuses while a
+listener or pool is still attached. The order is pool → listener → load
+balancer. A `kubectl delete svc` normally has the cloud controller do this for
+you, but two cases leave orphans that keep consuming quota and hold the floating
+IP:
+
+* the cluster is torn down (`k0s reset`) before the Service is deleted, so no
+  controller ever runs the cleanup;
+* the controller is removed or loses credentials mid-teardown.
+
+- [ ] **3b.1** `scripts/uninstall.sh`: on `topology: cloud`, delete the ingress
+      Service and WAIT for the cloud controller to release the load balancer
+      before touching k0s. Deleting the cluster first strands it.
+- [ ] **3b.2** Print the manual recovery in the right order when the Service is
+      already gone or the wait times out:
+      `openstack loadbalancer pool delete` → `listener delete` → `delete`,
+      then release the floating IP if it was allocated for this install.
+- [ ] **3b.3** Say in the docs that a stranded LB holds a floating IP, because
+      the next install will ask for one and the quota will already be spent.
+
 ### 4 — Per-edge exposure on cloud
 
 - [ ] **4.1** Today `edges[].exposure` is `nodePort | sni`. Behind one cloud LB,
@@ -122,7 +144,7 @@ install creates the load balancer, and a `nip.io` name *embeds* it.
 
 ### 5 — Certificates
 
-- [ ] **5.1** `sites/example-cloud/values.yaml` ships `certManager.issuer:
+- [x] **5.1** `sites/example-cloud/values.yaml` ships `certManager.issuer:
       ais-edge-ca` with a comment that `nip.io` cannot satisfy DNS-01.
 - [ ] **5.2** Document the four DNS-01 solver shapes (route53, azuredns,
       clouddns, designate) as commented blocks, verified against
@@ -143,7 +165,7 @@ install creates the load balancer, and a `nip.io` name *embeds* it.
 
 ### 7 — CI
 
-- [ ] **7.1** Positive render cases: `mgmt-cloud`, `mgmt-cloud-letsencrypt`.
+- [x] **7.1** Positive render cases: `mgmt-cloud`, `mgmt-cloud-letsencrypt`.
 - [ ] **7.2** Negative cases for every guard added above.
 - [ ] **7.3** Check the cloud site example renders both charts, as the
       README block check does.
