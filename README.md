@@ -101,7 +101,7 @@ chart is not needed.
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
 | **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**. The only component that deletes patient data. |
-| **cert-sync** | mgmt | Copies the CA bundle and each edge's Loki push credential into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
+| **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
 | **cert-manager** | mgmt | Issues the internal CA and every server certificate. |
 
@@ -198,14 +198,47 @@ $EDITOR sites/my-edge/values.yaml        $EDITOR sites/my-edge/secrets.enc.yaml
 scripts/site-secrets.sh encrypt my-site
 scripts/site-secrets.sh encrypt my-edge
 
-# 5. Install
+# 6. Install
 ./install.sh my-site
+
+# 7. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
+#    objects were accepted, not that the fleet is actually working.
+make verify-live SITE=my-site
 ```
 
 > **Back up `~/.config/sops/age/keys.txt`.** It is the only key that can decrypt
 > `sites/*/secrets.enc.yaml`, nothing can regenerate it, and losing it makes
 > every encrypted site file permanently unreadable. Put it in the team password
 > manager.
+
+### Then verify, every time
+
+```bash
+make verify-live SITE=my-site        # or: scripts/verify-live.sh my-site
+```
+
+This is the difference between "Helm accepted the manifests" and "a study sent
+to an edge will reach XNAT". It reads the SAME `sites/<site>/values.yaml` the
+install used, so it checks *your* hostnames, namespaces and edge list — nothing
+in it is hardcoded, and a deployment that keeps its data somewhere other than
+`/data` is checked where it actually lives.
+
+On this tier it walks the whole fleet: the management API server, node
+readiness, pod health per namespace, the `ais-edge-ca` Certificate and every
+Certificate derived from it, the SeaweedFS S3 Service, each edge's hosted
+control plane, and XNAT reachability. Its exit code is the number of failures.
+
+Run it:
+
+* after `install.sh`, always;
+* after adding an edge — a `join: bundle` edge in particular, because nothing
+  on the management side can tell you the operator actually ran the bundle;
+* after rotating a Secret or the CA;
+* after a reboot of the management node or any edge.
+
+> The edges' DICOM receivers listen on a **`hostPort`**, which is invisible from
+> inside the cluster, so verify-live cannot confirm them and does not pretend to.
+> Prove that leg with a real C-STORE from a machine that will send studies.
 
 ### What each step does, and why it is not all Helm
 
@@ -216,7 +249,7 @@ scripts/site-secrets.sh encrypt my-edge
 | **3** | site Secrets, SOPS → cluster | must precede the workloads that mount them |
 | **4** | `helm install` management chart | — |
 | **5** | child kubeconfig + join token, per edge | a Helm-rendered token would be re-minted on every upgrade |
-| **6** | join the edge worker over SSH | there is no API server on the edge until this runs |
+| **6** | join the edge worker — over SSH (`join: ssh`, the default), or by a self-contained bundle you carry to the site and run there (`join: bundle`, see **Edges** below) | the worker has to be joined from outside the cluster; with `join: bundle` the management node never touches it at all |
 | **7** | `helm install` edge chart, then seed cert-sync | — |
 
 #### Why cert-manager is a prerequisite, not a subchart
@@ -239,11 +272,20 @@ step 2 satisfies it.
 #### Why the installer seeds cert-sync immediately
 
 cert-sync is a CronJob (`23 */6 * * *`). On a fresh install that would leave the
-edge without its `ca-bundle` and its `loki-push-client-tls` for up to six hours
-— and neither is optional: the s3-uploader mounts the first and Vector mounts
-the second, so neither pod can start at all. Step 7 runs the CronJob's own pod
-spec once via `kubectl create job --from=cronjob`, so it cannot drift from what
-the schedule does later.
+edge without its `ca-bundle`, its `loki-push-client-tls` and its
+`s3-edge-credentials` for up to six hours — and none of the three is optional:
+the s3-uploader mounts `ca-bundle` and reads its S3 key pair out of
+`s3-edge-credentials` as environment variables, and Vector mounts `ca-bundle`
+and `loki-push-client-tls`, so neither pod can start at all. Step 7 runs the
+CronJob's own pod spec once via `kubectl create job --from=cronjob`, so it
+cannot drift from what the schedule does later.
+
+The S3 key pair is delivered rather than written on the edge for the same
+reason the CA bundle is: it is one credential that would otherwise have to be
+typed identically into two files — `<edge>-s3` here, which SeaweedFS builds the
+edge's scoped identity from, and `s3-edge-credentials` there, which its uploader
+authenticates with. A mismatch stalls the pipeline at upload with an S3 403 and
+nothing says why, so the edge's own secrets file deliberately does not carry it.
 
 ---
 
@@ -285,10 +327,16 @@ edges:
     nodeIP: "203.0.113.20"
     join: ssh                       # ssh (default) | bundle — see below
     sshUser: ubuntu                 # join: ssh only — install.sh pushes the join
-    sshKey: ~/.ssh/id_ed25519       #   (no API server on the edge until then)
+    sshKey: ~/.ssh/id_ed25519       #   over ssh. OMIT BOTH for join: bundle.
     s3SecretRef: edge-dev-s3
     exposure: sni                   # sni | nodePort — use sni
-    # joinTokenTTL: 2h              # bearer credential — keep it short
+    # joinTokenTTL: 2h              # how long this edge's join token stays valid.
+    #                               # Default 2h. The ssh path spends it in
+    #                               # seconds; raise it only for a `join: bundle`
+    #                               # edge whose bundle has to travel further than
+    #                               # that. It is a BEARER credential — anything
+    #                               # holding it can join a node — so a longer
+    #                               # window is a deliberate decision.
     # apiHost / konnectivityHost default to <prefix>-<name>.<domain>
 ```
 
@@ -386,12 +434,30 @@ The charts never contain credentials. They reference Secrets by name, and those
 Secrets are created separately from a SOPS-encrypted file.
 
 ```bash
-scripts/site-secrets.sh new <site>       # scaffold
-scripts/site-secrets.sh encrypt <site>   # before committing
-scripts/site-secrets.sh edit <site>      # decrypt → $EDITOR → re-encrypt
-scripts/site-secrets.sh apply <site>     # decrypt straight into the cluster
-scripts/site-secrets.sh check            # fail if any committed secret is plaintext
+scripts/site-secrets.sh new <site> <mgmt|edge>       # scaffold; the ROLE is required
+scripts/site-secrets.sh add-edge <mgmt-site> <edge>  # scaffold an edge AND mint its S3 key pair
+scripts/site-secrets.sh encrypt <site>               # before committing
+scripts/site-secrets.sh edit <site>                  # decrypt → $EDITOR → re-encrypt
+scripts/site-secrets.sh view <site>                  # print decrypted (careful: terminal)
+scripts/site-secrets.sh apply <site>                 # decrypt straight into the cluster
+scripts/site-secrets.sh check                        # fail if any committed secret is plaintext
 ```
+
+**`new` does not guess the role.** An edge scaffolded from the management
+template renders perfectly — Helm ignores values a chart does not declare — and
+then silently overrides the fleet's `dataPolicy` from the wrong file; a
+management site scaffolded from the edge template is missing every hostname the
+edges derive their endpoints from. Both fail much later and in the least obvious
+way, so the argument is mandatory rather than defaulted.
+
+**Use `add-edge` to onboard an edge**, not `new … edge`. It scaffolds
+`sites/<edge>/`, mints the edge's S3 key pair once, and writes it into the
+management secrets file as `<edge>-s3` — the one credential that still has to
+exist in two places, and the last one a human could mismatch by hand. It
+deliberately does **not** edit the management `values.yaml`: that file is the
+most heavily annotated in the repo and a YAML round-trip would destroy every
+caution comment in it, so it prints the `edges:` block for you to paste, along
+with the steps it cannot do for you.
 
 `apply` pipes the plaintext directly into `kubectl` — it never touches disk. It
 also creates any namespace its Secrets name, which is what makes
@@ -422,23 +488,43 @@ dataPolicy:
   dryRun: true        # decisions are logged, never acted on
 
   originals:                                   # the archive of record
+    allowExpiry: false  # the THIRD switch — while false the facility-backup
+                        # volume is mounted read-only and no original is removed
     facilityBackup: {retain: forever, minFreeDiskPercent: 10}
     quarantine:     {retain: forever, alertAfter: 24h}
     fileDrop:       {reclaim: never,  minAge: 30d}
 
   derived:                                     # reproducible from the originals
     orthancStorage: {reclaim: onGrouped,       minAge: 7d}
-    grouped:        {reclaim: onAssigned,      minAge: 0}
+    grouped:        {reclaim: onAssigned}      # no minAge: assign unlinks at
+                                               #   assign time, so only orphans
+                                               #   reach the engine; setting it
+                                               #   is rejected at render
     assigned:       {reclaim: onUploaded,      minAge: 0}
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d,
                      verifyAgainstXnat: true, maxRemovals: 50,
                      schedule: "17 * * * *"}
 
   telemetry:
-    podLogFiles: {retain: 14d}
-    loki:        {retain: 30d}
-    prometheus:  {retain: 15d}
+    # the kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi
+    # of on-disk log per container.
+    podLogFiles: {maxSize: 10Mi, maxFiles: 5}
 ```
+
+**Loki and Prometheus retention are not set here.** Helm cannot template a
+subchart's values from the parent, so keys under `telemetry` for them would read
+exactly like policy and do nothing — an operator could edit them, see a clean
+install, and keep the old retention indefinitely with nothing to say so. Setting
+`telemetry.loki` or `telemetry.prometheus` is now **rejected at render time**.
+Set retention where it is actually read, in the same `sites/<site>/values.yaml`:
+`kube-prometheus-stack.prometheus.prometheusSpec.retention` for Prometheus and
+`loki.loki.limits_config.retention_period` for Loki. `podLogFiles` is likewise
+not a duration — the kubelet rotates container logs by size and count only, so a
+window it could never honour was unimplementable rather than merely unwired. It
+is applied as `--kubelet-extra-args` at **worker-join time**, on both join paths,
+so changing it affects workers joined afterwards; an already-joined node needs its
+k0s worker service reinstalled, and `make verify-live` fails on the mismatch
+rather than letting the edit look applied.
 
 Three properties worth understanding:
 
@@ -460,6 +546,15 @@ still drains ~1200 sessions/day.
 **A fresh install expires nothing.** Run with `dryRun` for a week and read the
 decisions it logs before enabling it.
 
+**Originals need a third switch.** `enabled` and `not dryRun` arm the *derived*
+stages only. A duration on `originals.facilityBackup` or `originals.quarantine`
+does nothing until `dataPolicy.originals.allowExpiry` is also true — the
+`edge-data-policy` DaemonSet logs `expiry_skipped` instead, and the chart keeps
+the facility-backup volume mounted read-only, so the kernel refuses the delete
+even if the engine were wrong. Deleting an original destroys the only
+identifiable copy, so it takes its own deliberate act on top of the other two.
+Full truth table: `docs/TOUR.md` §5c.
+
 ---
 
 ## Security model
@@ -469,16 +564,22 @@ decisions it logs before enabling it.
 | Hospital → management | Outbound TLS only. No inbound route to the edge. |
 | Between edge sites | **One S3 bucket per site.** SeaweedFS matches identity actions as `<action>:<bucket>` with **no prefix scoping**, so a shared bucket would let any edge key read and delete every other site's staged imaging. The bucket is the only boundary there is. |
 | Edge → XNAT | The edge has **no XNAT credential**. Only the management uploader does. This is the main operational advantage of `upload.mode: s3`. |
-| Loki ingestion | Per-edge credential, Basic auth at the Ingress. Loki itself runs `auth_enabled: false`, so the Ingress is the only place it is checked. |
+| Loki ingestion | Per-edge **client certificate (mTLS)**, verified at the Ingress (`auth-tls-verify-client: on`, with `auth-tls-match-cn` pinned to the names in `edges`). cert-manager issues one `<edge>-loki-client` certificate per site and cert-sync delivers it as `loki-push-client-tls`. Loki itself runs `auth_enabled: false`, so the Ingress is the only place it is checked. The CN pin admits every site on the one push hostname, so it bounds *which* certificates are accepted, not one edge writing under another's name. |
 | TLS | Internal CA via cert-manager. An https S3 endpoint with no CA bundle is **refused at render time** — an empty `AWS_CA_BUNDLE` silently disables verification rather than falling back to the system store. |
 | Credentials at rest | SOPS + age. Never in a values file, never in a ConfigMap, never in git. |
 | CA private key | `tls.key` can never be copied to an edge — cert-sync refuses to render it. |
 
-`install.sh` also **refuses to install** with a placeholder credential or a
-secret shorter than 16 characters. That check exists because the template once
-shipped working defaults annotated "change defaults", and the first deployment
-ran with them unchanged — a comment is advice, and advice does not fail an
-install.
+`install.sh` also **refuses to install** if `sites/<site>/secrets.enc.yaml` is
+not SOPS-encrypted, or — when `sops` is on `PATH` — if any *value* in it is
+still an unfilled `REPLACE_` placeholder. It decrypts to a pipe, never to disk,
+and checks the values rather than the file text: the templates' own comments say
+"fill in every REPLACE_", so grepping the whole file refused to install a
+complete, correct site. Note the two limits of that check: `sops` is not in the
+required-tools list, so on a node without it the placeholder check is skipped
+entirely, and **nothing anywhere enforces a minimum length or strength** on a
+credential you did fill in. The check exists because the template once shipped
+working defaults annotated "change defaults", and the first deployment ran with
+them unchanged — a comment is advice, and advice does not fail an install.
 
 ---
 
@@ -494,8 +595,11 @@ Vector. Alerts come from **two** sources:
   tunnel, and because the source of truth is the log event, not a derived metric.
 
 The uploader's log schema is a **public interface**. `upload_started`,
-`upload_completed` and `upload_failed` are matched by five alert rules; renaming
-one disables the corresponding alert silently.
+`upload_completed` and `upload_failed` are matched by three Loki ruler alert
+rules — `XNATUploadFailingForAllSessions`, `S3UploaderRetryStorm` and
+`SessionUploadStalled`, five event matchers between them in
+`charts/mgmt/files/loki-ruler-rules.yaml` — and by eight Grafana dashboard
+panels; renaming one disables the corresponding alert silently.
 
 ```bash
 # Does every alert actually have the metrics it depends on?
@@ -513,6 +617,8 @@ against a CA that must be rotated in two phases weeks apart.
 
 ```
 install.sh                     the only entrypoint
+Makefile                       CI entrypoint (make ci-fast / make ci), and
+                               make verify-live SITE=<site>, which is NOT CI
 sites/
   example-mgmt/                template for THE management node (one per deployment)
   example-edge/                template for ONE edge node (one per facility)
@@ -533,13 +639,30 @@ charts/
                                vector.yaml
 scripts/
   site-secrets.sh              create / encrypt / apply site secrets
+  verify-live.sh               read-only checks against a RUNNING deployment
   uninstall.sh                 full reset
-  01,05,06                     bootstrap steps Helm cannot do
+  01,05,06,06b,06c             bootstrap steps Helm cannot do — 06 joins over
+                               SSH, 06b builds the carry-over bundle for an edge
+                               with no inbound path, 06c is the post-join work
+                               both paths share
+  files/edge-join.sh           the join itself; runs ON the edge, identical for
+                               both paths
   adopt-existing.sh            take over a running imperative install
   rotate-ca.sh                 two-phase CA rotation across the fleet
+  clear-staged-s3.sh           clear the S3 staging prefix; empty session
+                               prefixes only, unless you pass --all
   check-alert-inputs.sh        ask live Prometheus whether alerts can fire
-  ci-*.sh                      CI stages
-tests/reclaimer/               28 cases asserting on what was DELETED
+  ci/                          CI stages (render, negative, promtool, …), one
+                               script per stage, invoked by the Makefile
+tests/
+  reclaimer/                   28 cases asserting on what was DELETED
+  loki-rules/                  the real Loki rule expressions, against fixture
+                               logs, evaluated by the pinned Loki
+  data-policy/                 the real engine under the real image, asserting
+                               on what SURVIVED
+config/k0s-controller.yaml     the management k0s controller config (scripts/01)
+manifests/01-management/       the k0smotron Cluster template rendered by
+                               scripts/05, one per edge
 docs/                          component guides, CA ceremony, alerting design
 ```
 
@@ -548,8 +671,12 @@ docs/                          component guides, CA ceremony, alerting design
 ## Continuous integration
 
 ```bash
-make ci-fast     # no cluster required
-make ci          # adds a kind-based greenfield install
+make ci-fast     # no cluster, no docker
+make ci          # adds the three docker-based stages: loki-rules, data-policy,
+                 # greenfield
+
+make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
+                               # deployment. See "Then verify, every time".
 ```
 
 | Stage | Proves |
@@ -563,7 +690,16 @@ make ci          # adds a kind-based greenfield install
 | `duplicate-names` | no two objects collide |
 | `reclaimer` | 28 cases, asserting on **what was deleted**, not on log text |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
+| `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
+| `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |
+| `data-policy` | the edge retention engine, run under the real busybox image the chart deploys, asserting on **what survived** |
 | `greenfield` | the charts install onto an empty cluster |
+
+The last three need docker. They **skip loudly** without it, and the skip is
+reported separately from a pass, so a docker-less run never reads as "the charts
+are installable". `CI_REQUIRE_LOKI_TESTS`, `CI_REQUIRE_DATAPOLICY_TESTS` and
+`CI_REQUIRE_GREENFIELD` turn each skip into a failure, which is what the GitHub
+workflow sets.
 
 Two of these exist because of specific classes of silent failure:
 
@@ -584,6 +720,10 @@ the pod sits in `CreateContainerConfigError`.
 ## Operating
 
 ### Health
+
+Start with `make verify-live SITE=<site>` — it reads the site file and checks
+the whole fleet in one pass, so the one-liners below are for when it has told
+you *where* to look, or when you want a number it does not report.
 
 ```bash
 helm list -A
@@ -618,9 +758,45 @@ idempotence, not a failure. Use a different study to test a fresh write.
 
 ### Adding an edge
 
-Add an entry to `edges:` and re-run `./install.sh <site>`. Existing sites are
-untouched; the new one gets its own control plane, bucket, identity, uploader
-and reclaimer.
+An `edges:` entry alone is not enough — the new site also needs its own
+`sites/<edge>/` directory and an S3 key pair. Without them `install.sh` dies at
+step 7/7 with `missing sites/<edge>/values.yaml`, *after* the hosted control
+plane is up and the worker has joined, which is the expensive half.
+
+```bash
+# 1. scaffold sites/<edge>/ and generate its S3 key pair into the management
+#    secrets file as <edge>-s3 (cert-sync delivers it to the edge as
+#    s3-edge-credentials; do not write it on the edge side). Prints the
+#    'edges:' block to paste.
+scripts/site-secrets.sh add-edge <site> <edge>
+
+# 2. the AE-title map, de-identification profile and disk paths — facts only
+#    you have, so nothing generates them
+$EDITOR sites/<edge>/values.yaml
+
+# 3. the de-identification salt. The template ships
+#    AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS, and it is deliberately NOT
+#    auto-generated: it must survive reinstalls, and silently regenerating it
+#    would re-pseudonymise every existing patient.
+openssl rand -hex 32
+$EDITOR sites/<edge>/secrets.enc.yaml
+
+# 4. paste the printed block under 'edges:'. s3SecretRef must be <edge>-s3 —
+#    cert-sync substitutes <edge> and nothing else, and the chart refuses to
+#    render if the two disagree.
+$EDITOR sites/<site>/values.yaml
+
+# 5. encrypt the new edge before committing (add-edge already re-sealed the
+#    management file if it was encrypted)
+scripts/site-secrets.sh encrypt <edge>
+
+# 6. install, then prove it
+./install.sh <site>
+make verify-live SITE=<site>
+```
+
+Existing sites are untouched; the new one gets its own control plane, bucket,
+identity, uploader and reclaimer. Full walkthrough: `docs/TOUR.md` §5b.
 
 ### Removing an edge
 
@@ -640,15 +816,107 @@ each site. `CertificateExpiringSoon` fires at 60 days.
 
 | Symptom | Cause |
 |---|---|
-| Edge pods `CreateContainerConfigError` | A Secret is missing. Most often `ca-bundle` or `loki-push-client-tls`, both delivered by cert-sync — run its job manually: `kubectl -n ais-mgmt create job x --from=cronjob/mgmt-cert-sync-<edge>` |
+| Edge pods `CreateContainerConfigError` | A Secret is missing. Most often `ca-bundle`, `loki-push-client-tls` or `s3-edge-credentials`, all three delivered by cert-sync — run its job manually: `kubectl -n ais-mgmt create job x --from=cronjob/mgmt-cert-sync-<edge>` |
 | `helm install` fails with `conversion webhook … connection refused` | The k0smotron operator is not ready. It needs cert-manager, which must be installed *before* the chart. |
 | `invalid ownership metadata` on install | An object exists without Helm's ownership labels, usually from a previous non-Helm install. `scripts/uninstall.sh` clears these. |
-| Worker join times out | The management node cannot resolve its own child-cluster API. Check `/etc/hosts` has the `aisedge` entries — a partial teardown that removed the entries but left the marker comment causes the installer to skip re-adding them. |
+| Worker join times out | On a `join: bundle` edge, first check the obvious one: the bundle has not been run on the edge yet — the installer is waiting for the node to appear and 06c says so on timeout. Otherwise the management node cannot resolve its own child-cluster API: check `/etc/hosts` has the `aisedge` entries — a partial teardown that removed the entries but left the marker comment causes the installer to skip re-adding them. |
 | Uploader retries forever, no error on the management side | The edge cannot reach the S3 endpoint. Check `hostAliases` resolve and the CA bundle is present. The edge correctly preserves its local copy, so the only symptom is an absence. |
 | `XNATAuthFailure` while uploads succeed | Was a false positive from `xnat-ingest` progress-bar output matching bare `401`/`403`. Fixed; the rule now requires HTTP context and drops `it/s` lines. |
 | Loki logs `NoSuchBucket` at startup | Non-fatal. The bucket-creation hook is `post-install`, so Loki retries its chunk store until the bucket appears. It converges without restarting. |
 
 ---
+
+## Orthanc REST API Authentication
+
+The shipped edge site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
+`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
+accident of network placement, not a control. Anything running *inside* the
+cluster can call that API, and it can **delete studies**. Turn it on for any
+deployment where that matters.
+
+Three keys, all required, because two different things read this Secret:
+
+| Key | Read by | If it is wrong |
+| --- | --- | --- |
+| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
+| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
+| `orthanc-password` | `group-orthanc` | as above |
+
+`orthanc-user` / `orthanc-password` **must match** the user and password inside
+`users.json`. They are separate keys because Orthanc wants a file and
+`group-orthanc` wants environment variables; nothing reconciles them for you.
+
+**1. Generate a password and add the Secret.**
+
+```bash
+openssl rand -base64 24                       # use this as <password> below
+scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
+```
+
+Add this document (the template is already in your `secrets.enc.yaml`, commented
+out — uncomment and fill it in):
+
+```yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orthanc-credentials
+  namespace: xnat-ingest          # the EDGE site's namespace
+type: Opaque
+stringData:
+  users.json: '{"RegisteredUsers":{"admin":"<password>"}}'
+  orthanc-user: admin
+  orthanc-password: <password>
+```
+
+The password is **plaintext inside that JSON** — Orthanc has no hashed-password
+format here. That is precisely why this file is SOPS-encrypted before it is
+committed, and why `scripts/site-secrets.sh check` refuses a plaintext one.
+
+**2. Turn it on in the site file.**
+
+```yaml
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+```
+
+The chart refuses to render if `enabled: true` and `existingSecret` is empty —
+the deployment mounts that Secret non-optionally, so an empty name would fail
+as a confusing volume error rather than an auth one.
+
+**3. Apply, and restart what reads it.**
+
+```bash
+scripts/site-secrets.sh apply <site>
+./install.sh <site>
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+```
+
+Both restarts are needed: Kubernetes does not restart a pod when a Secret
+changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+
+**4. Verify.**
+
+```bash
+# from inside the cluster — should now be 401 without credentials
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# and 200 with them
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+```
+
+Then confirm the pipeline still moves: `group-orthanc`'s log should keep
+reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
+`orthanc-password` disagree with `users.json`.
+
+> **Do not expose port 8042 to the host or a NodePort just because auth is now
+> on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
+> layer here, not a replacement for keeping the API off the network.
 
 ## Uninstall
 
@@ -663,6 +931,17 @@ components leave in `kube-system`), every PersistentVolume **and its host
 directory**, `/data` on every node, `/etc/hosts` entries **and their marker
 comments**, the generated kubeconfigs and join tokens, and `k0s reset` on the
 management node and each edge.
+
+**One exception, and it is loud: a `join: bundle` edge.** The remote half of a
+teardown runs over SSH, and a bundle site has no inbound path by definition. The
+script detects that — `join: bundle`, or an empty `sshUser` — warns that **the
+edge half is not done**, and prints the commands to run on the edge itself:
+`k0s stop`, `k0s reset`, the `/data`, `/var/lib/k0s`, `/etc/k0s` and
+`/var/lib/vector` wipe, the `/etc/hosts` line, and a reboot to clear CNI
+interfaces and iptables state. That check exists because the old condition only
+required `sshUser` to be non-empty — which a bundle site legitimately leaves out
+— so it skipped in silence and "full reset" reported success with k0s still
+running and `/data` intact on the machine.
 
 It requires you to type the site name, because it deletes `/data` — which holds
 the facility backup, the archive of record.
@@ -697,7 +976,14 @@ that morning. Upgrade them deliberately, one at a time.
 ### Requirements
 
 * Ubuntu 22.04 on the management node and each edge
-* Key-based SSH from the management node to each edge
+* Key-based SSH from the management node to each edge — **only for `join: ssh`,
+  the default**. A site with no inbound path uses `join: bundle` and needs no
+  SSH at all (see **Edges** above, and `docs/TOUR.md` §4.1). Teardown of a
+  `join: bundle` site then has to be finished by hand on the edge.
 * `sops` and `age` on the management node
-* Ports: **443** on the management node, **4242** (DICOM) on each edge
+* Ports: **443** inbound on the management node; **4242** (DICOM) on each edge
+  from its modalities; **22** inbound on each edge from the management node
+  **for `join: ssh` only**. In steady state — and always under `join: bundle` —
+  the edge only dials *out*, to the management node on 443, under either
+  `exposure` mode.
 * ~16Gi RAM on the management node supports roughly 15 edge sites

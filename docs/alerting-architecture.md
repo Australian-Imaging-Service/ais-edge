@@ -2,10 +2,15 @@
 
 ## TL;DR
 
-Pipeline-event alerts (upload_failed spikes, stalled sessions, XNAT backlog,
-DICOM validation failures) are evaluated by **Loki's built-in ruler** running
-LogQL queries against the JSON event stream. K8s/cert-manager-derived alerts
-(node NotReady, pod crashlooping, certificate expiry, SeaweedFS down) stay in
+Pipeline-event alerts (upload_failed spikes, stalled sessions, sessions staged
+but never confirmed in XNAT, reclaimer outages, DICOM validation failures) are
+evaluated by **Loki's built-in ruler** running LogQL queries against the JSON
+event stream. XNAT *backlog* is deliberately NOT among them: `XNATBacklogGrowing`
+was measured and deleted, because the log string it matched could not
+distinguish a new arrival from a static backlog. See "What lives where" below
+for the current inventory — 13 Loki-ruler alerts and 9 Prometheus alerts — and
+"What we removed" for the four that went. K8s/cert-manager-derived alerts
+(node NotReady, certificate expiry, cert-sync staleness, SeaweedFS down) stay in
 **Prometheus** as `PrometheusRule` objects. Both fire into the existing
 **kube-prometheus-stack Alertmanager**, which routes via the
 `observability.alerting.*` in `sites/<site>/values.yaml` (the SMTP password and any Slack webhook come from Secrets in `sites/<site>/secrets.enc.yaml`).
@@ -43,17 +48,41 @@ expressions sit close to the dashboard queries that operators already trust.
 
 ## What lives where
 
+This table is the full shipped inventory, not a sample: **13** alerts in
+`charts/mgmt/files/loki-ruler-rules.yaml` and **9** across the four files in
+`charts/mgmt/files/prometheus-rules/`. If you add one, add a row — an alert
+missing from here reads as coverage nobody knows about, and an alert listed
+here that no longer ships reads as coverage that does not exist.
+
 | Alert | Source | Why |
 |------|--------|------|
-| `XNATUploadFailingForAllSessions` | Loki ruler | Derived from `event="upload_failed"` and `event="upload_completed"` JSON events on the edge. |
+| `XNATUploadFailingForAllSessions` | Loki ruler | Derived from `event="upload_failed"` and `event="upload_completed"` JSON events on the edge (`component="s3-uploader"`), joined `unless on (cluster)`. |
 | `S3UploaderRetryStorm` | Loki ruler | `event="upload_failed"` count over a window, per cluster. |
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
-| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines. |
+| `SessionStagedNotConfirmedInXNAT` | Loki ruler | The absence alert: an `event=~"reclaim_.*"` for a session in a 24h window `offset 48h`, with no `reclaim_confirmed` since. Its staged half is why the reclaimer must keep speaking through an outage — see the last section. |
+| `ReclaimerRunUnavailable` | Loki ruler | `event="reclaim_unavailable"` with `session=""` (the run-level line) and no `reclaim_finished` in the last 70m. This is what an operator acts on. |
+| `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines (`component="assign"`). |
+| `DICOMRejectedUnmappedAET` | Loki ruler | Orthanc's `REJECT: no project mapped for CalledAET`, with the AET pulled out by `regexp` so the mail names the misconfigured modality. |
+| `EdgeDiskLow` | Loki ruler | `event="stage_report"` from the data-policy pod with `free_pct` under the site's threshold — the threshold is substituted into the rule at render time. |
+| `QuarantinedDataUnresolved` | Loki ruler | `stage="originals.quarantine"` whose `oldest_age_s` exceeds the site's alert-after window; quarantined data nobody triaged is data that never reaches XNAT. |
+| `XNATUploadSuccess` | Loki ruler | `info`-severity receipt: `Successfully uploaded all files in '<session>'`, grouped by session. Range `[10m]`, deliberately wider than the uploader's ~62s loop — see the duplicate-mail section. |
+| `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
+| `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log — the de-identification script failing open is a PHI risk, not a cosmetic one. |
+| `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` — the uploader's own pre-flight refusals, which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
-| `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter. |
-| `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_*` from mgmt cert-manager. |
+| `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter (capitalised exactly so — PromQL is case-sensitive). |
+| `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_expiration_timestamp_seconds` from mgmt cert-manager. |
+| `CertSyncStale` | Prometheus | `kube_cronjob_status_last_successful_time` for any `*-cert-sync-*` CronJob older than 24h — an edge whose Loki client cert stopped being refreshed. |
+| `CertSyncNeverSucceeded` | Prometheus | `kube_cronjob_info` `unless on (namespace, cronjob)` a last-success timestamp — catches a site whose Secrets were never delivered at all, which "stale" cannot see. |
+| `CARotationDue` | Prometheus | `ais-edge-ca` inside a year of expiry. Fleet-wide reissue is a planned job, not an incident, so it is `info`. |
+| `CertificateRenewed` | Prometheus | `changes(certmanager_certificate_renewal_timestamp_seconds[1h])` — an `info` receipt that rotation is actually happening. |
+
+`kube-prometheus-stack`'s own rule pack is **not** part of that count:
+`defaultRules.create: false` (`charts/mgmt/values.yaml`), so every Prometheus
+alert in this stack is one of the nine above. There is no `KubePodCrashLooping`
+or `KubeletDown` quietly backing us up.
 
 Four alerts that used to be in this table are not, all removed after
 measurement showed they could never fire — `docs/TOUR.md` §9 has the
@@ -158,11 +187,28 @@ rather than by hardcoded name.
 **Verify it is quiet:**
 
 ```bash
-kubectl -n xnat-upload logs deploy/xnat-ingest-upload --since=3m \
+# Management side. The uploader renders once PER EDGE, as mgmt-upload-<edge>
+# in xnat-upload — there is no single fleet-wide uploader to look at.
+kubectl -n xnat-upload logs deploy/mgmt-upload-<edge> --since=3m \
   | grep -E 'Found [0-9]+ sessions'      # expect: Found 0 sessions
-kubectl -n xnat-ingest exec deploy/s3-uploader -- \
-  mc ls edge/ingest-bucket/staged/       # expect: no output
+
+# Edge side. Lists the staging prefix with the AWS CLI the uploader image
+# actually carries, against this site's own bucket (ingest-<edge>, the default
+# under seaweedfs.perSiteBuckets). AWS_ENDPOINT_URL is already set on the pod.
+kubectl --kubeconfig=kubeconfig-<edge> -n xnat-ingest exec deploy/edge-s3-uploader -- \
+  sh -c 'aws --endpoint-url "$AWS_ENDPOINT_URL" s3 ls s3://ingest-<edge>/staged/'
+                                         # expect: no output
 ```
+
+> These names matter more than they look. `aws s3 ls` **exits 1 with no output
+> on an empty prefix**, so "no output" is the success case here — but so is a
+> wrong Deployment name, a wrong bucket, or a missing binary. `mc` is not in
+> the uploader image at all (it runs `amazon/aws-cli`), and a fleet-wide
+> `ingest-bucket` only exists when `seaweedfs.perSiteBuckets` is turned off.
+> Get any of them wrong and the check reports the same quiet nothing as a
+> healthy system — the identical failure mode the note above describes for the
+> script itself. `scripts/clear-staged-s3.sh` prints the exact management-side
+> command for the site you ran it against; prefer copying it from there.
 
 Any `Successfully uploaded all files in '<same session>'` repeating on a ~60 s
 cadence means staged sessions (or empty prefixes) are still present.
@@ -176,8 +222,21 @@ range shorter than that ~62s loop lets the series go empty between passes:
 the alert resolves and re-fires every loop, and `group_by` cannot suppress
 that because it only collapses alerts firing at the same time, not a
 resolve/re-fire cycle. Fixed by widening the range past the loop period
-(`XNATUploadSuccess` now uses `[10m]`); `scripts/ci/promtool.sh` asserts any
-rule matching a looping process's output keeps enough headroom.
+(`XNATUploadSuccess` now uses `[10m]`); `scripts/ci/promtool.sh` holds that
+range above a 5m floor so it cannot be narrowed back by accident.
+
+> **The CI gate is an allowlist, not a detector — read it before you trust
+> it.** `scripts/ci/promtool.sh` carries a hardcoded set,
+> `LOOPING = {"XNATUploadSuccess", "XNATAuthFailure",
+> "S3UploaderRestartedRecently"}`, and range-checks only those three against
+> the 5m floor. It cannot tell that some *new* rule reads a looping emitter's
+> output, so a new rule written against one gets no protection and CI stays
+> green — which is exactly how this bug got in. The check does fail if a name
+> in the set disappears from the ruleset, so the list cannot rot silently; it
+> just cannot grow by itself. **If you add a rule whose source line is
+> re-emitted by a poll rather than fired once per real event, add its name to
+> `LOOPING` in the same commit.** Whether a rule belongs there is a property of
+> the emitter, not of the expression, so no static check can infer it.
 
 **Related alert-suppression gotcha.** `XNATUploadSuccess` is grouped by
 `session`, and Alertmanager records what it has already sent in

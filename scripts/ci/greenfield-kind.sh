@@ -73,7 +73,15 @@ HELM="$(ci_helm)"
 # Which kubectl, said out loud. ci_kubectl accepts a non-pinned one so the job
 # can run on a developer's machine; if that is what happened, the run should
 # not silently look identical to the pinned CI one.
-kubectl_ver="$("$KUBECTL" version --client 2>/dev/null | head -1)"
+# NO PIPE INTO head. `head -1` exits after the first line, kubectl gets
+# SIGPIPE, and `set -o pipefail` turns the whole substitution into exit 141 —
+# which `set -e` then treats as fatal. It is a RACE: it only fires when head
+# wins, so this stage passed when run by hand and died with a bare
+#     make[2]: *** [Makefile:154: greenfield] Error 141
+# and not one PASS line whenever the machine was busy. Same class of bug as the
+# `yes |` pipeline this suite's shell-syntax stage already refuses.
+kubectl_ver="$("$KUBECTL" version --client 2>/dev/null || true)"
+kubectl_ver="${kubectl_ver%%$'\n'*}"
 case "$kubectl_ver" in
   *"$CI_PIN_KUBECTL_VERSION"*) ci_pass "kubectl $CI_PIN_KUBECTL_VERSION (pinned) at $KUBECTL" ;;
   *) ci_skip "kubectl is NOT the pinned $CI_PIN_KUBECTL_VERSION but ${kubectl_ver:-unknown} at $KUBECTL — the greenfield result is not from the pinned toolchain" ;;
@@ -106,7 +114,11 @@ else
 fi
 
 # Prove it really is empty of anything of ours before we start.
-if "$KUBECTL" get ns 2>/dev/null | grep -qE '^(ais-mgmt|xnat-ingest|edge-alpha)\b'; then
+# Captured first, then matched: `get ns | grep -q` lets grep exit on its first
+# match, SIGPIPE kubectl, and pipefail hand the `if` a 141 — so a cluster that
+# IS dirty could report clean, which is the one thing this check must not do.
+ns_list="$("$KUBECTL" get ns 2>/dev/null || true)"
+if printf '%s\n' "$ns_list" | grep -qE '^(ais-mgmt|xnat-ingest|edge-alpha)\b'; then
   ci_fail "the cluster is not empty — this test is meaningless unless it starts from nothing"
 else
   ci_pass "cluster is empty: no ais-mgmt / xnat-ingest / edge-* namespaces"
@@ -304,7 +316,8 @@ if [ "$mgmt_ok" = 1 ]; then
   # missing Cluster still fails, it just has to be missing for 60s first.
   k0s_cluster_found=0
   for _ in $(seq 1 30); do
-    if "$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null | grep -q .; then
+    k0s_clusters="$("$KUBECTL" get cluster.k0smotron.io -A -o name 2>/dev/null || true)"
+    if [ -n "$k0s_clusters" ]; then
       k0s_cluster_found=1; break
     fi
     sleep 2

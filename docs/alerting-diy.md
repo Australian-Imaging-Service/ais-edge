@@ -55,10 +55,34 @@ curl -s 'http://localhost:9090/api/v1/label/__name__/values' \
   | jq -r '.data[]' | grep -i seaweed
 ```
 
-Already shipped: `kube_*` (kube-state-metrics), `node_*` (node-exporter),
-`nginx_ingress_controller_*`, `cert_manager_*`, `seaweedfs_*` (via
-ServiceMonitor), `loki_*`, and `up` — the single most useful metric in the
+Already shipped: `kube_*` (kube-state-metrics), `container_*` (the kubelet's
+cAdvisor, `kubelet: {enabled: true}`), `certmanager_*` (cert-manager, via the
+ServiceMonitor in `charts/mgmt/templates/cert-manager-monitoring.yaml`),
+`SeaweedFS_*` (SeaweedFS's own exporter, via the ServiceMonitor in
+`charts/mgmt/templates/observability.yaml`), `loki_*` (the Loki subchart's
+`monitoring.serviceMonitor`), and `up` — the single most useful metric in the
 stack.
+
+Three things you are likely to reach for are **not** here, and each has already
+cost someone an alert that could never fire:
+
+| Reached for | Reality |
+|---|---|
+| `node_*` | node-exporter is off on purpose — `prometheus-node-exporter: {enabled: false}` and `nodeExporter: {enabled: false}` in `charts/mgmt/values.yaml`, "host metrics off, matching the edges". For pod-level CPU/memory use the cAdvisor `container_*` series instead. |
+| `nginx_ingress_controller_*` | The pinned ingress-nginx 4.15.1 ships `controller.metrics.enabled: false`, and the `ingress-nginx:` block in `charts/mgmt/values.yaml` does not override it — nothing scrapes the controller, so there are no request/latency series and no ServiceMonitor for them. |
+| `cert_manager_*`, `seaweedfs_*` | Right exporters, wrong spelling. cert-manager's prefix is `certmanager_` (no underscore after `cert`) and SeaweedFS's is capitalised `SeaweedFS_`. PromQL is case-sensitive, so a misspelt name selects nothing and the rule is green for life. |
+
+Also absent by choice: `defaultRules: {create: false}`, so **none** of
+kube-prometheus-stack's own alert pack is installed. `KubePodCrashLooping`,
+`KubeletDown` and friends are not quietly covering you; the nine Prometheus
+alerts in `charts/mgmt/files/prometheus-rules/` are all there is.
+
+Before you trust a new expression, run `scripts/check-alert-inputs.sh` — it
+exists for exactly this class of mistake. It extracts every metric name the
+shipped rules reference and asks the LIVE Prometheus whether each one has any
+series (`--strict` to exit non-zero in CI). promtool unit tests cannot catch
+this: they supply the series themselves, so they prove the logic and say
+nothing about whether the metric exists in our cluster.
 
 ### 2b. Find Loki streams
 
@@ -100,22 +124,41 @@ sed -n '1,40p' charts/mgmt/files/loki-ruler-rules.yaml
 
 ## Step 3 — Write the rule
 
-### Prometheus — `charts/mgmt/files/prometheus-rules/{critical,warning,info}.yaml`
+### Prometheus — `charts/mgmt/files/prometheus-rules/{critical,warning,info,cert-sync}.yaml`
 
 ```yaml
-- alert: HighIngressErrorRate
+- alert: SeaweedFSS3ErrorRate
   expr: |
-    sum by (cluster) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m])) > 0.5
+    sum(rate(SeaweedFS_s3_request_total{code=~"5.."}[5m])) > 0.5
   for: 5m
   labels: {severity: warning}
   annotations:
-    summary: "nginx-ingress is returning many 5xx errors"
+    summary: "SeaweedFS S3 is returning many 5xx responses"
 ```
 
+Two things about that expression are deliberate, and copying either one wrong
+is the usual way a new rule ends up permanently green:
+
+- **`SeaweedFS_`, capitalised.** It is the exporter's own spelling and PromQL
+  is case-sensitive. Check any metric name against a live Prometheus (§2a, or
+  `scripts/check-alert-inputs.sh`) before committing the rule.
+- **No `sum by (cluster)`.** *Nothing in mgmt Prometheus carries a `cluster`
+  label* — not KSM, not cert-manager, not SeaweedFS, and the rules here never
+  set one statically. `charts/mgmt/files/alertmanager-config.yaml` says so at
+  length, in the comment on the inhibit rules that used to key on it. `by
+  (cluster)` therefore collapses to a single empty-labelled series: harmless
+  here, but it silently defeats any per-site grouping you thought you were
+  getting. Grouping per site is a **Loki**-side idea — Vector sets `cluster` on
+  log streams, so the LogQL rules below can and do use it.
+
 Rendered into a `PrometheusRule` object; the operator picks it up via CRD
-watch, no restart needed. `scripts/ci/promtool.sh` runs `promtool check
-rules` and any test in `charts/mgmt/files/prometheus-rules/tests/` against
-this file — add a test alongside a new rule.
+watch, no restart needed. `scripts/ci/promtool.sh` globs `*.yaml` in that
+directory, runs `promtool check rules` over each, and runs any test in
+`charts/mgmt/files/prometheus-rules/tests/` — add a test alongside a new rule.
+Splitting by severity is a convention, not a requirement: `cert-sync.yaml` is a
+fourth file grouped by *subject* instead, because its two alerts
+(`CertSyncStale`, `CertSyncNeverSucceeded`) are one mechanism at two
+severities and are easier to reason about together.
 
 ### Loki — `charts/mgmt/files/loki-ruler-rules.yaml`
 
@@ -244,9 +287,14 @@ See the CAUTION in Step 3 for why `and ignoring (...) == 0` is wrong here.
 
 **Cert expiring soon:**
 ```yaml
-expr: cert_manager_certificate_expiration_timestamp_seconds - time() < 14 * 24 * 3600
+# certmanager_, NOT cert_manager_ — the exporter's prefix has no underscore
+# after "cert". The misspelt version selects nothing and never fires.
+expr: (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 14
 for: 1h
 ```
+The shipped `CertificateExpiringSoon` (`prometheus-rules/warning.yaml`) is the
+same expression at 60 days; copy it rather than this snippet if you want the
+label and annotation wiring too.
 
 ---
 
@@ -258,6 +306,7 @@ for: 1h
 | `charts/mgmt/files/alertmanager-config.yaml` | Routes, receivers, inhibit rules |
 | `charts/mgmt/files/alertmanager-slack-receivers.yaml` | Slack receivers, spliced in only when a webhook Secret exists |
 | `charts/mgmt/files/prometheus-rules/{critical,warning,info}.yaml` | Prometheus rules, by severity |
-| `charts/mgmt/files/prometheus-rules/tests/*.yaml` | promtool unit tests |
+| `charts/mgmt/files/prometheus-rules/cert-sync.yaml` | `CertSyncStale` + `CertSyncNeverSucceeded` — grouped by subject rather than severity, because they are one mechanism at two severities. `promtool.sh` globs `*.yaml` here, so a new file needs no wiring |
+| `charts/mgmt/files/prometheus-rules/tests/*.yaml` | promtool unit tests — one per rule file, `cert-sync_test.yaml` included |
 | `charts/mgmt/files/loki-ruler-rules.yaml` | Every log-derived alert |
 | `charts/mgmt/values.yaml` | Retention, scrape interval, storage size |

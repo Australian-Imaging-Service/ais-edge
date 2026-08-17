@@ -152,6 +152,18 @@ KUBELET_LOG_MAX_SIZE="$(cfg dataPolicy.telemetry.podLogFiles.maxSize 10Mi)"
 KUBELET_LOG_MAX_FILES="$(cfg dataPolicy.telemetry.podLogFiles.maxFiles 5)"
 export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
 
+# Where the heavy state goes. Blank (the default) keeps k0s and the PVCs on the
+# root filesystem, which is right for a single-disk host.
+#
+# Set it to a mounted data volume when the root disk is small — the typical
+# Nectar VM is 30G root plus a 500G volume, and the container image store alone
+# does not fit in 30G. Both consumers below take a native path setting, so this
+# needs no bind mounts and leaves /etc/fstab alone. An earlier deployment did
+# use fstab binds for this; deleting /data then left the mounts dangling and the
+# node failed its next boot into an emergency shell. See docs/storage.md.
+DATA_ROOT="$(cfg storage.dataRoot)"
+export DATA_ROOT
+
 export MGMT_NODE_IP INTERNAL_DOMAIN INGRESS_PORT INSTALL_TOPOLOGY INSTALL_MODE
 export SEAWEEDFS_HOSTNAME GRAFANA_HOSTNAME LOKI_HOSTNAME
 
@@ -445,7 +457,18 @@ PY
     export CLUSTER_CR_MANAGED_BY_HELM=1
 
     if step "5/7  ${EDGE_NAME}: child kubeconfig + join token"; then
-        bash "${SCRIPT_DIR}/scripts/05-setup-edge-cluster.sh" "$EDGE_NAME"
+        # JOIN_TOKEN_TTL BELONGS HERE, because step 05 is where the token is
+        # actually minted (scripts/05-setup-edge-cluster.sh:128 reads it, :139
+        # writes it as the Secret's `expiry`).
+        #
+        # It used to be passed only to 06b on the bundle arm below, so
+        # edges[].joinTokenTTL reached the bundle BUILDER but never the MINTER,
+        # and every token was the 2h default no matter what the site asked for.
+        # Documented as a working knob in README and TOUR §4.1 — and advised
+        # there precisely for the bundle case, where a token has to survive being
+        # carried to a hospital by hand. That is the one case it silently failed.
+        JOIN_TOKEN_TTL="${EDGE_JOIN_TTL:-${JOIN_TOKEN_TTL:-2h}}" \
+            bash "${SCRIPT_DIR}/scripts/05-setup-edge-cluster.sh" "$EDGE_NAME"
     fi
 
     # HOW THE WORKER IS JOINED.

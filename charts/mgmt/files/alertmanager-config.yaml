@@ -127,6 +127,23 @@ route:
   repeat_interval: 12h
   receiver: email-primary       # default — every alert hits the inbox
   routes:
+    # kube-prometheus-stack's own META-ALERTS, routed to a receiver that
+    # delivers nothing. FIRST, so they can never fall through to the tree
+    # below.
+    #
+    # Both fire PERMANENTLY and by design:
+    #   Watchdog       always-firing heartbeat, the thing you point a
+    #                  dead-man's-switch at to prove the alert path works.
+    #   InfoInhibitor  a dummy that exists only to be an inhibition source.
+    # Neither describes anything about this deployment.
+    #
+    # They carry severity="none", which matches none of the severity routes
+    # below, so both fell through to the ROOT receiver and mailed the operator
+    # forever. Observed on a live tier-1 install; the routing shape is the same
+    # here, so the same two alerts would arrive.
+    - matchers:
+        - alertname =~ "Watchdog|InfoInhibitor"
+      receiver: "null-meta"
     # Per-alert override: XNATUploadSuccess is severity=info (so the
     # default routing tree below would send it to Slack), but operators
     # want an email confirmation for every successful XNAT push for
@@ -254,6 +271,9 @@ route:
       continue: false
 
 receivers:
+  # Deliberately empty: a receiver with a name and no *_configs is
+  # Alertmanager's null sink. Do not "fix" this by adding an email config.
+  - name: "null-meta"
   - name: email-primary
     email_configs:
       - to: "__ALERT_EMAIL_TO__"

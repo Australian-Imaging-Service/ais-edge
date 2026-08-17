@@ -39,40 +39,95 @@ openstack server add floating ip mgmt-vm $MGMT_FIP
 LB_FIP=$(openstack floating ip create $EXTNET -f value -c floating_ip_address)
 echo "LB FIP: $LB_FIP   — point your DNS at this"
 
-# 5. Subnet ID for the site file
+# 5. Subnet ID — OCCM needs it to place the LB VIP on the tenant subnet
 LB_SUBNET=$(openstack subnet show aisedge-internal-sub -f value -c id)
-echo "LB_SUBNET_ID=$LB_SUBNET"
+echo "subnet-id: $LB_SUBNET"
 ```
 
 Then:
 
-```bash
-# sites/<site>/values.yaml
-export INSTALL_TOPOLOGY="cloud"
-export CLOUD_PROVIDER="openstack"
-export CLOUD_CREDENTIALS_FILE="/path/to/openrc.sh"
-export LB_PUBLIC_IP="$LB_FIP"                   # the FIP from step 4
-export LB_SUBNET_ID="$LB_SUBNET"                 # the tenant subnet
-export LB_AVAILABILITY_ZONE="<your-AZ>"          # AZ where mgmt VM lives
-export PRECREATE_LB=""                           # NOT needed — FIP gives us the IP up front
-export OCCM_CLUSTER_NAME="aisedge"
-export INTERNAL_DOMAIN="aisedge.example.com"     # your real DNS, or .<FIP-dashed>.nip.io for dev
-export CERT_ISSUER="letsencrypt-prod"            # real LE certs once you have real DNS
+```yaml
+# sites/<site>/values.yaml — this file is YAML, not a shell env file.
+# install.sh parses it with yaml.safe_load (install.sh:95-113) and reads dotted
+# paths out of it; `export` lines here are not config, they are a parse error.
 
-./install.sh -y
+topology: cloud            # install.sh:133 — skips the on-prem /etc/hosts writes
+installMode: fresh         # install.sh:134 — the TL;DR above boots a bare VM,
+                           # so install.sh installs k0s on it. Use `existing`
+                           # only when adopting a cluster that already runs.
+
+domain:
+  internal: aisedge.example.com   # your real DNS, or <FIP-dashed>.nip.io for dev
+  mgmtNodeIP: "192.168.100.10"    # required (install.sh:130) — the mgmt VM's
+                                  # address ON THE TENANT SUBNET, not the FIP
+
+certManager:
+  enabled: false                  # install.sh step 2/7 installs cert-manager
+  issuer: letsencrypt-prod        # real LE certs once you have real DNS;
+                                  # anything prefixed letsencrypt- takes the
+                                  # ACME path (cert-issuers.yaml:80)
+  acme:
+    email: ops@example.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # REQUIRED on a letsencrypt-* issuer: an empty dns01Solver fails the render
+    # (cert-issuers.yaml:265), because a ClusterIssuer with no solver leaves
+    # every Certificate Pending while nginx serves its default self-signed cert
+    # — which reads as a browser warning rather than a misconfiguration. The
+    # block is passed through VERBATIM into solvers[0].dns01
+    # (cert-issuers.yaml:291), so it must be a shape cert-manager understands.
+    dns01Solver:
+      # <provider-key>:           # route53 / cloudDNS / azureDNS / webhook / ...
+      #   <provider fields>       # see the DNS-01 note below
+
+# The chart ships the ON-PREM ingress shape (hostNetwork on the host's :443,
+# Service type ClusterIP) and expects cloud sites to override it here — see the
+# CAUTION at charts/mgmt/values.yaml:511-522. All three lines matter: without
+# them no Octavia LB is ever requested and loadBalancerIP alone does nothing.
+ingress-nginx:                    # subchart key — hyphenated, exactly this
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+      loadBalancerIP: "203.101.x.y"          # the FIP from step 4
+      annotations:                           # read by OCCM, not by this chart
+        loadbalancer.openstack.org/subnet-id: "<LB_SUBNET from step 5>"
+        loadbalancer.openstack.org/availability-zone: "<your-AZ>"
 ```
 
-`install.sh` runs the standard cloud path — no Nectar-specific
-`00a-precreate-lb` step needed.
+```bash
+./install.sh -y <site>       # <site> is a directory under sites/ — required
+```
+
+There is no cloud-provider, credentials or LB key in the site file to set.
+OpenStack credentials reach OCCM the way OCCM is already configured on the
+cluster (its own Secret / `openrc` on the control plane), not through this
+repo, and the LB is expressed purely as the `Service` override above. Note also
+that the top-level `ingressNginx.loadBalancerIP` key at
+`charts/mgmt/values.yaml:555` is **dead** — no template reads it.
+
+**DNS-01 on OpenStack.** cert-manager has no built-in solver for OpenStack
+Designate; the built-ins are the big public providers. Either run a
+cert-manager DNS-01 *webhook* solver for Designate (installed separately — this
+chart does not ship one) and reference it under `dns01Solver`, or host the zone
+with a provider cert-manager supports natively. For a working solver block in
+this repo, see `scripts/ci/values.sh:166-175`, which uses route53 — same shape,
+different provider key. If you have no resolvable domain at all, leave
+`certManager.issuer: ais-edge-ca` and skip ACME entirely: nip.io cannot satisfy
+a DNS-01 challenge (`charts/mgmt/values.yaml:366-370`).
+
+`install.sh` runs the standard cloud path: one `helm upgrade --install` of the
+management chart at step 4/7 creates the `Service type=LoadBalancer`, and OCCM
+does the rest. Nothing pre-creates the load balancer.
 
 ## Why this topology is preferred
 
 | | Nectar QLD shared network | Private subnet + FIP |
 |---|---|---|
 | Floating IP attaches to LB? | ❌ No — same-network rejection | ✅ Yes — standard Octavia + Neutron router NAT |
-| `LB_PUBLIC_IP` known up front? | ❌ Discovered after LB creation | ✅ Pre-allocated, pinned at LB create time |
-| `00a-precreate-lb.sh` needed? | ✅ Yes (workaround) | ❌ No — install runs one-shot like AWS/GCP/Azure |
-| Cert SANs from the start? | ❌ Need `00a` to write IP back into env first | ✅ FIP is the IP, certs reference it directly |
+| Public IP known up front? | ❌ Discovered after LB creation | ✅ Pre-allocated, pinned at LB create time |
+| Extra pre-create pass needed? | ✅ Yes (workaround — the IP has to be discovered, then written back into the site file, then the install re-run) | ❌ No — one `install.sh` run, like AWS/GCP/Azure |
+| Cert SANs from the start? | ❌ Need a first pass to learn the IP before the hostnames can be pinned | ✅ FIP is the IP, certs reference it directly |
 | Mirrors AWS/GCP/Azure shape? | ❌ Unusual / Nectar-specific | ✅ Identical 4-tier shape |
 | Production-ready? | dev only | ✅ |
 
@@ -113,26 +168,39 @@ Internet Gateway), GCP uses (Network LB + static IP + Cloud Router),
 and Azure uses (Standard LB + public IP + NAT Gateway). The Nectar QLD
 shared-network arrangement is the outlier.
 
-## What `00a-precreate-lb.sh` looks like on this topology
+## What the install actually does about the LB on this topology
 
-It runs but **does nothing** — `LB_PUBLIC_IP` is already set in
-the site file, so 00a's "skip if LB_PUBLIC_IP is pinned" guard
-fires:
+**Nothing pre-creates it, and there is no separate LB step.** Earlier revisions
+of this page described a `00a-precreate-lb.sh` script with a "skip if the public
+IP is already pinned" guard; no such script exists — `scripts/` holds
+`00-common.sh`, `01-install-k0s.sh`, `05-setup-edge-cluster.sh`,
+`06-join-edge-worker.sh`, `06b-make-bootstrap.sh`, `06c-post-join.sh` and the
+maintenance helpers, and nothing else. The pre-create dance was a Nectar-QLD
+workaround for an IP that could not be known in advance; on this topology the
+FIP is allocated by you in TL;DR step 4, so there is nothing to discover.
 
-```
-=== 00a: pre-create LB — SKIPPED (LB_PUBLIC_IP=203.101.x.y already pinned) ===
-```
+The load balancer is requested declaratively instead, as one line of chart
+values. `install.sh` step **4/7** (`helm upgrade --install mgmt charts/mgmt`)
+renders the vendored ingress-nginx subchart with the override from the site
+file, producing a `Service type=LoadBalancer` carrying
+`loadBalancerIP: 203.101.x.y` and the OCCM annotations. OCCM then:
 
-Then 02c's `helm install nginx-ingress` renders a `Service type=LoadBalancer`
-with `loadBalancerIP: ${LB_PUBLIC_IP}`. OCCM:
 1. Creates a fresh Octavia LB on `aisedge-internal` with the requested
    VIP (Neutron allocates one from the subnet range).
-2. Associates the pre-allocated `LB_FIP` to the LB VIP port via Neutron
+2. Associates the pre-allocated FIP to the LB VIP port via Neutron
    router NAT.
 3. Adds listeners + pool + members.
 
 Service status populates with `EXTERNAL-IP=<LB_FIP>`. No retries, no
-errors. Install runs one-shot.
+errors. Install runs one-shot:
+
+```bash
+kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
+# release `mgmt` in namespace `ais-mgmt` (install.sh:121-122); there is no
+# ingress-nginx namespace. EXTERNAL-IP stays <none> if the ingress-nginx
+# override is missing from the site file — the chart default is
+# service.type ClusterIP (charts/mgmt/values.yaml:536).
+```
 
 ## Security group rules (same as Nectar QLD)
 
@@ -154,7 +222,8 @@ openstack port show <lb-vip-port-id> -f value -c security_group_ids
 ## Pros + cons
 
 **Pros:**
-- Single-pass `install.sh -y` with pinned `LB_PUBLIC_IP` from the start.
+- Single-pass `install.sh -y <site>` with the LB address pinned in the site
+  file (`ingress-nginx.controller.service.loadBalancerIP`) from the start.
 - Standard `Service type=LoadBalancer` + FIP pattern that every CCM
   (AWS, GCP, Azure, OpenStack) implements the same way.
 - No Nectar-specific workarounds — same codepath as managed K8s.
@@ -176,8 +245,10 @@ You can't move a VM between networks live. Plan a maintenance window:
 2. Snapshot the mgmt VM disk (`openstack server image create mgmt-vm`).
 3. Boot a new mgmt VM from the snapshot on the new tenant subnet.
 4. Re-allocate the FIP (or allocate a fresh one) and update DNS.
-5. Update `sites/<site>/values.yaml` to the new IDs.
-6. Run `./install.sh -y` on the new VM — it provisions fresh from the
+5. Update `sites/<site>/values.yaml` to the new IDs — at minimum
+   `domain.mgmtNodeIP`, the ingress-nginx `loadBalancerIP`, and the OCCM
+   subnet-id annotation.
+6. Run `./install.sh -y <site>` on the new VM — it provisions fresh from the
    snapshotted state.
 
 SeaweedFS data, k0smotron child clusters, and pod configs all live

@@ -140,8 +140,16 @@ Each entry produces, automatically: a hosted control plane, an S3 bucket named
 `ingest-<name>`, an S3 identity scoped to that bucket, an uploader, and a
 reclaimer.
 
-`sshUser`/`sshKey` are here because joining a worker **must** be done over SSH —
-there is no API server on the edge until it has happened.
+`sshUser`/`sshKey` belong to `join: ssh`, the default: this node pushes the join
+to the edge over 22, and `scripts/uninstall.sh` later reaches back the same way
+to run `k0s reset` and wipe `/data`. If nothing can dial *into* the site — a
+whitelisted-IP allowlist, a VPN, GlobalProtect — set `join: bundle`, omit both
+fields entirely, and read §4.1; teardown then has to be finished by hand on the
+edge. Either way the bootstrap is a script rather than a chart, because the edge
+machine is not a Kubernetes node yet and there is no API path onto it to apply
+anything declaratively. Note it is not that the API server appears later: the
+edge never has one. Its control plane is hosted *here*, and step 5 creates it
+before the worker exists.
 
 #### `exposure: sni` vs `nodePort`
 
@@ -219,7 +227,7 @@ dataPolicy:
 
   derived:
     orthancStorage: {reclaim: onGrouped,       minAge: 7d}
-    grouped:        {reclaim: onAssigned,      minAge: 0}
+    grouped:        {reclaim: onAssigned}      # no minAge — rejected at render
     assigned:       {reclaim: onUploaded,      minAge: 0}
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d, maxRemovals: 50}
 ```
@@ -234,9 +242,24 @@ The model has two categories:
 * **derived** — anything reproducible from the originals. These have reclaim
   rules.
 
-**Every derived rule is `(condition AND minAge)` — both must hold.** A pure age
-rule would expire a session that never reached XNAT because a credential was
-wrong. A pure condition rule frees nothing the moment the signal breaks.
+**Every derived rule is `(condition AND minAge)` — both must hold**, with
+`grouped` the deliberate exception noted below. A pure age rule would expire a
+session that never reached XNAT because a credential was wrong. A pure condition
+rule frees nothing the moment the signal breaks.
+
+**`grouped` takes no `minAge`, and setting one fails the render.**
+`assign --unlink-source all` deletes each grouped tree at assign time, so a
+window measured from assign can never elapse — there is nothing left to wait
+on. What
+reaches the policy engine is only an *orphan*: a tree assign copied but failed to
+unlink (crash, OOM, eviction). Delaying an orphan buys nothing, because its bytes
+are still in Orthanc storage and in the facility backup. So the key was removed
+rather than defaulted, and `charts/edge` **rejects it at render**
+(`charts/edge/templates/_helpers.tpl`) instead of ignoring it — a site file
+carrying `minAge` under `grouped` fails `helm upgrade` of the edge chart with an
+explanation, which is the loud version of a setting that would otherwise do
+nothing. (`charts/mgmt` never reads that key, so the management release renders
+either way; step 7 is where you would see it.)
 
 **A fresh install expires nothing.** Run with `dryRun` for a week, read the
 decisions in the logs, then enable.
@@ -267,24 +290,47 @@ admin key on a hospital machine.
 |                        | Management site (one)                                    | Each edge site                        |
 | ---------------------- | -------------------------------------------------------- | ------------------------------------- |
 | Namespaces             | `ais-mgmt`, `xnat-upload`                                | `xnat-ingest`                         |
-| You fill in            | 6 Secrets, plus one `<edge>-s3` per edge                 | **1 Secret** — the de-id salt         |
+| You fill in            | 6 credentials — 7 Secret *documents*, because `seaweedfs-upload` is created twice — plus one `<edge>-s3` per edge | **1 Secret** — the de-id salt         |
 | Delivered for you      | —                                                        | CA bundle, Loki client cert, S3 key   |
 
 That last row is the part people get wrong: an edge has **exactly one** secret
-you write by hand. Everything else arrives via cert-sync (see "Two secrets you
+you write by hand. Everything else arrives via cert-sync (see "Three secrets you
 must NOT create by hand" below).
 
 **Management site** (`sites/example-mgmt/secrets.example.yaml`):
 
-| Secret                        | Keys                                   | What it is                                                                                                                                                                 | Rotating it needs         |
-| ----------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| `seaweedfs-admin`           | `access-key`, `secret-key`         | full access to the object store                                                                                                                                            | restart SeaweedFS (below) |
-| `seaweedfs-upload`          | `access-key`, `secret-key`         | the XNAT uploader + reclaimer's S3 identity                                                                                                                                | restart SeaweedFS         |
-| `xnat-credentials`          | `server`, `username`, `password` | the XNAT account every site's data is pushed with                                                                                                                          | restart the uploader      |
-| `grafana-admin-credentials` | `admin-password`                     | Grafana login                                                                                                                                                              | restart Grafana           |
-| `loki-s3-credentials`       | `access-key`, `secret-key`         | Loki's log-chunk storage identity                                                                                                                                          | restart SeaweedFS + Loki  |
-| `alertmanager-smtp`         | `username`, `password`             | alert mail. For Gmail this is an**App Password** — a 2FA account rejects the real one with `535 BadCredentials`, and the only symptom is alerts that never arrive | restart Alertmanager      |
-| `<edge>-s3` (one per edge)  | `access-key`, `secret-key`         | that edge's bucket-scoped S3 identity                                                                                                                                      | restart SeaweedFS         |
+| Secret                        | Namespace                        | Keys                                   | What it is                                                                                                                                                                 | Rotating it needs         |
+| ----------------------------- | -------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `seaweedfs-admin`           | `ais-mgmt`                     | `access-key`, `secret-key`         | full access to the object store                                                                                                                                            | restart SeaweedFS (below) |
+| `seaweedfs-upload`          | `xnat-upload` **and** `ais-mgmt` | `access-key`, `secret-key`         | the XNAT uploader + reclaimer's S3 identity —**and** the entry SeaweedFS builds for it in `s3.json`                                                                | restart SeaweedFS         |
+| `xnat-credentials`          | `xnat-upload`                  | `server`, `username`, `password` | the XNAT account every site's data is pushed with                                                                                                                          | restart the uploader      |
+| `grafana-admin-credentials` | `ais-mgmt`                     | `admin-user`, `admin-password`     | Grafana login                                                                                                                                                              | restart Grafana           |
+| `loki-s3-credentials`       | `ais-mgmt`                     | `access-key`, `secret-key`         | Loki's log-chunk storage identity                                                                                                                                          | restart SeaweedFS + Loki  |
+| `alertmanager-smtp`         | `ais-mgmt`                     | `username`, `password`             | alert mail. For Gmail this is an**App Password** — a 2FA account rejects the real one with `535 BadCredentials`, and the only symptom is alerts that never arrive | restart Alertmanager      |
+| `<edge>-s3` (one per edge)  | `ais-mgmt`                     | `access-key`, `secret-key`         | that edge's bucket-scoped S3 identity                                                                                                                                      | restart SeaweedFS         |
+
+> **`seaweedfs-upload` is one credential in two Secret objects.** The template
+> carries it twice — in `xnat-upload`, where the uploader and reclaimer
+> *authenticate* with it (`charts/mgmt/templates/xnat-upload.yaml`,
+> `s3-staged-reclaimer.yaml`), and in `ais-mgmt`, where the SeaweedFS pod
+> projects it alongside `seaweedfs-admin`, `loki-s3-credentials` and each
+> `<edge>-s3` to build the `s3.json` identity list that *authorises* that key
+> (`charts/mgmt/templates/seaweedfs.yaml`). A pod can only mount a Secret from
+> its own namespace and SeaweedFS runs in the release namespace, so both copies
+> are required. Drop the `ais-mgmt` one and the install stalls at step 4 with
+> SeaweedFS in `Init:0/1` — `MountVolume.SetUp failed … secret
+> "seaweedfs-upload" not found` — and every other component healthy.
+>
+> **Keep the two values identical, and change both when you rotate.** If they
+> drift, SeaweedFS authorises one key while the uploader presents another and
+> every upload fails with S3 403 — the same symptom as a wrong key, from a file
+> where both copies look right in isolation. `make secret-contract`
+> (`scripts/ci/secret-namespaces.sh`) checks both the presence and the match.
+>
+> Two caveats. The `ais-mgmt` copy is only mounted when `xnatUpload.enabled` is
+> true; and if an edge sets `edges[].uploadSecretRef`, that name replaces
+> `seaweedfs-upload` for *both* readers, so a per-edge upload identity needs the
+> same pair of copies under its own name.
 
 **Edge site** (`sites/example-edge/secrets.example.yaml`):
 
@@ -293,8 +339,8 @@ must NOT create by hand" below).
 | `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the HMAC salt that turns a patient identifier into`${SubjectHash}`. **Effectively permanent** — see the rotation warning below |
 
 Everything else in the edge template is commented out and optional (Orthanc
-auth, Samba). `s3-edge-credentials` is deliberately absent — see the next
-section.
+auth, Samba). `s3-edge-credentials` is deliberately absent — see "Three secrets
+you must NOT create by hand on an edge" below.
 
 ### Step A — once per operator, on a new machine
 
@@ -334,7 +380,8 @@ scripts/site-secrets.sh new my-deployment mgmt
 ```
 
 Do exactly those three. Fill in every `REPLACE_` in the secrets file — the six
-Secrets in the table above — then encrypt.
+credentials in the table above, remembering that `seaweedfs-upload` appears
+twice and both copies must carry the same value — then encrypt.
 
 ### Step C — each edge
 
@@ -385,17 +432,34 @@ run `apply` by hand to change a secret on an already-running system.
 > `${SubjectHash}` and `${SessionHash}` from a string published in this
 > repository.
 >
-> You cannot rely on `encrypt` to catch it. Measured: `encrypt` warns
-> `still contains REPLACE_ placeholders. Encrypt anyway? [y/N]` on **every**
-> edge, even a correctly filled-in one, because the check greps the whole file
-> and the template's own comments contain that string — including a comment
-> that literally reads "fill in every REPLACE_". So the warning is expected
-> here and you have to answer `y`; it tells you nothing about whether you
-> actually set the salt. Check it yourself before encrypting:
+> `encrypt` now catches this — so do not train yourself to click past it. It
+> matches only unfilled **values** (`<key>: REPLACE_...` on a line that is not
+> commented out), never the templates' own comments, and it names the offending
+> keys:
+>
+> ```
+> WARNING: sites/<edge-name>/secrets.enc.yaml has unfilled placeholder VALUES:
+>     38:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS
+>   Encrypt anyway? [y/N]:
+> ```
+>
+> It used to grep the whole file, so it warned on **every** site, correct ones
+> included — the templates' comments contain that string, one of them literally
+> reading "fill in every REPLACE_" — and an operator who learned to answer `y`
+> to the noise would answer `y` to a real one too. That is fixed: a correctly
+> filled edge produces no warning at all, so a warning here is always a real
+> placeholder. **Never answer `y` to it.** `AIS_DEID_HMAC_SALT` is the only
+> uncommented placeholder the edge template ships, so in practice this prompt
+> means the salt. Belt and braces before encrypting:
 >
 > ```bash
 > grep AIS_DEID_HMAC_SALT sites/<edge-name>/secrets.enc.yaml   # must NOT say REPLACE_
 > ```
+>
+> `install.sh` runs the same value-only check on the site you name on its
+> command line, decrypting to a pipe and never to disk, and refuses to install.
+> That covers the **management** site only: an edge's secrets are applied at
+> step 7 without a placeholder check, so `encrypt` is the one gate an edge gets.
 >
 > Treat the salt as permanent once set: rotating it gives the same patient a
 > different pseudonym and breaks linkage to everything already in XNAT.
@@ -411,7 +475,7 @@ the block for you to paste), and the salt.
 | ------------------ | -------------------------------------------------------------------------------------------------------------- |
 | `view <site>`    | decrypt to stdout, change nothing.**This prints secrets to your terminal** — prefer `edit`            |
 | `edit <site>`    | decrypt into`$EDITOR`, re-encrypt on save. The normal way to change a value                                  |
-| `encrypt <site>` | encrypt a file that is still plaintext. Warns if`REPLACE_` placeholders remain and asks before proceeding    |
+| `encrypt <site>` | encrypt a file that is still plaintext. Warns, naming the keys, if any placeholder**value** is still unfilled, and asks before proceeding    |
 | `apply <site>`   | decrypt and`kubectl apply` into the cluster                                                                  |
 | `check`          | fails if any**committed** `sites/*/secrets*.yaml` lacks the `sops:` header. Run it before every push |
 
@@ -449,6 +513,98 @@ working until something restarts it — see the note in
 > again without the original identifiers. Treat it as permanent per site, and
 > back it up with the same care as the age key.
 
+### Turning on Orthanc's REST API authentication
+
+The shipped edge site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
+`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
+accident of network placement, not a control. Anything running *inside* the
+cluster can call that API, and it can **delete studies**. Turn it on for any
+deployment where that matters.
+
+Three keys, all required, because two different things read this Secret:
+
+| Key | Read by | If it is wrong |
+| --- | --- | --- |
+| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
+| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
+| `orthanc-password` | `group-orthanc` | as above |
+
+`orthanc-user` / `orthanc-password` **must match** the user and password inside
+`users.json`. They are separate keys because Orthanc wants a file and
+`group-orthanc` wants environment variables; nothing reconciles them for you.
+
+**1. Generate a password and add the Secret.**
+
+```bash
+openssl rand -base64 24                       # use this as <password> below
+scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
+```
+
+Add this document (the template is already in your `secrets.enc.yaml`, commented
+out — uncomment and fill it in):
+
+```yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orthanc-credentials
+  namespace: xnat-ingest          # the EDGE site's namespace
+type: Opaque
+stringData:
+  users.json: '{"RegisteredUsers":{"admin":"<password>"}}'
+  orthanc-user: admin
+  orthanc-password: <password>
+```
+
+The password is **plaintext inside that JSON** — Orthanc has no hashed-password
+format here. That is precisely why this file is SOPS-encrypted before it is
+committed, and why `scripts/site-secrets.sh check` refuses a plaintext one.
+
+**2. Turn it on in the site file.**
+
+```yaml
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+```
+
+The chart refuses to render if `enabled: true` and `existingSecret` is empty —
+the deployment mounts that Secret non-optionally, so an empty name would fail
+as a confusing volume error rather than an auth one.
+
+**3. Apply, and restart what reads it.**
+
+```bash
+scripts/site-secrets.sh apply <site>
+./install.sh <site>
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+```
+
+Both restarts are needed: Kubernetes does not restart a pod when a Secret
+changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+
+**4. Verify.**
+
+```bash
+# from inside the cluster — should now be 401 without credentials
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# and 200 with them
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
+    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+```
+
+Then confirm the pipeline still moves: `group-orthanc`'s log should keep
+reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
+`orthanc-password` disagree with `users.json`.
+
+> **Do not expose port 8042 to the host or a NodePort just because auth is now
+> on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
+> layer here, not a replacement for keeping the API off the network.
+
 ### Adding or removing a colleague
 
 ```bash
@@ -467,14 +623,25 @@ from `.sops.yaml` and re-running `updatekeys` stops them reading *future*
 versions, but they have already seen the current values. **Removal is only real
 once the secrets themselves are rotated** — see the standing gap in §9.
 
-### Two secrets you must NOT create by hand on an edge
+### Three secrets you must NOT create by hand on an edge
 
-`ca-bundle` and `loki-push-client-tls` are written into each edge cluster by the
-management side's **cert-sync** CronJob. `loki-push-client-tls` is this site's
-mTLS identity for the Loki push endpoint, and hand-writing it produces a
-certificate the management CA never signed — the push is then rejected at the
-TLS handshake, its logs stop arriving, and the alerts that would tell you are
-built from those same logs.
+`ca-bundle`, `loki-push-client-tls` and `s3-edge-credentials` are written into
+each edge cluster by the management side's **cert-sync** CronJob.
+`loki-push-client-tls` is this site's mTLS identity for the Loki push endpoint,
+and hand-writing it produces a certificate the management CA never signed — the
+push is then rejected at the TLS handshake, its logs stop arriving, and the
+alerts that would tell you are built from those same logs.
+
+`s3-edge-credentials` is this edge's S3 identity. It is written **once**, on the
+management side, as the `<edge>-s3` Secret named by that edge's
+`edges[].s3SecretRef`, and cert-sync copies it in under the edge-side name. It
+used to live in both files with identical values, and that was the bug: nobody
+cares what the key pair *is*, only that the two copies match, so making a human
+the consistency mechanism guaranteed eventual drift — surfacing as an S3 403 at
+upload with nothing saying which side was wrong. Writing a copy on the edge does
+not "also work" either: cert-sync overwrites it on the next run, so the edge
+authenticates correctly right up until the credential silently changes underneath
+it, which is worse than failing immediately.
 
 <details>
 <summary><b>How that is possible when the edge accepts no inbound connection</b>
@@ -506,7 +673,7 @@ worker holds an outbound connection to its API server, and fetches the Secret
 over the connection it opened. Nothing dials in.
 
 Konnectivity is a separate mechanism and follows the same rule. Its agent runs
-*on the edge* and dials *out* (`--proxy-server-host=konnect.aisedge.local --proxy-server-port=443`); it exists so the API server can reach back toward the
+*on the edge* and dials *out* (`--proxy-server-host=konnectivity-edge-dev.aisedge.local --proxy-server-port=443`, i.e. `<konnectivityPrefix>-<edge>.<domain.internal>`); it exists so the API server can reach back toward the
 node for `kubectl exec`/`logs`/`port-forward`, and even that reverse traffic
 rides a tunnel the edge established. Secrets do not use it at all.
 
@@ -566,8 +733,16 @@ so `git diff` shows *which* credential changed without showing it.
 
 **File:** `install.sh`
 
-There is **no `--set` anywhere in it.** A flag needed to make an install work is
-a value that belongs in the site file.
+There is **no `--set` on either chart.** The management release is
+`-f <site values>`; the edge release is `-f <site values> -f <edge values>`. A
+flag needed to make an install work is a value that belongs in the site file,
+and an install nobody can reproduce from the file alone is not reproducible.
+
+> The installer's single `--set` — `crds.enabled=true`, at `install.sh` step 2 —
+> belongs to the pinned cert-manager prerequisite, which is installed outside the
+> charts (see the dependency loop under step 2 below) and is not configured from
+> the site file at all. `install.sh`'s own header still claims "no `--set`
+> anywhere below"; it means the charts.
 
 ### The seven steps
 
@@ -615,10 +790,11 @@ Which of the two runs is `edges[].join` — see §4.1 below.
 Orthanc, the pipeline, the uploader, Vector. Then it runs the cert-sync CronJob
 **once, immediately**.
 
-> Without that, the edge waits up to **six hours** for its `ca-bundle` and its
-> `loki-push-client-tls` — the s3-uploader mounts the first and Vector mounts the
-> second, so neither pod can start at all. The install would report success and
-> the site would do nothing until the small hours.
+> Without that, the edge waits up to **six hours** for the three Secrets
+> cert-sync delivers — the s3-uploader reads `s3-edge-credentials` for its keys
+> and mounts `ca-bundle` to trust the S3 endpoint, and Vector mounts
+> `loki-push-client-tls`, so neither pod can start at all. The install would
+> report success and the site would do nothing until the small hours.
 
 ### 4.1 Joining an edge you cannot SSH to — `join: bundle`
 
@@ -688,10 +864,19 @@ membership. It defends itself:
 | refuses after the token expires | says "ask for a fresh bundle" instead of failing later as a TLS error |
 | shreds the token after use | it belongs in `/etc/k0s/join-token` at 0600, not in `/tmp` |
 
-Tokens are minted with `expiry: 2h` (`joinTokenTTL` on the edge entry). The ssh
-path consumes one in seconds, so the bound costs it nothing; raise it only if a
-bundle genuinely has to travel further, and treat that as a deliberate decision.
+Tokens are minted with `expiry: 2h` by default
+(`scripts/05-setup-edge-cluster.sh:128`). The ssh path consumes one in seconds, so
+the bound costs it nothing there.
 
+> **`joinTokenTTL` sets it per edge.** `install.sh` reads it into `EDGE_JOIN_TTL`
+> and passes it to step 5, which is where the token is actually minted
+> (`scripts/05-setup-edge-cluster.sh:128` reads it, `:139` writes it as the
+> Secret's `expiry`). Raise it only for a `join: bundle` edge whose bundle has to
+> travel further than the default — a bundle carried to a hospital by hand is the
+> case this exists for. It is a BEARER credential: anything holding it can join a
+> node, so a longer window is a deliberate decision rather than a convenience.
+> `JOIN_TOKEN_TTL=8h ./install.sh <site>` still works as a fleet-wide override for
+> a run, and the per-edge value takes precedence over it.
 **Re-running is safe and is the repair path.** The join converges rather than
 skipping: it rewrites `/etc/hosts` rather than leaving a stale block, and it
 asks the API whether this node's identity is still accepted rather than trusting
@@ -699,10 +884,13 @@ asks the API whether this node's identity is still accepted rather than trusting
 started refusing is reset and re-joined.
 
 > **Teardown still needs a way in.** `scripts/uninstall.sh` runs `k0s reset` and
-> wipes `/data` on the edge over SSH. For a `join: bundle` site it cannot, so it
-> skips that edge, says so, and prints the commands to run on the edge by hand.
-> A site removed only from the management side leaves patient data on the edge —
-> finish the job there.
+> wipes `/data` on the edge over SSH. For a `join: bundle` site it cannot — and
+> the same is true of any edge whose entry has no `sshUser`. The cluster-side
+> half still happens from here, through `kubeconfig-<edge>`: the edge release,
+> its namespaces and its PVs go. Only the machine-level half is skipped, loudly,
+> with the commands to run on the edge by hand printed for you. A site removed
+> only from the management side leaves patient data on the edge — finish the job
+> there.
 
 ### What can go wrong
 
@@ -711,7 +899,7 @@ started refusing is reset and re-joined.
 | `conversion webhook … connection refused` | k0smotron operator not ready; cert-manager must come first                           |
 | `invalid ownership metadata`               | an object exists without Helm's labels, from a previous non-Helm install             |
 | Worker join times out                        | the management node cannot resolve its own child API — check`/etc/hosts`          |
-| Edge pods`CreateContainerConfigError`      | a Secret is missing, usually`ca-bundle` or `loki-push-client-tls` from cert-sync |
+| Edge pods`CreateContainerConfigError`      | a Secret is missing — one of the three cert-sync delivers:`ca-bundle`, `loki-push-client-tls` or `s3-edge-credentials` |
 
 ---
 
@@ -793,8 +981,12 @@ make verify-live SITE=<management-site>
 > it: the chart only checks that a salt Secret is *named*, not that its value
 > is real, so the edge installs, Orthanc starts, and every `${SubjectHash}` and
 > `${SessionHash}` on that site is derived from a string published in this
-> repository. `encrypt` warns — `WARNING: ... still contains REPLACE_ placeholders. Encrypt anyway? [y/N]` — and answering `y` there is the whole
-> failure. The salt is also effectively permanent: rotating it later gives the
+> repository. `encrypt` catches it and names the key —
+> `WARNING: sites/edge-syd/secrets.enc.yaml has unfilled placeholder VALUES:`
+> followed by `38:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS` — then asks
+> `Encrypt anyway? [y/N]`, and answering `y` there is the whole failure. A
+> correctly filled edge produces no warning at all, so a prompt here always
+> means a real unfilled value. The salt is also effectively permanent: rotating it later gives the
 > same patient a different pseudonym and breaks linkage to everything already
 > in XNAT (§3, "Rotating a secret").
 
@@ -888,8 +1080,17 @@ to the edge's own secrets file — cert-sync delivers it from the Secret above.
 
 It is idempotent. Steps 1–4 no-op on what already exists; the per-edge loop then
 runs steps 5–7 for **every** edge, so `edge-dev` is re-verified and `edge-syd` is
-built: hosted control plane → child kubeconfig + join token → SSH worker join →
-edge chart → cert-sync seeded.
+built: hosted control plane → child kubeconfig + join token → worker join → edge
+chart → cert-sync seeded.
+
+**Step 6 is the one that differs per site.** The loop branches on that edge's
+`edges[].join`: the default `ssh` pushes the join from here over 22, while
+`bundle` writes a `<edge>-join.sh` for someone to run at the facility and then
+waits for the node to appear. A hospital behind a whitelisted-IP allowlist, a VPN
+or GlobalProtect — which is exactly the kind of site the second and later entries
+tend to be — needs `join: bundle` on the `edges:` entry you pasted in step 1, and
+`sshUser`/`sshKey` can be omitted there entirely. §4.1 has the whole procedure,
+including the teardown caveat that comes with it.
 
 ### What the new site gets automatically
 
@@ -899,9 +1100,9 @@ edge chart → cert-sync seeded.
 | S3 bucket               | `ingest-edge-syd` — isolated from every other site               |
 | S3 identity             | scoped to that bucket alone                                         |
 | Uploader + reclaimer    | `mgmt-upload-edge-syd`, `mgmt-reclaim-edge-syd`                 |
-| Ingress hostnames       | `k0s-edge-syd.<domain>`, `konnect-edge-syd.<domain>`            |
+| Ingress hostnames       | `k0s-edge-syd.<domain>`, `konnectivity-edge-syd.<domain>`       |
 | Loki push client cert   | `edge-syd-loki-client`, `CN=edge-syd`, issued from the fleet CA |
-| CA bundle + client cert | delivered into the site by cert-sync                                |
+| CA bundle, client cert + S3 key | all three delivered into the site by cert-sync               |
 
 ### Check it landed
 
@@ -909,11 +1110,13 @@ edge chart → cert-sync seeded.
 kubectl -n edge-syd get pods                                    # control plane up
 kubectl --kubeconfig kubeconfig-edge-syd get nodes              # worker Ready
 kubectl --kubeconfig kubeconfig-edge-syd -n xnat-ingest get pods
-kubectl --kubeconfig kubeconfig-edge-syd -n xnat-ingest get secret ca-bundle loki-push-client-tls
+kubectl --kubeconfig kubeconfig-edge-syd -n xnat-ingest get secret ca-bundle loki-push-client-tls s3-edge-credentials
 ```
 
-If the edge pods sit in `CreateContainerConfigError`, `ca-bundle` or
-`loki-push-client-tls` has not arrived yet — run cert-sync by hand:
+If the edge pods sit in `CreateContainerConfigError`, one of those three has not
+arrived yet — `ca-bundle` and `s3-edge-credentials` for the s3-uploader,
+`loki-push-client-tls` for Vector. `verify-live` reports them as one line ("all 3
+cert-sync Secrets present"), which is the same check. Run cert-sync by hand:
 
 ```bash
 kubectl -n ais-mgmt create job seed --from=cronjob/mgmt-cert-sync-edge-syd
@@ -969,12 +1172,17 @@ Verified with `retain: 30d` against real files: a patient last touched 31 days
 ago was reported `WOULD expire` in dry-run and removed when armed; a patient
 holding a 60-day-old study *and* a 2-day-old one was kept in both.
 
-### Derived stages need a condition AND an age
+### Derived stages need a condition AND an age — with one exception
 
-`grouped` and `assigned` are reclaimed only when something downstream proves the
-copy is reconstructible — the uploader's own fingerprint file, or assign's
-output — **and** `minAge` has elapsed. An unknown condition word keeps rather
-than deletes, so a typo in values.yaml cannot authorise removal.
+`assigned` is reclaimed only when something downstream proves the copy is
+reconstructible — the uploader's own fingerprint file — **and** `minAge` has
+elapsed. `grouped` is the exception: assign's `--unlink-source all` has already
+removed each tree, so the only thing left to reclaim is an orphan assign failed
+to unlink, and there is no age to wait out. It runs on the condition alone, and
+the chart rejects a `minAge` there at render rather than ignoring it (§2.4).
+
+An unknown condition word keeps rather than deletes, so a typo in values.yaml
+cannot authorise removal.
 
 `orthancStorage` is different: Orthanc names files by UUID, so a directory walk
 cannot map them to sessions. That stage declares `backend: orthanc-rest` and is
@@ -995,8 +1203,11 @@ The pipeline alerts live in the Loki ruler because the management Prometheus
 the source of truth is the JSON log event, not a derived metric.
 
 > **The uploader's log schema is a public interface.** `upload_started`,
-> `upload_completed` and `upload_failed` are matched by five alert rules.
-> Renaming one disables the corresponding alert *silently*.
+> `upload_completed` and `upload_failed` are matched by three alert rules in
+> `charts/mgmt/files/loki-ruler-rules.yaml` — `XNATUploadFailingForAllSessions`,
+> `S3UploaderRetryStorm` and `SessionUploadStalled` — across five match
+> expressions, since two of those rules test a started/completed pair. Renaming
+> one event disables the corresponding alert *silently*.
 
 ```bash
 scripts/check-alert-inputs.sh    # asks LIVE Prometheus whether each alert can fire
@@ -1055,12 +1266,17 @@ smoke-test or a cron.
 
 ```bash
 make ci-fast     # no cluster needed
-make ci          # adds a kind-based greenfield install
+make ci          # adds the three stages that need docker
 ```
 
-Ten stages. Three are worth explaining:
+Thirteen stages; `ci-fast` runs ten of them, skipping the three that need docker
+— `loki-rules` (evaluates the real rules against the pinned Loki), `data-policy`
+(runs the real engine under the image the chart ships) and `greenfield` (a
+kind-based install from nothing). Each of those skips loudly rather than
+silently, so a run without docker never reads as a full pass. Three of the ten
+are worth explaining:
 
-**`reclaimer`** — 28 cases that assert on **what was deleted**, not on log text.
+**`reclaimer`** — 31 cases that assert on **what was deleted**, not on log text.
 A run that logs `reclaim_kept` and issues a DELETE anyway passes a log-only test
 and fails this one. Its `aws` and `curl` are stubbed and **fail by default** for
 anything a case does not explicitly configure, because a stub that invented a
@@ -1092,10 +1308,19 @@ A **partial teardown is worse than none.** A CRD without its operator, a
 namespace Helm cannot adopt, cert-manager RBAC from a release that no longer
 exists, or a stale `/etc/hosts` marker each make the *next* install fail in a way
 that looks like a chart bug. So the default removes all of it, including
-`k0s reset` on both machines.
+`k0s reset` on both machines — **unless the edge is `join: bundle`**, or its
+`edges:` entry has no `sshUser`, because then there is no inbound SSH path from
+the management node. In that case `scripts/uninstall.sh` still removes the edge's
+Helm release, its namespaces and its PVs through `kubeconfig-<edge>` — that half
+runs from here, over the hosted control plane — but the machine-level half,
+`k0s reset` and `/data` and the `/etc/hosts` marker, is skipped with a loud
+warning and a printed block of commands to run at the site. See §4.1.
 
 It requires you to type the site name, because it deletes `/data` — the facility
-backup. It never deletes your age key or your site files.
+backup. It never deletes your age key or your site files. On a `join: bundle`
+edge that `/data` deletion is precisely the part that does *not* happen from
+here: until someone runs the printed commands on the edge, the facility backup —
+patient data — is still sitting on that machine.
 
 ---
 
@@ -1164,8 +1389,12 @@ advisories. Three pins were changed and the reasoning lives next to each one:
   The bump is **not** just a tag change. 4.x defaults an Iceberg REST Catalog
   on to port 8181 that 3.99 did not have at all, and that server is the
   subsystem two of these advisories are about — so upgrading naively would
-  have opened new surface while closing old. Both the chart and the legacy
-  manifest now pass `-s3.port.iceberg=0`. Nothing here speaks Iceberg.
+  have opened new surface while closing old. The chart passes
+  `-s3.port.iceberg=0` (`charts/mgmt/templates/seaweedfs.yaml`), and it is now
+  the only place SeaweedFS is deployed: the legacy `manifests/` copy and
+  `scripts/03-deploy-seaweedfs.sh` were deleted when the install moved into the
+  chart, leaving `manifests/01-management/edge-cluster.yaml.tpl` as the sole
+  surviving manifest. Nothing here speaks Iceberg.
 * **Grafana 13.1.1 → 13.1.2**, pinned ahead of its subchart. CVE-2026-13438,
   no public details yet. Grafana is the only thing ingress-nginx publishes
   with no auth in front of it.
