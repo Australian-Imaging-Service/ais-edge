@@ -94,24 +94,24 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with rea
 - [x] **2.2** Same audit for `ingressNginx.proxyBodySize` — flagged as possibly
       dead by the earlier values-consumers work. Confirm and resolve.
 
-### 3 — Load balancer address
+### 3 — Load balancer address  ·  verify-live check DONE; 3.2 still open
 
 The chicken-and-egg: `domain.internal` must contain the address before the
 install creates the load balancer, and a `nip.io` name *embeds* it.
 
-- [ ] **3.1** Document the pre-allocated floating IP as the supported answer on
+- [x] **3.1** Document the pre-allocated floating IP as the supported answer on
       OpenStack, with the exact `openstack floating ip create` command.
 - [ ] **3.2** `domain.mgmtNodeIP` is currently a static IP used for cert SANs and
       edge `hostAliases`. On cloud the LB address may be a **hostname** (AWS
       NLB), not an IP. Decide whether `mgmtNodeIP` stays IP-only on cloud, or
       gains a hostname sibling. Do not silently accept a hostname into a field
       that renders into an IP SAN.
-- [ ] **3.3** `verify-live.sh`: check that the LB Service actually got an
+- [x] **3.3** `verify-live.sh`: check that the LB Service actually got an
       external address, and fail with the pending-address case named — a
       `LoadBalancer` Service with no cloud controller sits `<pending>` forever
       and everything downstream times out with no explanation.
 
-### 3b — Octavia teardown ordering (OpenStack)
+### 3b — Octavia teardown ordering (OpenStack)  ·  DONE
 
 Deleting a load balancer is **not** a single call: Octavia refuses while a
 listener or pool is still attached. The order is pool → listener → load
@@ -123,10 +123,10 @@ IP:
   controller ever runs the cleanup;
 * the controller is removed or loses credentials mid-teardown.
 
-- [ ] **3b.1** `scripts/uninstall.sh`: on `topology: cloud`, delete the ingress
+- [x] **3b.1** `scripts/uninstall.sh`: on `topology: cloud`, delete the ingress
       Service and WAIT for the cloud controller to release the load balancer
       before touching k0s. Deleting the cluster first strands it.
-- [ ] **3b.2** Print the manual recovery in the right order when the Service is
+- [x] **3b.2** Print the manual recovery in the right order when the Service is
       already gone or the wait times out:
       `openstack loadbalancer pool delete` → `listener delete` → `delete`,
       then release the floating IP if it was allocated for this install.
@@ -251,6 +251,26 @@ applies.
       default is the path with operational evidence behind it. Not done here
       because it changes behaviour for any existing site that omits the key —
       it wants its own change and its own conversation.
+
+## On-prem regression proof — run this before every cloud commit
+
+Both charts rendered for all 20 on-prem cases, on `main-config-consolidation`
+and on this branch, then diffed:
+
+    identical: 20    differing: 0
+
+Re-run after each change. Every cloud edit to a shared file is gated so that the
+on-prem path executes exactly the lines it did before:
+
+| Shared file | Unconditional change | Gate |
+|---|---|---|
+| `charts/mgmt/templates/_helpers.tpl` | none | `if eq .Values.topology "cloud"` |
+| `charts/mgmt/templates/edge-clusters.yaml` | none | `and (eq $.Values.topology "cloud")` |
+| `charts/mgmt/values.yaml` | 2 keys removed, read by zero templates | n/a — renders identically |
+| `scripts/verify-live.sh` | 1 line: read `topology`, default `onprem` | `if [ "$TOPOLOGY" = "cloud" ]` |
+| `scripts/uninstall.sh` | 1 line: read `topology`, default `onprem` | `if [ "$TOPOLOGY" = "cloud" ]` |
+
+No installer or join script has been touched at all.
 
 ## Open questions for the user
 
