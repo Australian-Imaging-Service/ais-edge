@@ -133,14 +133,14 @@ IP:
 - [ ] **3b.3** Say in the docs that a stranded LB holds a floating IP, because
       the next install will ask for one and the quota will already be spent.
 
-### 4 — Per-edge exposure on cloud
+### 4 — Per-edge exposure on cloud  ·  DONE (nodePort refused on cloud)
 
-- [ ] **4.1** Today `edges[].exposure` is `nodePort | sni`. Behind one cloud LB,
+- [x] **4.1** Today `edges[].exposure` is `nodePort | sni`. Behind one cloud LB,
       `sni` maps cleanly; `nodePort` means exposing a node port of the
       *management* cluster, which needs security-group rules per edge.
       Proposal: refuse `nodePort` when `topology: cloud` unless a site
       explicitly opts in. **Confirm with the user before implementing.**
-- [ ] **4.2** If refused, render guard + negative case.
+- [x] **4.2** If refused, render guard + negative case.
 
 ### 5 — Certificates
 
@@ -229,6 +229,28 @@ Copy `/data/facility-backup` first if anything there matters.**
 - [ ] **8.9** Restore the "end-to-end tested" claim with the date.
 
 ---
+
+## A finding worth acting on separately
+
+`k0smotron.exposure.default` is **`nodePort`**, but every deployment that has
+actually been run used `sni`:
+
+| | exposure |
+|---|---|
+| the live tier-2 deployment on .240 (`sites/stream-2-ab-dev`) | `sni` |
+| `sites/example-mgmt` | `sni` |
+| `sites/example-cloud` | `sni` |
+| **the chart default** | **`nodePort`** |
+
+CI render-tests both, but render-tested is not run-for-real. So an edge entry
+that simply omits `exposure` gets the mode nobody has exercised — on either
+topology. On cloud that is now refused outright; on-prem it still silently
+applies.
+
+- [ ] **4.3** Propose changing `k0smotron.exposure.default` to `sni`, so the
+      default is the path with operational evidence behind it. Not done here
+      because it changes behaviour for any existing site that omits the key —
+      it wants its own change and its own conversation.
 
 ## Open questions for the user
 

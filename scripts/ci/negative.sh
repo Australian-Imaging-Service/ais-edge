@@ -73,7 +73,7 @@ expected_census() {
 charts/mgmt/templates/_helpers.tpl	22
 charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	13
-charts/mgmt/templates/edge-clusters.yaml	10
+charts/mgmt/templates/edge-clusters.yaml	11
 charts/mgmt/templates/observability.yaml	10
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2
 charts/edge/templates/_helpers.tpl	16

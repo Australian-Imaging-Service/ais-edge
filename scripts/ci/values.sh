@@ -760,6 +760,25 @@ EOF
 
 # ClusterFirstWithHostNet without hostNetwork: the pod gets the HOST's
 # resolv.conf and loses its in-cluster upstreams.
+# nodePort is the CHART DEFAULT, so an edge that omits `exposure` lands on the
+# mode that reaches nothing on cloud. This fixture states it explicitly.
+cat >"$V/neg-mgmt-cloud-nodeport.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+EOF
+
 cat >"$V/neg-mgmt-cloud-dnspolicy.yaml" <<'EOF'
 topology: cloud
 ingress-nginx:
@@ -885,6 +904,7 @@ neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yam
 neg-mgmt-cloud-hostnetwork	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-hostnetwork.yaml	hostNetwork=true
 neg-mgmt-cloud-clusterip	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-clusterip.yaml	service.type=ClusterIP
 neg-mgmt-cloud-dnspolicy	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-dnspolicy.yaml	dnsPolicy=ClusterFirstWithHostNet without hostNetwork
+neg-mgmt-cloud-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-nodeport.yaml	exposure=nodePort with topology=cloud
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
