@@ -1,0 +1,104 @@
+# CIMA-X standalone Tier-1 configuration.
+# Credentials remain in the existing Kubernetes Secrets in namespace ais-edge.
+clusterLabel: cima-x
+namespace: ais-edge
+topology: onprem
+
+# No management plane is used for this standalone site.
+hostAliases:
+  enabled: false
+
+# Preserve all data during migration. Retention can be enabled separately only
+# after the new deployment has been observed and approved.
+dataPolicy:
+  enabled: false
+  dryRun: true
+  reporter:
+    enabled: false
+  originals:
+    facilityBackup:
+      enabled: false
+    fileDrop:
+      location: /data/cima-export
+      reclaim: never
+
+storage:
+  storageClass:
+    create: true
+    name: hostpath-pipeline
+  pipeline:
+    # Same physical directory as the existing retained ais-edge PVC.
+    hostPath: /data/ais-edge
+    capacity: 1500Gi
+  # CIMA-X currently has no separate facility-backup volume or deid hook.
+  facilityBackup:
+    enabled: false
+
+orthanc:
+  aet: ORTHANC
+  expose:
+    dicom: nodePort
+    http: nodePort
+    nodePorts:
+      # Preserve the scanner and web connections.
+      dicom: 30042
+      http: 30842
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+  # Preserve the current receive-time transcoding behaviour.
+  ingestTranscoding: "1.2.840.10008.1.2.1"
+  deid:
+    enabled: false
+
+ingest:
+  orthancGroup:
+    enabled: true
+    interval: 30
+    # No deid hook applies the chart's default ready label at CIMA-X.
+    toProcessLabel: ""
+    # Preserve the label used by the current CIMA-X deployment.
+    processedLabel: xnat-sorted
+    waitPeriod: 0
+    copyMode: hardlink_or_copy
+  fileDrop:
+    enabled: true
+    interval: 30
+    inputGlob: "/data/cima-export/**/*"
+    waitPeriod: 15
+    datatypes: "medimage/dicom-series"
+    copyMode: hardlink_or_copy
+  assign:
+    interval: 30
+    copyMode: hardlink_or_copy
+    tagMapping:
+      project: StudyDescription
+      subject: PatientName
+      session: PatientID
+  associate:
+    enabled: false
+
+upload:
+  mode: direct
+  direct:
+    # Preserve the current upload approval gate.
+    replicas: 0
+    existingSecret: xnat-credentials
+    loop: 30
+    waitPeriod: 15
+    alwaysInclude: all
+    verifySsl: true
+    requireManifest: false
+    checkChecksums: false
+    tempDir: /data/tmp
+
+samba:
+  enabled: true
+  shareName: cima-x
+  # Preserve the current whole-volume share layout, including cima-export/.
+  subPath: "."
+  existingSecret: samba-credentials
+  hostPort: 445
+
+observability:
+  enabled: false

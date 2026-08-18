@@ -20,7 +20,9 @@ scan order is filesystem order, so a future key that does collide would
 silently reconfigure the server, non-deterministically, with no error.
 
 Here:
-    /etc/orthanc/       ONLY orthanc.json + the Lua script. Orthanc's config.
+    /etc/orthanc/       orthanc.json, the Lua script, and users.json from the
+                        credentials Secret when authentication is enabled.
+                        Orthanc scans users.json and merges RegisteredUsers.
     /etc/ais-edge/      routing.json + the de-identification profile. Read by
                         our Lua hook via AIS_ROUTING_FILE; never scanned by
                         Orthanc.
@@ -59,9 +61,6 @@ data:
 
       "RemoteAccessAllowed": true,
       "AuthenticationEnabled": {{ .Values.orthanc.auth.enabled }},
-      {{- if .Values.orthanc.auth.enabled }}
-      "RegisteredUsersFile": "/etc/orthanc-credentials/users.json",
-      {{- end }}
 
       {{- with .Values.orthanc.ingestTranscoding }}
       {{- /* Rewrites pixel data at RECEIVE time, before the Lua hook runs, so

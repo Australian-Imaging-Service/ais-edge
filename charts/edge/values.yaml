@@ -384,7 +384,7 @@ orthanc:
     # AuthenticationEnabled: false and was protected only by the accident of
     # being ClusterIP-only.
     enabled: true
-    existingSecret: orthanc-credentials   # keys: orthanc-user, orthanc-password
+    existingSecret: orthanc-credentials   # keys: users.json, orthanc-user, orthanc-password
 
   # Rewriting pixel data at receive time happens BEFORE the Lua hook runs, so
   # the facility backup would hold the transcoded copy rather than the wire
