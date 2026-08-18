@@ -405,47 +405,102 @@ fi
 # binary, but they all name themselves *cloud-controller-manager*, so this works
 # on OpenStack, AWS, Azure and GCP without this installer knowing which it is.
 if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ] && [ "${SKIP_CLOUD_PREFLIGHT:-0}" != "1" ]; then
-    info "cloud pre-flight: checking for a cloud controller"
-    ccm="$(kubectl get pods -A -o name 2>/dev/null | grep -c 'cloud-controller-manager' || true)"
-    if [ "${ccm:-0}" -eq 0 ]; then
-        echo >&2
-        echo "[install] ERROR: topology=cloud, but no cloud controller manager is running." >&2
-        echo >&2
-        echo "  Nothing in this cluster can turn a Kubernetes LoadBalancer Service into a" >&2
-        echo "  real cloud load balancer. The install would appear to succeed: the ingress" >&2
-        echo "  pod would report Running, its Service would sit at <pending> forever with no" >&2
-        echo "  external address, and every hostname the edges resolve would point at" >&2
-        echo "  nothing. You would find out when an edge failed to join." >&2
-        echo >&2
-        echo "  This installer does not provision cloud infrastructure — that needs" >&2
-        echo "  credentials it should not hold, and on managed Kubernetes it is already" >&2
-        echo "  done. Install the controller for your cloud out of band, then re-run:" >&2
-        echo >&2
-        echo "    docs/clouds/README.md          the prerequisites, and why they are yours" >&2
-        echo "    docs/clouds/openstack-nectar.md  OpenStack / Nectar, step by step" >&2
-        echo "    docs/clouds/{aws,azure,gcp}.md   managed clusters already ship one" >&2
-        echo >&2
-        echo "  If you have a load balancer provisioned some other way and know what you" >&2
-        echo "  are doing, re-run with SKIP_CLOUD_PREFLIGHT=1." >&2
-        exit 1
-    fi
-    info "cloud pre-flight: cloud controller present (${ccm} pod(s))"
+    info "cloud pre-flight: checking the operator-provided edge path"
 
-    # A node still carrying the uninitialized taint means the controller is
-    # present but has not adopted this node — pods will not schedule and the
-    # cause is not obvious from anything the installer does next.
-    tainted="$(kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[?(@.key=="node.cloudprovider.kubernetes.io/uninitialized")].key}{"\n"}{end}' 2>/dev/null | grep -c 'uninitialized' || true)"
-    if [ "${tainted:-0}" -gt 0 ]; then
-        echo >&2
-        echo "[install] ERROR: ${tainted} node(s) still carry" >&2
-        echo "          node.cloudprovider.kubernetes.io/uninitialized." >&2
-        echo >&2
-        echo "  A cloud controller is running but has not adopted them, so workloads will" >&2
-        echo "  not schedule. Usually its credentials are wrong for this project, or its" >&2
-        echo "  configured region does not match where these nodes actually are." >&2
-        echo "  Check its logs before re-running:" >&2
-        echo "    kubectl -n kube-system logs -l component=cloud-controller-manager --tail=50" >&2
-        exit 1
+    # What shape did the site ask for? The answer decides what has to be true.
+    svc_type="$(python3 - "$VALUES" <<'PY'
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1])) or {}
+c = ((v.get("ingress-nginx") or {}).get("controller") or {})
+print(((c.get("service") or {}).get("type")) or "NodePort")
+PY
+)"
+
+    # --- NodePort: the default, and the shape this deployment recommends ------
+    # The operator builds the load balancer themselves and forwards to a node
+    # port. Nothing in the cluster talks to the cloud API, so there is no
+    # controller to check for and no credential living in kube-system.
+    #
+    # What CAN be verified here is that the name the edges will resolve already
+    # points somewhere, and that it does not point straight at the management
+    # node -- which would mean there is no load balancer in front at all.
+    if [ "$svc_type" = "NodePort" ]; then
+        resolved="$(getent hosts "$INTERNAL_DOMAIN" 2>/dev/null | awk '{print $1; exit}')"
+        if [ -z "$resolved" ]; then
+            echo >&2
+            echo "[install] ERROR: topology=cloud, but ${INTERNAL_DOMAIN} does not resolve." >&2
+            echo >&2
+            echo "  Edges resolve this name to find the management cluster. Provisioning" >&2
+            echo "  the load balancer and its DNS is the operator's job -- this installer" >&2
+            echo "  holds no cloud credentials and will not create infrastructure." >&2
+            echo >&2
+            echo "  Create the load balancer, point ${INTERNAL_DOMAIN} at its address," >&2
+            echo "  then re-run. Step by step:" >&2
+            echo "    docs/clouds/README.md            what is yours to provide, and why" >&2
+            echo "    docs/clouds/openstack-nectar.md  OpenStack / Nectar" >&2
+            echo "    docs/clouds/{aws,azure,gcp}.md   per-cloud equivalents" >&2
+            echo >&2
+            echo "  To proceed anyway: SKIP_CLOUD_PREFLIGHT=1" >&2
+            exit 1
+        fi
+        if [ "$resolved" = "$MGMT_NODE_IP" ]; then
+            echo >&2
+            echo "[install] ERROR: ${INTERNAL_DOMAIN} resolves to ${resolved}, which is the" >&2
+            echo "          management node itself -- there is no load balancer in front." >&2
+            echo >&2
+            echo "  That works until the management node is replaced or scaled, at which" >&2
+            echo "  point every edge loses the cluster and has to be re-pointed by hand." >&2
+            echo "  Point the name at the load balancer's address instead." >&2
+            echo >&2
+            echo "  If this is deliberate for a single-node trial: SKIP_CLOUD_PREFLIGHT=1" >&2
+            exit 1
+        fi
+        info "cloud pre-flight: ${INTERNAL_DOMAIN} -> ${resolved} (operator-provided)"
+        info "cloud pre-flight: your load balancer must forward 443 to this node's ingress NodePort"
+
+    # --- LoadBalancer: supported, but it needs something to answer the request -
+    # `type: LoadBalancer` is only a REQUEST. Without a controller watching for
+    # it, the Service sits at <pending> for ever: the ingress pod reports 1/1
+    # Running, no external address is ever assigned, and the failure surfaces
+    # much later as an edge that cannot join.
+    else
+        ccm="$(kubectl get pods -A -o name 2>/dev/null | grep -c 'cloud-controller-manager' || true)"
+        if [ "${ccm:-0}" -eq 0 ]; then
+            echo >&2
+            echo "[install] ERROR: ingress-nginx service.type=${svc_type}, but nothing in this" >&2
+            echo "          cluster can turn that request into a real load balancer." >&2
+            echo >&2
+            echo "  The Service would sit at <pending> for ever and no edge could join." >&2
+            echo >&2
+            echo "  Either (recommended here) provision the load balancer yourself and use" >&2
+            echo "  a node port, by setting this in your SITE file:" >&2
+            echo >&2
+            echo "    ingress-nginx:" >&2
+            echo "      controller:" >&2
+            echo "        service:" >&2
+            echo "          type: NodePort" >&2
+            echo >&2
+            echo "  or install a cloud controller manager for your cloud out of band." >&2
+            echo "  See docs/clouds/README.md for the trade-off." >&2
+            exit 1
+        fi
+        info "cloud pre-flight: cloud controller present (${ccm} pod(s))"
+
+        # Only meaningful when a controller is actually running: a node left
+        # carrying this taint means the controller has not adopted it, and
+        # nothing will schedule there.
+        tainted="$(kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[?(@.key=="node.cloudprovider.kubernetes.io/uninitialized")].key}{"\n"}{end}' 2>/dev/null | grep -c . || true)"
+        if [ "${tainted:-0}" -gt 0 ]; then
+            echo >&2
+            echo "[install] ERROR: ${tainted} node(s) still carry" >&2
+            echo "          node.cloudprovider.kubernetes.io/uninitialized." >&2
+            echo >&2
+            echo "  The cloud controller is running but has not adopted them, so workloads" >&2
+            echo "  will not schedule. Usually its credentials are wrong for this project," >&2
+            echo "  or its configured region does not match where these nodes actually are." >&2
+            echo "    kubectl -n kube-system logs -l component=cloud-controller-manager --tail=50" >&2
+            exit 1
+        fi
     fi
 fi
 

@@ -156,11 +156,11 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
   {{- if and (eq .Values.topology "cloud") .Values.ingressNginx.enabled }}
     {{- $c := (index .Values "ingress-nginx").controller | default dict }}
     {{- if $c.hostNetwork }}
-      {{- fail "topology=cloud with ingress-nginx.controller.hostNetwork=true. That is the on-prem shape: it binds the management host's own :443 and never asks the cloud for a load balancer, so the controller reports 1/1 Running while no external address exists and every fleet hostname is unreachable. Set the following in your SITE file (a parent chart cannot push values into a subchart, so it has to be written there):\n\ningress-nginx:\n  controller:\n    hostNetwork: false\n    dnsPolicy: ClusterFirst\n    service:\n      type: LoadBalancer" }}
+      {{- fail "topology=cloud with ingress-nginx.controller.hostNetwork=true. That is the on-prem shape: it binds the management host's own :443 and never asks the cloud for a load balancer, so the controller reports 1/1 Running while no external address exists and every fleet hostname is unreachable. Set the following in your SITE file (a parent chart cannot push values into a subchart, so it has to be written there):\n\ningress-nginx:\n  controller:\n    hostNetwork: false\n    dnsPolicy: ClusterFirst\n    service:\n      type: NodePort" }}
     {{- end }}
     {{- $svcType := (($c.service) | default dict).type | default "" }}
     {{- if eq $svcType "ClusterIP" }}
-      {{- fail "topology=cloud with ingress-nginx.controller.service.type=ClusterIP. Nothing outside the cluster can reach a ClusterIP, so no edge can join and no site can stage imaging. Set service.type: LoadBalancer in your SITE file under the `ingress-nginx:` key. On OpenStack, pin it to a pre-allocated floating IP with service.loadBalancerIP so the address exists before domain.internal has to name it." }}
+      {{- fail "topology=cloud with ingress-nginx.controller.service.type=ClusterIP. Nothing outside the cluster can reach a ClusterIP, so no edge can join and no site can stage imaging. Set service.type: NodePort in your SITE file under the `ingress-nginx:` key, and point your load balancer at that node port -- provisioning the load balancer is the operator's job, and this deployment does not run a cloud controller. service.type: LoadBalancer is also accepted, but ONLY if you have installed a cloud controller manager out of band; without one the Service sits at <pending> for ever." }}
     {{- end }}
     {{- /* dnsPolicy is not independently fatal, but ClusterFirstWithHostNet
            without hostNetwork gives the pod the HOST's resolv.conf and loses
