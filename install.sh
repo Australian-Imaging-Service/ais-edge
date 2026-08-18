@@ -161,7 +161,12 @@ export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
 # needs no bind mounts and leaves /etc/fstab alone. An earlier deployment did
 # use fstab binds for this; deleting /data then left the mounts dangling and the
 # node failed its next boot into an emergency shell. See docs/storage.md.
-DATA_ROOT="$(cfg storage.dataRoot)"
+# EMPTY IS THE DEFAULT AND IS VALID — it means "keep k0s and the PVCs on the root
+# filesystem", which is right for a single-disk host. `cfg <path>` with no second
+# argument means REQUIRED and exits 1, so omitting the default here made an
+# optional key mandatory and killed the install on every site that did not set
+# it. Caught on the first cloud install.
+DATA_ROOT="$(cfg storage.dataRoot "")"
 export DATA_ROOT
 
 # ONE k0s VERSION FOR THE WHOLE DEPLOYMENT.
@@ -176,7 +181,10 @@ export DATA_ROOT
 # chose the version, so two installs a fortnight apart differ while the operator
 # is told they are identical. Falls back to the chart default when a site does
 # not override it, and to unpinned only if the chart value is somehow absent.
-K0S_VERSION="$(cfg k0smotron.k0sVersion)"
+# Empty is valid and falls through to the chart default below. `cfg <path>` with
+# no second argument means REQUIRED — the same trap that made storage.dataRoot
+# mandatory. I wrote this one.
+K0S_VERSION="$(cfg k0smotron.k0sVersion "")"
 if [ -z "$K0S_VERSION" ] && [ -f "${SCRIPT_DIR}/charts/mgmt/values.yaml" ]; then
     K0S_VERSION="$(python3 -c "
 import yaml,sys
