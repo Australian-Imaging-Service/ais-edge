@@ -302,6 +302,29 @@ seaweedfs:
     proxyBodySize: 50g        # mc multipart / large session uploads
     tlsSecretName: seaweedfs-tls
 
+    # mTLS on the upload path, the same shape as
+    # observability.loki.push.requireAuth — one client certificate per edge,
+    # verified by the Ingress. It ADDS to the SigV4 key pair, it does not
+    # replace it: the key pair is still what scopes a site to its own bucket.
+    #
+    # TWO SWITCHES, FLIPPED AT DIFFERENT TIMES. Rollout order:
+    #   1. issue: true         + the certSync entry below   -> helm upgrade
+    #   2. kubectl -n <edge ns> get secret s3-client-tls     on EVERY site
+    #   3. upload.s3.requireClientCert: true in each EDGE site file
+    #   4. require: true                                     -> helm upgrade
+    #
+    # CAUTION: flipping `require` before step 2 has answered breaks every
+    # upload with an error that names nothing. MEASURED: the TLS handshake
+    # still succeeds (TLS 1.3 sends the client cert last), nginx answers HTTP
+    # 400 with an HTML body, and rclone reports it as an S3 XML parse failure
+    # — so it reads as a dead endpoint, not an auth problem. The chart refuses
+    # require without issue, and refuses issue without something delivering the
+    # certificates, but it cannot see whether a Secret actually landed;
+    # scripts/verify-live.sh checks that against a live cluster.
+    clientCerts:
+      issue: false            # mint the anchor + one <edge>-s3-client per edge
+      require: false          # make the Ingress demand one
+
   resources:
     requests: {memory: 512Mi, cpu: 200m}
     limits:   {memory: 4Gi,   cpu: "2"}

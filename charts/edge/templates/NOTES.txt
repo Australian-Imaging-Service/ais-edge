@@ -90,6 +90,9 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
   {{- if .Values.upload.s3.caBundleSecret }}
   {{ .Values.upload.s3.caBundleSecret }}   key: {{ .Values.upload.s3.caBundleKey }}
   {{- end }}
+  {{- if .Values.upload.s3.requireClientCert }}
+  {{ .Values.upload.s3.clientCertSecret }}   keys: tls.crt, tls.key   (delivered by the management cert-sync CronJob)
+  {{- end }}
 {{- else }}
   {{ .Values.upload.direct.existingSecret }}   keys: server, username, password
 {{- end }}

@@ -147,11 +147,35 @@ upload:
     # endpoint and bucket are DERIVED from the management file's domain,
     # hostnames and bucketPrefix. Do not set them here.
     existingSecret: s3-edge-credentials
-    # An https endpoint with NO CA bundle is refused: an empty AWS_CA_BUNDLE
-    # disables TLS verification entirely rather than falling back to the system
-    # trust store. cert-sync populates this Secret.
+    # An https endpoint with NO CA bundle is refused at render time: SeaweedFS
+    # here is signed by the fleet's internal CA, which is in no system trust
+    # store, so every upload would fail the TLS handshake at runtime instead.
+    # (The client is rclone now; the older warning that an empty value silently
+    # DISABLED verification was true of AWS_CA_BUNDLE and is not true of
+    # RCLONE_CA_CERT.) cert-sync populates this Secret.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
+
+    # mTLS ON THE UPLOAD PATH — OFF, AND STEP 3 OF A FOUR-STEP ROLLOUT.
+    # caBundleSecret above is who we TRUST; this is who we ARE. They are
+    # independent: on cloud the server certificate can come from a public CA
+    # (caBundleSecret empty) while this one still comes from the fleet CA.
+    #
+    # Do NOT set this until, on the MANAGEMENT side:
+    #   1. seaweedfs.ingress.clientCerts.issue: true, plus the matching
+    #      certSync.secrets entry (both are commented out in the management
+    #      site file, together, for this reason)
+    #   2. kubectl -n xnat-ingest get secret s3-client-tls   answers HERE
+    # then set requireClientCert: true here, and only afterwards flip
+    # seaweedfs.ingress.clientCerts.require on the management side.
+    #
+    # CAUTION, both directions: turning this on before the Secret lands leaves
+    # the uploader in CreateContainerConfigError (loud, local); flipping the
+    # management `require` before this is on breaks every upload as an HTTP 400
+    # that rclone reports as an S3 XML parse failure — naming neither
+    # certificates nor auth, and reaching the logs as endpoint_failed.
+    # requireClientCert: true
+    # clientCertSecret: s3-client-tls
     interval: 60
 
 observability:

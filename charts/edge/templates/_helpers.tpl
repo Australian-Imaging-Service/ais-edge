@@ -57,12 +57,33 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            empty string does NOT fall back to the system trust store — it
            disables certificate verification entirely and only logs
            "Unverified HTTPS request is being made". A request to a hostname
-           the certificate does not cover then succeeds. So an https endpoint
-           with no CA configured must be a hard render error, never a default. */ -}}
+           the certificate does not cover then succeeds.
+
+           THE CLIENT IS NOW RCLONE AND THAT SPECIFIC TRAP IS GONE: measured on
+           rclone 1.75.0, RCLONE_CA_CERT="" behaves exactly like unset and
+           still verifies against the system trust store. The guard stays,
+           because the reason it is a HARD error did not depend on the
+           downgrade. SeaweedFS here is signed by the internal CA, which no
+           system trust store contains, so an https endpoint with no CA
+           configured means every transfer fails the handshake at runtime, on
+           an edge, after install reported success. Failing at render time is
+           the cheap place to find that. */ -}}
     {{- if hasPrefix "https://" (include "edge.s3Endpoint" .) }}
       {{- if not .Values.upload.s3.caBundleSecret }}
-        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
+        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: the SeaweedFS endpoint is signed by the fleet's internal CA, which is in no system trust store, so every upload would fail the TLS handshake at runtime. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
       {{- end }}
+    {{- end }}
+
+    {{- /* THE OTHER HALF OF THE TLS STORY, and a separate key on purpose:
+           caBundleSecret is who we TRUST, clientCertSecret is who we ARE.
+
+           With the name empty, templates/upload.yaml renders `secretName:` with
+           no value. That is valid YAML, so the render is green and every CI
+           stage that parses it passes; the kubelet then refuses the volume and
+           the uploader sits in CreateContainerConfigError. Naming the missing
+           key here is much cheaper than reading a pod event on an edge. */ -}}
+    {{- if and .Values.upload.s3.requireClientCert (not .Values.upload.s3.clientCertSecret) }}
+      {{- fail "upload.s3.requireClientCert=true but upload.s3.clientCertSecret is empty. The uploader mounts that Secret to get its client certificate, so an empty name renders a volume with no source: helm succeeds, the manifest is valid YAML, and the uploader then sits in CreateContainerConfigError on the edge. It is delivered by the management cert-sync CronJob — name it (s3-client-tls unless the management site file says otherwise), or set requireClientCert=false." }}
     {{- end }}
   {{- end }}
 

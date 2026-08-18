@@ -312,6 +312,26 @@ except Exception:
     [ -z "$miss" ] && ok "edge ${EDGE}: all 3 cert-sync Secrets present" \
         || bad "edge ${EDGE}: missing cert-sync Secret(s):${miss}" \
                "run: $KUBECTL -n ${NS_MGMT} create job seed-${EDGE} --from=cronjob/mgmt-cert-sync-${EDGE}"
+
+    # S3 upload mTLS is optional and ships off, so this is asserted only when
+    # the management side is actually issuing the certificate — the presence of
+    # <edge>-s3-client is what says clientCerts.issue is on.
+    #
+    # THIS IS THE ONE STEP OF THAT ROLLOUT NO TEMPLATE CAN CHECK. The chart can
+    # see that something is configured to deliver the certificate; only a live
+    # cluster can say it arrived. Flipping clientCerts.require before it has
+    # breaks every upload from this site with an error that names nothing:
+    # measured, the handshake succeeds, nginx answers HTTP 400 with an HTML
+    # body, and rclone reports that as an S3 XML parse failure — the uploader
+    # logs endpoint_failed and it reads as an unreachable endpoint.
+    if $KUBECTL -n "$NS_MGMT" get secret "${EDGE}-s3-client" >/dev/null 2>&1; then
+        if $EK -n "$ENS" get secret s3-client-tls >/dev/null 2>&1; then
+            ok "edge ${EDGE}: S3 upload client certificate delivered (s3-client-tls)"
+        else
+            bad "edge ${EDGE}: ${EDGE}-s3-client is issued on the management cluster but s3-client-tls has NOT reached the edge" \
+                "Do NOT set seaweedfs.ingress.clientCerts.require until this passes — every upload would fail as an HTTP 400 that rclone reports as an S3 XML parse error, naming neither certificates nor auth. Force a sync: $KUBECTL -n ${NS_MGMT} create job seed-${EDGE} --from=cronjob/mgmt-cert-sync-${EDGE}"
+        fi
+    fi
 done
 
 head_ "periodic jobs"

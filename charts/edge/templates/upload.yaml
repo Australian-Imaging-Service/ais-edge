@@ -59,10 +59,49 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
-      containers:
-        - name: uploader
+      initContainers:
+        {{- /*
+        THE S3 CLIENT AND THE USERLAND COME FROM DIFFERENT IMAGES, AND THAT IS
+        A DECISION. This container exists only to lift the rclone binary out of
+        the pinned rclone image into an emptyDir that the uploader then finds on
+        its PATH.
+
+        Running the loop IN rclone/rclone instead was the obvious shape and is
+        wrong twice over. That image is Alpine, so:
+          * there is no /bin/bash at all — `command: ["/bin/bash", ...]` is an
+            instant CrashLoopBackOff, which is the loud half; and
+          * busybox `find` has no `-printf` and no `-xtype`, which is the
+            silent half. Measured in rclone/rclone:1.75.0 against a real
+            session tree: fingerprint() returns the md5 of an empty string for
+            EVERY session, so a changed session is never re-uploaded, and the
+            dangling-symlink guard never fires, so a session with missing files
+            can reach XNAT. Neither errors; both are invisible in a render.
+        This is the same wall the migration off busybox-based `minio/mc` hit —
+        see docs/components/mc.md, "A full userland".
+
+        rclone is a static Go binary with no libc dependency, so the copy runs
+        unchanged in the glibc image below; verified end to end (version, lsd,
+        copy) against SeaweedFS 4.34.
+        */}}
+        - name: rclone-bin
           image: "{{ .Values.upload.s3.image.repository }}:{{ .Values.upload.s3.image.tag }}"
           imagePullPolicy: {{ .Values.upload.s3.image.pullPolicy }}
+          # This image's entrypoint is `rclone` itself, so it has to be
+          # overridden even here, just to run `cp`.
+          command: ["/bin/sh", "-c", "cp /usr/local/bin/rclone /opt/rclone/rclone"]
+          volumeMounts:
+            - name: rclone-bin
+              mountPath: /opt/rclone
+          resources:
+            requests: {memory: 32Mi, cpu: 10m}
+            limits:   {memory: 128Mi, cpu: 200m}
+      containers:
+        - name: uploader
+          # NOT the S3 client — see upload.s3.shell.image in values.yaml. This
+          # image supplies bash + GNU coreutils/findutils; rclone arrives from
+          # the initContainer above.
+          image: "{{ .Values.upload.s3.shell.image.repository }}:{{ .Values.upload.s3.shell.image.tag }}"
+          imagePullPolicy: {{ .Values.upload.s3.shell.image.pullPolicy }}
           # The image's entrypoint is `aws`; override it to run our loop.
           command: ["/bin/bash", "/scripts/s3-uploader.sh"]
           env:
@@ -91,38 +130,83 @@ spec:
             - name: DRY_RUN
               value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
 
-            # --- AWS CLI configuration -------------------------------------
-            - name: AWS_ENDPOINT_URL
+            # --- rclone remote "sw" ----------------------------------------
+            # rclone builds a remote entirely from RCLONE_CONFIG_<NAME>_* env,
+            # with no config file — which is why there is no rclone.conf
+            # anywhere in this chart. NAME is upper-case in the variable and
+            # lower-case in the URL, so these define the `sw:` the uploader
+            # script uses. Same credential Secret and same keys as the AWS CLI
+            # env they replace; nothing about the S3 identity changed.
+            - name: RCLONE_CONFIG_SW_TYPE
+              value: s3
+            # Not cosmetic: `provider` selects rclone's per-vendor quirk set
+            # (checksum headers, multipart behaviour, which optional API calls
+            # it will attempt).
+            - name: RCLONE_CONFIG_SW_PROVIDER
+              value: SeaweedFS
+            - name: RCLONE_CONFIG_SW_ENDPOINT
               value: {{ include "edge.s3Endpoint" . | quote }}
-            # SeaweedFS ignores the region; the AWS CLI refuses to run without
-            # one.
-            - name: AWS_DEFAULT_REGION
+            # SeaweedFS ignores the region, but SigV4 signs over it, so it has
+            # to be some fixed value on both sides.
+            - name: RCLONE_CONFIG_SW_REGION
               value: {{ .Values.upload.s3.region | quote }}
-            # Addressing style is deliberately not set. A custom
-            # AWS_ENDPOINT_URL makes botocore resolve with ForcePathStyle=True
-            # by itself, which is what the single-SAN SeaweedFS certificate
-            # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not an
-            # environment variable, so setting it here would do nothing.
-            - name: AWS_ACCESS_KEY_ID
+            # Addressing style is deliberately not set. rclone's s3 backend
+            # defaults force_path_style=true, and it stays true for SeaweedFS —
+            # measured, the request URL comes out https://<endpoint>/<bucket>?…
+            # with the bucket in the PATH, which is what the single-SAN
+            # SeaweedFS certificate needs. Setting it would only risk turning
+            # that off.
+            - name: RCLONE_CONFIG_SW_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.s3.existingSecret }}
                   key: access-key
-            - name: AWS_SECRET_ACCESS_KEY
+            - name: RCLONE_CONFIG_SW_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.s3.existingSecret }}
                   key: secret-key
             {{- if .Values.upload.s3.caBundleSecret }}
-            # Emitted ONLY when there is a real value. An empty AWS_CA_BUNDLE
-            # does not fall back to the system trust store — it disables
-            # certificate verification entirely and merely logs
-            # "Unverified HTTPS request is being made". Rendering this
-            # unconditionally would silently turn TLS validation off.
-            # _helpers.tpl additionally refuses to render an https endpoint
-            # with no CA configured.
-            - name: AWS_CA_BUNDLE
+            # KEPT CONDITIONAL, though the reason is now weaker than it was.
+            # An empty AWS_CA_BUNDLE did not fall back to the system trust
+            # store — it disabled certificate verification entirely and merely
+            # logged "Unverified HTTPS request is being made". MEASURED for
+            # rclone 1.75.0 against a self-signed endpoint: RCLONE_CA_CERT=""
+            # behaves exactly like unset — it still verifies, against the
+            # system store, and still rejects an unknown authority. So an empty
+            # value here would be harmless rather than dangerous.
+            # It stays conditional anyway: a CA path that is set but missing is
+            # a hard CRITICAL at startup (also measured), the mount below is
+            # gated on the same key so an unconditional env would point at a
+            # path that does not exist, and _helpers.tpl still refuses to
+            # render an https endpoint with no CA configured.
+            - name: RCLONE_CA_CERT
               value: /etc/ssl/ais-edge/{{ .Values.upload.s3.caBundleKey }}
+            {{- end }}
+            {{- if .Values.upload.s3.requireClientCert }}
+            {{- /*
+            SERVER TRUST AND OUR OWN IDENTITY ARE TWO SEPARATE THINGS, and this
+            block is deliberately not nested inside the caBundleSecret one
+            above. RCLONE_CA_CERT answers "who signed the endpoint's
+            certificate"; these answer "who are we". On cloud the first can
+            legitimately be a public CA already in the system trust store — so
+            caBundleSecret empty — while the client certificate still comes from
+            the fleet's own CA via cert-sync. Coupling them would silently drop
+            our identity on exactly the topology that needs it stated.
+
+            rclone maps its global --client-cert / --client-key flags to these
+            names, the same mechanism RCLONE_CA_CERT uses. Both must be set —
+            verified end to end against nginx ssl_verify_client on and
+            SeaweedFS 4.34: with the pair present the probe and the transfer
+            succeed; with the certificate FILE absent rclone exits
+            `CRITICAL: Failed to load --client-cert/--client-key pair`, and
+            with no certificate at all the endpoint answers HTTP 400 and rclone
+            reports an S3 XML parse failure that mentions neither.
+            */}}
+            - name: RCLONE_CLIENT_CERT
+              value: /etc/ssl/s3-client/tls.crt
+            - name: RCLONE_CLIENT_KEY
+              value: /etc/ssl/s3-client/tls.key
             {{- end }}
           resources:
             {{- toYaml .Values.upload.s3.resources | nindent 12 }}
@@ -131,9 +215,24 @@ spec:
             - name: scripts
               mountPath: /scripts
               readOnly: true
+            # The staged rclone binary. The script prepends this to PATH;
+            # the mount path and that prepend must agree.
+            - name: rclone-bin
+              mountPath: /opt/rclone
+              readOnly: true
             {{- if .Values.upload.s3.caBundleSecret }}
             - name: ca-bundle
               mountPath: /etc/ssl/ais-edge
+              readOnly: true
+            {{- end }}
+            {{- if .Values.upload.s3.requireClientCert }}
+            # Its OWN directory, not a subpath of /etc/ssl/ais-edge: that path
+            # is already a Secret mount, and nesting one volume inside another
+            # depends on mount ordering the kubelet does not promise. Same
+            # separation charts/edge/templates/vector.yaml makes for the Loki
+            # client certificate.
+            - name: s3-client
+              mountPath: /etc/ssl/s3-client
               readOnly: true
             {{- end }}
       volumes:
@@ -142,10 +241,34 @@ spec:
           configMap:
             name: {{ include "edge.fullname" . }}-s3-uploader
             defaultMode: 0755
+        # Handoff between the initContainer and the loop. emptyDir, not a PVC:
+        # it is re-populated from the image on every pod start, so it must NOT
+        # survive one — a stale rclone left behind by a rolled-back image tag
+        # is exactly the drift the pinning is there to prevent.
+        - name: rclone-bin
+          emptyDir: {}
         {{- if .Values.upload.s3.caBundleSecret }}
         - name: ca-bundle
           secret:
             secretName: {{ .Values.upload.s3.caBundleSecret }}
+        {{- end }}
+        {{- if .Values.upload.s3.requireClientCert }}
+        # NOT marked optional — same call as the Loki client certificate in
+        # vector.yaml, for the same reason. This Secret is written by the
+        # management cert-sync CronJob, not by this chart, so a freshly built
+        # site renders this manifest before it exists. An optional mount would
+        # let the uploader start with no identity, every transfer would be
+        # rejected at the handshake, and the site would look healthy while
+        # shipping nothing. Failing to start is the visible failure, and it is
+        # the one we want.
+        #
+        # No items: mapping — kubernetes.io/tls fixes the key names, so nothing
+        # here can drift out of step with the env above. No defaultMode either:
+        # 0400 would need the container's UID to match the file owner, and this
+        # pod sets no runAsUser.
+        - name: s3-client
+          secret:
+            secretName: {{ .Values.upload.s3.clientCertSecret }}
         {{- end }}
 {{- else if eq .Values.upload.mode "direct" }}
 apiVersion: apps/v1

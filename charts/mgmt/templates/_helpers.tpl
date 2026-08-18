@@ -106,6 +106,27 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
 {{- printf "%s-loki-client" . -}}
 {{- end }}
 
+{{/* The management-side Secret holding ONE edge's S3 push client certificate.
+
+     Argument is the edge NAME, not the context. Same not-release-prefixed
+     reasoning as mgmt.lokiClientCertSecret above: the site file writes this
+     name a second time, by hand, as the literal "<edge>-s3-client".
+
+     A SEPARATE IDENTITY FROM THE LOKI ONE, and separate from `<edge>-s3`:
+
+       <edge>-loki-client  authenticates the site to the LOKI push endpoint
+       <edge>-s3-client    authenticates the site to the SEAWEEDFS endpoint
+       <edge>-s3           the SigV4 access/secret key pair (not a certificate)
+
+     Two client certificates rather than one shared identity, because the two
+     endpoints are revoked for different reasons: a site whose S3 access is
+     withdrawn must keep shipping logs, or the fleet loses the telemetry that
+     would explain why. One certificate would make "stop this site uploading"
+     and "stop this site reporting" the same action. */}}
+{{- define "mgmt.s3ClientCertSecret" -}}
+{{- printf "%s-s3-client" . -}}
+{{- end }}
+
 
 {{/* ===================================================================== */}}
 {{/* Validation — all of these fail silently at runtime if wrong           */}}

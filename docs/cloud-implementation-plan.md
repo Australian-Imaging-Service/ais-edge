@@ -272,6 +272,44 @@ on-prem path executes exactly the lines it did before:
 
 No installer or join script has been touched at all.
 
+## rclone + S3 mTLS — done, with two deviations from the spec
+
+Ported the edge S3 uploader from aws-cli to rclone and built mTLS on the
+SeaweedFS S3 path. Two things the spec did not anticipate, both measured:
+
+**1. `rclone copy` silently skips symlinks.** Assigned sessions are symlink
+trees into orthanc-storage. Measured on a 4-file session with 2 symlinked
+DICOMs: rclone uploaded 2 objects and EXITED 0, with `--log-level ERROR`
+suppressing the warning. The counts come from `find -L`, which does follow, so
+the script would have logged `upload_completed` with the full bytes/files/dicoms,
+written the state file, and `rm -rf`'d the only remaining copy — the mc data-loss
+bug rebuilt from new parts. `--copy-links` is on the transfer, and a dangling
+link under it is a hard error (exit 6) that lands in the else branch, so no state
+file and no reclaim.
+
+**2. The rclone image cannot run this script.** rclone/rclone is Alpine/busybox:
+no /bin/bash at all, and busybox `find` has neither `-printf` nor `-xtype`, so
+`fingerprint()` returns the md5 of nothing for EVERY session and the
+dangling-symlink guard never fires. Both silent. Invariant 5 forbids touching
+fingerprint(). So the rclone binary is staged out of the pinned image by an
+initContainer and the loop runs in the GNU/bash image it already ran in. This
+deviates from the literal "upload.s3.image -> rclone/rclone" instruction and is
+the first thing to review.
+
+**mTLS ships OFF, as a 4-step rollout**, and the reason is a measured failure
+mode worse than expected: flipping the management `require` before the edge has
+its certificate does NOT produce a clean TLS rejection. The handshake succeeds,
+nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure —
+naming neither certificates nor auth, reaching the logs as `endpoint_failed`.
+The chart refuses to render either half of the pair alone, in both directions,
+so the two cannot drift apart.
+
+- [ ] **9.1** DECIDE: ship mTLS on by default, or keep the staged rollout?
+      Recommended: keep it staged, given the opacity of the failure.
+- [ ] **9.2** On-prem revalidation, after the cloud test: the uploader change
+      affects on-prem edges too. mgmt renders are 11/11 identical; the 9 edge
+      diffs are the intended port. A fresh on-prem install must be re-run.
+
 ## Open questions for the user
 
 1. **`nodePort` on cloud** (4.1) — refuse it, or keep it for a site that needs it?

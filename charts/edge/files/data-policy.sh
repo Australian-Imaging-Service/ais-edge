@@ -185,7 +185,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name>
     case "$1" in
         onUploaded)
             # The uploader wrote its fingerprint for this session, which it only
-            # does after `aws s3 sync` returned 0.
+            # does after `rclone copy` returned 0.
             [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already

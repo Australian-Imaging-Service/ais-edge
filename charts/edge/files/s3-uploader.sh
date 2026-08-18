@@ -2,9 +2,22 @@
 # =============================================================================
 # Edge S3 uploader — pushes assigned sessions to the central staging bucket.
 # =============================================================================
-# Replaces the previous `minio/mc` implementation. The S3 client is now the
-# AWS CLI so that every site — edge, management and any future cloud target —
-# speaks the same client with the same credential and endpoint conventions.
+# The S3 client is rclone. It replaced the AWS CLI, which had replaced
+# `minio/mc`. The conventions did NOT change with it: still SigV4 access keys
+# against an explicit endpoint, still one client for edge, management and any
+# future cloud target. Only the binary moved.
+#
+# THE CLIENT AND THE USERLAND DELIBERATELY COME FROM DIFFERENT IMAGES.
+# `rclone/rclone` is Alpine, so its userland is busybox, and busybox `find`
+# has neither `-printf` nor `-xtype`. MEASURED in rclone/rclone:1.75.0:
+# fingerprint() below returns d41d8cd98f00b204e9800998ecf8427e — the md5 of
+# nothing — for EVERY session, and the dangling-symlink guard never fires.
+# Both failures are silent, and both are precisely what the migration off
+# busybox-based `minio/mc` fixed (docs/components/mc.md, "A full userland").
+# So charts/edge/templates/upload.yaml stages the rclone BINARY out of the
+# pinned rclone image with an initContainer and runs this loop in a GNU/bash
+# image. rclone is a static Go binary and runs there unchanged — verified
+# end to end against SeaweedFS 4.34.
 #
 # THE LOG SCHEMA BELOW IS A PUBLIC INTERFACE. DO NOT CHANGE IT CASUALLY.
 #
@@ -31,6 +44,12 @@
 # =============================================================================
 set -uo pipefail
 
+# Where upload.yaml's initContainer stages the rclone binary. PREPENDED, not
+# assigned: the loop still needs the GNU coreutils/findutils on the image's own
+# PATH, and prepending a directory that does not exist is harmless, so this
+# script also still runs unchanged in any image that already ships rclone.
+PATH="/opt/rclone:${PATH}"
+
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
 STATE_DIR="${STATE_DIR:-/data/LOGS/s3-uploader-state}"
 INTERVAL="${INTERVAL:-60}"
@@ -52,7 +71,53 @@ jlog() {
         "$(date -Iseconds)" "${EDGE_NAME}" "$1" "${2:-}" "${3:-}" "${4:-}"
 }
 
-jlog startup "" "s3-uploader starting endpoint=${AWS_ENDPOINT_URL:-<unset>} bucket=${S3_BUCKET} prefix=${S3_PREFIX} reclaim=${RECLAIM}"
+# Client-certificate state, worked out ONCE and reported in two places.
+#
+# RCLONE_CLIENT_CERT / RCLONE_CLIENT_KEY are rclone's --client-cert /
+# --client-key; upload.yaml sets them only when upload.s3.requireClientCert is
+# on. They are INDEPENDENT of RCLONE_CA_CERT, which is server trust: on cloud
+# the SeaweedFS server certificate can come from a public CA (no CA bundle
+# needed) while our own identity still comes from the fleet CA via cert-sync.
+#
+# This is diagnostic text only — nothing branches on it. The uploader stays
+# topology-independent and mTLS-agnostic: rclone either has an identity to
+# present or it does not.
+#
+# WHY IT IS WORTH THE LINES. MEASURED against nginx with
+# `ssl_verify_client on` (what the auth-tls-* annotations render to) and
+# rclone 1.75.0:
+#
+#   no certificate sent      the TLS handshake SUCCEEDS — under TLS 1.3 the
+#                            client certificate goes after the server's
+#                            Finished, so nginx cannot refuse the connection
+#                            and refuses the REQUEST instead: HTTP 400
+#                            "No required SSL certificate was sent", an HTML
+#                            body. rclone tries to parse it as an S3 error and
+#                            reports `error while deserializing xml error
+#                            response : XML syntax error ... element <hr>`.
+#   wrong CA                 identical HTTP 400, identical XML noise.
+#   CN outside match-cn      HTTP 403, identical XML noise.
+#   cert file missing        the one loud case: rclone exits with
+#                            `CRITICAL: Failed to load --client-cert/--client-key pair`.
+#
+# So three of the four mTLS failures reach an operator as a malformed-S3-
+# response error naming neither certificates nor authentication, on a probe
+# whose event name is `endpoint_failed`. Without this text the obvious reading
+# is a broken endpoint, and the actual cause is never mentioned anywhere.
+if [ -n "${RCLONE_CLIENT_CERT:-}" ]; then
+    mtls_state="on cert=${RCLONE_CLIENT_CERT}"
+    # No quotes, no newlines: this string is interpolated into the JSON below.
+    if [ -r "${RCLONE_CLIENT_CERT}" ] && [ -r "${RCLONE_CLIENT_KEY:-}" ]; then
+        mtls_hint="a client certificate IS configured and readable, so suspect the certificate itself — expired, signed by a CA the endpoint does not verify against (arrives as HTTP 400), or a CN the endpoint does not accept (HTTP 403). Both reach rclone as an S3 XML parse failure, never as an auth error"
+    else
+        mtls_hint="a client certificate is configured at ${RCLONE_CLIENT_CERT} but it or its key is MISSING OR UNREADABLE — rclone reports CRITICAL: Failed to load --client-cert/--client-key pair on stderr. Check the s3-client-tls Secret that cert-sync delivers"
+    fi
+else
+    mtls_state="off"
+    mtls_hint="no client certificate is configured (RCLONE_CLIENT_CERT unset). If the endpoint now requires one, the handshake still SUCCEEDS and the endpoint answers HTTP 400 No required SSL certificate was sent, whose HTML body rclone reports as an S3 XML parse failure — which is exactly what the errors above would look like"
+fi
+
+jlog startup "" "s3-uploader starting endpoint=${RCLONE_CONFIG_SW_ENDPOINT:-<unset>} bucket=${S3_BUCKET} prefix=${S3_PREFIX} reclaim=${RECLAIM} client_cert=${mtls_state}"
 
 # -----------------------------------------------------------------------------
 # Pre-flight. Refuse to enter the upload loop against an endpoint we cannot
@@ -62,14 +127,31 @@ jlog startup "" "s3-uploader starting endpoint=${AWS_ENDPOINT_URL:-<unset>} buck
 # The mc version needed this guard for a sharper reason: mc treated an
 # unresolved alias as a LOCAL path, so a failed `alias set` made `mc mirror`
 # copy into ./edge/<bucket>/... , exit 0, and the script then deleted the
-# staged data having uploaded nothing. The AWS CLI has no such failure mode —
-# a bad endpoint is a hard error — but failing fast is still right, and DNS
-# or pod-startup races deserve a few retries rather than an instant crashloop.
+# staged data having uploaded nothing. Neither the AWS CLI nor rclone has that
+# failure mode — measured with every RCLONE_CONFIG_SW_* unset, `sw:` is
+# "CRITICAL: ... didn't find section in config file", exit 1, nothing written
+# locally. But failing fast is still right, and DNS or pod-startup races
+# deserve a few retries rather than an instant crashloop.
+#
+# `rclone lsd sw:<bucket>` AND NOT `rclone about sw:`. MEASURED against
+# SeaweedFS 4.34: `about` answers "S3 root doesn't support about" and exits 1
+# no matter how healthy the endpoint is — `about` is optional in the S3 API
+# and SeaweedFS does not implement it — so a probe built on it would fail all
+# 12 attempts and crashloop the pod against a working bucket. `lsd` on the
+# bucket asserts exactly what this probe is for, which is also exactly what
+# `aws s3api head-bucket` asserted: the endpoint answers, AND this site's
+# credential can see THIS site's bucket. Measured: exit 0 on the site's own
+# bucket, exit 1 with AccessDenied on a bucket its identity is not scoped to.
+#
+# --log-level ERROR because rclone otherwise opens every invocation with
+# NOTICE "Config file ... not found - using defaults" — true, expected (the
+# remote comes entirely from RCLONE_CONFIG_SW_* env), and pure noise in a
+# diagnostic. Errors still reach $err.
 # -----------------------------------------------------------------------------
 probe_endpoint() {
     local err
-    err=$(aws s3api head-bucket --bucket "$S3_BUCKET" 2>&1) || {
-        echo "head-bucket ${S3_BUCKET}: ${err}" >&2
+    err=$(rclone lsd "sw:${S3_BUCKET}" --log-level ERROR 2>&1) || {
+        echo "lsd sw:${S3_BUCKET}: ${err}" >&2
         return 1
     }
 }
@@ -78,7 +160,21 @@ attempt=0
 until probe_endpoint; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 12 ]; then
-        jlog endpoint_failed "" "bucket probe failed after 12 attempts (60s) — refusing to start upload loop"
+        # "refusing to start upload loop" IS MATCHED BY A LOKI RULE.
+        # charts/mgmt/files/loki-ruler-rules.yaml selects
+        # `refusing to start upload loop|alias_failed|endpoint_failed` for
+        # S3UploaderRestartedRecently, so that phrase is as contractual as the
+        # event name. Extend this message; do not reword that clause.
+        #
+        # THE CLIENT-CERTIFICATE HINT IS THE POINT OF THE REST OF IT. With mTLS
+        # on the endpoint this probe is the FIRST thing a bad or missing client
+        # certificate breaks, and — measured, see the block above — it breaks as
+        # an S3 XML parse failure on a 400 or 403, which names neither
+        # certificates nor authentication. Without this text an operator reading
+        # these logs has nothing pointing at certificates at all. The rclone
+        # error itself goes to stderr from probe_endpoint; it can contain quotes
+        # and newlines, so it must not be interpolated into this JSON.
+        jlog endpoint_failed "" "bucket probe failed after 12 attempts (60s) — refusing to start upload loop. Endpoint mTLS: ${mtls_hint}. The rclone error for each attempt is on stderr above; an mTLS refusal arrives there as a 400/403 with an unparseable XML body, not as an auth error"
         sleep 15
         exit 1
     fi
@@ -137,7 +233,7 @@ while true; do
         # Re-probe immediately before the transfer. If the endpoint went away
         # mid-loop this skips the session — and, critically, skips the reclaim
         # below — so the local copy survives for the next attempt.
-        if ! aws s3api head-bucket --bucket "$S3_BUCKET" >/dev/null 2>&1; then
+        if ! rclone lsd "sw:${S3_BUCKET}" --log-level ERROR >/dev/null 2>&1; then
             jlog upload_skipped "$session_name" "endpoint probe failed — preserving local copy for next retry"
             continue
         fi
@@ -153,14 +249,39 @@ while true; do
         # altogether. Turning on the safety mode silently halted delivery.
         # Only the reclaim below is a data-policy action, so only the reclaim
         # is gated.
-        if aws s3 sync "$session_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/${session_name}/" --only-show-errors; then
+
+        # `rclone copy`, NEVER `rclone sync`. This is the one line where the
+        # port from `aws s3 sync` is not a rename: `aws s3 sync` never deletes
+        # at the destination, `rclone sync` deletes there BY DEFAULT. The
+        # destination is the staging bucket holding DICOM that XNAT has not
+        # confirmed yet, and s3Staged.reclaim=onXnatConfirmed removes objects
+        # from it on its own schedule — so a session re-uploaded here while the
+        # reclaimer is mid-reconcile would take the reclaimer's objects with
+        # it. Measured against SeaweedFS 4.34 with an unrelated object sitting
+        # under the same prefix: `copy` left it, `sync` deleted it.
+        #
+        # --copy-links IS LOAD-BEARING, not tuning. Assigned sessions are
+        # symlink/hardlink trees into orthanc-storage (see fingerprint()'s
+        # `find -L`). `aws s3 sync` followed symlinks by default; rclone SKIPS
+        # them by default and still exits 0. Measured on a 4-file session with
+        # 2 symlinked DICOMs: without this flag rclone uploaded 2 objects,
+        # exited 0, and --log-level ERROR suppressed the warning — so the run
+        # would emit upload_completed with the full bytes/files/dicoms counts
+        # (they come from `find -L`, which does follow), write the state file,
+        # and then rm -rf the only remaining copy. That is the mc data-loss
+        # bug rebuilt out of new parts. With the flag: 4 objects, exit 0.
+        #
+        # A dangling link under --copy-links is a hard error (exit 6, measured),
+        # which lands in the else branch — no state file, no reclaim.
+        if rclone copy "$session_dir" "sw:${S3_BUCKET}/${S3_PREFIX}/${session_name}/" \
+             --copy-links --transfers 4 --checkers 8 --retries 3 --log-level ERROR; then
             duration=$(( $(date +%s) - start_ts ))
             jlog upload_completed "$session_name" "" \
                 ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms},\"duration_s\":${duration}"
             echo "$fp" > "$state_file"
 
             # dataPolicy.derived.assigned.reclaim. Only ever reached after a
-            # zero-exit sync. The bytes also exist in Orthanc storage and the
+            # zero-exit transfer. The bytes also exist in Orthanc storage and the
             # facility backup, both governed by the `originals` rules.
             if [ "$RECLAIM" = "onUploaded" ]; then
                 if [ "$DRY_RUN" = "true" ]; then
@@ -171,7 +292,7 @@ while true; do
             fi
         else
             duration=$(( $(date +%s) - start_ts ))
-            jlog upload_failed "$session_name" "aws s3 sync non-zero exit; will retry next cycle" \
+            jlog upload_failed "$session_name" "rclone copy non-zero exit; will retry next cycle" \
                 ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms},\"duration_s\":${duration}"
         fi
     done

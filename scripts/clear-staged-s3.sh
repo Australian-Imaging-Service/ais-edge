@@ -128,7 +128,7 @@ need_deploy() {   # need_deploy <kubectl-prefix> <namespace> <label> <what>
 EDGE_KC="${EDGE_KUBECONFIG:-${REPO_DIR}/kubeconfig-${EDGE}}"
 [ -f "$EDGE_KC" ] || {
     echo "ERROR: edge kubeconfig not found: ${EDGE_KC}" >&2
-    echo "       Needed to run 'mc' in the edge uploader to COUNT objects." >&2
+    echo "       Needed to run rclone in the edge uploader to COUNT objects." >&2
     exit 1
 }
 KEDGE="kubectl --kubeconfig=$EDGE_KC"
@@ -141,22 +141,40 @@ echo "  uploader  : ${UPLOAD_NS}/${UPLOADER}"
 echo "  counting via ${EDGE_NS}/${EDGE_UPLOADER} on the edge"
 echo
 
-# Counting uses the AWS CLI from the edge uploader pod — an authoritative object
+# Counting uses the S3 client in the edge uploader pod — an authoritative object
 # listing — NOT `weed shell` output. weed shell prints its prompt inline
 # ("> FIRST_ENTRY"), and an earlier version filtered those lines out, which made
 # a session that HELD DATA look empty and deleted it. Never decide a deletion
 # from weed-shell text.
 #
-# `mc` USED TO BE THE TOOL AND IS NOT INSTALLED ANY MORE. The consolidated
-# uploader runs amazon/aws-cli, which has `aws` and python3 and no `mc` at all.
-# Every call here was `2>/dev/null`, so `mc: command not found` was invisible:
-# the listing came back empty, and an empty listing is indistinguishable from
-# "no staged sessions" — the script reported "removed 0, kept 0" against a
-# bucket that held a session, which is the same quiet no-op as the stale names.
-# Errors are surfaced now, and an unreadable listing aborts instead of reading
-# as "nothing to do".
-AWSCLI() { $KEDGE -n "$EDGE_NS" exec "$EDGE_UPLOADER" -- \
-             sh -c "aws --endpoint-url \"\$AWS_ENDPOINT_URL\" $1"; }
+# THE CLIENT IN THAT POD HAS CHANGED TWICE NOW, AND EACH TIME THIS SCRIPT WAS
+# THE THING THAT BROKE.
+#   mc -> aws:     every call was `2>/dev/null`, so `mc: command not found` was
+#                  invisible. The listing came back empty, and an empty listing
+#                  is indistinguishable from "no staged sessions" — the script
+#                  reported "removed 0, kept 0" against a bucket that held a
+#                  session.
+#   aws -> rclone: `aws` is still IN the image (it is the uploader's userland),
+#                  but AWS_ENDPOINT_URL and the AWS_* credentials are no longer
+#                  on the pod, so `aws --endpoint-url ""` would have failed on
+#                  every call. Loudly, thanks to the fix above — but failed.
+# Both are the same lesson: this script reads its S3 client out of a pod it does
+# not own. Read charts/edge/templates/upload.yaml before assuming a binary or an
+# env var is there.
+#
+# `sw:` is the remote the uploader Deployment defines through RCLONE_CONFIG_SW_*;
+# there is no rclone.conf to point at. rclone lives at /opt/rclone (staged by
+# the initContainer) and is NOT on the default PATH of that image, so it is
+# called by absolute path — the uploader script gets it via its own PATH
+# prepend, which a `kubectl exec` does not inherit.
+#
+# Default log level, deliberately not --log-level ERROR: measured, an
+# AccessDenied listing under `--log-level ERROR` exits 1 and prints NOTHING at
+# all, which would hand the operator a bare failure with no reason. At the
+# default level the same call prints "Failed to lsf: ... AccessDenied". The one
+# NOTICE it adds on every call ("Config file not found - using defaults") is
+# expected and goes to stderr, clear of the listings parsed below.
+RCLONE() { $KEDGE -n "$EDGE_NS" exec "$EDGE_UPLOADER" -- /opt/rclone/rclone "$@"; }
 
 # Deletion goes through the filer: only `fs.rm -r` removes the directory ENTRY.
 # Checked, not `|| true` — a filer that refuses must not read as success.
@@ -165,50 +183,67 @@ WEED() {
         sh -c "printf '%s\n' '$1' | weed shell" 2>&1
 }
 
-# Session prefixes. `aws s3 ls` prints them as "   PRE <name>/".
+# Session prefixes, one bare name per line. `--dirs-only` asks rclone for the
+# prefixes directly instead of parsing them out of a human listing, which is
+# what the old `awk '/PRE /'` was doing against `aws s3 ls`.
 # A FAILED listing must never look like an empty bucket — abort instead.
 s3ls() {
-    local out rc
-    out=$(AWSCLI "s3 ls s3://${BUCKET}/staged/" 2>&1); rc=$?
+    local out rc err
+    err=$(mktemp)
+    out=$(RCLONE lsf "sw:${BUCKET}/staged/" --dirs-only 2>"$err"); rc=$?
     if [ $rc -ne 0 ]; then
-        echo "ERROR: could not list s3://${BUCKET}/staged/ from ${EDGE_UPLOADER}:" >&2
-        printf '%s\n' "$out" | sed 's/^/       /' >&2
+        echo "ERROR: could not list sw:${BUCKET}/staged/ from ${EDGE_UPLOADER}:" >&2
+        sed 's/^/       /' "$err" >&2
         echo "       Refusing to continue: an unreadable listing is not an empty one." >&2
+        rm -f "$err"
         exit 1
     fi
-    printf '%s\n' "$out" | awk '/PRE /{print $NF}' | sed 's#/$##' | grep -v '^$' || true
+    rm -f "$err"
+    printf '%s\n' "$out" | sed 's#/$##' | grep -v '^$' || true
 }
 
 # Authoritative recursive object count; echoes ERR if the command failed, and
 # the caller KEEPS the prefix on ERR.
 #
-# `aws s3 ls` DOES NOT EXIT 0 ON AN EMPTY PREFIX. Measured against this cluster:
+# THE THREE-WAY rc TEST THAT USED TO LIVE HERE IS GONE BECAUSE THE AMBIGUITY IS.
+# `aws s3 ls` did not exit 0 on an empty prefix — it exited 1 with no output,
+# indistinguishable by exit code from a broken call, so this function had to
+# separate "rc=1 and silent" (empty) from "rc=1 and noisy" (broken). Getting
+# that wrong marked every empty prefix "count FAILED", and the fail-safe then
+# KEPT it — the one thing this script exists to remove was the one thing it
+# could never remove.
 #
-#   prefix holding objects   rc=0    one line per object
-#   EMPTY prefix             rc=1    no output at all
-#   genuinely broken call    rc=255  "Could not connect to the endpoint URL..."
+# MEASURED for `rclone lsf -R --files-only` against SeaweedFS 4.34:
 #
-# Treating any non-zero rc as failure therefore marked every empty prefix
-# "count FAILED", and the fail-safe then KEPT it — so the one thing this script
-# exists to remove was the one thing it could never remove. Separate the three:
-# only rc=1 WITH no output is an empty prefix.
+#   prefix holding objects   rc=0    one line per object on stdout
+#   EMPTY / absent prefix    rc=0    no output   <- the ambiguity, resolved
+#   credential cannot see it rc=1    reason on STDERR, stdout empty
+#   endpoint unreachable     rc=1    reason on STDERR, stdout empty
 #
-# `kubectl exec` ALSO WRITES ITS OWN LINE. When the remote command exits
-# non-zero it prints "command terminated with exit code 1" on stderr, so with
-# 2>&1 the output of an empty prefix is not empty and the test above still fell
-# through to ERR. Strip kubectl's own diagnostic before deciding.
-kubectl_noise() { grep -v '^command terminated with exit code [0-9]*$' || true; }
-
+# So the exit code alone is now the authoritative/failed signal, and stdout is
+# only ever data. Keep it that way: do NOT fold stderr into stdout here. That
+# `2>&1` is precisely what forced the old three-way test, because it also
+# swept in `kubectl exec`'s own "command terminated with exit code 1" line and
+# made a silent failure look like output.
 s3count() {
-    local out rc body
-    out=$(AWSCLI "s3 ls --recursive s3://${BUCKET}/staged/$1/" 2>&1); rc=$?
-    body=$(printf '%s\n' "$out" | kubectl_noise | tr -d '[:space:]')
-    if [ $rc -eq 0 ]; then
-        printf '%s\n' "$out" | kubectl_noise | grep -c '[^[:space:]]' || echo 0
-    elif [ $rc -eq 1 ] && [ -z "$body" ]; then
+    local out rc err
+    err=$(mktemp)
+    out=$(RCLONE lsf "sw:${BUCKET}/staged/$1/" -R --files-only 2>"$err"); rc=$?
+    rm -f "$err"
+    if [ $rc -ne 0 ]; then
+        echo "ERR"
+        return
+    fi
+    # Tested explicitly rather than piped through `grep -c`. On no match grep
+    # PRINTS 0 and EXITS 1, so the old `... | grep -c ... || echo 0` emitted a
+    # SECOND zero — and now that rc=0 can mean "empty", the caller would read
+    # "0\n0", match neither "0" nor "ERR", and report the prefix as holding
+    # objects. Every empty prefix would then be kept forever, which is the same
+    # bug the aws-era rc handling above was written to fix.
+    if [ -z "$out" ]; then
         echo 0
     else
-        echo "ERR"
+        printf '%s\n' "$out" | grep -c '[^[:space:]]'
     fi
 }
 
@@ -239,7 +274,16 @@ if [ "$MODE" = "--all" ]; then
 else
     echo "=== Safe clean of s3://${BUCKET}/staged — EMPTY prefixes only ==="
     EMPTY=0; KEPT=0
-    for p in $(s3ls); do
+    # CAPTURED FIRST, ON ITS OWN LINE. `for p in $(s3ls)` runs s3ls in a
+    # command-substitution SUBSHELL, so the `exit 1` it takes on an unreadable
+    # listing kills only that subshell — `set -e` never sees it, the loop
+    # iterates zero times, and the script goes on to print "removed 0 empty
+    # prefix(es); kept 0 session(s) with data" and exit 0. Measured: that is
+    # exactly the silent no-op the abort was added to prevent, and the abort
+    # could not prevent it from inside a `$( )`. As a plain assignment the
+    # substitution's status IS the command status, and set -e stops here.
+    PREFIXES=$(s3ls)
+    for p in $PREFIXES; do
         n=$(s3count "$p")
         # FAIL-SAFE: if the count cannot be determined, KEEP. Never delete on
         # uncertainty.

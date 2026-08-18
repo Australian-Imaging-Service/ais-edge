@@ -327,6 +327,19 @@ which is why the client-cert annotations above are not optional hardening. The
 edge side presents the cert cert-sync delivers as `loki-push-client-tls`
 (charts/edge/values.yaml:646).
 
+**The S3 upload path can carry the same mTLS, and on cloud for the same
+reason.** The load balancer above is **layer 4** — it forwards TCP and does not
+terminate TLS — so nginx still sees the edge's own ClientHello and can still
+request a client certificate. Nothing about `auth-tls-*` behaves differently
+here from on-prem. Turning it on is `seaweedfs.ingress.clientCerts` plus the
+matching `certSync` entry (see `docs/components/seaweedfs.md` for the four-step
+rollout, which must not be short-cut). One cloud-specific nuance: the SeaweedFS
+**server** certificate may legitimately come from a public CA here, so an edge's
+`upload.s3.caBundleSecret` can be empty — but its **client** certificate still
+comes from the fleet's own CA via cert-sync. Server trust
+(`RCLONE_CA_CERT`) and our own identity (`RCLONE_CLIENT_CERT` /
+`RCLONE_CLIENT_KEY`) are independent settings and the chart keeps them that way.
+
 Note the scope of ssl-passthrough. `ingressNginx.sslPassthrough: true` enables
 the controller *feature*, but the passthrough annotation is set only on each
 edge's k0s API and konnectivity Ingresses
@@ -342,6 +355,7 @@ out that this coexistence is deliberate, not an oversight.
 | LB came up with the right IP | `kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller -o yaml` — `status.loadBalancer.ingress[0].ip` should equal the `loadBalancerIP` you set. The names are `mgmt-*` in `ais-mgmt` because ingress-nginx is a subchart of the `mgmt` release; there is no `ingress-nginx` namespace. |
 | TLS termination | `curl -kv https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/` — expect TLS handshake + 404 default backend |
 | Loki push mTLS | `curl --cert tls.crt --key tls.key --resolve loki.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/ready` — expect Loki's `ready` response. The cert/key are the `tls.crt` / `tls.key` of the edge's `loki-push-client-tls` Secret; **without them the request is rejected at the handshake**, because the Ingress sets `auth-tls-verify-client: on`. That rejection is the test passing. |
+| S3 upload mTLS (only if `seaweedfs.ingress.clientCerts.require` is on) | `curl --cert tls.crt --key tls.key --resolve seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io/` — expect an S3 error document (no credentials), **not** a TLS failure. Re-run without `--cert/--key`: the handshake must be rejected, and that rejection is the test passing. The cert/key are those of the edge's `s3-client-tls` Secret. Run this **before** flipping `require`, using the certificates cert-sync has already delivered. Measured: a missing client certificate gives HTTP 400 with an HTML body that rclone reports as an S3 XML parse failure, so if you discover it from the uploader's logs instead it looks like an unreachable endpoint. |
 | Edge resolves via real DNS | `kubectl --kubeconfig kubeconfig-edge-dev exec -n xnat-ingest deploy/edge-s3-uploader -- nslookup seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io` — should resolve via the worker's standard resolver. (`edge-` is the Helm release name install.sh:512 uses; a site that sets `fullnameOverride` changes the prefix.) |
 | Full pipeline | drop a DICOM into Orthanc (via `dcmsend`, `storescu`, or the Orthanc REST upload), wait for group-orthanc + assign to stage it, watch `upload_completed` event land in Loki + dashboards |
 | Memory leak fix | sample `kubectl top pod -n xnat-upload` over 2 hours — should stay flat ±20 MiB |
