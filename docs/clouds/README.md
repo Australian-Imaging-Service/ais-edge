@@ -42,6 +42,50 @@ The on-prem path (no cloud, hostNetwork :443 on the mgmt VM) is the default
 `topology: onprem` and is documented in the top-level
 [README.md](../../README.md). It is the only path the charts install today.
 
+## What is yours to provision, and what this installer does
+
+The installer deploys the AIS-Edge application. It does **not** provision cloud
+infrastructure, on any cloud, and that boundary is deliberate:
+
+* it is cloud-specific, and this repo would need a different implementation per
+  provider to do it;
+* it needs credentials that can create and delete resources in your project —
+  credentials an application installer should not hold;
+* on managed Kubernetes (EKS, AKS, GKE) it is **already done for you**.
+
+| | Who does it |
+|---|---|
+| Kubernetes cluster | you (or your provider) |
+| **Cloud controller manager** | **you** — unless managed, which ships one |
+| Floating IP / static address | you |
+| DNS records | you |
+| cert-manager, k0smotron, the charts, edge joins | the installer |
+
+### The cloud controller is the one that surprises people
+
+Kubernetes does not know your cloud exists. When a Service asks for
+`type: LoadBalancer`, something has to translate that into API calls that create
+a real balancer, listeners, pools and members, and then write the address back.
+That translator is the **cloud controller manager**, and each cloud has its own:
+
+| Cloud | Implementation | Pre-installed? |
+|---|---|---|
+| OpenStack | `openstack-cloud-controller-manager` | no — self-managed clusters must install it |
+| AWS EKS | `aws-cloud-controller-manager` | yes |
+| Azure AKS | `cloud-provider-azure` | yes |
+| GCP GKE | `cloud-provider-gcp` | yes |
+
+**Without one, nothing fails loudly.** The ingress pod reports `1/1 Running`, its
+Service sits at `<pending>` with no external address forever, and every hostname
+your edges resolve points at nothing. The first symptom is an edge that will not
+join, at the far end of the link.
+
+`install.sh` therefore refuses to continue on `topology: cloud` when no cloud
+controller is present, names what is missing, and points here. If you have a
+balancer provisioned some other way, `SKIP_CLOUD_PREFLIGHT=1` overrides it — but
+read the failure first, because it is describing a real hole.
+
+
 ## What's shared vs cloud-specific
 
 **Shared across all clouds (the "cloud topology"):**

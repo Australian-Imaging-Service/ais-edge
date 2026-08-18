@@ -4,6 +4,86 @@ This is the path that has been **end-to-end tested**. The mgmt cluster is
 a single Nectar VM running k0s; the cloud LB is Octavia (amphora driver).
 DNS is a `nip.io` wildcard for dev, switchable to your own zone for prod.
 
+
+## Before you install: the cloud controller (yours to do, once)
+
+`install.sh` will stop with an error if this is missing — deliberately, because
+without it a `LoadBalancer` Service sits at `<pending>` forever and nothing says
+so. See docs/clouds/README.md for why this is the operator's job.
+
+There is no script for this in the repo on purpose: it is OpenStack-specific,
+it needs credentials the installer should not hold, and every site's project,
+network and credential policy differ.
+
+**1. An application credential scoped to this project.** Horizon → Identity →
+Application Credentials. Give it only what the controller needs; it will create
+and delete load balancers in your project.
+
+**2. A `cloud.conf` Secret on the management cluster.**
+
+```bash
+cat > /tmp/cloud.conf <<EOF
+[Global]
+auth-url=https://identity.rc.nectar.org.au/v3/
+application-credential-id=<id>
+application-credential-secret=<secret>
+region=Melbourne
+
+[LoadBalancer]
+# Octavia gives a TCP listener by default, which is what this deployment needs:
+# the k0s API and konnectivity are mTLS end to end and must NOT be terminated.
+# Do not set a TERMINATED_HTTPS listener here.
+use-octavia=true
+EOF
+
+kubectl -n kube-system create secret generic openstack-cloud-config \
+    --from-file=cloud.conf=/tmp/cloud.conf
+shred -u /tmp/cloud.conf
+```
+
+**3. The controller itself**, pinned like everything else here:
+
+```bash
+helm repo add cpo https://kubernetes.github.io/cloud-provider-openstack
+helm install openstack-ccm cpo/openstack-cloud-controller-manager \
+    --namespace kube-system --version <pin-a-version> \
+    --set secret.create=false --set secret.name=openstack-cloud-config
+```
+
+**4. Confirm it adopted the nodes** — this is what the installer's pre-flight
+checks, and it is worth checking yourself before spending an install:
+
+```bash
+kubectl -n kube-system get pods | grep cloud-controller-manager
+# and no node should still carry the uninitialized taint:
+kubectl get nodes -o json | grep -c 'node.cloudprovider.kubernetes.io/uninitialized'
+```
+
+A node still carrying that taint means the controller is running but has not
+adopted it — almost always wrong credentials for the project, or a `region` that
+does not match where the nodes actually are.
+
+### Reusing an address you already hold
+
+Allocating a floating IP per install wastes quota, and on a `nip.io` name the
+address is embedded in the hostname — so it has to exist before `domain.internal`
+can name it. Reuse one:
+
+```bash
+openstack floating ip list          # look for one with no Port and no Fixed IP
+```
+
+Then pin the balancer to it in your site file, under the SUBCHART (a parent
+chart cannot set a subchart's values):
+
+```yaml
+ingress-nginx:
+  controller:
+    service:
+      loadBalancerIP: "203.0.113.50"
+```
+
+
 ## Prerequisites
 
 1. A Nectar project with available quota for:

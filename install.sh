@@ -376,6 +376,72 @@ if step "2/7  prerequisites: cert-manager CRDs + k0smotron operator (pinned)"; t
 fi
 
 # =============================================================================
+# CLOUD PRE-FLIGHT: is this cluster actually able to get a load balancer?
+# =============================================================================
+# Provisioning cloud infrastructure is the OPERATOR'S job, not this installer's.
+# It is cloud-specific, it needs credentials this installer should not hold, and
+# on managed Kubernetes (EKS/AKS/GKE) it is already done for you. That boundary
+# is deliberate — see docs/clouds/README.md.
+#
+# But "not our job" must not mean "fails silently an hour later". Without a cloud
+# controller, a type: LoadBalancer Service sits at <pending> forever: no error,
+# no event worth reading, the ingress pod Running and healthy, and every fleet
+# hostname resolving to nothing. The first symptom is an edge that will not join,
+# at the far end of the link.
+#
+# So: check, and if it is missing, STOP HERE and say exactly what is needed and
+# where it is written down. Cheaper than discovering it after the charts are
+# applied and an edge has been half-joined.
+#
+# The check is deliberately generic. Every cloud's implementation is a different
+# binary, but they all name themselves *cloud-controller-manager*, so this works
+# on OpenStack, AWS, Azure and GCP without this installer knowing which it is.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ] && [ "${SKIP_CLOUD_PREFLIGHT:-0}" != "1" ]; then
+    info "cloud pre-flight: checking for a cloud controller"
+    ccm="$(kubectl get pods -A -o name 2>/dev/null | grep -c 'cloud-controller-manager' || true)"
+    if [ "${ccm:-0}" -eq 0 ]; then
+        echo >&2
+        echo "[install] ERROR: topology=cloud, but no cloud controller manager is running." >&2
+        echo >&2
+        echo "  Nothing in this cluster can turn a Kubernetes LoadBalancer Service into a" >&2
+        echo "  real cloud load balancer. The install would appear to succeed: the ingress" >&2
+        echo "  pod would report Running, its Service would sit at <pending> forever with no" >&2
+        echo "  external address, and every hostname the edges resolve would point at" >&2
+        echo "  nothing. You would find out when an edge failed to join." >&2
+        echo >&2
+        echo "  This installer does not provision cloud infrastructure — that needs" >&2
+        echo "  credentials it should not hold, and on managed Kubernetes it is already" >&2
+        echo "  done. Install the controller for your cloud out of band, then re-run:" >&2
+        echo >&2
+        echo "    docs/clouds/README.md          the prerequisites, and why they are yours" >&2
+        echo "    docs/clouds/openstack-nectar.md  OpenStack / Nectar, step by step" >&2
+        echo "    docs/clouds/{aws,azure,gcp}.md   managed clusters already ship one" >&2
+        echo >&2
+        echo "  If you have a load balancer provisioned some other way and know what you" >&2
+        echo "  are doing, re-run with SKIP_CLOUD_PREFLIGHT=1." >&2
+        exit 1
+    fi
+    info "cloud pre-flight: cloud controller present (${ccm} pod(s))"
+
+    # A node still carrying the uninitialized taint means the controller is
+    # present but has not adopted this node — pods will not schedule and the
+    # cause is not obvious from anything the installer does next.
+    tainted="$(kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[?(@.key=="node.cloudprovider.kubernetes.io/uninitialized")].key}{"\n"}{end}' 2>/dev/null | grep -c 'uninitialized' || true)"
+    if [ "${tainted:-0}" -gt 0 ]; then
+        echo >&2
+        echo "[install] ERROR: ${tainted} node(s) still carry" >&2
+        echo "          node.cloudprovider.kubernetes.io/uninitialized." >&2
+        echo >&2
+        echo "  A cloud controller is running but has not adopted them, so workloads will" >&2
+        echo "  not schedule. Usually its credentials are wrong for this project, or its" >&2
+        echo "  configured region does not match where these nodes actually are." >&2
+        echo "  Check its logs before re-running:" >&2
+        echo "    kubectl -n kube-system logs -l component=cloud-controller-manager --tail=50" >&2
+        exit 1
+    fi
+fi
+
+# =============================================================================
 # 3. Site Secrets
 # =============================================================================
 # BEFORE the charts, always. A workload that starts without the Secret it
