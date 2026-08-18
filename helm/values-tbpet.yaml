@@ -53,7 +53,7 @@ xnatIngest:
 
   # Pipeline A: Orthanc -> /data/grouped-orthanc -> /data/assigned
   orthancIngest:
-    enabled: false
+    enabled: true
     interval: 300
 
   # Pipeline B: Windows RAW-DATA-EXPORT -> /data/grouped-fs -> /data/assigned
