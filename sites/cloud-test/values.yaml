@@ -98,7 +98,7 @@ domain:
   # Internal DNS suffix. The edges resolve the hostnames below through
   # /etc/hosts entries that install.sh writes, not through real DNS, so this
   # name does NOT have to be registered anywhere.
-  internal: cloud-test.203-101-227-222.nip.io
+  internal: cloud-test.203-101-225-151.nip.io
   # The address every edge node reaches this management node on.
   mgmtNodeIP: "203.101.224.240"
 
@@ -420,3 +420,12 @@ ingress-nginx:
       # ExternalGatewayForFloatingIPNotFound. Whatever VIP Octavia assigns is
       # already publicly routable.
       type: NodePort
+      # PINNED to the ports the operator's load balancer already forwards to.
+      # LB bb36d58e (VIP 203.101.225.151, AZ QRIScloud) has TCP listeners on
+      # 443 -> pool fd22275c -> 203.101.224.240:30925
+      #  80 -> pool c46565bd -> 203.101.224.240:30406
+      # Leaving these unset would let Kubernetes pick a random port each install
+      # and silently break the pool members.
+      nodePorts:
+        http: 30406
+        https: 30925

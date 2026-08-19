@@ -5,21 +5,103 @@ a single Nectar VM running k0s; the cloud LB is Octavia (amphora driver).
 DNS is a `nip.io` wildcard for dev, switchable to your own zone for prod.
 
 
-## Before you install: the cloud controller (yours to do, once)
+## Before you install: the load balancer (yours to do, once)
 
-`install.sh` will stop with an error if this is missing — deliberately, because
-without it a `LoadBalancer` Service sits at `<pending>` forever and nothing says
-so. See docs/clouds/README.md for why this is the operator's job.
+`install.sh` stops with an error if the pieces below are missing — deliberately,
+because the failure they cause is silent and surfaces much later as an edge that
+will not join. See docs/clouds/README.md for why this is the operator's job.
 
 There is no script for this in the repo on purpose: it is OpenStack-specific,
 it needs credentials the installer should not hold, and every site's project,
 network and credential policy differ.
 
-**1. An application credential scoped to this project.** Horizon → Identity →
-Application Credentials. Give it only what the controller needs; it will create
-and delete load balancers in your project.
+### Region is not availability zone
 
-**2. A `cloud.conf` Secret on the management cluster.**
+Get this wrong and nothing works, so it is worth stating plainly:
+
+| | Nectar value | Where it goes |
+|---|---|---|
+| **Region** | `Melbourne` | the only region in the catalog; `--os-region-name`, `region=` in `cloud.conf` |
+| **Availability zone** | `QRIScloud`, `melbourne-qh2`, `ardc-syd-1`, … | where a VM or an LB amphora physically runs |
+
+`QRIScloud` is an **availability zone**. It is not a region and does not appear
+in `openstack region list`. A QLD project still authenticates against region
+`Melbourne`; only the AZ differs. Confirm both:
+
+```bash
+openstack region list -f value -c Region                       # Melbourne
+openstack server show <mgmt-vm> -f value -c OS-EXT-AZ:availability_zone
+```
+
+### 1. An application credential scoped to this project
+
+Horizon → Identity → Application Credentials. It is project-scoped, so one
+credential works regardless of which AZ your machines are in.
+
+### 2. Build the balancer
+
+Create it **in the same AZ as the mgmt VM** — see quirk 1 below for what happens
+otherwise — and give it a plain TCP listener:
+
+```bash
+MGMT_IP=203.0.113.10          # the mgmt VM's address on its network
+SUBNET=<subnet-of-that-network>
+AZ=QRIScloud                  # must match the mgmt VM's AZ
+
+openstack loadbalancer create --name ais-edge-mgmt \
+    --vip-subnet-id "$SUBNET" --availability-zone "$AZ" --wait
+
+openstack loadbalancer listener create ais-edge-mgmt \
+    --name https --protocol TCP --protocol-port 443 --wait
+openstack loadbalancer pool create --name https-pool \
+    --listener https --protocol TCP --lb-algorithm ROUND_ROBIN --wait
+openstack loadbalancer member create --address "$MGMT_IP" \
+    --protocol-port 30925 --subnet-id "$SUBNET" https-pool --wait
+```
+
+**TCP, not `TERMINATED_HTTPS`.** The k0s API and konnectivity are mTLS end to
+end: the client proves itself with a certificate during the handshake, and
+nothing survives a decrypt/re-encrypt. A terminating listener breaks edge joins
+in a way that looks like a network fault.
+
+### 3. Tell the cluster which ports the pool expects
+
+The balancer forwards to a **node port**, so the site file must pin the ports
+rather than let Kubernetes pick fresh ones on every install:
+
+```yaml
+ingress-nginx:
+  controller:
+    service:
+      type: NodePort
+      nodePorts:
+        http: 30406
+        https: 30925
+```
+
+Then read the VIP and point `domain.internal` at it:
+
+```bash
+openstack loadbalancer show ais-edge-mgmt -f value -c vip_address
+```
+
+### 4. Confirm before spending an install
+
+```bash
+getent hosts <domain.internal>        # resolves, and NOT to the mgmt node itself
+openstack loadbalancer show ais-edge-mgmt -f value -c provisioning_status  # ACTIVE
+```
+
+A balancer stuck in `PENDING_CREATE` is almost always the AZ mistake in quirk 1.
+
+### Alternative: let a cloud controller build it
+
+If you would rather the cluster create and destroy balancers on demand, install
+`openstack-cloud-controller-manager` and use `service.type: LoadBalancer`
+instead of `NodePort`. This is the natural shape on managed Kubernetes, which
+already runs a controller; on a self-managed cluster it means putting a
+credentialled component in `kube-system` whose job is to create infrastructure
+for you. Choose it deliberately.
 
 ```bash
 cat > /tmp/cloud.conf <<EOF
@@ -34,24 +116,23 @@ region=Melbourne
 # the k0s API and konnectivity are mTLS end to end and must NOT be terminated.
 # Do not set a TERMINATED_HTTPS listener here.
 use-octavia=true
+# NOT OPTIONAL on Nectar. Without it the amphora is built in melbourne-qh2
+# regardless of where your nodes are, and the LB hangs forever. See quirk 1.
+availability-zone=QRIScloud
 EOF
 
 kubectl -n kube-system create secret generic openstack-cloud-config \
     --from-file=cloud.conf=/tmp/cloud.conf
 shred -u /tmp/cloud.conf
-```
 
-**3. The controller itself**, pinned like everything else here:
-
-```bash
 helm repo add cpo https://kubernetes.github.io/cloud-provider-openstack
 helm install openstack-ccm cpo/openstack-cloud-controller-manager \
     --namespace kube-system --version <pin-a-version> \
     --set secret.create=false --set secret.name=openstack-cloud-config
 ```
 
-**4. Confirm it adopted the nodes** — this is what the installer's pre-flight
-checks, and it is worth checking yourself before spending an install:
+Confirm it adopted the nodes — this is what the installer's pre-flight checks on
+this path, and it is worth checking yourself before spending an install:
 
 ```bash
 kubectl -n kube-system get pods | grep cloud-controller-manager
@@ -63,18 +144,32 @@ A node still carrying that taint means the controller is running but has not
 adopted it — almost always wrong credentials for the project, or a `region` that
 does not match where the nodes actually are.
 
-### Reusing an address you already hold
+### Reusing a balancer or an address you already hold
 
 Allocating a floating IP per install wastes quota, and on a `nip.io` name the
 address is embedded in the hostname — so it has to exist before `domain.internal`
-can name it. Reuse one:
+can name it.
+
+A balancer left behind by a previous cluster is often reusable as-is. Check what
+it already forwards to before building a second one:
+
+```bash
+openstack loadbalancer list -c id -c name -c vip_address -c provisioning_status
+openstack loadbalancer listener list --loadbalancer <lb> -c protocol_port -c default_pool_id
+openstack loadbalancer member list <pool> -c address -c protocol_port
+```
+
+If its VIP is public and its members already point at your mgmt node, pin the
+node ports in the site file to match the pool and change nothing in OpenStack.
+
+For a free floating IP instead:
 
 ```bash
 openstack floating ip list          # look for one with no Port and no Fixed IP
 ```
 
-Then pin the balancer to it in your site file, under the SUBCHART (a parent
-chart cannot set a subchart's values):
+On the `LoadBalancer` path only, pin it under the SUBCHART (a parent chart
+cannot set a subchart's values). Note quirk 2: **Nectar QLD rejects this**.
 
 ```yaml
 ingress-nginx:
@@ -122,8 +217,15 @@ ingress-nginx:
     hostNetwork: false
     dnsPolicy: ClusterFirst
     service:
-      type: LoadBalancer
+      type: NodePort       # your balancer forwards to these ports
+      nodePorts:
+        http: 30406
+        https: 30925
 ```
+
+Use `type: LoadBalancer` here **only** if you installed a cloud controller (see
+"Alternative" above). Without one the Service sits at `<pending>` for ever, and
+`install.sh` refuses to start rather than let you find out later.
 
 `certManager.issuer: ais-edge-ca` is already the default, and
 `ais-edge-ca-issuer` is **not** a valid value — the ClusterIssuer is named
@@ -133,8 +235,9 @@ Run `./install.sh -y <site>`; the site argument is mandatory. Nothing in the
 install reads OpenStack credentials, so sourcing the openrc is only needed
 for the `openstack` CLI commands below.
 
-**This repo does not install or configure a cloud controller manager.**
-Install `cloud-provider-openstack` (OCCM) yourself, before `install.sh`.
+**This repo does not create cloud infrastructure.** Build the load balancer,
+its listener and its pool yourself, before `install.sh` — or, if you chose the
+`LoadBalancer` path, install `cloud-provider-openstack` (OCCM) yourself first.
 Subnet, availability zone and floating-IP behaviour are settings in *that*
 CCM's own `cloud.conf` Secret, not keys in `sites/<site>/values.yaml` — the
 chart's `cloud:` block is parked and deliberately not wired up. Read the
