@@ -250,6 +250,17 @@ if [ -f "$SECRETS" ]; then
         [ -n "$UNFILLED" ] && die "sites/${SITE}/secrets.enc.yaml still has unfilled placeholder VALUES:
 ${UNFILLED}
        Fix with: scripts/site-secrets.sh edit ${SITE}"
+
+        # Two more classes the REPLACE_ check cannot see, each of which
+        # otherwise costs a full install to discover. See the script's
+        # docstring for what they are and how they present.
+        SECRET_CHECK="$(sops --config "${SCRIPT_DIR}/.sops.yaml" -d "$SECRETS" 2>/dev/null \
+            | python3 "${SCRIPT_DIR}/scripts/check-site-secrets.py" "$VALUES" 2>/dev/null || true)"
+        if [ -n "$(printf '%s' "$SECRET_CHECK" | tr -d '[:space:]')" ]; then
+            die "sites/${SITE}: the secrets do not match the site file:
+${SECRET_CHECK}
+       Fix with: scripts/site-secrets.sh edit ${SITE}"
+        fi
     fi
 else
     info "WARNING: no sites/${SITE}/secrets.enc.yaml — the charts reference Secrets by name and will not start without them"
