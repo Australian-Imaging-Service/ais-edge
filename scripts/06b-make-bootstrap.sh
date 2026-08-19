@@ -49,6 +49,38 @@ OUT="${REPO_DIR}/${CLUSTER_NAME}-join.sh"
 JOIN_SRC="${REPO_DIR}/scripts/files/edge-join.sh"
 [ -f "$JOIN_SRC" ] || { echo "ERROR: ${JOIN_SRC} not found" >&2; exit 1; }
 
+# =============================================================================
+# THE WORKER MUST RUN THE SAME k0s AS ITS CONTROL PLANE
+# =============================================================================
+# edge-join.sh used to install k0s with a bare `curl get.k0s.sh | sh`, which
+# takes whatever upstream published that day. The hosted control plane is
+# PINNED (k0smotron.k0sVersion), so the two only agree by luck — and they
+# stopped agreeing the moment upstream moved on.
+#
+# When they disagree the failure is silent and deeply misleading. A 1.36 worker
+# against a 1.35 control plane:
+#   * bootstraps its client config       -> looks fine
+#   * gets its CSR approved              -> looks fine
+#   * asks for `worker-config-default-1.36`, which the 1.35 control plane never
+#     created and whose RBAC does not cover it
+#   * is denied by the Node authorizer, exits 1, and systemd restarts it forever
+# The node NEVER appears, so the installer just waits. Observed on cai-lfs3.
+#
+# The Cluster CR is the authority: it is what k0smotron actually built the
+# control plane from, so it cannot drift from what is running the way a chart
+# value read at a different moment could.
+K0S_VERSION="$(kubectl get cluster.k0smotron.io -n "$CLUSTER_NAME" "$CLUSTER_NAME" \
+    -o jsonpath='{.spec.version}' 2>/dev/null || true)"
+if [ -z "$K0S_VERSION" ]; then
+    echo "ERROR: cannot read .spec.version from cluster.k0smotron.io/${CLUSTER_NAME}" >&2
+    echo "       Without it the bundle would install an unpinned k0s, and a worker" >&2
+    echo "       whose minor version differs from its control plane crash-loops on" >&2
+    echo "       a worker-config ConfigMap that does not exist. Refusing to build" >&2
+    echo "       a bundle that can fail that way." >&2
+    exit 1
+fi
+echo "  k0s version (from the Cluster CR): ${K0S_VERSION}"
+
 echo "=== 06b: building bootstrap bundle for ${CLUSTER_NAME} ==="
 
 STAGE="$(mktemp -d)"
@@ -100,6 +132,8 @@ export SEAWEEDFS_HOSTNAME=$(printf '%q' "${SEAWEEDFS_HOSTNAME:-}")
 export K0S_API_HOSTNAME=$(printf '%q' "${K0S_API_HOSTNAME:-}")
 export KONNECTIVITY_HOSTNAME=$(printf '%q' "${KONNECTIVITY_HOSTNAME:-}")
 export KUBELET_EXTRA_ARGS=$(printf '%q' "--container-log-max-size=${KUBELET_LOG_MAX_SIZE:-10Mi} --container-log-max-files=${KUBELET_LOG_MAX_FILES:-5}")
+# Pinned to the control plane's own version — see the note where this is read.
+export K0S_VERSION=$(printf '%q' "$K0S_VERSION")
 export INSTALL_TOPOLOGY=$(printf '%q' "${INSTALL_TOPOLOGY:-onprem}")
 
 FORCE_HOST=false
