@@ -31,7 +31,9 @@ ais-edge-ca (ClusterIssuer)  ─── signs ───►
         ├── grafana-tls               (1y, auto-renew at -30d)
         ├── loki-tls                  (1y, auto-renew at -30d)
         ├── mgmt-loki-client-ca       (1y, auto-renew at -30d) — anchor only
-        └── <edge>-loki-client        (90d, renewBefore 30d)   — one per edge
+        ├── <edge>-loki-client        (90d, renewBefore 30d)   — one per edge
+        ├── mgmt-s3-client-ca         (1y, auto-renew at -30d) — anchor only
+        └── <edge>-s3-client          (90d, renewBefore 30d)   — one per edge
 ```
 
 **Names, because they moved.** The CA ClusterIssuer is `ais-edge-ca`, not
@@ -50,8 +52,8 @@ every edge. The same trap applies to `certManager.ca.commonName`, which
 cert-manager treats as desired state; changing it needs
 `allowCommonNameChange: true` and a fleet-wide redistribution.
 
-The last two leaves are the Loki push mTLS pair, both issued from this same
-CA on purpose — two copies of the issuer-selection logic is exactly how the
+The last four leaves are two mTLS pairs — one for the Loki push path, one
+for the SeaweedFS upload path — all issued from this same CA on purpose — two copies of the issuer-selection logic is exactly how the
 client certs would end up signed by a CA the push Ingress does not verify
 against:
 
@@ -67,6 +69,39 @@ against:
   end-to-end by cert-sync, and a yearly cadence means the distribution path
   is proven once a year — which is the same as not proven. `CertSyncStale`
   covers the gap.
+- **`mgmt-s3-client-ca`** is the same kind of anchor for the SeaweedFS S3
+  endpoint, `commonName` `s3-upload-client-ca-anchor`. Rendered only when
+  `seaweedfs.ingress.clientCerts.issue`.
+- **`<edge>-s3-client`** is one Certificate per `edges[]` entry, client auth
+  only, `rotationPolicy: Always`, same 90-day cadence and same reasoning.
+  cert-sync delivers it as `s3-client-tls`; the edge presents it when
+  `upload.s3.requireClientCert` is set.
+
+**Why two anchors and not one.** `auth-tls-secret` is what nginx checks a
+client chain against, so the anchor *is* the revocation boundary: the only
+way to stop trusting certificates under it is to re-issue it, which
+invalidates every certificate beneath it at once. With one shared anchor,
+withdrawing a site's ability to upload imaging would also stop its log
+shipping — at exactly the moment the fleet most needs to hear from that
+site. Two anchors keep those two actions independent. They are still signed
+by the same fleet CA, so there is one PKI to reason about, and the cost is
+one extra `Certificate` object.
+
+**The two S3 switches are separate on purpose.**
+`seaweedfs.ingress.clientCerts.issue` mints and distributes;
+`clientCerts.require` puts `auth-tls-verify-client: on` across the Ingress.
+Turning verification on before the certificates have landed breaks every
+upload with an error that names nothing. Measured: the TLS handshake still
+succeeds (under TLS 1.3 the client certificate is sent last, so nginx cannot
+refuse the connection), nginx answers `400 No required SSL certificate was
+sent` with an HTML body, and rclone reports that as an S3 XML parse failure —
+so the uploader logs `endpoint_failed` and it reads as an endpoint that is not
+listening. The rollout is therefore: `issue`
+→ wait for cert-sync → confirm `s3-client-tls` exists on every edge →
+`upload.s3.requireClientCert` on each edge → `require`. The chart refuses
+`require` without `issue`, and refuses `issue` without a `certSync` entry
+carrying the certificate, but no template can see whether a Secret actually
+landed — that step is the operator's.
 
 ## CA modes
 
@@ -146,10 +181,10 @@ its own.
 | File | Purpose |
 |---|---|
 | `charts/mgmt/templates/cert-issuers.yaml` | bootstrap Issuer + CA Certificate + CA ClusterIssuer, in both CA modes. This is what used to be `scripts/02b-bootstrap-ca.sh`, absorbed into Helm step 4 |
-| `charts/mgmt/templates/seaweedfs.yaml` | seaweedfs-tls Certificate |
+| `charts/mgmt/templates/seaweedfs.yaml` | seaweedfs-tls Certificate, plus the `<release>-s3-client-ca` anchor and the per-edge `<edge>-s3-client` Certificates when `seaweedfs.ingress.clientCerts.issue` is set |
 | `charts/mgmt/templates/observability.yaml` | grafana-tls, loki-tls, the `<release>-loki-client-ca` anchor and the per-edge `<edge>-loki-client` Certificates |
 | `charts/mgmt/templates/cert-manager-monitoring.yaml` | the metrics Service (`:9402`) + ServiceMonitor. Without it `certmanager_certificate_*_timestamp_seconds` has **no series** and `CARotationDue` / `CertificateExpiringSoon` / `CertificateRenewed` cannot fire at all. Gated on `observability.enabled` **and** `certManager.monitoring.enabled` |
-| `charts/mgmt/templates/cert-sync.yaml` | distributes the CA **public** half — one CronJob per edge copying `ca.crt` out of `cert-manager/ais-edge-ca-secret` into the edge's `ca-bundle` Secret, plus that edge's `<edge>-loki-client` cert and key. The destination namespace is per-site (`certSync.secrets[].destination`), not fixed |
+| `charts/mgmt/templates/cert-sync.yaml` | distributes the CA **public** half — one CronJob per edge copying `ca.crt` out of `cert-manager/ais-edge-ca-secret` into the edge's `ca-bundle` Secret, plus that edge's `<edge>-loki-client` cert and key, and — when S3 mTLS is enabled — its `<edge>-s3-client` cert and key. The destination namespace is per-site (`certSync.secrets[].destination`), not fixed |
 | `scripts/rotate-ca.sh` | bundled-CA rotation (Phase 1 + Phase 2 transition) |
 
 `certSync.secrets[].source.namespace` **must** equal

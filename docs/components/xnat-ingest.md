@@ -196,7 +196,7 @@ The nine event names, and what each one means:
 | `startup` | the loop starts; records endpoint, bucket, prefix and reclaim mode |
 | `endpoint_ready` | the `head-bucket` probe succeeded |
 | `endpoint_retrying` | probe failed; retrying (12 attempts over 60s) |
-| `endpoint_failed` | probe failed 12 times — refuses to enter the upload loop |
+| `endpoint_failed` | probe failed 12 times — refuses to enter the upload loop. Message also reports whether a client certificate is configured and readable: with mTLS on the S3 path this probe is what a bad or missing one breaks first, and (measured) the rejection arrives as an HTTP 400/403 that rclone reports as an S3 XML parse failure |
 | `upload_started` | a settled session is about to be synced |
 | `upload_completed` | `aws s3 sync` exited zero |
 | `upload_failed` | `aws s3 sync` exited non-zero; retried next cycle |

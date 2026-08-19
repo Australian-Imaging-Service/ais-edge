@@ -162,6 +162,56 @@ EOF
 
 # Let's Encrypt staging with a DNS-01 solver. Exercises the ACME ClusterIssuer
 # branch, which is otherwise never rendered.
+# THE SHIPPED CLOUD SITE ITSELF. Not a hand-written fixture: sites/example-cloud
+# is what an operator copies, so if it stops rendering CI is what should notice.
+cp "$REPO_ROOT/sites/example-cloud/values.yaml" "$V/mgmt-cloud.yaml"
+
+# mTLS on the S3 upload path, FULLY ROLLED OUT — both switches on and the
+# certSync entry that carries the certificate in. This is the only case that
+# renders the auth-tls-* annotations on the SeaweedFS Ingress, the S3 client CA
+# anchor and the per-edge <edge>-s3-client Certificates; without it that whole
+# path ships never having been rendered once.
+#
+# certSync.secrets is restated in FULL because Helm replaces lists rather than
+# merging them: naming only the new entry would drop the Loki client cert entry
+# and trip that guard first.
+cat >"$V/mgmt-s3-mtls.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+      require: true
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-loki-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: loki-push-client-tls, type: kubernetes.io/tls}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: s3-client-tls, type: kubernetes.io/tls}
+EOF
+
+# Step 1 of the rollout, layered ON TOP of the case above: certificates issued
+# and delivered, nothing verifying them yet. That is the state a fleet sits in
+# between `issue` and `require` — the window in which the operator confirms the
+# Secret landed on every site — so it has to render too. The Ingress must come
+# out with NO auth-tls-* annotations here while the Certificates are present.
+cat >"$V/mgmt-s3-mtls-issue-only.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      require: false
+EOF
+
 cat >"$V/mgmt-letsencrypt.yaml" <<'EOF'
 certManager:
   issuer: letsencrypt-staging
@@ -192,6 +242,34 @@ observability:
     endpoint: "https://loki.ci.198-51-100-10.nip.io"
     clientCertSecret: loki-push-client-tls
     caBundleSecret: ca-bundle
+EOF
+
+# The edge half of S3 mTLS: mount the client certificate and present it. The
+# only case that renders RCLONE_CLIENT_CERT / RCLONE_CLIENT_KEY and the
+# s3-client volume, and the one that proves they are NOT coupled to
+# caBundleSecret — both are set here, and edge-cloud-s3-mtls below sets only
+# this one.
+cat >"$V/edge-s3-mtls.yaml" <<'EOF'
+upload:
+  s3:
+    requireClientCert: true
+    clientCertSecret: s3-client-tls
+EOF
+
+# CLOUD NUANCE, and the reason the two keys are independent: on cloud the
+# SeaweedFS server certificate can come from a public CA that is already in the
+# image's trust store, so caBundleSecret is legitimately EMPTY — while our own
+# client identity still comes from the fleet CA via cert-sync. This case would
+# not render if the client cert were nested inside the CA-bundle branch.
+# The endpoint is http:// because the https guard requires a CA bundle; what is
+# under test is that the client-certificate mount survives an empty
+# caBundleSecret, not the endpoint scheme.
+cat >"$V/edge-s3-mtls-no-cabundle.yaml" <<'EOF'
+upload:
+  s3:
+    endpoint: "http://mgmt-seaweedfs.ais-mgmt.svc.cluster.local:8333"
+    caBundleSecret: ""
+    requireClientCert: true
 EOF
 
 cat >"$V/edge-samba-on.yaml" <<'EOF'
@@ -610,6 +688,81 @@ certSync:
       destination: {namespace: logging, name: ca-bundle, type: Opaque}
 EOF
 
+# ---- S3 mTLS ordering --------------------------------------------------------
+# The hazard these four guard: turning verification on before the client
+# certificates are on the edges rejects every upload at the TLS handshake, and
+# that rejection reaches the uploader as a generic connection error — no 403,
+# no S3 error code — so it reads as a dead endpoint rather than as an auth
+# problem. Each case injects one step of the rollout done out of order.
+
+# require without issue: the Ingress demands a certificate while nothing mints
+# one and the CA anchor Secret it names does not exist.
+cat >"$V/neg-mgmt-s3-mtls-require-no-issue.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: false
+      require: true
+EOF
+
+# Certificates issued with no distribution mechanism at all. requireAuth is
+# turned off so the LOKI certSync guard — which fires on the same values and is
+# rendered from an earlier file — cannot satisfy this case for the wrong reason.
+cat >"$V/neg-mgmt-s3-mtls-no-certsync.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+certSync:
+  enabled: false
+observability:
+  loki:
+    push:
+      requireAuth: false
+EOF
+
+# certSync is on and well-formed but carries no S3 client certificate: the
+# identities are minted on the management cluster and never reach a site.
+cat >"$V/neg-mgmt-s3-mtls-no-client-cert.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+observability:
+  loki:
+    push:
+      requireAuth: false
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+EOF
+
+# The reverse: the certSync entry uncommented without the flag. Nothing creates
+# the source Secret, so that one entry logs sync_failed every six hours while
+# every other Secret in the same run syncs fine.
+cat >"$V/neg-mgmt-s3-certsync-entry-no-issue.yaml" <<'EOF'
+observability:
+  loki:
+    push:
+      requireAuth: false
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: s3-client-tls, type: kubernetes.io/tls}
+EOF
+
 # | , = are the delimiters of the spec file cert-sync.sh parses, so a name
 # containing one is read as a different instruction rather than rejected.
 cat >"$V/neg-mgmt-certsync-delimiter-in-name.yaml" <<'EOF'
@@ -653,6 +806,10 @@ printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-en
 # one bucket can read and delete every other site's staged imaging.
 printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
 printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
+# requireClientCert with nothing to mount. The volume renders with an empty
+# secretName, which is valid YAML — so every parsing stage passes and the
+# uploader sits in CreateContainerConfigError on the edge instead.
+printf 'upload:\n  s3:\n    requireClientCert: true\n    clientCertSecret: ""\n' >"$V/neg-edge-s3-no-client-secret.yaml"
 printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
@@ -733,6 +890,58 @@ EOF
 printf 'hostAliases:\n  mgmtNodeIP: ""\n'                 >"$V/neg-edge-hostaliases-no-ip.yaml"
 printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clusterlabel.yaml"
 
+# -- cloud ingress shape ------------------------------------------------------
+# The on-prem default left in place on cloud: binds the host's :443, never asks
+# for a load balancer, and the controller still reports 1/1 Running.
+cat >"$V/neg-mgmt-cloud-hostnetwork.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: true
+EOF
+
+# Reachable from nowhere outside the cluster.
+cat >"$V/neg-mgmt-cloud-clusterip.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: ClusterIP
+EOF
+
+# ClusterFirstWithHostNet without hostNetwork: the pod gets the HOST's
+# resolv.conf and loses its in-cluster upstreams.
+# nodePort is the CHART DEFAULT, so an edge that omits `exposure` lands on the
+# mode that reaches nothing on cloud. This fixture states it explicitly.
+cat >"$V/neg-mgmt-cloud-nodeport.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+EOF
+
+cat >"$V/neg-mgmt-cloud-dnspolicy.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirstWithHostNet
+    service:
+      type: LoadBalancer
+EOF
+
 # Orthanc auth on with nothing to authenticate against. The deployment mounts
 # existingSecret non-optionally, so an empty name fails as a volume error
 # rather than as an auth error.
@@ -766,8 +975,12 @@ mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
 mgmt-no-seaweedfs	charts/mgmt	mgmt-base.yaml mgmt-no-seaweedfs.yaml
 mgmt-shared-bucket	charts/mgmt	mgmt-base.yaml mgmt-shared-bucket.yaml
 mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
+mgmt-cloud	charts/mgmt	mgmt-cloud.yaml
 mgmt-slack	charts/mgmt	mgmt-base.yaml mgmt-slack.yaml
 mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-datapolicy-on.yaml
+mgmt-s3-mtls	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml
+mgmt-s3-mtls-issue-only	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml mgmt-s3-mtls-issue-only.yaml
+mgmt-s3-mtls-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-s3-mtls.yaml
 edge-defaults	charts/edge	edge-base.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
@@ -777,7 +990,9 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
-edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
+edge-s3-mtls	charts/edge	edge-base.yaml edge-s3-mtls.yaml
+edge-s3-mtls-no-cabundle	charts/edge	edge-base.yaml edge-s3-mtls-no-cabundle.yaml
+edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml edge-s3-mtls.yaml
 EOF
 }
 
@@ -831,10 +1046,15 @@ neg-mgmt-certsync-delimiter-in-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-
 neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-cronjob-name-too-long.yaml	the API server rejects CronJob names over 52
 neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
 neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
+neg-mgmt-s3-mtls-require-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-require-no-issue.yaml	clientCerts.require=true with clientCerts.issue=false
+neg-mgmt-s3-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-no-certsync.yaml	mints one S3 client certificate per edge, but certSync.enabled=false
+neg-mgmt-s3-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-no-client-cert.yaml	but seaweedfs.ingress.clientCerts.issue mints that certificate
+neg-mgmt-s3-certsync-entry-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-certsync-entry-no-issue.yaml	but seaweedfs.ingress.clientCerts.issue=false
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
-neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
+neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every upload would fail the TLS handshake
+neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
@@ -844,6 +1064,10 @@ neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toproc
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
+neg-mgmt-cloud-hostnetwork	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-hostnetwork.yaml	hostNetwork=true
+neg-mgmt-cloud-clusterip	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-clusterip.yaml	service.type=ClusterIP
+neg-mgmt-cloud-dnspolicy	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-dnspolicy.yaml	dnsPolicy=ClusterFirstWithHostNet without hostNetwork
+neg-mgmt-cloud-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-nodeport.yaml	exposure=nodePort with topology=cloud
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse

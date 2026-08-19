@@ -161,7 +161,12 @@ export KUBELET_LOG_MAX_SIZE KUBELET_LOG_MAX_FILES
 # needs no bind mounts and leaves /etc/fstab alone. An earlier deployment did
 # use fstab binds for this; deleting /data then left the mounts dangling and the
 # node failed its next boot into an emergency shell. See docs/storage.md.
-DATA_ROOT="$(cfg storage.dataRoot)"
+# EMPTY IS THE DEFAULT AND IS VALID — it means "keep k0s and the PVCs on the root
+# filesystem", which is right for a single-disk host. `cfg <path>` with no second
+# argument means REQUIRED and exits 1, so omitting the default here made an
+# optional key mandatory and killed the install on every site that did not set
+# it. Caught on the first cloud install.
+DATA_ROOT="$(cfg storage.dataRoot "")"
 export DATA_ROOT
 
 # ONE k0s VERSION FOR THE WHOLE DEPLOYMENT.
@@ -176,7 +181,10 @@ export DATA_ROOT
 # chose the version, so two installs a fortnight apart differ while the operator
 # is told they are identical. Falls back to the chart default when a site does
 # not override it, and to unpinned only if the chart value is somehow absent.
-K0S_VERSION="$(cfg k0smotron.k0sVersion)"
+# Empty is valid and falls through to the chart default below. `cfg <path>` with
+# no second argument means REQUIRED — the same trap that made storage.dataRoot
+# mandatory. I wrote this one.
+K0S_VERSION="$(cfg k0smotron.k0sVersion "")"
 if [ -z "$K0S_VERSION" ] && [ -f "${SCRIPT_DIR}/charts/mgmt/values.yaml" ]; then
     K0S_VERSION="$(python3 -c "
 import yaml,sys
@@ -242,6 +250,17 @@ if [ -f "$SECRETS" ]; then
         [ -n "$UNFILLED" ] && die "sites/${SITE}/secrets.enc.yaml still has unfilled placeholder VALUES:
 ${UNFILLED}
        Fix with: scripts/site-secrets.sh edit ${SITE}"
+
+        # Two more classes the REPLACE_ check cannot see, each of which
+        # otherwise costs a full install to discover. See the script's
+        # docstring for what they are and how they present.
+        SECRET_CHECK="$(sops --config "${SCRIPT_DIR}/.sops.yaml" -d "$SECRETS" 2>/dev/null \
+            | python3 "${SCRIPT_DIR}/scripts/check-site-secrets.py" "$VALUES" 2>/dev/null || true)"
+        if [ -n "$(printf '%s' "$SECRET_CHECK" | tr -d '[:space:]')" ]; then
+            die "sites/${SITE}: the secrets do not match the site file:
+${SECRET_CHECK}
+       Fix with: scripts/site-secrets.sh edit ${SITE}"
+        fi
     fi
 else
     info "WARNING: no sites/${SITE}/secrets.enc.yaml — the charts reference Secrets by name and will not start without them"
@@ -373,6 +392,127 @@ if step "2/7  prerequisites: cert-manager CRDs + k0smotron operator (pinned)"; t
         die "the k0smotron operator did not become ready; the management chart cannot create Cluster objects without its conversion webhook"
     fi
     info "k0smotron operator ready"
+fi
+
+# =============================================================================
+# CLOUD PRE-FLIGHT: is this cluster actually able to get a load balancer?
+# =============================================================================
+# Provisioning cloud infrastructure is the OPERATOR'S job, not this installer's.
+# It is cloud-specific, it needs credentials this installer should not hold, and
+# on managed Kubernetes (EKS/AKS/GKE) it is already done for you. That boundary
+# is deliberate — see docs/clouds/README.md.
+#
+# But "not our job" must not mean "fails silently an hour later". Without a cloud
+# controller, a type: LoadBalancer Service sits at <pending> forever: no error,
+# no event worth reading, the ingress pod Running and healthy, and every fleet
+# hostname resolving to nothing. The first symptom is an edge that will not join,
+# at the far end of the link.
+#
+# So: check, and if it is missing, STOP HERE and say exactly what is needed and
+# where it is written down. Cheaper than discovering it after the charts are
+# applied and an edge has been half-joined.
+#
+# The check is deliberately generic. Every cloud's implementation is a different
+# binary, but they all name themselves *cloud-controller-manager*, so this works
+# on OpenStack, AWS, Azure and GCP without this installer knowing which it is.
+if [ "${INSTALL_TOPOLOGY:-onprem}" = "cloud" ] && [ "${SKIP_CLOUD_PREFLIGHT:-0}" != "1" ]; then
+    info "cloud pre-flight: checking the operator-provided edge path"
+
+    # What shape did the site ask for? The answer decides what has to be true.
+    svc_type="$(python3 - "$VALUES" <<'PY'
+import sys, yaml
+v = yaml.safe_load(open(sys.argv[1])) or {}
+c = ((v.get("ingress-nginx") or {}).get("controller") or {})
+print(((c.get("service") or {}).get("type")) or "NodePort")
+PY
+)"
+
+    # --- NodePort: the default, and the shape this deployment recommends ------
+    # The operator builds the load balancer themselves and forwards to a node
+    # port. Nothing in the cluster talks to the cloud API, so there is no
+    # controller to check for and no credential living in kube-system.
+    #
+    # What CAN be verified here is that the name the edges will resolve already
+    # points somewhere, and that it does not point straight at the management
+    # node -- which would mean there is no load balancer in front at all.
+    if [ "$svc_type" = "NodePort" ]; then
+        resolved="$(getent hosts "$INTERNAL_DOMAIN" 2>/dev/null | awk '{print $1; exit}')"
+        if [ -z "$resolved" ]; then
+            echo >&2
+            echo "[install] ERROR: topology=cloud, but ${INTERNAL_DOMAIN} does not resolve." >&2
+            echo >&2
+            echo "  Edges resolve this name to find the management cluster. Provisioning" >&2
+            echo "  the load balancer and its DNS is the operator's job -- this installer" >&2
+            echo "  holds no cloud credentials and will not create infrastructure." >&2
+            echo >&2
+            echo "  Create the load balancer, point ${INTERNAL_DOMAIN} at its address," >&2
+            echo "  then re-run. Step by step:" >&2
+            echo "    docs/clouds/README.md            what is yours to provide, and why" >&2
+            echo "    docs/clouds/openstack-nectar.md  OpenStack / Nectar" >&2
+            echo "    docs/clouds/{aws,azure,gcp}.md   per-cloud equivalents" >&2
+            echo >&2
+            echo "  To proceed anyway: SKIP_CLOUD_PREFLIGHT=1" >&2
+            exit 1
+        fi
+        if [ "$resolved" = "$MGMT_NODE_IP" ]; then
+            echo >&2
+            echo "[install] ERROR: ${INTERNAL_DOMAIN} resolves to ${resolved}, which is the" >&2
+            echo "          management node itself -- there is no load balancer in front." >&2
+            echo >&2
+            echo "  That works until the management node is replaced or scaled, at which" >&2
+            echo "  point every edge loses the cluster and has to be re-pointed by hand." >&2
+            echo "  Point the name at the load balancer's address instead." >&2
+            echo >&2
+            echo "  If this is deliberate for a single-node trial: SKIP_CLOUD_PREFLIGHT=1" >&2
+            exit 1
+        fi
+        info "cloud pre-flight: ${INTERNAL_DOMAIN} -> ${resolved} (operator-provided)"
+        info "cloud pre-flight: your load balancer must forward 443 to this node's ingress NodePort"
+
+    # --- LoadBalancer: supported, but it needs something to answer the request -
+    # `type: LoadBalancer` is only a REQUEST. Without a controller watching for
+    # it, the Service sits at <pending> for ever: the ingress pod reports 1/1
+    # Running, no external address is ever assigned, and the failure surfaces
+    # much later as an edge that cannot join.
+    else
+        ccm="$(kubectl get pods -A -o name 2>/dev/null | grep -c 'cloud-controller-manager' || true)"
+        if [ "${ccm:-0}" -eq 0 ]; then
+            echo >&2
+            echo "[install] ERROR: ingress-nginx service.type=${svc_type}, but nothing in this" >&2
+            echo "          cluster can turn that request into a real load balancer." >&2
+            echo >&2
+            echo "  The Service would sit at <pending> for ever and no edge could join." >&2
+            echo >&2
+            echo "  Either (recommended here) provision the load balancer yourself and use" >&2
+            echo "  a node port, by setting this in your SITE file:" >&2
+            echo >&2
+            echo "    ingress-nginx:" >&2
+            echo "      controller:" >&2
+            echo "        service:" >&2
+            echo "          type: NodePort" >&2
+            echo >&2
+            echo "  or install a cloud controller manager for your cloud out of band." >&2
+            echo "  See docs/clouds/README.md for the trade-off." >&2
+            exit 1
+        fi
+        info "cloud pre-flight: cloud controller present (${ccm} pod(s))"
+
+        # Only meaningful when a controller is actually running: a node left
+        # carrying this taint means the controller has not adopted it, and
+        # nothing will schedule there.
+        tainted="$(kubectl get nodes -o jsonpath='{range .items[*]}{.spec.taints[?(@.key=="node.cloudprovider.kubernetes.io/uninitialized")].key}{"\n"}{end}' 2>/dev/null | grep -c . || true)"
+        if [ "${tainted:-0}" -gt 0 ]; then
+            echo >&2
+            echo "[install] ERROR: ${tainted} node(s) still carry" >&2
+            echo "          node.cloudprovider.kubernetes.io/uninitialized." >&2
+            echo >&2
+            echo "  The cloud controller is running but has not adopted them, so workloads" >&2
+            echo "  will not schedule. Usually its credentials are wrong for this project," >&2
+            echo "  or its configured region does not match where these nodes actually are." >&2
+            echo "    kubectl -n kube-system logs -l component=cloud-controller-manager --tail=50" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # =============================================================================

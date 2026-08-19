@@ -1,4 +1,36 @@
 # =============================================================================
+# EXAMPLE CLOUD SITE — tier-2 management plane on a cloud provider
+# =============================================================================
+# sites/example-mgmt with the cloud differences applied and explained.
+#
+# WHAT "CLOUD" ACTUALLY CHANGES
+#   * Names resolve through REAL DNS. The installer stops writing /etc/hosts on
+#     the management node and on every edge, and certificates carry hostnames
+#     only, with no IP SANs.
+#   * The ingress asks the cloud for a LOAD BALANCER instead of binding the
+#     management host's own :443.
+#
+# WHAT IT DOES NOT CHANGE
+#   * SNI + ssl-passthrough routing. One address serves every fleet hostname.
+#   * The direction of travel: edges connect OUT, nothing connects in.
+#   * The imaging path: edge -> S3 staging on this cluster -> the management
+#     xnat-upload -> XNAT. The edge never talks to XNAT and holds no XNAT
+#     credential.
+#
+# THE LOAD BALANCER MUST BE LAYER 4.
+# The k0s API and konnectivity are mTLS end to end: the worker proves itself
+# with a client certificate inside the TLS handshake, and nothing survives being
+# decrypted and re-encrypted. An L7 balancer exists in order to read HTTP, which
+# it cannot do without terminating TLS, so AWS ALB, Azure Application Gateway
+# and GCP HTTPS LB all break the join -- and break it asymmetrically: this side
+# reports healthy and only the edge fails, as an x509 error in a journal on a
+# machine in a hospital.
+#
+#   works:  AWS NLB / Azure Standard LB / GCP External TCP LB / Octavia (TCP)
+#   breaks: anything that routes on HTTP paths or headers
+# =============================================================================
+
+# =============================================================================
 # EXAMPLE MANAGEMENT SITE — non-secret configuration
 # =============================================================================
 # This is the config for THE MANAGEMENT NODE: the one machine that runs
@@ -37,7 +69,30 @@ clusterLabel: mgmt
 #           nothing. This is what you want on a new machine.
 # existing  k0s is already running on this node; install.sh verifies instead of
 #           building. Only for adopting a cluster that predates these charts.
+# cloud, not the onprem default. This is what stops the installer writing
+# /etc/hosts on this node and on every edge, and drops IP SANs from the
+# certificates -- on cloud the names resolve for real.
+topology: cloud
+
 installMode: fresh
+
+storage:
+  # Where k0s state and every PVC live on this node. Read by install.sh only.
+  #
+  # ""       everything on the root filesystem (k0s default /var/lib/k0s,
+  #          PVCs in /opt/local-path-provisioner). Right for a single-disk host.
+  # /data    a mounted data volume. Use this whenever the root disk is small —
+  #          the container image store alone does not fit in a 30G root.
+  #
+  # Applied as native settings: `k0s install --data-dir` and the
+  # local-path-provisioner nodePathMap. NOT bind mounts — an earlier deployment
+  # used fstab binds, and deleting /data left them dangling so the node failed
+  # its next boot into an emergency shell. See docs/storage.md.
+  #
+  # INSTALL-TIME ONLY. k0s bakes the data-dir into its systemd unit and PV
+  # objects record their host path, so changing this after install strands the
+  # existing state where it is. Set it before the first install.
+  dataRoot: ""
 
 domain:
   # Internal DNS suffix. The edges resolve the hostnames below through
@@ -45,12 +100,24 @@ domain:
   # name does NOT have to be registered anywhere.
   internal: aisedge.local
   # The address every edge node reaches this management node on.
-  mgmtNodeIP: "203.101.224.240"
+  mgmtNodeIP: "10.0.0.1"
 
 hostnames:
-  seaweedfs: seaweedfs.aisedge.local
-  grafana: grafana.aisedge.local
-  loki: loki.aisedge.local
+  # LEAVE THESE EMPTY ON CLOUD. Empty means "derive from domain.internal above"
+  # (edge.seaweedfsHost / edge.lokiHost / edge.grafanaHost in
+  # charts/edge/templates/_helpers.tpl), so the names follow the domain and can
+  # never drift from it.
+  #
+  # Setting them explicitly still wins, and that is the trap: an operator
+  # changes domain.internal -- which they MUST on cloud, .local is an on-prem
+  # convention -- and leaves these behind. Nothing warns. The edge uploader then
+  # dials the stale name for ever:
+  #   dial tcp: lookup seaweedfs.aisedge.local: no such host
+  # and retries until it gives up, while the management side simply sees an
+  # absence it is not watching for. Measured on the first cloud install.
+  seaweedfs: ""
+  grafana: ""
+  loki: ""
 # The child-cluster API and konnectivity hostnames are NOT here, and the chart
 # REFUSES to render if you add them. They used to live at this level, which gave
 # every edge the same two names — so the second site's Ingress claimed a
@@ -118,14 +185,14 @@ seaweedfs:
 
 observability:
   alerting:
-    emailTo: akshitbeniwal26@gmail.com
-    emailFrom: backupsync7@gmail.com
-    smtpHost: smtp.gmail.com
+    emailTo: alerts@example.org
+    emailFrom: ais-edge@example.org
+    smtpHost: smtp.example.org
     smtpPort: 587
     # For Gmail this must be an App Password. A 2FA account rejects the account
     # password with 535 BadCredentials, and the only symptom is alerts that
     # never arrive.
-    smtpUsername: backupsync7@gmail.com
+    smtpUsername: ais-edge@example.org
 
 # -----------------------------------------------------------------------------
 # Edge sites
@@ -143,11 +210,37 @@ observability:
 # practical ceiling around 15 sites.
 edges:
   - name: edge-dev
-    nodeIP: "203.101.230.171"
-    # install.sh joins the worker over SSH — there is no API server on the edge
-    # until it has — so the connection details belong with the edge.
+    # Required for BOTH join modes: ssh connects to it, and a bundle refuses to
+    # run on a machine that does not hold this address.
+    nodeIP: "10.0.0.2"
+
+    # HOW THE WORKER GETS JOINED. Only the one-time bootstrap differs; once
+    # joined, both are identical — the edge dials OUT (konnectivity, and the
+    # kubelet to its hosted control plane) and nothing ever connects into the
+    # site.
+    #
+    # ssh     Default, and what you want when it works. This node pushes the
+    #         join to the edge, so it needs an inbound path to it on port 22.
+    # bundle  For a site this node CANNOT reach inbound — a hospital behind a
+    #         whitelisted-IP allowlist, a VPN, or GlobalProtect. install.sh
+    #         writes <edge>-join.sh instead; you carry it to the edge by
+    #         whatever route you have and run it there, and the installer waits
+    #         for the node to appear. See docs/TOUR.md 4.1.
+    #
+    # NOT "offline": a bundle-joined edge still needs OUTBOUND reachability to
+    # this node on 443, permanently. An air-gapped machine cannot be a worker.
+    join: ssh
+
+    # Only used by join: ssh. Leave them out entirely for join: bundle.
     sshUser: ubuntu
     sshKey: ~/.ssh/id_ed25519
+
+    # How long this edge's join token stays valid. Optional; default 2h.
+    # The token is a BEARER CREDENTIAL — anything holding it can join a node.
+    # ssh consumes it in seconds, so the default costs nothing there. Raise it
+    # only if a bundle has to travel further than that, and treat a long value
+    # as the deliberate decision it is.
+    # joinTokenTTL: 2h
     # Names of Secrets in sites/<this site>/secrets.enc.yaml. The charts never
     # contain credentials; they reference them by name only.
     s3SecretRef: edge-dev-s3
@@ -342,3 +435,38 @@ dataPolicy:
     # rejected at render rather than silently ignored.
     # kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi per container.
     podLogFiles: {maxSize: 10Mi, maxFiles: 5}
+
+# =============================================================================
+# INGRESS -- the one block that MUST differ from on-prem
+# =============================================================================
+# This is a SUBCHART's values. Helm cannot template a subchart from the parent,
+# so it cannot be defaulted for you by topology: it has to be written here, and
+# charts/mgmt refuses to render `topology: cloud` without it.
+#
+# Left at the on-prem defaults the deployment looks entirely healthy and answers
+# nothing -- the controller reports 1/1 Running, no LoadBalancer is requested,
+# no external address exists, and every fleet hostname is unreachable.
+ingress-nginx:
+  controller:
+    # false, not true: on cloud the entry point is the load balancer's address,
+    # not this host's :443.
+    hostNetwork: false
+    # ClusterFirst, not ClusterFirstWithHostNet. The latter without hostNetwork
+    # hands the pod the HOST's resolv.conf and loses every in-cluster upstream
+    # name, so SeaweedFS and Loki stop resolving from inside the controller.
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+      # PIN A PRE-ALLOCATED ADDRESS. Otherwise: domain.internal above has to
+      # name the address, and on a nip.io name it EMBEDS it -- but the load
+      # balancer is created by this install. Allocate first, build the name
+      # from it:
+      #
+      #   openstack floating ip create <external-network>
+      #
+      # loadBalancerIP: "203.0.113.50"
+      #
+      # Not every provider honours loadBalancerIP (AWS assigns a hostname, not
+      # an address). Where it is not honoured: install once, read the address
+      # off the Service, set domain.internal, re-run.
+      loadBalancerIP: ""

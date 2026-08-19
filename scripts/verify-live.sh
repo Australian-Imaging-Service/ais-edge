@@ -41,6 +41,11 @@ VALUES="${REPO_DIR}/sites/${SITE}/values.yaml"
 [ -f "$VALUES" ] || { echo "no such site: sites/${SITE}/values.yaml" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 required" >&2; exit 2; }
 
+TOPOLOGY="$(python3 -c "
+import yaml,sys
+v=yaml.safe_load(open('$VALUES')) or {}
+print(v.get('topology','onprem'))" 2>/dev/null || echo onprem)"
+
 KUBECTL="${KUBECTL:-sudo k0s kubectl}"
 NS_MGMT="${NS_MGMT:-ais-mgmt}"
 NS_UPLOAD="${NS_UPLOAD:-xnat-upload}"
@@ -143,6 +148,52 @@ for c in d.get("items", []):
 [ -z "$nr" ] && ok "all Certificates Ready" \
   || bad "Certificates not Ready: $(echo "$nr" | paste -sd', ')" \
          "a Pending Certificate does not error — the Ingress serves nginx's self-signed default"
+
+# -----------------------------------------------------------------------------
+# CLOUD ONLY: did the load balancer actually get an address?
+# -----------------------------------------------------------------------------
+# A LoadBalancer Service with no cloud controller to satisfy it sits at
+# <pending> forever. Nothing errors: the controller pod is Running, the Service
+# exists, and every fleet hostname simply resolves to nothing. The first symptom
+# is an edge that will not join, half an hour later, at the other end of the
+# link. On-prem there is no LoadBalancer to wait for, so this whole section is
+# skipped rather than reported.
+if [ "$TOPOLOGY" = "cloud" ]; then
+    head_ "cloud load balancer"
+    lb_svc="$($KUBECTL get svc -n "$NS_MGMT" -l app.kubernetes.io/name=ingress-nginx \
+              -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].metadata.name}' 2>/dev/null || true)"
+    if [ -z "$lb_svc" ]; then
+        bad "no LoadBalancer Service for ingress-nginx in ${NS_MGMT}" \
+            "topology=cloud but the ingress is not asking the cloud for an address. Check ingress-nginx.controller.service.type in sites/${SITE}/values.yaml"
+    else
+        lb_addr="$($KUBECTL get svc -n "$NS_MGMT" "$lb_svc" \
+                   -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+        if [ -z "$lb_addr" ]; then
+            bad "load balancer ${lb_svc} has no external address (<pending>)" \
+                "the cloud controller has not assigned one. Nothing below can work: every fleet hostname points at an address that does not exist yet. On OpenStack check the Octavia quota and that the floating IP is free"
+        else
+            ok "load balancer ${lb_svc} has address ${lb_addr}"
+            # The names edges resolve MUST land on that address, or the join
+            # reaches something else entirely.
+            internal="$(python3 -c "
+import yaml
+v=yaml.safe_load(open('$VALUES')) or {}
+print((v.get('domain') or {}).get('internal',''))" 2>/dev/null || true)"
+            if [ -n "$internal" ]; then
+                resolved="$(getent hosts "seaweedfs.${internal}" 2>/dev/null | awk '{print $1}' | head -1)"
+                if [ -z "$resolved" ]; then
+                    bad "seaweedfs.${internal} does not resolve" \
+                        "topology=cloud resolves by REAL DNS — no /etc/hosts is written. Point the name at ${lb_addr}, or use a nip.io name built from it"
+                elif [ "$resolved" != "$lb_addr" ]; then
+                    bad "seaweedfs.${internal} resolves to ${resolved}, not the load balancer ${lb_addr}" \
+                        "edges would connect somewhere that is not this deployment"
+                else
+                    ok "domain.internal resolves to the load balancer (${lb_addr})"
+                fi
+            fi
+        fi
+    fi
+fi
 
 head_ "object storage"
 # SELECTED BY PORT, not by label: `app=seaweedfs` matches only the -metrics
@@ -261,6 +312,26 @@ except Exception:
     [ -z "$miss" ] && ok "edge ${EDGE}: all 3 cert-sync Secrets present" \
         || bad "edge ${EDGE}: missing cert-sync Secret(s):${miss}" \
                "run: $KUBECTL -n ${NS_MGMT} create job seed-${EDGE} --from=cronjob/mgmt-cert-sync-${EDGE}"
+
+    # S3 upload mTLS is optional and ships off, so this is asserted only when
+    # the management side is actually issuing the certificate — the presence of
+    # <edge>-s3-client is what says clientCerts.issue is on.
+    #
+    # THIS IS THE ONE STEP OF THAT ROLLOUT NO TEMPLATE CAN CHECK. The chart can
+    # see that something is configured to deliver the certificate; only a live
+    # cluster can say it arrived. Flipping clientCerts.require before it has
+    # breaks every upload from this site with an error that names nothing:
+    # measured, the handshake succeeds, nginx answers HTTP 400 with an HTML
+    # body, and rclone reports that as an S3 XML parse failure — the uploader
+    # logs endpoint_failed and it reads as an unreachable endpoint.
+    if $KUBECTL -n "$NS_MGMT" get secret "${EDGE}-s3-client" >/dev/null 2>&1; then
+        if $EK -n "$ENS" get secret s3-client-tls >/dev/null 2>&1; then
+            ok "edge ${EDGE}: S3 upload client certificate delivered (s3-client-tls)"
+        else
+            bad "edge ${EDGE}: ${EDGE}-s3-client is issued on the management cluster but s3-client-tls has NOT reached the edge" \
+                "Do NOT set seaweedfs.ingress.clientCerts.require until this passes — every upload would fail as an HTTP 400 that rclone reports as an S3 XML parse error, naming neither certificates nor auth. Force a sync: $KUBECTL -n ${NS_MGMT} create job seed-${EDGE} --from=cronjob/mgmt-cert-sync-${EDGE}"
+        fi
+    fi
 done
 
 head_ "periodic jobs"

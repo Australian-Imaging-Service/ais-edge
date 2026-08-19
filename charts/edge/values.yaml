@@ -547,28 +547,98 @@ upload:
     # management chart derived for this site.
     bucket: ""   # e.g. ingest-edge-dev
     prefix: staged
-    region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
+    region: us-east-1                  # SeaweedFS ignores it; SigV4 signs over it
 
-    # No addressing-style key here on purpose: AWS_ENDPOINT_URL alone makes
-    # botocore resolve with ForcePathStyle=True — measured against SeaweedFS
-    # 3.99, the request URL comes out path-style, which the single-SAN cert
-    # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not a botocore env
-    # var, so a values entry for it would be silently ignored.
+    # No addressing-style key here on purpose: rclone's s3 backend defaults
+    # force_path_style=true and keeps it true for provider=SeaweedFS —
+    # measured, the request URL comes out path-style
+    # (https://<endpoint>/<bucket>?…), which the single-SAN cert needs. A
+    # values entry for it could only turn that off.
 
     existingSecret: s3-edge-credentials  # keys: access-key, secret-key
 
     # PEM holding the CA that signed the SeaweedFS server certificate.
-    # CAUTION: an EMPTY AWS_CA_BUNDLE does not fall back to the system trust
-    # store — it disables certificate verification entirely, silently
-    # (measured: a request to a hostname the cert does not cover succeeded
-    # anyway). The chart refuses to render an https endpoint with no CA
-    # configured; never let this render empty.
+    # CAUTION, and it changed with the client: an EMPTY AWS_CA_BUNDLE did not
+    # fall back to the system trust store — it disabled certificate
+    # verification entirely, silently (measured: a request to a hostname the
+    # cert does not cover succeeded anyway). RCLONE_CA_CERT="" is NOT that
+    # trap — measured on rclone 1.75.0, empty behaves as unset and still
+    # verifies against the system store. Do not let it render empty regardless:
+    # against a privately-signed SeaweedFS that is a failed handshake on every
+    # transfer instead of a silent downgrade. The chart still refuses to render
+    # an https endpoint with no CA configured.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
+
+    # ---- mTLS: THIS SITE'S OWN IDENTITY ON THE UPLOAD PATH -----------------
+    # INDEPENDENT OF caBundleSecret ABOVE, and the two are easy to confuse:
+    #   caBundleSecret    who WE trust — the CA that signed the SeaweedFS
+    #                     server certificate. May legitimately be empty on
+    #                     cloud, where that certificate can come from a public
+    #                     CA already in the system trust store.
+    #   clientCertSecret  who WE ARE — a certificate signed by the fleet's own
+    #                     CA and delivered by the management cert-sync CronJob.
+    #                     Never comes from a public CA, on any topology.
+    # Setting one has no bearing on the other.
+    #
+    # Mirrors observability.loki.push.requireAuth on the management side. Ships
+    # OFF: the certificate is delivered by cert-sync, the mount below is NOT
+    # optional (a silent start with no identity is the failure this prevents),
+    # and a site that turns this on before its Secret has landed gets an
+    # uploader stuck in CreateContainerConfigError.
+    # CAUTION: the management half is a separate flag —
+    # seaweedfs.ingress.clientCerts.require. Turn THIS on first; presenting a
+    # certificate nobody asks for is harmless, being asked for one you do not
+    # have is not — measured, that is an HTTP 400 whose body rclone reports as
+    # an S3 XML parse error, so the logs name neither certificates nor auth.
+    requireClientCert: false
+    # kubernetes.io/tls — keys tls.crt / tls.key, fixed by Kubernetes. Must
+    # match the certSync destination in the MANAGEMENT site values.
+    clientCertSecret: s3-client-tls
+
+    # THE S3 CLIENT. rclone, replacing amazon/aws-cli:2.31.19.
+    #
+    # PINNED to an exact release, like every other image here. `latest` on this
+    # one is worse than most: rclone ships roughly monthly and its S3 backend
+    # defaults (force_path_style, checksum headers, per-provider quirks) are
+    # the part this deployment depends on.
+    # 1.75.0 is the current stable release; verified end to end against the
+    # SeaweedFS 4.34 this fleet pins.
+    #
+    # CAUTION: this image is Alpine, and the uploader loop does NOT run in it —
+    # see shell.image below before changing either.
     image:
-      repository: amazon/aws-cli
-      tag: "2.31.19"
+      repository: rclone/rclone
+      tag: "1.75.0"
       pullPolicy: IfNotPresent
+
+    # THE USERLAND THE LOOP RUNS IN — not an S3 client, despite the name of the
+    # repository. files/s3-uploader.sh needs bash, GNU findutils (`find -L
+    # -printf`, `find -xtype l`) and GNU coreutils (`du -sb`, `md5sum`).
+    # rclone/rclone is Alpine and has none of them: MEASURED there, the pod
+    # cannot even start (no /bin/bash), and if it could, fingerprint() would
+    # return the md5 of an empty string for every session and the
+    # dangling-symlink guard would never fire — both silent. The busybox
+    # userland is what the migration off `minio/mc` was partly about
+    # (docs/components/mc.md, "A full userland"); this is not a wall worth
+    # walking into a second time.
+    #
+    # So upload.yaml runs the loop here and stages the rclone binary in from
+    # image above with an initContainer. rclone is a static Go binary, so it
+    # runs in this glibc image unchanged.
+    #
+    # amazon/aws-cli:2.31.19 specifically, and NOT because anything still calls
+    # `aws`: it is the image this loop already ran in, so the userland the
+    # script is proven against does not change at all, and it is already
+    # present on every edge node and already pinned twice elsewhere in this
+    # repo — no new pull on upgrade, which matters on constrained sites. Any
+    # bash + GNU-coreutils image would do; swapping it is a userland change and
+    # deserves the same measurement the note above records.
+    shell:
+      image:
+        repository: amazon/aws-cli
+        tag: "2.31.19"
+        pullPolicy: IfNotPresent
     interval: 60
     # Don't touch a session until it has been quiet this long — assign may
     # still be writing into it.

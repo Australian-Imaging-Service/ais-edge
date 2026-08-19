@@ -302,6 +302,46 @@ seaweedfs:
     proxyBodySize: 50g        # mc multipart / large session uploads
     tlsSecretName: seaweedfs-tls
 
+    # mTLS on the upload path, the same shape as
+    # observability.loki.push.requireAuth — one client certificate per edge,
+    # verified by the Ingress. It ADDS to the SigV4 key pair, it does not
+    # replace it: the key pair is still what scopes a site to its own bucket.
+    #
+    # TWO SWITCHES, FLIPPED AT DIFFERENT TIMES **ON A RUNNING SITE**:
+    #   1. issue: true         + the certSync entry below   -> helm upgrade
+    #   2. kubectl -n <edge ns> get secret s3-client-tls     on EVERY site
+    #   3. upload.s3.requireClientCert: true in each EDGE site file
+    #   4. require: true                                     -> helm upgrade
+    #
+    # ON A FRESH INSTALL YOU DO NOT NEED THIS SEQUENCE. Set all of them before
+    # the first ./install.sh and the site comes up correct in one pass.
+    # MEASURED, on a from-scratch cloud install with every flag on from step
+    # zero: install exit 0, uploader client_cert=on and endpoint_ready, a study
+    # carried edge -> S3 -> XNAT, no intervention at any point.
+    #
+    # The reason is structural rather than luck. The s3-uploader MOUNTS
+    # ca-bundle and s3-client-tls as volumes, so the kubelet will not start the
+    # pod until both Secrets exist — measured at 2m47s in Pending then
+    # PodInitializing while cert-sync created them, after which it started with
+    # the certificate already in place. There is no window in which it can meet
+    # a cert-demanding endpoint without a certificate, which is a stronger
+    # guarantee than a retry loop would give.
+    #
+    # The staged order matters when the pods are ALREADY RUNNING and connected
+    # — that is upgrade, not install.
+    #
+    # CAUTION: flipping `require` before step 2 has answered breaks every
+    # upload with an error that names nothing. MEASURED: the TLS handshake
+    # still succeeds (TLS 1.3 sends the client cert last), nginx answers HTTP
+    # 400 with an HTML body, and rclone reports it as an S3 XML parse failure
+    # — so it reads as a dead endpoint, not an auth problem. The chart refuses
+    # require without issue, and refuses issue without something delivering the
+    # certificates, but it cannot see whether a Secret actually landed;
+    # scripts/verify-live.sh checks that against a live cluster.
+    clientCerts:
+      issue: false            # mint the anchor + one <edge>-s3-client per edge
+      require: false          # make the Ingress demand one
+
   resources:
     requests: {memory: 512Mi, cpu: 200m}
     limits:   {memory: 4Gi,   cpu: "2"}
@@ -550,10 +590,26 @@ ingress-nginx:
       limits:   {cpu: 1,    memory: 512Mi}
 
 ingressNginx:
+  # BOTH KEYS HERE ARE READ BY THIS CHART. Two more used to sit alongside them
+  # and were read by nothing:
+  #
+  #   loadBalancerIP   the key you reach for to pin a pre-allocated floating IP
+  #                    on cloud. It did nothing. A parent chart cannot push a
+  #                    value into a subchart, so the address has to be set on
+  #                    the subchart itself, in your SITE file:
+  #                        ingress-nginx:
+  #                          controller:
+  #                            service:
+  #                              loadBalancerIP: "203.0.113.50"
+  #   proxyBodySize    likewise. The real setting is the subchart's own
+  #                    controller.config.proxy-body-size, set to 50g above.
+  #
+  # Both were deleted rather than wired, because a key that reads as configured
+  # and is not is worse than no key: on cloud the first one would have been set
+  # to a floating IP, ignored, and the load balancer would have come up on a
+  # different address than domain.internal names — with nothing to say so.
   enabled: true
   sslPassthrough: true   # required — k0smotron traffic must not terminate here
-  loadBalancerIP: ""
-  proxyBodySize: 50g
 
 
 # =============================================================================

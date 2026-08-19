@@ -1,0 +1,86 @@
+clusterLabel: cloud-edge
+namespace: xnat-ingest
+topology: cloud
+storage:
+  storageClass:
+    create: true
+    name: hostpath-pipeline
+  pipeline:
+    hostPath: /data/xnat-ingest
+    capacity: 500Gi
+  facilityBackup:
+    enabled: true
+    hostPath: /data/facility-backup
+    capacity: 500Gi
+orthanc:
+  aet: AISEDGE
+  auth:
+    enabled: false
+  deid:
+    enabled: true
+    policyReviewed: true
+    existingSaltSecret: orthanc-deid-salt
+    aetMap:
+      AISEDGE:
+        project: test_project
+      STORESCU:
+        project: test_project
+      DCMTK_001:
+        project: test_project
+      AISTEST:
+        project: test_project
+      UNKNOWN:
+        project: test_project
+    profile:
+      DeidMode: modify
+      Force: true
+      RemovePrivateTags: false
+      Keep:
+      - StudyInstanceUID
+      - SeriesInstanceUID
+      - SOPInstanceUID
+      - FrameOfReferenceUID
+      Replace:
+        PatientIdentityRemoved: 'YES'
+        DeidentificationMethod: AIS-Edge research-default v1; Retain UIDs Option
+        PatientName: ANONYMOUS
+        PatientID: ${ProjectCode}-${SubjectHash}
+        PatientBirthDate: ${BirthYearOnly}0101
+        AccessionNumber: ${SessionHash}
+        StudyID: ${SessionHash}
+        ClinicalTrialProtocolID: ${ProjectCode}
+        ClinicalTrialSubjectID: ${SubjectHash}
+        ClinicalTrialTimePointID: ${SessionHash}
+        InstitutionName: AIS
+        InstitutionAddress: ''
+        ReferringPhysicianName: ''
+        PerformingPhysicianName: ''
+        OperatorsName: ''
+        PatientBirthName: ''
+        PatientAddress: ''
+        PatientTelephoneNumbers: ''
+        PatientComments: ''
+        StudyDescription: ''
+ingest:
+  orthancGroup:
+    enabled: true
+    interval: 60
+    toProcessLabel: xnat-ingest-ready
+    processedLabel: xnat-ingest-processed
+  assign:
+    interval: 60
+upload:
+  mode: s3
+  s3:
+    existingSecret: s3-edge-credentials
+    caBundleSecret: ca-bundle
+    caBundleKey: ca.crt
+    interval: 60
+    requireClientCert: true
+    clientCertSecret: s3-client-tls
+observability:
+  enabled: true
+  loki:
+    clientCertSecret: loki-push-client-tls
+    caBundleSecret: ca-bundle
+    caBundleKey: ca.crt

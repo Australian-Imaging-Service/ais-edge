@@ -1,4 +1,36 @@
 # =============================================================================
+# EXAMPLE CLOUD SITE — tier-2 management plane on a cloud provider
+# =============================================================================
+# sites/example-mgmt with the cloud differences applied and explained.
+#
+# WHAT "CLOUD" ACTUALLY CHANGES
+#   * Names resolve through REAL DNS. The installer stops writing /etc/hosts on
+#     the management node and on every edge, and certificates carry hostnames
+#     only, with no IP SANs.
+#   * The ingress asks the cloud for a LOAD BALANCER instead of binding the
+#     management host's own :443.
+#
+# WHAT IT DOES NOT CHANGE
+#   * SNI + ssl-passthrough routing. One address serves every fleet hostname.
+#   * The direction of travel: edges connect OUT, nothing connects in.
+#   * The imaging path: edge -> S3 staging on this cluster -> the management
+#     xnat-upload -> XNAT. The edge never talks to XNAT and holds no XNAT
+#     credential.
+#
+# THE LOAD BALANCER MUST BE LAYER 4.
+# The k0s API and konnectivity are mTLS end to end: the worker proves itself
+# with a client certificate inside the TLS handshake, and nothing survives being
+# decrypted and re-encrypted. An L7 balancer exists in order to read HTTP, which
+# it cannot do without terminating TLS, so AWS ALB, Azure Application Gateway
+# and GCP HTTPS LB all break the join -- and break it asymmetrically: this side
+# reports healthy and only the edge fails, as an x509 error in a journal on a
+# machine in a hospital.
+#
+#   works:  AWS NLB / Azure Standard LB / GCP External TCP LB / Octavia (TCP)
+#   breaks: anything that routes on HTTP paths or headers
+# =============================================================================
+
+# =============================================================================
 # EXAMPLE MANAGEMENT SITE — non-secret configuration
 # =============================================================================
 # This is the config for THE MANAGEMENT NODE: the one machine that runs
@@ -31,26 +63,61 @@
 
 # Short name for this deployment. Becomes a label on every log line and metric,
 # and appears in alert routing.
-clusterLabel: mgmt
+clusterLabel: cloud-test
 
 # fresh     install.sh installs k0s, kubectl, helm and local-path here from
 #           nothing. This is what you want on a new machine.
 # existing  k0s is already running on this node; install.sh verifies instead of
 #           building. Only for adopting a cluster that predates these charts.
+# cloud, not the onprem default. This is what stops the installer writing
+# /etc/hosts on this node and on every edge, and drops IP SANs from the
+# certificates -- on cloud the names resolve for real.
+topology: cloud
+
 installMode: fresh
+
+storage:
+  # Where k0s state and every PVC live on this node. Read by install.sh only.
+  #
+  # ""       everything on the root filesystem (k0s default /var/lib/k0s,
+  #          PVCs in /opt/local-path-provisioner). Right for a single-disk host.
+  # /data    a mounted data volume. Use this whenever the root disk is small —
+  #          the container image store alone does not fit in a 30G root.
+  #
+  # Applied as native settings: `k0s install --data-dir` and the
+  # local-path-provisioner nodePathMap. NOT bind mounts — an earlier deployment
+  # used fstab binds, and deleting /data left them dangling so the node failed
+  # its next boot into an emergency shell. See docs/storage.md.
+  #
+  # INSTALL-TIME ONLY. k0s bakes the data-dir into its systemd unit and PV
+  # objects record their host path, so changing this after install strands the
+  # existing state where it is. Set it before the first install.
+  dataRoot: ""
 
 domain:
   # Internal DNS suffix. The edges resolve the hostnames below through
   # /etc/hosts entries that install.sh writes, not through real DNS, so this
   # name does NOT have to be registered anywhere.
-  internal: aisedge.local
+  internal: cloud-test.203-101-xxx-xxx.nip.io
   # The address every edge node reaches this management node on.
-  mgmtNodeIP: "203.101.224.240"
+  mgmtNodeIP: "203.101.xxx.xxx"
 
 hostnames:
-  seaweedfs: seaweedfs.aisedge.local
-  grafana: grafana.aisedge.local
-  loki: loki.aisedge.local
+  # LEAVE THESE EMPTY ON CLOUD. Empty means "derive from domain.internal above"
+  # (edge.seaweedfsHost / edge.lokiHost / edge.grafanaHost in
+  # charts/edge/templates/_helpers.tpl), so the names follow the domain and can
+  # never drift from it.
+  #
+  # Setting them explicitly still wins, and that is the trap: an operator
+  # changes domain.internal -- which they MUST on cloud, .local is an on-prem
+  # convention -- and leaves these behind. Nothing warns. The edge uploader then
+  # dials the stale name for ever:
+  #   dial tcp: lookup seaweedfs.aisedge.local: no such host
+  # and retries until it gives up, while the management side simply sees an
+  # absence it is not watching for. Measured on the first cloud install.
+  seaweedfs: ""
+  grafana: ""
+  loki: ""
 # The child-cluster API and konnectivity hostnames are NOT here, and the chart
 # REFUSES to render if you add them. They used to live at this level, which gave
 # every edge the same two names — so the second site's Ingress claimed a
@@ -113,19 +180,19 @@ seaweedfs:
     # as a dead endpoint, not an auth problem. `make verify-live` checks step 2
     # for you, per site.
     clientCerts:
-      issue: false
-      require: false
+      issue: true 
+      require: true 
 
 observability:
   alerting:
-    emailTo: akshitbeniwal26@gmail.com
-    emailFrom: backupsync7@gmail.com
-    smtpHost: smtp.gmail.com
+    emailTo: "alerts@your-org.example"
+    emailFrom: "ais-edge@your-org.example"
+    smtpHost: "smtp.your-provider.example"
     smtpPort: 587
     # For Gmail this must be an App Password. A 2FA account rejects the account
     # password with 535 BadCredentials, and the only symptom is alerts that
     # never arrive.
-    smtpUsername: backupsync7@gmail.com
+    smtpUsername: "ais-edge@your-org.example"
 
 # -----------------------------------------------------------------------------
 # Edge sites
@@ -142,24 +209,12 @@ observability:
 # Measured cost: ~231Mi per uploader. On a 16Gi management node that is a
 # practical ceiling around 15 sites.
 edges:
-  - name: edge-dev
-    nodeIP: "203.101.230.171"
-    # install.sh joins the worker over SSH — there is no API server on the edge
-    # until it has — so the connection details belong with the edge.
+  - name: cloud-edge
+    nodeIP: 203.101.xxx.xxx
+    s3SecretRef: cloud-edge-s3
+    exposure: sni
     sshUser: ubuntu
     sshKey: ~/.ssh/id_ed25519
-    # Names of Secrets in sites/<this site>/secrets.enc.yaml. The charts never
-    # contain credentials; they reference them by name only.
-    s3SecretRef: edge-dev-s3
-    uploadSecretRef: seaweedfs-upload
-    # sni      ClusterIP behind the :443 ssl-passthrough Ingress. NO cluster-wide
-    #          port allocation, so sites cannot collide and adding one needs no
-    #          port assignment at all. Use this.
-    # nodePort Reserves a port on every node, fleet-wide. Only for adopting a
-    #          site already running that way.
-    exposure: sni
-
-# Where the CA bundle and each edge's Loki push credential are copied from, into
 # every edge cluster, by the cert-sync CronJob.
 certSync:
   secrets:
@@ -235,17 +290,17 @@ certSync:
     # `kubectl -n xnat-ingest get secret s3-client-tls` on EVERY edge, set
     # upload.s3.requireClientCert in each edge site file, and only then set
     # clientCerts.require: true here.
-    # - source:
-    #     namespace: ais-mgmt
-    #     name: "<edge>-s3-client"
-    #     keys:
-    #       tls.crt: tls.crt
-    #       tls.key: tls.key
-    #   destination:
-    #     namespace: xnat-ingest
-    #     # Must equal upload.s3.clientCertSecret in the EDGE site values.
-    #     name: s3-client-tls
-    #     type: kubernetes.io/tls
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys:
+          tls.crt: tls.crt
+          tls.key: tls.key
+      destination:
+        namespace: xnat-ingest
+        # Must equal upload.s3.clientCertSecret in the EDGE site values.
+        name: s3-client-tls
+        type: kubernetes.io/tls
 
 # =============================================================================
 # Data policy — WRITTEN ONCE, HERE, FOR THE WHOLE SITE
@@ -342,3 +397,47 @@ dataPolicy:
     # rejected at render rather than silently ignored.
     # kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi per container.
     podLogFiles: {maxSize: 10Mi, maxFiles: 5}
+
+# =============================================================================
+# INGRESS -- the one block that MUST differ from on-prem
+# =============================================================================
+# This is a SUBCHART's values. Helm cannot template a subchart from the parent,
+# so it cannot be defaulted for you by topology: it has to be written here, and
+# charts/mgmt refuses to render `topology: cloud` without it.
+#
+# Left at the on-prem defaults the deployment looks entirely healthy and answers
+# nothing -- the controller reports 1/1 Running, no LoadBalancer is requested,
+# no external address exists, and every fleet hostname is unreachable.
+ingress-nginx:
+  controller:
+    # false, not true: on cloud the entry point is the load balancer's address,
+    # not this host's :443.
+    hostNetwork: false
+    # ClusterFirst, not ClusterFirstWithHostNet. The latter without hostNetwork
+    # hands the pod the HOST's resolv.conf and loses every in-cluster upstream
+    # name, so SeaweedFS and Loki stop resolving from inside the controller.
+    dnsPolicy: ClusterFirst
+    service:
+      # NodePort, NOT LoadBalancer. No cloud controller runs in this cluster --
+      # provisioning the load balancer is the operator's job -- so a LoadBalancer
+      # request would have nothing to answer it and would sit at <pending> for
+      # ever, while the ingress pod reported 1/1 Running.
+      #
+      # The operator's load balancer forwards 443 to this node port, and
+      # domain.internal above names the load balancer's address.
+      #
+      # Nectar QLD additionally rejects pinning a floating IP: the qld network is
+      # both the external network AND where the VMs live, so Neutron has no
+      # router between it and itself and fails the association with
+      # ExternalGatewayForFloatingIPNotFound. Whatever VIP Octavia assigns is
+      # already publicly routable.
+      type: NodePort
+      # PINNED to the ports the operator's load balancer already forwards to.
+      # e.g. a balancer whose TCP listeners forward
+      #   443 -> <mgmt-node>:30925
+      #    80 -> <mgmt-node>:30406
+      # Leaving these unset would let Kubernetes pick a random port each install
+      # and silently break the pool members.
+      nodePorts:
+        http: 30406
+        https: 30925
