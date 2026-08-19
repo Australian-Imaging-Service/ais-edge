@@ -29,6 +29,46 @@ step 1/7 *verify* the cluster you already have (`kubectl get nodes`, plus a
 warning if there is no default StorageClass) instead of installing k0s on it.
 The rest of the install runs unchanged.
 
+## Which ingress shape, and what the pre-flight checks
+
+EKS runs a cloud controller, so `type: LoadBalancer` works out of the box and is the right choice here.
+
+```yaml
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+      loadBalancerIP: "<your Elastic IP>"   # see the note on ELB hostnames below
+```
+
+If you would rather front the cluster with a balancer you build and manage
+yourself, `NodePort` is equally supported and is the DEFAULT for self-managed
+clusters, which have no controller to answer a `LoadBalancer` request:
+
+```yaml
+    service:
+      type: NodePort
+      nodePorts:            # pin them, or Kubernetes picks fresh ports each
+        http: 30080         # install and silently breaks your target group
+        https: 30443
+```
+
+Before doing any work, `install.sh` checks on `topology: cloud`:
+
+* **`domain.internal` resolves.** Edges resolve this name to find the
+  management cluster; if there is no record yet there is no point installing.
+* **it does not resolve to a node itself.** That works until the node is
+  replaced, then every edge loses the cluster.
+* **on the `LoadBalancer` path:** that a cloud controller is running and that
+  no node still carries `node.cloudprovider.kubernetes.io/uninitialized`. On
+  EKS this is satisfied out of the box; the check is there for the
+  self-managed case and costs nothing here.
+
+`SKIP_CLOUD_PREFLIGHT=1` overrides all of them.
+
+
 ## Prerequisites
 
 1. **AWS account + IAM user with**:
