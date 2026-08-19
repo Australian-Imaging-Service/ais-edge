@@ -307,11 +307,28 @@ seaweedfs:
     # verified by the Ingress. It ADDS to the SigV4 key pair, it does not
     # replace it: the key pair is still what scopes a site to its own bucket.
     #
-    # TWO SWITCHES, FLIPPED AT DIFFERENT TIMES. Rollout order:
+    # TWO SWITCHES, FLIPPED AT DIFFERENT TIMES **ON A RUNNING SITE**:
     #   1. issue: true         + the certSync entry below   -> helm upgrade
     #   2. kubectl -n <edge ns> get secret s3-client-tls     on EVERY site
     #   3. upload.s3.requireClientCert: true in each EDGE site file
     #   4. require: true                                     -> helm upgrade
+    #
+    # ON A FRESH INSTALL YOU DO NOT NEED THIS SEQUENCE. Set all of them before
+    # the first ./install.sh and the site comes up correct in one pass.
+    # MEASURED, on a from-scratch cloud install with every flag on from step
+    # zero: install exit 0, uploader client_cert=on and endpoint_ready, a study
+    # carried edge -> S3 -> XNAT, no intervention at any point.
+    #
+    # The reason is structural rather than luck. The s3-uploader MOUNTS
+    # ca-bundle and s3-client-tls as volumes, so the kubelet will not start the
+    # pod until both Secrets exist — measured at 2m47s in Pending then
+    # PodInitializing while cert-sync created them, after which it started with
+    # the certificate already in place. There is no window in which it can meet
+    # a cert-demanding endpoint without a certificate, which is a stronger
+    # guarantee than a retry loop would give.
+    #
+    # The staged order matters when the pods are ALREADY RUNNING and connected
+    # — that is upgrade, not install.
     #
     # CAUTION: flipping `require` before step 2 has answered breaks every
     # upload with an error that names nothing. MEASURED: the TLS handshake
