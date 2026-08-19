@@ -103,9 +103,21 @@ domain:
   mgmtNodeIP: "10.0.0.1"
 
 hostnames:
-  seaweedfs: seaweedfs.aisedge.local
-  grafana: grafana.aisedge.local
-  loki: loki.aisedge.local
+  # LEAVE THESE EMPTY ON CLOUD. Empty means "derive from domain.internal above"
+  # (edge.seaweedfsHost / edge.lokiHost / edge.grafanaHost in
+  # charts/edge/templates/_helpers.tpl), so the names follow the domain and can
+  # never drift from it.
+  #
+  # Setting them explicitly still wins, and that is the trap: an operator
+  # changes domain.internal -- which they MUST on cloud, .local is an on-prem
+  # convention -- and leaves these behind. Nothing warns. The edge uploader then
+  # dials the stale name for ever:
+  #   dial tcp: lookup seaweedfs.aisedge.local: no such host
+  # and retries until it gives up, while the management side simply sees an
+  # absence it is not watching for. Measured on the first cloud install.
+  seaweedfs: ""
+  grafana: ""
+  loki: ""
 # The child-cluster API and konnectivity hostnames are NOT here, and the chart
 # REFUSES to render if you add them. They used to live at this level, which gave
 # every edge the same two names — so the second site's Ingress claimed a
