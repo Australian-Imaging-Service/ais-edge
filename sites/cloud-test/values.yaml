@@ -103,9 +103,21 @@ domain:
   mgmtNodeIP: "203.101.224.240"
 
 hostnames:
-  seaweedfs: seaweedfs.aisedge.local
-  grafana: grafana.aisedge.local
-  loki: loki.aisedge.local
+  # LEAVE THESE EMPTY ON CLOUD. Empty means "derive from domain.internal above"
+  # (edge.seaweedfsHost / edge.lokiHost / edge.grafanaHost in
+  # charts/edge/templates/_helpers.tpl), so the names follow the domain and can
+  # never drift from it.
+  #
+  # Setting them explicitly still wins, and that is the trap: an operator
+  # changes domain.internal -- which they MUST on cloud, .local is an on-prem
+  # convention -- and leaves these behind. Nothing warns. The edge uploader then
+  # dials the stale name for ever:
+  #   dial tcp: lookup seaweedfs.aisedge.local: no such host
+  # and retries until it gives up, while the management side simply sees an
+  # absence it is not watching for. Measured on the first cloud install.
+  seaweedfs: ""
+  grafana: ""
+  loki: ""
 # The child-cluster API and konnectivity hostnames are NOT here, and the chart
 # REFUSES to render if you add them. They used to live at this level, which gave
 # every edge the same two names — so the second site's Ingress claimed a
@@ -168,19 +180,19 @@ seaweedfs:
     # as a dead endpoint, not an auth problem. `make verify-live` checks step 2
     # for you, per site.
     clientCerts:
-      issue: false
-      require: false
+      issue: true 
+      require: true 
 
 observability:
   alerting:
-    emailTo: alerts@example.org
-    emailFrom: ais-edge@example.org
-    smtpHost: smtp.example.org
+    emailTo: "akshitbeniwal26@gmail.com"
+    emailFrom: "backupsync7@gmail.com"
+    smtpHost: "smtp.gmail.com"
     smtpPort: 587
     # For Gmail this must be an App Password. A 2FA account rejects the account
     # password with 535 BadCredentials, and the only symptom is alerts that
     # never arrive.
-    smtpUsername: ais-edge@example.org
+    smtpUsername: "backupsync7@gmail.com"
 
 # -----------------------------------------------------------------------------
 # Edge sites
@@ -278,17 +290,17 @@ certSync:
     # `kubectl -n xnat-ingest get secret s3-client-tls` on EVERY edge, set
     # upload.s3.requireClientCert in each edge site file, and only then set
     # clientCerts.require: true here.
-    # - source:
-    #     namespace: ais-mgmt
-    #     name: "<edge>-s3-client"
-    #     keys:
-    #       tls.crt: tls.crt
-    #       tls.key: tls.key
-    #   destination:
-    #     namespace: xnat-ingest
-    #     # Must equal upload.s3.clientCertSecret in the EDGE site values.
-    #     name: s3-client-tls
-    #     type: kubernetes.io/tls
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys:
+          tls.crt: tls.crt
+          tls.key: tls.key
+      destination:
+        namespace: xnat-ingest
+        # Must equal upload.s3.clientCertSecret in the EDGE site values.
+        name: s3-client-tls
+        type: kubernetes.io/tls
 
 # =============================================================================
 # Data policy — WRITTEN ONCE, HERE, FOR THE WHOLE SITE
