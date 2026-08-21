@@ -33,6 +33,7 @@ set -uo pipefail
 
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
 STATE_DIR="${STATE_DIR:-/data/LOGS/s3-uploader-state}"
+EVENT_DIR="${EVENT_DIR:-${STATE_DIR}/events}"
 INTERVAL="${INTERVAL:-60}"
 SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
 # onUploaded -> remove the local copy after a verified upload.
@@ -44,7 +45,8 @@ DRY_RUN="${DRY_RUN:-false}"
 : "${EDGE_NAME:?EDGE_NAME required}"
 S3_PREFIX="${S3_PREFIX:-staged}"
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$EVENT_DIR"
+upload_event_seq=0
 
 jlog() {
     # $1=event  $2=session  $3=message  $4=extra JSON (leading comma)
@@ -155,9 +157,27 @@ while true; do
         # is gated.
         if aws s3 sync "$session_dir" "s3://${S3_BUCKET}/${S3_PREFIX}/${session_name}/" --only-show-errors; then
             duration=$(( $(date +%s) - start_ts ))
+            if ! mkdir -p "$STATE_DIR" "$EVENT_DIR" ||
+               ! printf '%s\n' "$fp" > "${state_file}.tmp.$$" ||
+               ! mv "${state_file}.tmp.$$" "$state_file"; then
+                rm -f "${state_file}.tmp.$$"
+                jlog upload_state_failed "$session_name" "S3 sync succeeded but completion marker could not be written to ${state_file}; will retry"
+                continue
+            fi
+
+            # One durable event per successful sync attempt (for example DICOM from
+            # Orthanc, then non-DICOM files from the export share)
+            upload_event_seq=$((upload_event_seq + 1))
+            event_file="${EVENT_DIR}/$(date +%s).$$.${upload_event_seq}"
+            if ! printf '%s\n' "$session_name" > "${event_file}.tmp" ||
+               ! mv "${event_file}.tmp" "$event_file"; then
+                rm -f "${event_file}.tmp"
+                rm -f "$state_file"
+                jlog upload_event_failed "$session_name" "S3 sync succeeded but its notification event could not be persisted; will retry"
+                continue
+            fi
             jlog upload_completed "$session_name" "" \
                 ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms},\"duration_s\":${duration}"
-            echo "$fp" > "$state_file"
 
             # dataPolicy.derived.assigned.reclaim. Only ever reached after a
             # zero-exit sync. The bytes also exist in Orthanc storage and the

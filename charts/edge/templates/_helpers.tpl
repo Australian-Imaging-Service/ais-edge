@@ -58,10 +58,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            disables certificate verification entirely and only logs
            "Unverified HTTPS request is being made". A request to a hostname
            the certificate does not cover then succeeds. So an https endpoint
-           with no CA configured must be a hard render error, never a default. */ -}}
+           with no CA configured must be a hard render error, never a default.
+           systemTrust is the one legitimate exception: the endpoint's cert
+           chains to a CA in the image's own store (real AWS S3), and
+           AWS_CA_BUNDLE is then not set at all. */ -}}
     {{- if hasPrefix "https://" (include "edge.s3Endpoint" .) }}
-      {{- if not .Values.upload.s3.caBundleSecret }}
-        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
+      {{- if and (not .Values.upload.s3.caBundleSecret) (not .Values.upload.s3.systemTrust) }}
+        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret; or set upload.s3.systemTrust=true if (and only if) the endpoint's certificate chains to a CA already in the uploader image's trust store, e.g. real AWS S3; or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
       {{- end }}
     {{- end }}
   {{- end }}
@@ -103,13 +106,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* group-orthanc filters on the label the Lua hook applies. With deid
-         off, nothing applies it, and the pipeline stalls with data sitting in
-         Orthanc and no error anywhere — the worst kind of failure. */ -}}
+  {{- /* group-orthanc filters on a label applied by either the de-id hook or
+         the minimal stable-label hook. Without either, data sits forever. */ -}}
   {{- if and .Values.ingest.orthancGroup.enabled (not .Values.orthanc.deid.enabled) }}
-    {{- if .Values.ingest.orthancGroup.toProcessLabel }}
-      {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. Clear toProcessLabel, or enable deid." }}
+    {{- if and .Values.ingest.orthancGroup.toProcessLabel (not .Values.orthanc.applyStableLabel) }}
+      {{- fail "ingest.orthancGroup.toProcessLabel is set but neither orthanc.deid nor orthanc.applyStableLabel is enabled. Nothing applies that label, so group-orthanc would filter out every study." }}
     {{- end }}
+    {{- if and .Values.orthanc.applyStableLabel (not .Values.ingest.orthancGroup.toProcessLabel) }}
+      {{- fail "orthanc.applyStableLabel=true requires ingest.orthancGroup.toProcessLabel." }}
+    {{- end }}
+  {{- end }}
+  {{- if and .Values.orthanc.applyStableLabel .Values.orthanc.deid.enabled }}
+    {{- fail "orthanc.applyStableLabel and orthanc.deid.enabled cannot both be true: both define OnStableStudy." }}
   {{- end }}
 
   {{- /* Reclaiming the operator's only copy. */ -}}
@@ -131,6 +139,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          dropping it is the exact defect this whole block is being cleaned of. */ -}}
   {{- if hasKey .Values.dataPolicy.derived.grouped "minAge" }}
     {{- fail "dataPolicy.derived.grouped.minAge was removed and setting it does nothing. `assign --unlink-source all` deletes each grouped tree at assign time, so a window measured from assign can never elapse; only trees assign FAILED to unlink reach the policy engine, and those are cleaned up immediately. Remove the key. If you want a post-upload recovery window, dataPolicy.derived.assigned.minAge is the one that works." }}
+  {{- end }}
+
+  {{- /* An export-claim glob that does not live under the export mount means
+         group-fs watches an empty directory forever while the operator's
+         files sit unread on the share — no error anywhere. */ -}}
+  {{- if and .Values.ingest.fileDrop.enabled .Values.ingest.fileDrop.exportClaim }}
+    {{- if not (hasPrefix (trimSuffix "/" .Values.ingest.fileDrop.exportMountPath) .Values.ingest.fileDrop.inputGlob) }}
+      {{- fail (printf "ingest.fileDrop.exportClaim is set, so inputGlob (%s) must point under exportMountPath (%s) — otherwise group-fs watches an empty directory forever while the export share sits unread." .Values.ingest.fileDrop.inputGlob .Values.ingest.fileDrop.exportMountPath) }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* A watchdog with no webhook Secret named would render a Pod that
+         crash-loops on a missing env var — fail at template time instead. */ -}}
+  {{- if and .Values.watchdog.enabled (not .Values.watchdog.existingSecret) }}
+    {{- fail "watchdog.enabled=true requires watchdog.existingSecret — the Secret (key: url) holding the Discord webhook URL. The URL is a credential and is never set in values." }}
   {{- end }}
 
   {{- if not .Values.clusterLabel }}
@@ -203,6 +226,40 @@ affinity:
 {{- define "edge.pipelineVolumeMount" -}}
 - name: pipeline
   mountPath: /data
+{{- end }}
+
+{{/* The optional export share (ingest.fileDrop.exportClaim): an EXISTING PVC
+     (e.g. an NFS export written by an instrument workstation) mounted
+     READ-ONLY at exportMountPath. Renders to nothing when unset. Mounted in
+     group-fs (reads it), both uploaders and the data-policy engine (assigned
+     sessions may contain symlinks into it when copyMode is symlink_or_copy —
+     a consumer without the mount silently sees every file as a dangling
+     link). */}}
+{{- define "edge.exportVolume" -}}
+{{- if and .Values.ingest.fileDrop.enabled .Values.ingest.fileDrop.exportClaim }}
+- name: export
+  persistentVolumeClaim:
+    claimName: {{ .Values.ingest.fileDrop.exportClaim }}
+    readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "edge.exportVolumeMount" -}}
+{{- if and .Values.ingest.fileDrop.enabled .Values.ingest.fileDrop.exportClaim }}
+- name: export
+  mountPath: {{ .Values.ingest.fileDrop.exportMountPath }}
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{/* Outbound proxy environment, rendered verbatim from .Values.proxy.
+     Injected ONLY into pods that dial out of the cluster (the uploaders);
+     in-cluster pods deliberately get nothing — see values.yaml `proxy`. */}}
+{{- define "edge.proxyEnv" -}}
+{{- range $k, $v := .Values.proxy }}
+- name: {{ $k }}
+  value: {{ $v | quote }}
+{{- end }}
 {{- end }}
 
 {{/* Structured logging. The alert rules and dashboards parse these fields

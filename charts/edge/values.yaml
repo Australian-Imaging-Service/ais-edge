@@ -364,6 +364,11 @@ orthanc:
   # label is never applied, group-orthanc filters everything out, and the
   # pipeline stalls with data sitting in Orthanc and no error anywhere.
   stableAge: 30
+  # At non-deidentifying sites, install a minimal OnStableStudy hook that
+  # applies ingest.orthancGroup.toProcessLabel after stableAge. This is the
+  # reliable settle gate: group-orthanc accepts --wait-period but currently
+  # does not pass it through to the Orthanc grouping API.
+  applyStableLabel: false
 
   # hostPort  — bind 4242 on the node IP. Standard DICOM port; modalities are
   #             painful to repoint, so this is the default. Pins the pod to
@@ -410,6 +415,12 @@ orthanc:
   # original. Leave empty whenever deid + facilityBackup are on.
   ingestTranscoding: ""
   dicomScuTimeout: 60
+
+  # Extra DICOM tags for Orthanc to INDEX, per level (Patient/Study/Series/
+  # Instance).
+  extraMainDicomTags: {}
+  #  Study:
+  #    - PatientComments
 
   plugins:
     - /usr/local/share/orthanc/plugins/libOrthancExplorer2.so
@@ -472,7 +483,7 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.12.3"
+    tag: "0.13.0"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -502,6 +513,15 @@ ingest:
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
 
+    # Optional EXISTING PVC holding the drop directory (e.g. an NFS export
+    # written by an instrument workstation), mounted READ-ONLY at
+    # exportMountPath. 
+    # Empty = the drop dir lives on the pipeline volume (default layout).
+    exportClaim: ""
+    exportMountPath: /data/export
+
+    perStudyWalk: false
+
   # Derive project/subject/session from the DICOM tags the Lua hook writes.
   # routing.json's AETMap is the single source of truth for project; there is
   # no hardcoded project ID anywhere.
@@ -512,6 +532,7 @@ ingest:
       project: ClinicalTrialProtocolID
       subject: ClinicalTrialSubjectID
       session: ClinicalTrialTimePointID
+      scan: ""
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.
@@ -565,6 +586,10 @@ upload:
     # configured; never let this render empty.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
+    # Set true ONLY when the endpoint's certificate chains to a CA already in
+    # the image's own trust store — i.e. real AWS S3, not SeaweedFS behind a
+    # private CA.
+    systemTrust: false
     image:
       repository: amazon/aws-cli
       tag: "2.31.19"
@@ -620,6 +645,33 @@ samba:
 
 
 # =============================================================================
+# 7b. watchdog — standalone alerting via a Discord webhook
+# =============================================================================
+watchdog:
+  enabled: false
+  schedule: "*/10 * * * *"
+  # Secret holding the Discord webhook URL under key `url`. 
+  #   kubectl -n <ns> create secret generic discord-webhook \
+  #     --from-literal=url='https://discord.com/api/webhooks/...'
+  existingSecret: discord-webhook
+  heartbeatHourUtc: ""
+  thresholds:
+    diskPercent: 85
+    # A session quiet this long with no upload marker means the uploader is
+    # not getting it out (endpoint, credentials, proxy, dangling symlinks).
+    pendingHours: 6
+    # A grouped tree older than this means assign is stalled or crashed.
+    groupedStuckHours: 6
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1"
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 5m, memory: 16Mi}
+    limits:   {cpu: 100m, memory: 64Mi}
+
+
+# =============================================================================
 # 7. observability — ship logs to the management cluster
 # =============================================================================
 # Off for standalone sites. On for tier-2, where the mgmt cluster runs Loki,
@@ -663,6 +715,8 @@ hostAliases:
   enabled: true
   mgmtNodeIP: ""
   hostnames: []
+
+proxy: {}
 
 nodeSelector: {}
 tolerations: []

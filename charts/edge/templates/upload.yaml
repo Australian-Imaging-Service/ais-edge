@@ -66,6 +66,8 @@ spec:
           # The image's entrypoint is `aws`; override it to run our loop.
           command: ["/bin/bash", "/scripts/s3-uploader.sh"]
           env:
+            {{- /* Site egress proxy, if any — this pod dials OUT to S3. */}}
+            {{- include "edge.proxyEnv" . | nindent 12 }}
             - name: EDGE_NAME
               value: {{ .Values.clusterLabel | quote }}
             - name: S3_BUCKET
@@ -76,6 +78,8 @@ spec:
               value: /data/assigned
             - name: STATE_DIR
               value: {{ include "edge.uploaderStateDir" . | quote }}
+            - name: EVENT_DIR
+              value: "{{ include "edge.uploaderStateDir" . }}/events"
             - name: INTERVAL
               value: {{ .Values.upload.s3.interval | quote }}
             - name: SETTLE_MINUTES
@@ -128,6 +132,10 @@ spec:
             {{- toYaml .Values.upload.s3.resources | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- /* Assigned fs-sessions may be symlinks into the export share;
+                   without this mount every one of them reads as a dangling
+                   link and is silently skipped. */}}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
             - name: scripts
               mountPath: /scripts
               readOnly: true
@@ -138,6 +146,7 @@ spec:
             {{- end }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
         - name: scripts
           configMap:
             name: {{ include "edge.fullname" . }}-s3-uploader
@@ -198,6 +207,8 @@ spec:
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
+            {{- /* Site egress proxy, if any — this pod dials OUT to XNAT. */}}
+            {{- include "edge.proxyEnv" . | nindent 12 }}
             - name: XINGEST_HOST
               valueFrom:
                 secretKeyRef:
@@ -219,6 +230,8 @@ spec:
             {{- toYaml .Values.upload.direct.resources | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
 {{- end }}

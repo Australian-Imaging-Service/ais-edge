@@ -20,7 +20,9 @@ scan order is filesystem order, so a future key that does collide would
 silently reconfigure the server, non-deterministically, with no error.
 
 Here:
-    /etc/orthanc/       ONLY orthanc.json + the Lua script. Orthanc's config.
+    /etc/orthanc/       orthanc.json, the Lua script, and users.json from the
+                        credentials Secret when authentication is enabled.
+                        Orthanc scans users.json and merges RegisteredUsers.
     /etc/ais-edge/      routing.json + the de-identification profile. Read by
                         our Lua hook via AIS_ROUTING_FILE; never scanned by
                         Orthanc.
@@ -44,6 +46,14 @@ data:
       "IndexDirectory": "/data/orthanc-storage",
       "StorageCompression": false,
 
+      {{- with .Values.orthanc.extraMainDicomTags }}
+      {{- /* group-orthanc reads ONLY indexed tags; a tagMapping tag Orthanc
+             does not index sends every pulled study to __invalid__ with no
+             error anywhere. Pre-existing studies need
+             POST /studies/<id>/reconstruct after this changes. */}}
+      "ExtraMainDicomTags": {{ toJson . }},
+      {{- end }}
+
       {{- /* Orthanc's own recycler. Left at 0 (unlimited) so that
              dataPolicy.derived.orthancStorage is the ONLY thing that removes
              anything — two independent expiry mechanisms racing over the same
@@ -59,9 +69,6 @@ data:
 
       "RemoteAccessAllowed": true,
       "AuthenticationEnabled": {{ .Values.orthanc.auth.enabled }},
-      {{- if .Values.orthanc.auth.enabled }}
-      "RegisteredUsersFile": "/etc/orthanc-credentials/users.json",
-      {{- end }}
 
       {{- with .Values.orthanc.ingestTranscoding }}
       {{- /* Rewrites pixel data at RECEIVE time, before the Lua hook runs, so
@@ -80,6 +87,8 @@ data:
 
       {{- if .Values.orthanc.deid.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
+      {{- else if .Values.orthanc.applyStableLabel }}
+      "LuaScripts": ["/etc/orthanc/scripts/stable-label.lua"]
       {{- else }}
       "LuaScripts": []
       {{- end }}
@@ -98,6 +107,19 @@ data:
          a real file means it stays lintable and diffable. */}}
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
+  stable-label.lua: |
+    local readyLabel = {{ .Values.ingest.orthancGroup.toProcessLabel | quote }}
+
+    function OnStableStudy(studyId, tags, metadata)
+      RestApiPut("/studies/" .. studyId .. "/labels/" .. readyLabel, "")
+      print(DumpJson({
+        ts = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+        component = "orthanc-stable-label",
+        event = "study_labeled_ready",
+        studyId = studyId,
+        label = readyLabel
+      }, false))
+    end
 {{- if .Values.orthanc.deid.enabled }}
 ---
 apiVersion: v1

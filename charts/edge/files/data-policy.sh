@@ -294,6 +294,8 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
 expire_original() {   # expire_original <name> <location> <retain_seconds> <policy>
     e_name="$1" e_loc="$2" e_age="$3" e_policy="$4"
 
+    case "${e_policy:-}" in never|forever|'') return 0 ;; esac
+
     # `forever` renders as `-`; anything non-numeric means "no expiry rule", and
     # is treated as forever rather than as 0. A malformed duration must never
     # become "expire immediately".

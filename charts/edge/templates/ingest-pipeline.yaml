@@ -101,6 +101,21 @@ spec:
 ---
 {{- end }}
 {{- if .Values.ingest.fileDrop.enabled }}
+{{- if .Values.ingest.fileDrop.perStudyWalk }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-fs-walker
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, like s3-uploader.sh: keeps the script a real file that
+         `bash -n` can lint, free of Helm-escaping around ${...}. */}}
+  fs-walker.sh: |
+    {{- .Files.Get "files/fs-walker.sh" | nindent 4 }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -124,11 +139,55 @@ spec:
         {{- include "edge.labels" . | nindent 8 }}
         app: xnat-ingest
         component: group-fs
+      {{- if .Values.ingest.fileDrop.perStudyWalk }}
+      annotations:
+        # Checksum the script FILE, same rationale as the s3 uploader: the
+        # pod rolls exactly when the walker logic changes.
+        checksum/script: {{ .Files.Get "files/fs-walker.sh" | sha256sum }}
+      {{- end }}
     spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
       containers:
+{{- if .Values.ingest.fileDrop.perStudyWalk }}
+        {{- /* Per-study walker: group AND assign per study subdirectory —
+               see values.yaml ingest.fileDrop.perStudyWalk and
+               files/fs-walker.sh. The whole-glob container below is what it
+               replaces. */}}
+        - name: group-fs
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["bash", "/scripts/fs-walker.sh"]
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            - name: INPUT_GLOB
+              value: {{ .Values.ingest.fileDrop.inputGlob | quote }}
+            - name: DATATYPES
+              value: {{ .Values.ingest.fileDrop.datatypes | quote }}
+            - name: WAIT_PERIOD
+              value: {{ .Values.ingest.fileDrop.waitPeriod | quote }}
+            - name: COPY_MODE
+              value: {{ .Values.ingest.fileDrop.copyMode | quote }}
+            - name: INTERVAL
+              value: {{ .Values.ingest.fileDrop.interval | quote }}
+            - name: PROJECT_FIELD
+              value: {{ .Values.ingest.assign.tagMapping.project | quote }}
+            - name: SUBJECT_FIELD
+              value: {{ .Values.ingest.assign.tagMapping.subject | quote }}
+            - name: SESSION_FIELD
+              value: {{ .Values.ingest.assign.tagMapping.session | quote }}
+            {{- with .Values.ingest.assign.tagMapping.scan }}
+            - name: SCAN_FIELD
+              value: {{ . | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+{{- else }}
         - name: group-fs
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
@@ -160,8 +219,17 @@ spec:
             {{- end }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+{{- end }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
+        {{- if .Values.ingest.fileDrop.perStudyWalk }}
+        - name: scripts
+          configMap:
+            name: {{ include "edge.fullname" . }}-fs-walker
+            defaultMode: 0755
+        {{- end }}
 ---
 {{- end }}
 {{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
@@ -209,6 +277,10 @@ spec:
             - {{ .Values.ingest.assign.tagMapping.subject | quote }}
             - "--session"
             - {{ .Values.ingest.assign.tagMapping.session | quote }}
+            {{- with .Values.ingest.assign.tagMapping.scan }}
+            - "--scan"
+            - {{ . | quote }}
+            {{- end }}
             - "--copy-mode"
             - {{ .Values.ingest.assign.copyMode | quote }}
             {{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
@@ -283,6 +355,10 @@ spec:
             {{- include "edge.logEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- /* Side files in assigned sessions may be symlinks into the
+                   export share. */}}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
 {{- end }}

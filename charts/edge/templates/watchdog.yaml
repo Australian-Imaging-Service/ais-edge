@@ -1,0 +1,130 @@
+{{- /*
+Pipeline watchdog: a CronJob that reads the signals the pipeline already
+leaves on disk (upload markers, __invalid__, grouped trees, disk usage) plus
+Orthanc's REST /system, and posts to a Discord webhook on STATE CHANGE only.
+
+*/ -}}
+{{- if .Values.watchdog.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-watchdog
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, like the other scripts: keeps it a real file `bash -n`
+         and shellcheck can lint, free of Helm escaping around ${...}. */}}
+  watchdog.sh: |
+    {{- .Files.Get "files/watchdog.sh" | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "edge.fullname" . }}-watchdog
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: watchdog
+spec:
+  schedule: {{ .Values.watchdog.schedule | quote }}
+  # Two overlapping runs would race on the transition state and double-post.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  # Failed jobs are the only place a broken webhook is visible — keep a few.
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: watchdog
+      annotations:
+        checksum/script: {{ .Files.Get "files/watchdog.sh" | sha256sum }}
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: xnat-ingest
+            component: watchdog
+        spec:
+          {{- include "edge.schedulingRules" . | nindent 10 }}
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          containers:
+            - name: watchdog
+              image: "{{ .Values.watchdog.image.repository }}:{{ .Values.watchdog.image.tag }}"
+              imagePullPolicy: {{ .Values.watchdog.image.pullPolicy }}
+              {{- /* curlimages/curl defaults to uid 100, but /data/LOGS is
+                     created by the pipeline pods (root). Without this the
+                     state dir mkdir fails silently-ish and the transition-only
+                     alerts lose their memory — every run re-alerts. */}}
+              securityContext:
+                runAsUser: 0
+              command: ["sh", "/scripts/watchdog.sh"]
+              env:
+                {{- /* Discord is OUTSIDE the cluster; the proxy env is what
+                       lets the POST out at proxied sites. NO_PROXY keeps the
+                       Orthanc probe in-cluster. */}}
+                {{- include "edge.proxyEnv" . | nindent 16 }}
+                - name: EDGE_NAME
+                  value: {{ .Values.clusterLabel | quote }}
+                - name: WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.watchdog.existingSecret }}
+                      key: url
+                - name: ASSIGNED_DIR
+                  value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
+                - name: GROUPED_DIRS
+                  value: "{{ .Values.dataPolicy.derived.grouped.location }} /data/grouped-fs"
+                {{- /* Same helper the uploader and data-policy use — the three
+                       cannot drift apart on where upload markers live. */}}
+                - name: UPLOAD_STATE_DIR
+                  value: {{ include "edge.uploaderStateDir" . | quote }}
+                - name: UPLOAD_EVENT_DIR
+                  value: "{{ include "edge.uploaderStateDir" . }}/events"
+                - name: DISK_PERCENT
+                  value: {{ .Values.watchdog.thresholds.diskPercent | quote }}
+                - name: PENDING_HOURS
+                  value: {{ .Values.watchdog.thresholds.pendingHours | quote }}
+                - name: GROUPED_STUCK_HOURS
+                  value: {{ .Values.watchdog.thresholds.groupedStuckHours | quote }}
+                - name: HEARTBEAT_HOUR
+                  value: {{ .Values.watchdog.heartbeatHourUtc | quote }}
+                {{- if .Values.ingest.orthancGroup.enabled }}
+                - name: ORTHANC_URL
+                  value: "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
+                {{- if .Values.orthanc.auth.enabled }}
+                - name: ORTHANC_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.orthanc.auth.existingSecret }}
+                      key: orthanc-user
+                - name: ORTHANC_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.orthanc.auth.existingSecret }}
+                      key: orthanc-password
+                {{- end }}
+                {{- end }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                {{- /* Writable ONLY for its own transition-state dir under
+                       LOGS/; every pipeline stage it inspects is read via
+                       find/df. It deletes nothing — reclaim stays the data
+                       policy engine's job alone. */}}
+                {{- include "edge.pipelineVolumeMount" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.watchdog.resources | nindent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "edge.fullname" . }}-watchdog
+                defaultMode: 0755
+            {{- include "edge.pipelineVolume" . | nindent 12 }}
+{{- end }}

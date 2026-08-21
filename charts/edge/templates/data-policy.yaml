@@ -151,6 +151,11 @@ spec:
             - {name: scripts, mountPath: /scripts, readOnly: true}
             - {name: stages, mountPath: /etc/data-policy, readOnly: true}
             - {name: pipeline, mountPath: /data, readOnly: {{ not $armed }}}
+            {{- /* The export share, so the originals.fileDrop stage can be
+                   REPORTED when it lives on an export claim. Read-only in
+                   every mode: its reclaim is refused at render while the
+                   policy is enforced, so the engine never writes here. */}}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
             {{- if .Values.storage.facilityBackup.enabled }}
             {{- /* The archive of record stays read-only until ALL THREE line up:
                    enabled, not dryRun, and allowExpiry. Two switches govern
@@ -167,6 +172,7 @@ spec:
           configMap: {name: {{ $fullName }}}
         - name: pipeline
           persistentVolumeClaim: {claimName: {{ include "edge.pipelinePvc" . }}}
+        {{- include "edge.exportVolume" . | nindent 8 }}
         {{- if .Values.storage.facilityBackup.enabled }}
         - name: facility-backup
           persistentVolumeClaim: {claimName: {{ include "edge.facilityBackupPvc" . }}}

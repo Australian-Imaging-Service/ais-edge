@@ -134,7 +134,9 @@ spec:
             {{- end }}
             {{- if .Values.orthanc.auth.enabled }}
             - name: credentials
-              mountPath: /etc/orthanc-credentials
+              # Orthanc merges JSON fragments from its config directory.
+              mountPath: /etc/orthanc/users.json
+              subPath: users.json
               readOnly: true
             {{- end }}
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
