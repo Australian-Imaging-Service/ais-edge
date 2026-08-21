@@ -143,6 +143,7 @@ watchdog:
   enabled: true
   schedule: "*/10 * * * *"
   existingSecret: discord-webhook
+  caBundleSecret: tbpet-egress-ca
   heartbeatHourUtc: "23"
   thresholds:
     diskPercent: 80

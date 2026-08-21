@@ -76,6 +76,10 @@ spec:
                     secretKeyRef:
                       name: {{ .Values.watchdog.existingSecret }}
                       key: url
+                {{- if .Values.watchdog.caBundleSecret }}
+                - name: CURL_CA_BUNDLE
+                  value: /etc/ssl/ais-edge/{{ .Values.watchdog.caBundleKey }}
+                {{- end }}
                 - name: ASSIGNED_DIR
                   value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
                 - name: GROUPED_DIRS
@@ -114,6 +118,11 @@ spec:
                 - name: scripts
                   mountPath: /scripts
                   readOnly: true
+                {{- if .Values.watchdog.caBundleSecret }}
+                - name: ca-bundle
+                  mountPath: /etc/ssl/ais-edge
+                  readOnly: true
+                {{- end }}
                 {{- /* Writable ONLY for its own transition-state dir under
                        LOGS/; every pipeline stage it inspects is read via
                        find/df. It deletes nothing — reclaim stays the data
@@ -126,5 +135,10 @@ spec:
               configMap:
                 name: {{ include "edge.fullname" . }}-watchdog
                 defaultMode: 0755
+            {{- if .Values.watchdog.caBundleSecret }}
+            - name: ca-bundle
+              secret:
+                secretName: {{ .Values.watchdog.caBundleSecret }}
+            {{- end }}
             {{- include "edge.pipelineVolume" . | nindent 12 }}
 {{- end }}

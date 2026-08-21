@@ -47,7 +47,7 @@ log() { echo "[watchdog] $*"; }
 notify() {
     _msg=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}')
     if ! curl -fsS -m 30 -H 'Content-Type: application/json' \
-         -d "{\"content\":\"${_msg}\"}" "$WEBHOOK_URL" >/dev/null 2>&1; then
+         -d "{\"content\":\"${_msg}\"}" "$WEBHOOK_URL" -o /dev/null; then
         log "ERROR: webhook POST failed"
         WEBHOOK_FAILED=1
     fi

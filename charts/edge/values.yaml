@@ -654,6 +654,9 @@ watchdog:
   #   kubectl -n <ns> create secret generic discord-webhook \
   #     --from-literal=url='https://discord.com/api/webhooks/...'
   existingSecret: discord-webhook
+  # Optional private CA bundle for proxied HTTPS webhook delivery.
+  caBundleSecret: ""
+  caBundleKey: ca.crt
   heartbeatHourUtc: ""
   thresholds:
     diskPercent: 85
