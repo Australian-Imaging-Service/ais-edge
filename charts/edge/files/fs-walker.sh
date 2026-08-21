@@ -42,8 +42,12 @@ while true; do
         --wait-period "${WAIT_PERIOD:?}" \
         --copy-mode "${COPY_MODE:?}"
 
-    if ! compgen -G "$GROUPED_DIR/*" >/dev/null; then
+    # `group` can create an empty study skeleton when every file is younger
+    # than WAIT_PERIOD. A top-level glob then matches even though assign sees
+    # zero sessions, which previously marked the source done permanently.
+    if ! find "$GROUPED_DIR" -name __MANIFEST__.json -print -quit 2>/dev/null | grep -q .; then
       log "Nothing staged for $study (still transferring?) — will retry"
+      rm -rf "$GROUPED_DIR"/*
       continue
     fi
 
