@@ -116,10 +116,13 @@ upload:
     prefix: STAGING-202607
     region: ap-southeast-2
     existingSecret: s3-edge-credentials
-    caBundleSecret: ""
-    systemTrust: true
+    caBundleSecret: tbpet-egress-ca
+    systemTrust: false
     interval: 300
     settleMinutes: 5
+    resources:
+      requests: {memory: 128Mi, cpu: 25m}
+      limits:   {memory: 512Mi, cpu: 500m}
   resources:
     requests: {memory: 128Mi, cpu: 25m}
     limits:   {memory: 512Mi, cpu: 500m}
