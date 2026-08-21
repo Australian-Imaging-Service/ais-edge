@@ -120,6 +120,9 @@ upload:
     systemTrust: true
     interval: 300
     settleMinutes: 5
+  resources:
+    requests: {memory: 128Mi, cpu: 25m}
+    limits:   {memory: 512Mi, cpu: 500m}
 
 samba:
   enabled: true
