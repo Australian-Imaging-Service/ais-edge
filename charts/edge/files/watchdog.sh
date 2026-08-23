@@ -107,7 +107,9 @@ check_grouped() {
     n=0
     for base in $GROUPED_DIRS; do
         [ -d "$base" ] || continue
-        c=$(find "$base" -mindepth 1 -maxdepth 1 -type d -mmin +"$((GROUPED_STUCK_HOURS * 60))" 2>/dev/null | wc -l | tr -d ' ')
+        c=$(find "$base" -mindepth 1 -maxdepth 1 -type d \
+            ! -name '__*' -mmin +"$((GROUPED_STUCK_HOURS * 60))" \
+            2>/dev/null | wc -l | tr -d ' ')
         n=$((n + c))
     done
     if [ "$n" -gt 0 ]; then
