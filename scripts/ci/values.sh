@@ -672,6 +672,36 @@ orthanc:
     enabled: false
 EOF
 
+cat >"$V/neg-edge-stable-label-no-filter.yaml" <<'EOF'
+orthanc:
+  deid:
+    enabled: false
+  applyStableLabel: true
+ingest:
+  orthancGroup:
+    toProcessLabel: ""
+EOF
+
+cat >"$V/neg-edge-two-stable-hooks.yaml" <<'EOF'
+orthanc:
+  applyStableLabel: true
+EOF
+
+cat >"$V/neg-edge-export-glob-outside-mount.yaml" <<'EOF'
+ingest:
+  fileDrop:
+    enabled: true
+    exportClaim: export-data
+    exportMountPath: /data/export
+    inputGlob: "/wrong/path/**/*"
+EOF
+
+cat >"$V/neg-edge-watchdog-no-secret.yaml" <<'EOF'
+watchdog:
+  enabled: true
+  existingSecret: ""
+EOF
+
 # Reclaiming the operator's only copy.
 cat >"$V/neg-mgmt-podlogfiles-retain.yaml" <<'EOF'
 dataPolicy:
@@ -841,6 +871,10 @@ neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profi
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
 neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toprocesslabel.yaml	Nothing applies that label
+neg-edge-stable-label-no-filter	charts/edge	edge-base.yaml neg-edge-stable-label-no-filter.yaml	requires ingest.orthancGroup.toProcessLabel
+neg-edge-two-stable-hooks	charts/edge	edge-base.yaml neg-edge-two-stable-hooks.yaml	cannot both be true
+neg-edge-export-glob-outside-mount	charts/edge	edge-base.yaml neg-edge-export-glob-outside-mount.yaml	must point under exportMountPath
+neg-edge-watchdog-no-secret	charts/edge	edge-base.yaml neg-edge-watchdog-no-secret.yaml	requires watchdog.existingSecret
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
