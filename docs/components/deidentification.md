@@ -1,28 +1,67 @@
 # De-identification
 
+> **Deciding which engine to use?** See
+> [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). This page covers
+> configuration once you have chosen.
+
 ## Overview
 
-Two engines can strip patient identifiers before data leaves the facility. A
-site picks **one**; the chart refuses to render with both enabled.
+**Orthanc is always present.** It is the only DICOM network receiver in this
+stack, so it receives every study regardless of which engine de-identifies. What
+this page configures is *where de-identification happens*.
+
+Two engines exist, built for pipelines that differ in where the routing
+identifiers — the XNAT project, subject and session — come from:
 
 | | Orthanc Lua hook | xnat-ingest deidentify |
 |---|---|---|
 | values key | `orthanc.deid.enabled` | `ingest.deidentify.enabled` |
-| default | **on** | off |
-| runs | on each instance, as it arrives | as a stage between `assign` and `upload` |
-| reversible | no, by design | yes — writes a re-identification mapping |
-| policy format | JSON profile passed to Orthanc `/modify` | pydicom `deid` recipe, one per project |
-| stable pseudonyms | yes — HMAC of the patient ID with a site salt | no — removes fields rather than hashing them |
-| needs | `orthanc.deid.aetMap`, `profile` | `ingest.deidentify.specs` recipes |
+| chart default | on | off |
+| runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
+| source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
+| needs an AE-title map | yes | no |
+| strips PHI | yes, JSON profile via Orthanc `/modify` | yes, pydicom `deid` recipe per project |
+| pseudonymises | yes, HMAC + per-site salt | yes, SHA-256 ([salting disabled upstream](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)) |
+| re-identification possible | no | yes, via the reid mapping |
+| identifiable data on the pipeline volume | no | yes, until the stage runs |
+| applies the ready label | yes | no |
 
-The Lua hook is the default because it cleans at the front door: identifiable
-data exists inside Orthanc briefly, the original goes to the facility backup,
-and every later stage only ever sees stripped data. `deidentify` runs later, so
-identifiable data passes through `group` and `assign` first and sits on the
-pipeline volume until the stage catches up.
+> **Deciding between them?** See
+> [choosing-a-deid-engine.md](../choosing-a-deid-engine.md), which sets out the
+> two architectures and what each requires. This page covers configuration once
+> the choice is made.
 
-Prefer `deidentify` when the *reversal* matters — a clinical follow-up needing
-to find the original scan. The Lua hook cannot do that at all.
+## Routing identifiers, and why the choice is constrained
+
+`assign` files a study using three DICOM tags:
+
+```
+ClinicalTrialProtocolID    -> project
+ClinicalTrialSubjectID     -> subject
+ClinicalTrialTimePointID   -> session
+```
+
+The Lua hook populates them: it maps the calling AE title to a project and
+HMACs the patient identifier into subject and session codes. `deidentify` does
+not — it works on identifiers already present, which is why it needs no AE-title
+map.
+
+So if studies arrive carrying those tags, either engine can be used. If they
+arrive identified only by an AE title, the Lua hook is what supplies the
+routing, and with it disabled `assign` places every study in
+`/data/assigned/__invalid__`:
+
+```
+/data/assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...
+                           INVALID_MISSING_CLINICALTRIALSUBJECTID_...
+                           INVALID_MISSING_CLINICALTRIALTIMEPOINTID_...
+```
+
+Checking which case applies, on a study a modality actually sends:
+
+```bash
+dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
+```
 
 ## The label coupling
 
@@ -162,7 +201,21 @@ Set, the mappings are written as `<session>.json.enc` and are unreadable
 without it. **Keep the key somewhere other than the volume the mappings are
 on** — together they are just a slower way of storing the identifiers.
 
-### 4. Switch engines — two settings, not one
+### 4. Confirm your studies carry the routing tags
+
+**Before switching, check this** — it is the difference between a working
+pipeline and every study landing in `__invalid__`:
+
+```bash
+# on a study your modality actually sends
+dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
+```
+
+All three must be present and populated. If they are not, the Lua hook has to
+stay on, because nothing else writes them. See "The Lua hook does more than
+de-identify" above.
+
+### 5. Switch engines — two settings, not one
 
 ```yaml
 orthanc:
@@ -218,6 +271,7 @@ Two other tier-2 differences:
 | both engines enabled | the Lua hook strips first, so the reid mapping records pseudonyms as if they were originals — it reverses to nothing while appearing to work |
 | `deidentify` with no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge |
 | neither engine, `policyReviewed: false` | identifiable data would reach XNAT unchanged |
+| *(not caught by the chart)* | `deidentify` alone when studies lack the ClinicalTrial routing tags — the chart cannot see inside your DICOM, so this fails at runtime with every study in `__invalid__` |
 | `toProcessLabel` set with the Lua hook off | nothing applies the label; `group-orthanc` filters out every study |
 
 Neither engine *is* allowed when acknowledged with `policyReviewed: true` — for
