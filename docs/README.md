@@ -31,7 +31,7 @@ env-var-shaped configuration to keep in step with it.
   the deid Lua hook before xnat-ingest sees the data
 - [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
 - [`deidentification.md`](components/deidentification.md) — the two de-identification
-  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up
+  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up (see also [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
 
 ### Observability stack (optional)
 

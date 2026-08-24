@@ -1,28 +1,67 @@
 # De-identification
 
+> **Deciding which engine to use?** See
+> [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). This page covers
+> configuration once you have chosen.
+
 ## Overview
 
-Two engines can strip patient identifiers before data leaves the facility. A
-site picks **one**; the chart refuses to render with both enabled.
+**Orthanc is always present.** It is the only DICOM network receiver in this
+stack, so it receives every study regardless of which engine de-identifies. What
+this page configures is *where de-identification happens*.
+
+Two engines exist, built for pipelines that differ in where the routing
+identifiers — the XNAT project, subject and session — come from:
 
 | | Orthanc Lua hook | xnat-ingest deidentify |
 |---|---|---|
 | values key | `orthanc.deid.enabled` | `ingest.deidentify.enabled` |
-| default | **on** | off |
-| runs | on each instance, as it arrives | as a stage between `assign` and `upload` |
-| reversible | no, by design | yes — writes a re-identification mapping |
-| policy format | JSON profile passed to Orthanc `/modify` | pydicom `deid` recipe, one per project |
-| stable pseudonyms | yes — HMAC of the patient ID with a site salt | no — removes fields rather than hashing them |
-| needs | `orthanc.deid.aetMap`, `profile` | `ingest.deidentify.specs` recipes |
+| chart default | on | off |
+| runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
+| source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
+| needs an AE-title map | yes | no |
+| strips PHI | yes, JSON profile via Orthanc `/modify` | yes, pydicom `deid` recipe per project |
+| pseudonymises | yes, HMAC + per-site salt | yes, SHA-256 ([salting disabled upstream](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)) |
+| re-identification possible | no | yes, via the reid mapping |
+| identifiable data on the pipeline volume | no | yes, until the stage runs |
+| applies the ready label | yes | no |
 
-The Lua hook is the default because it cleans at the front door: identifiable
-data exists inside Orthanc briefly, the original goes to the facility backup,
-and every later stage only ever sees stripped data. `deidentify` runs later, so
-identifiable data passes through `group` and `assign` first and sits on the
-pipeline volume until the stage catches up.
+> **Deciding between them?** See
+> [choosing-a-deid-engine.md](../choosing-a-deid-engine.md), which sets out the
+> two architectures and what each requires. This page covers configuration once
+> the choice is made.
 
-Prefer `deidentify` when the *reversal* matters — a clinical follow-up needing
-to find the original scan. The Lua hook cannot do that at all.
+## Routing identifiers, and why the choice is constrained
+
+`assign` files a study using three DICOM tags:
+
+```
+ClinicalTrialProtocolID    -> project
+ClinicalTrialSubjectID     -> subject
+ClinicalTrialTimePointID   -> session
+```
+
+The Lua hook populates them: it maps the calling AE title to a project and
+HMACs the patient identifier into subject and session codes. `deidentify` does
+not — it works on identifiers already present, which is why it needs no AE-title
+map.
+
+So if studies arrive carrying those tags, either engine can be used. If they
+arrive identified only by an AE title, the Lua hook is what supplies the
+routing, and with it disabled `assign` places every study in
+`/data/assigned/__invalid__`:
+
+```
+/data/assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...
+                           INVALID_MISSING_CLINICALTRIALSUBJECTID_...
+                           INVALID_MISSING_CLINICALTRIALTIMEPOINTID_...
+```
+
+Checking which case applies, on a study a modality actually sends:
+
+```bash
+dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
+```
 
 ## The label coupling
 
@@ -162,7 +201,21 @@ Set, the mappings are written as `<session>.json.enc` and are unreadable
 without it. **Keep the key somewhere other than the volume the mappings are
 on** — together they are just a slower way of storing the identifiers.
 
-### 4. Switch engines — two settings, not one
+### 4. Confirm your studies carry the routing tags
+
+**Before switching, check this** — it is the difference between a working
+pipeline and every study landing in `__invalid__`:
+
+```bash
+# on a study your modality actually sends
+dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
+```
+
+All three must be present and populated. If they are not, the Lua hook has to
+stay on, because nothing else writes them. See "The Lua hook does more than
+de-identify" above.
+
+### 5. Switch engines — two settings, not one
 
 ```yaml
 orthanc:
@@ -180,6 +233,39 @@ ingest:
 `upload` follows automatically: it reads `/data/deidentified` instead of
 `/data/assigned` whenever the stage is on.
 
+## Where the stage sits, tier-1 versus tier-2
+
+On this branch (tier-1) the node uploads straight to XNAT, so `deidentify` sits between
+`assign` and that upload. On tier-2 the edge stages to S3 and a management-side
+uploader moves it on to XNAT, so the chain is longer:
+
+```
+tier-1   orthanc -> group -> assign -> [deidentify] -> upload ------------> XNAT
+tier-2   orthanc -> group -> assign -> [deidentify] -> rclone -> S3 -> mgmt xnat-upload -> XNAT
+```
+
+The placement is the same either way — immediately before whatever carries data
+off the node — and the chart handles it with one helper, so no extra
+configuration is needed. `upload` and the rclone S3 uploader both read
+`edge.uploadSourceDir`, which becomes `/data/deidentified` when the stage is on.
+
+This ordering matters on tier-2 specifically: **de-identification happens before
+anything reaches S3**, so identifiable data never leaves the facility, even into
+your own object store. Turning the stage on does not change where S3 sits in the
+chain; it changes what has already been stripped by the time data gets there.
+
+Two other differences, if you also run the tier-2 (cloud) deployment from the
+`main` branch:
+
+* the alert rules live in the **management** chart there
+  (`charts/mgmt/files/loki-ruler-rules.yaml`), because tier-2 runs Loki centrally
+  and edges ship to it. On this branch they are in
+  `charts/edge/files/loki-ruler-rules.yaml`, since a single node runs everything.
+* `xnat-ingest` is pinned in **both** charts there — `charts/edge` for the
+  pipeline stages and `charts/mgmt` for the S3 -> XNAT uploader, and both must
+  move together because the CLI contract is shared. On this branch there is one
+  chart and one pin.
+
 ## What the chart refuses
 
 | combination | why |
@@ -187,6 +273,7 @@ ingest:
 | both engines enabled | the Lua hook strips first, so the reid mapping records pseudonyms as if they were originals — it reverses to nothing while appearing to work |
 | `deidentify` with no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge |
 | neither engine, `policyReviewed: false` | identifiable data would reach XNAT unchanged |
+| *(not caught by the chart)* | `deidentify` alone when studies lack the ClinicalTrial routing tags — the chart cannot see inside your DICOM, so this fails at runtime with every study in `__invalid__` |
 | `toProcessLabel` set with the Lua hook off | nothing applies the label; `group-orthanc` filters out every study |
 
 Neither engine *is* allowed when acknowledged with `policyReviewed: true` — for
@@ -214,7 +301,7 @@ A session that produced no output files is worth checking by hand:
 `deidentify` reports success even when it processes nothing, so an empty
 `/data/deidentified` alongside a populated `/data/assigned` means the layout or
 the recipes are not matching, not that there was nothing to do. See
-[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 
 ## Current limitation
 
@@ -230,7 +317,7 @@ directory level deeper than `assign` produces:
 so `upload` reports `Found 0 sessions` and the data stops there. This is
 upstream and no chart setting works around it — the chart already points
 `upload` at the right directory. Tracked as
-[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 
 Until that lands, `ingest.deidentify.enabled: true` is usable for evaluating
 the engine and its recipes, but the Orthanc Lua hook remains the only engine
