@@ -27,9 +27,10 @@ env-var-shaped configuration to keep in step with it.
 
 ### Data plane
 
-- [`orthanc.md`](components/orthanc.md) — DICOM SCP on the node; runs
-  the deid Lua hook before xnat-ingest sees the data
-- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
+- [`orthanc.md`](components/orthanc.md) — DICOM SCP on the node; the only
+  DICOM network receiver. Runs the deid Lua hook when that engine is enabled
+- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload
+  pods, plus the optional deidentify stage
 - [`deidentification.md`](components/deidentification.md) — the two de-identification
   engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up (see also [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
 

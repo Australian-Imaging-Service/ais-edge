@@ -153,7 +153,14 @@ all below.
 Everything runs on one node, in one namespace, from one Helm release. Modalities
 C-STORE to Orthanc on the node's own IP (port 4242 on the local LAN). Orthanc
 de-identifies in-process, keeps the deid'd instance, and backs up the original to
-a node-local directory that never leaves the machine. `xnat-ingest group-orthanc`,
+a node-local directory that never leaves the machine.
+
+De-identification in Orthanc is the default and the only engine that carries data
+end to end today. xnat-ingest also ships a `deidentify` stage, off by default,
+which suits a different pipeline — one where studies arrive already carrying
+their project/subject/session identifiers. See
+[docs/choosing-a-deid-engine.md](docs/choosing-a-deid-engine.md) for what each
+requires. `xnat-ingest group-orthanc`,
 `xnat-ingest assign`, and `xnat-ingest upload` move the deid'd data to XNAT over
 HTTPS. The only inbound port is DICOM 4242; the only outbound path is HTTPS to
 XNAT (plus the Grafana NodePort for the local admin).
@@ -332,6 +339,7 @@ k0s-k0smotron-mvp/
 │   ├── files/                             ← loaded with .Files.Get, never templated
 │   │   ├── deidentify-and-forward.lua     ← deid + facility-backup + label hook
 │   │   ├── deidentification-profile.example.json  ← start your profile here
+│   │   ├── deid-specs.example/               ← recipes for the xnat-ingest deidentify stage
 │   │   ├── data-policy.sh                 ← the retention/reporting engine
 │   │   ├── vector-local.yaml              ← tier-1 Vector config (in-cluster Loki, no TLS)
 │   │   └── vector.yaml                    ← tier-2 variant (mTLS to a management Loki)
@@ -433,7 +441,7 @@ then runs with `--dont-verify-ssl`.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | 0.12.3 | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, and local-path upload source |
+| xnat-ingest | 0.13.1 | `ghcr.io/australian-imaging-service/xnat-ingest:0.13.1` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |

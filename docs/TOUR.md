@@ -182,6 +182,15 @@ This is the section where a mistake sends identifiable data to a research
 archive. Nothing downstream re-checks what was removed: the uploader trusts that
 whatever reaches it is already de-identified.
 
+Everything below describes the Orthanc Lua hook, which is the default and the
+engine this deployment is built around. There is a second one — the xnat-ingest
+`deidentify` stage, off by default — but it suits a different pipeline: it needs
+studies to arrive already carrying their project/subject/session identifiers,
+whereas here they arrive identified only by AE title and the hook is what
+manufactures them. If you are wondering which applies to your site,
+[choosing-a-deid-engine.md](choosing-a-deid-engine.md) has the check. For a
+first install, read on: this is the one you want.
+
 ```yaml
 orthanc:
   aet: AISEDGE
@@ -595,6 +604,9 @@ matter. The exit code is the number of failures.
 4. **assign** reads `ClinicalTrialProtocolID`, `ClinicalTrialSubjectID` and
    `ClinicalTrialTimePointID` from the de-identified headers and works out the
    XNAT project, subject and session. Output goes to `assigned/`.
+   (If `ingest.deidentify.enabled` is on — it is not by default — a
+   **deidentify** stage sits here, reading `assigned/` and writing
+   `deidentified/`, and step 5 reads that instead.)
 5. **upload** waits for a quiet period (`waitPeriod: 60` — no new files for a
    minute, so it does not upload a study still being sent), then PUTs the
    session to XNAT over HTTPS using `xnat-credentials`. On success it logs
@@ -692,7 +704,9 @@ this tier are:
   `alertAfter`. Almost always an AE title missing from `aetMap`.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
-- **`OrthancDeidLuaError`** — de-identification itself is failing.
+- **`OrthancDeidLuaError`** — de-identification itself is failing (Orthanc Lua
+  hook). **`DeidentifyStageError`** is the same signal for the xnat-ingest
+  `deidentify` stage, if you run that engine instead.
 
 The alert expressions are unit-tested against recorded log fixtures
 (`tests/loki-rules/`), including the case that asserts a tqdm progress bar

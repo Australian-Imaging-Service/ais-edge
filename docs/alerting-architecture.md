@@ -125,8 +125,8 @@ that content comes from:
   `charts/edge/files/loki-ruler-rules.yaml` holds 11 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
-  `XNATAuthFailure`, `OrthancDeidLuaError` and `OrthancStorageGrowing`, which
-  ship but are not tabulated.
+  `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError` and
+  `OrthancStorageGrowing`, which ship but are not tabulated.
   `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
   `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled
   `loki_rule: "true"` — the **label**, not the name and not the namespace, is
@@ -231,7 +231,7 @@ one. `scripts/ci/promtool.sh` guards the neighbouring silent failure under its
 "Loki ruler file matches rulefmt.RuleGroup" heading — a rule indented out of its
 group is still valid YAML, but Loki then rejects the **entire** file
 (`error parsing /rules/fake/ais-edge-rules.yaml: field alert not found in type
-rulefmt.RuleGroup`) and all 11 alerts disappear together, not just the one that
+rulefmt.RuleGroup`) and all 12 alerts disappear together, not just the one that
 was mis-indented.
 
 [`alerting-diy.md`](alerting-diy.md) covers writing the rule expression itself.

@@ -10,6 +10,9 @@ is the AIS-maintained Python tool that:
    as a structured directory (`assign`)
 3. **Uploads** staged sessions to an XNAT server via REST (`upload`)
 
+An optional fourth stage, `deidentify`, can sit between 2 and 3 for sites whose
+studies arrive already identified.
+
 Upstream ≥ 0.12 split the old single `sort` command into these discrete stages.
 We run them as three Deployments on the single node, all rendered by
 `charts/edge`:
@@ -19,8 +22,16 @@ We run them as three Deployments on the single node, all rendered by
 - **`xnat-ingest assign`** (`<release>-assign`, `component=assign`) — reads
   `/data/grouped`, assigns project/subject/session IDs, and collates into
   `/data/assigned`
+- **`xnat-ingest deidentify`** (`<release>-deidentify`, `component=deidentify`) —
+  OPTIONAL and off by default (`ingest.deidentify.enabled`). Reads
+  `/data/assigned`, writes de-identified sessions to `/data/deidentified` and a
+  re-identification mapping to `/data/reid`. Only for pipelines where studies
+  arrive already carrying their `ClinicalTrial*` identifiers — see
+  [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
+  `upload` follows it to `/data/deidentified`.
 - **`xnat-ingest upload`** (`<release>-upload`, `component=upload`) — reads
-  `/data/assigned` and uploads sessions to XNAT
+  `/data/assigned`, or `/data/deidentified` when the deidentify stage is on, and
+  uploads sessions to XNAT
 
 All three run in ONE namespace — `namespace:` in `sites/<site>/values.yaml`,
 `xnat-ingest`. Tier-2 splits ingest (edge cluster) from upload (management

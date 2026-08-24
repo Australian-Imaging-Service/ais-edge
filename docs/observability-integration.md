@@ -203,6 +203,7 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from orthanc in 10m (deid stalled) |
+| `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (an unmapped AET nobody has mapped) |

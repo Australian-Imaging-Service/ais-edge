@@ -14,6 +14,12 @@ image, pinned in `orthanc.image.tag` (currently `1.12.11`). It must stay
 
 ## Role in this stack
 
+Three jobs on the node. Job 1 is unconditional — Orthanc is the only DICOM
+network receiver in this stack, so it runs whichever de-identification engine the
+site uses. Jobs 2 and 3 exist only while `orthanc.deid.enabled` is true; with the
+xnat-ingest `deidentify` engine they are off and Orthanc stores studies
+unmodified. See [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
+
 Three jobs on the node:
 
 1. **DIMSE C-STORE SCP** on host port 4242 with `AET=AISEDGE`. Modalities
