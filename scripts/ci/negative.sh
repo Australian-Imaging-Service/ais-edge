@@ -77,7 +77,7 @@ charts/mgmt/templates/cert-sync.yaml	13
 charts/mgmt/templates/edge-clusters.yaml	10
 charts/mgmt/templates/observability.yaml	10
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2
-charts/edge/templates/_helpers.tpl	21
+charts/edge/templates/_helpers.tpl	24
 EOF
 }
 

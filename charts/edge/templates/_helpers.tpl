@@ -66,6 +66,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- /* TWO ENGINES, ONE JOB. Running both means the Lua hook strips each
+         instance on arrival and xnat-ingest then de-identifies what is already
+         de-identified: the reid mapping it writes records the PSEUDONYMS as if
+         they were the originals, so it looks like a working reversal path and
+         reverses to nothing. */ -}}
+  {{- if and .Values.orthanc.deid.enabled .Values.ingest.deidentify.enabled }}
+    {{- fail "orthanc.deid.enabled and ingest.deidentify.enabled are both true. Pick one de-identification engine: the Orthanc Lua hook strips instances as they arrive; xnat-ingest deidentify runs as a stage between assign and upload. Running both makes the re-identification mapping record pseudonyms rather than originals, so it reverses to nothing while appearing to work." }}
+  {{- end }}
+
+  {{- /* Neither engine on is a legitimate choice — modalities that already
+         de-identify, or staging into a trusted enclave — but it is never the
+         RIGHT default, so it has to be said out loud. */ -}}
+  {{- if and (not .Values.orthanc.deid.enabled) (not .Values.ingest.deidentify.enabled) }}
+    {{- if not .Values.orthanc.deid.policyReviewed }}
+      {{- fail "no de-identification engine is enabled (orthanc.deid.enabled=false and ingest.deidentify.enabled=false), so identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* The spec directory is what tells deidentify a format is handled. With no
+         ConfigMap the volume renders with an empty source: helm succeeds, the
+         manifest is valid YAML, and the pod then sits in
+         CreateContainerConfigError on an edge nobody is watching. */ -}}
+  {{- if and .Values.ingest.deidentify.enabled (not .Values.ingest.deidentify.specConfigMap) }}
+    {{- fail "ingest.deidentify.enabled=true but ingest.deidentify.specConfigMap is empty. The stage mounts that ConfigMap at /etc/xnat-ingest/deid-specs to find its recipes; empty renders a volume with no source and the pod sits in CreateContainerConfigError. Name the ConfigMap holding one directory per project (plus __default__), each with a pydicom deid recipe per format." }}
+  {{- end }}
+
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}
@@ -139,7 +165,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          Orthanc and no error anywhere — the worst kind of failure. */ -}}
   {{- if and .Values.ingest.orthancGroup.enabled (not .Values.orthanc.deid.enabled) }}
     {{- if .Values.ingest.orthancGroup.toProcessLabel }}
-      {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. Clear toProcessLabel, or enable deid." }}
+      {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. If you are switching to ingest.deidentify (the xnat-ingest engine), clearing toProcessLabel is the expected second step — the Lua hook applies that label as well as de-identifying, so turning it off removes both. Otherwise clear toProcessLabel, or re-enable orthanc.deid." }}
     {{- end }}
   {{- end }}
 
@@ -453,4 +479,16 @@ ever reclaimed, and the only symptom is staging that quietly stops draining.
 */}}
 {{- define "edge.uploaderStateDir" -}}
 /data/LOGS/s3-uploader-state
+{{- end }}
+
+{{/*
+The directory upload reads from.
+
+assign writes /data/assigned. When the xnat-ingest deidentify stage is on it
+sits between the two, reading /data/assigned and writing /data/deidentified,
+so upload has to follow it — otherwise it would keep uploading the
+pre-deidentification copy and the stage would be silently pointless.
+*/}}
+{{- define "edge.uploadSourceDir" -}}
+{{- if .Values.ingest.deidentify.enabled }}/data/deidentified{{- else }}/data/assigned{{- end }}
 {{- end }}

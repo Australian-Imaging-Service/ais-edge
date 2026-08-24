@@ -678,6 +678,18 @@ printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no
 printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
+
+# Two de-identification engines at once. The Lua hook strips on arrival, so
+# xnat-ingest would then de-identify already-pseudonymous data and record the
+# pseudonyms in the reid mapping as if they were the originals.
+printf 'ingest:\n  deidentify:\n    enabled: true\n    specConfigMap: specs\n' >"$V/neg-edge-deid-both-engines.yaml"
+
+# ais-deid with nothing to mount: the volume renders with an empty source and
+# the pod sits in CreateContainerConfigError on the edge.
+printf 'orthanc:\n  deid:\n    enabled: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n  deidentify:\n    enabled: true\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
+
+# Neither engine, unacknowledged: identifiable data would reach XNAT unchanged.
+printf 'orthanc:\n  deid:\n    enabled: false\n    policyReviewed: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n' >"$V/neg-edge-deid-no-engine.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
 
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
@@ -923,6 +935,9 @@ neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no s
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
+neg-edge-deid-both-engines	charts/edge	edge-base.yaml neg-edge-deid-both-engines.yaml	are both true
+neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	specConfigMap is empty
+neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	no de-identification engine is enabled
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true

@@ -30,6 +30,8 @@ env-var-shaped configuration to keep in step with it.
 - [`orthanc.md`](components/orthanc.md) — DICOM SCP on the node; runs
   the deid Lua hook before xnat-ingest sees the data
 - [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
+- [`deidentification.md`](components/deidentification.md) — the two de-identification
+  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up
 
 ### Observability stack (optional)
 

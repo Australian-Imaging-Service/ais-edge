@@ -236,6 +236,76 @@ spec:
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
 {{- end }}
+{{- if .Values.ingest.deidentify.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-deidentify
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: deidentify
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: deidentify
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: deidentify
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: deidentify
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "deidentify"]
+          args:
+            - "/data/assigned"
+            - "/data/deidentified"
+            - "/etc/xnat-ingest/deid-specs"
+            - "/data/reid"
+            - "--copy-mode"
+            - {{ .Values.ingest.deidentify.copyMode | quote }}
+            {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onAssigned" }}
+            # Same reasoning as assign: without this, `--loop` rebuilds its
+            # work list from a live listing every cycle and re-processes
+            # sessions it has already done. Deletes hardlinks, not data.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+            - "--loop"
+            - {{ .Values.ingest.deidentify.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
+            - name: XINGEST_REID_ENCRYPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ingest.deidentify.reidEncryptKeySecret }}
+                  key: XINGEST_REID_ENCRYPT_KEY
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            - name: deid-specs
+              mountPath: /etc/xnat-ingest/deid-specs
+              readOnly: true
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        - name: deid-specs
+          configMap:
+            name: {{ .Values.ingest.deidentify.specConfigMap }}
+{{- end }}
 {{- if .Values.ingest.associate.enabled }}
 ---
 apiVersion: apps/v1
