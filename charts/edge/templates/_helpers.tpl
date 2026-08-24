@@ -87,6 +87,42 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+{{- /* TWO ENGINES, ONE JOB. Running both means the Lua hook strips each
+         instance on arrival and xnat-ingest then de-identifies what is already
+         de-identified: the reid mapping it writes records the PSEUDONYMS as if
+         they were the originals, so it looks like a working reversal path and
+         reverses to nothing. */ -}}
+  {{- if and .Values.orthanc.deid.enabled .Values.ingest.deidentify.enabled }}
+    {{- fail "orthanc.deid.enabled and ingest.deidentify.enabled are both true. Pick one de-identification engine: the Orthanc Lua hook strips instances as they arrive; xnat-ingest deidentify runs as a stage between assign and upload. Running both makes the re-identification mapping record pseudonyms rather than originals, so it reverses to nothing while appearing to work." }}
+  {{- end }}
+
+  {{- /* Neither engine on is a legitimate choice — modalities that already
+         de-identify, or staging into a trusted enclave — but it is never the
+         RIGHT default, so it has to be said out loud. */ -}}
+  {{- if and (not .Values.orthanc.deid.enabled) (not .Values.ingest.deidentify.enabled) }}
+    {{- if not .Values.orthanc.deid.policyReviewed }}
+      {{- fail "no de-identification engine is enabled (orthanc.deid.enabled=false and ingest.deidentify.enabled=false), so identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* The spec directory is what tells deidentify a format is handled. With no
+         ConfigMap the volume renders with an empty source: helm succeeds, the
+         manifest is valid YAML, and the pod then sits in
+         CreateContainerConfigError on an edge nobody is watching. */ -}}
+  {{- /* specFiles is what puts the '@' and the per-project directory on disk. A
+       ConfigMap key cannot contain '@' and a ConfigMap mounts flat, so without
+       the mapping the recipes land as bare keys in one directory, xnat-ingest
+       matches none of them, and every session is skipped as "no applicable
+       spec" — logged, but easy to read as "nothing to do". */ -}}
+{{- if and .Values.ingest.deidentify.enabled .Values.ingest.deidentify.specConfigMap (not .Values.ingest.deidentify.specFiles) }}
+  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap key cannot contain '@' and mounts flat, so the recipes would land as bare keys in one directory and xnat-ingest would match none of them, skipping every session. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series.json: \"__default__/medimage@dicom-series.json\"}." }}
+{{- end }}
+
+{{- if and .Values.ingest.deidentify.enabled (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
+    {{- fail "ingest.deidentify.enabled=true but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
+  {{- end }}
+
+  
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}
@@ -129,7 +165,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          Orthanc and no error anywhere — the worst kind of failure. */ -}}
   {{- if and .Values.ingest.orthancGroup.enabled (not .Values.orthanc.deid.enabled) }}
     {{- if .Values.ingest.orthancGroup.toProcessLabel }}
-      {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. Clear toProcessLabel, or enable deid." }}
+      {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. If you are switching to ingest.deidentify (the xnat-ingest engine), clearing toProcessLabel is the expected second step — the Lua hook applies that label as well as de-identifying, so turning it off removes both. Otherwise clear toProcessLabel, or re-enable orthanc.deid." }}
     {{- end }}
   {{- end }}
 
@@ -401,4 +437,16 @@ ever reclaimed, and the only symptom is staging that quietly stops draining.
 */}}
 {{- define "edge.uploaderStateDir" -}}
 /data/LOGS/s3-uploader-state
+{{- end }}
+
+{{/*
+The directory upload reads from.
+
+assign writes /data/assigned. When the xnat-ingest deidentify stage is on it
+sits between the two, reading /data/assigned and writing /data/deidentified,
+so upload has to follow it — otherwise it would keep uploading the
+pre-deidentification copy and the stage would be silently pointless.
+*/}}
+{{- define "edge.uploadSourceDir" -}}
+{{- if .Values.ingest.deidentify.enabled }}/data/deidentified{{- else }}/data/assigned{{- end }}
 {{- end }}

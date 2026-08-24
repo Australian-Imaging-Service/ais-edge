@@ -813,6 +813,11 @@ printf 'upload:\n  s3:\n    requireClientCert: true\n    clientCertSecret: ""\n'
 printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
+
+printf 'ingest:\n  deidentify:\n    enabled: true\n    specConfigMap: specs\n' >"$V/neg-edge-deid-both-engines.yaml"
+printf 'orthanc:\n  deid:\n    enabled: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n  deidentify:\n    enabled: true\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
+printf 'orthanc:\n  deid:\n    enabled: false\n    policyReviewed: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n' >"$V/neg-edge-deid-no-engine.yaml"
+printf 'orthanc:\n  deid:\n    enabled: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n  deidentify:\n    enabled: true\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
 
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
@@ -1057,6 +1062,10 @@ neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every 
 neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
+neg-edge-deid-both-engines	charts/edge	edge-base.yaml neg-edge-deid-both-engines.yaml	are both true
+neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	no recipes are configured
+neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	no de-identification engine is enabled
+neg-edge-deid-no-specfiles	charts/edge	edge-base.yaml neg-edge-deid-no-specfiles.yaml	specFiles is empty
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true

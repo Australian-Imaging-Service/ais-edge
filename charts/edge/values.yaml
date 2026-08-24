@@ -472,7 +472,7 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.12.3"
+    tag: "0.13.1"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -512,6 +512,73 @@ ingest:
       project: ClinicalTrialProtocolID
       subject: ClinicalTrialSubjectID
       session: ClinicalTrialTimePointID
+
+  # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
+  #
+  # The default engine is the Orthanc Lua hook (orthanc.deid above), which
+  # strips each instance as it arrives. This one runs as its own stage between
+  # assign and upload instead. Pick ONE; the chart refuses both.
+  #
+  # WHEN TO PREFER THIS ONE. It writes a re-identification mapping per session,
+  # so the process can be reversed later (a clinical follow-up needing to find
+  # the original scan). The Lua hook is one-way by design and cannot do that.
+  #
+  # WHAT IT COSTS. Identifiable data passes through group and assign before it
+  # is cleaned, so it exists on the pipeline volume for longer and in more
+  # places. The Lua hook cleans at the front door and everything downstream only
+  # ever sees stripped data. That is why the Lua hook stays the default.
+  #
+  # The reid mapping is the sensitive part: it is the map BACK to the identities
+  # that were removed. Set reidEncryptKeySecret and keep that key somewhere
+  # other than the volume the mappings are written to.
+  deidentify:
+    enabled: false
+    interval: 60
+    copyMode: hardlink_or_copy
+    # THE RECIPES. Written here, in the site file, exactly like
+    # orthanc.deid.profile — the chart builds the ConfigMap and mounts it, so a
+    # fresh install needs no kubectl and no pre-existing namespace.
+    #
+    # Key is the path under SPEC_DIR, value is the recipe:
+    #
+    #   specs:
+    #     "__default__/medimage@dicom-series.json": |
+    #       FORMAT dicom
+    #
+    #       %header
+    #
+    #       REMOVE PatientName
+    #       REMOVE PatientBirthDate
+    #
+    # A ConfigMap key cannot contain '/' or '@' and a ConfigMap mounts flat, so
+    # the chart sanitises each path into a legal key and maps it back with
+    # items[].path on the volume. That is entirely internal: write the real
+    # paths here and ignore the restriction.
+    specs: {}
+
+    # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
+    # external pipeline, recipes too large to sit in the site file). Set both,
+    # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
+    # under SPEC_DIR>, doing by hand what specs does automatically.
+    specConfigMap: ""
+
+    # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
+    # restricted to [-._a-zA-Z0-9], so the '@' xnat-ingest needs is illegal,
+    # and a ConfigMap mounts flat, so the per-project directory would be lost
+    # too. Both are fixed by mapping each key to the path it must appear at,
+    # which is why this cannot be built with `kubectl create configmap
+    # --from-file` alone.
+    #
+    #   specFiles:
+    #     default-dicom-series.json: "__default__/medimage@dicom-series.json"
+    #     myproject-dicom-series.json: "MYPROJECT/medimage@dicom-series.json"
+    specFiles: {}
+
+    # Optional. A URL-safe base64 32-byte key (cryptography's
+    # Fernet.generate_key()). Set, mappings are written encrypted as
+    # <session>.json.enc and are unreadable without it. Unset, they are plain
+    # JSON on the same volume as the data they de-identify.
+    reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.

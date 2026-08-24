@@ -1,0 +1,42 @@
+# Example de-identification recipe for medimage/dicom-series.
+#
+# Despite the .json extension this is a pydicom `deid` RECIPE, not JSON. The
+# extension is part of the filename convention xnat-ingest uses to map a file
+# to a format: medimage/dicom-series -> medimage@dicom-series.json.
+#
+# Copy this directory, rename __default__ to your project ID for a
+# project-specific policy, and edit to match your site's approved profile.
+# __default__ is the fallback for any project without its own directory.
+#
+# ONLY THE TAGS NAMED HERE ARE REMOVED. Anything not listed passes through
+# untouched, so this list IS the policy — review it as such.
+#
+# Compare with files/deidentification-profile.example.json, which is the
+# equivalent for the Orthanc Lua engine and has a different syntax.
+
+FORMAT dicom
+
+%header
+
+# Direct identifiers.
+REMOVE PatientName
+REMOVE PatientBirthDate
+REMOVE PatientAddress
+REMOVE PatientTelephoneNumbers
+REMOVE OtherPatientIDs
+REMOVE OtherPatientNames
+
+# Care-team and institution.
+REMOVE ReferringPhysicianName
+REMOVE PerformingPhysicianName
+REMOVE OperatorsName
+REMOVE InstitutionName
+REMOVE InstitutionAddress
+
+# Local accession/order numbers, which are re-identifying within a site.
+REMOVE AccessionNumber
+
+# NOTE: PatientID is deliberately NOT removed here. assign has already
+# rewritten it to the project/subject the session was routed to, and upload
+# needs it to place the session in XNAT. Removing it detaches the data from
+# its subject.

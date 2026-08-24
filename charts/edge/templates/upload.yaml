@@ -112,7 +112,7 @@ spec:
             - name: S3_PREFIX
               value: {{ .Values.upload.s3.prefix | quote }}
             - name: ASSIGNED_DIR
-              value: /data/assigned
+              value: {{ include "edge.uploadSourceDir" . }}
             - name: STATE_DIR
               value: {{ include "edge.uploaderStateDir" . | quote }}
             - name: INTERVAL
@@ -305,7 +305,7 @@ spec:
           # xnat-ingest loops internally via --loop; no bash wrapper needed.
           command: ["xnat-ingest", "upload"]
           args:
-            - "/data/assigned"
+            - {{ include "edge.uploadSourceDir" . | quote }}
             - "$(XINGEST_HOST)"
             - "--always-include"
             - {{ .Values.upload.direct.alwaysInclude | quote }}

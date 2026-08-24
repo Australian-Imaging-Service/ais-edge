@@ -21,6 +21,8 @@ Operations → Risks → Replacements / Future).
   staged DICOM files
 - [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
 - [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
+- [`deidentification.md`](components/deidentification.md) — the two de-identification
+  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up
 
 ### Control plane / networking
 
