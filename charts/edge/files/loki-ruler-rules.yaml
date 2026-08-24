@@ -179,6 +179,33 @@ groups:
         the deidentification-profile.json for syntax issues.
 
         '
+  - alert: DeidentifyStageError
+    # Counterpart to OrthancDeidLuaError for the xnat-ingest engine. Whichever
+    # engine a site runs, a failure to de-identify has to be visible; without
+    # this, switching to ingest.deidentify silences OrthancDeidLuaError and puts
+    # nothing in its place, leaving the one thing you cannot afford to miss
+    # unwatched.
+    #
+    # Matches error text rather than a structured event: the stage logs
+    # tracebacks as plain text. tqdm writes progress bars to the same stream
+    # ("Processing staged sessions ... 100%|####|"), so the pattern is anchored
+    # on error words and never on a bare percentage.
+    expr: |
+      sum by (cluster) (count_over_time(
+        {namespace="xnat-ingest", component="deidentify"}
+        |~ "(?i)traceback|error:|exception|no applicable spec" [10m])) > 0
+    for: 1m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: deid
+    annotations:
+      summary: xnat-ingest deidentify errored on {{ $labels.cluster }}
+      description: >
+        The deidentify stage logged an error in the last 10 minutes. Sessions
+        that fail to de-identify are NOT uploaded, so this is a stall rather
+        than a leak. Check the pod logs and confirm the recipes under
+        ingest.deidentify.specConfigMap cover the formats being received.
   - alert: OrthancStorageGrowing
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\" [1h])) > 1000\n"
     for: 5m

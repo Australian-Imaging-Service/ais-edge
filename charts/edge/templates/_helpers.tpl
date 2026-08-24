@@ -88,8 +88,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          ConfigMap the volume renders with an empty source: helm succeeds, the
          manifest is valid YAML, and the pod then sits in
          CreateContainerConfigError on an edge nobody is watching. */ -}}
-  {{- if and .Values.ingest.deidentify.enabled (not .Values.ingest.deidentify.specConfigMap) }}
-    {{- fail "ingest.deidentify.enabled=true but ingest.deidentify.specConfigMap is empty. The stage mounts that ConfigMap at /etc/xnat-ingest/deid-specs to find its recipes; empty renders a volume with no source and the pod sits in CreateContainerConfigError. Name the ConfigMap holding one directory per project (plus __default__), each with a pydicom deid recipe per format." }}
+  {{- /* specFiles is what puts the '@' and the per-project directory on disk. A
+       ConfigMap key cannot contain '@' and a ConfigMap mounts flat, so without
+       the mapping the recipes land as bare keys in one directory, xnat-ingest
+       matches none of them, and every session is skipped as "no applicable
+       spec" — logged, but easy to read as "nothing to do". */ -}}
+{{- if and .Values.ingest.deidentify.enabled .Values.ingest.deidentify.specConfigMap (not .Values.ingest.deidentify.specFiles) }}
+  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap key cannot contain '@' and mounts flat, so the recipes would land as bare keys in one directory and xnat-ingest would match none of them, skipping every session. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series.json: \"__default__/medimage@dicom-series.json\"}." }}
+{{- end }}
+
+{{- if and .Values.ingest.deidentify.enabled (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
+    {{- fail "ingest.deidentify.enabled=true but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
   {{- end }}
 
   {{- /* De-identification is the control that stops identifiable data

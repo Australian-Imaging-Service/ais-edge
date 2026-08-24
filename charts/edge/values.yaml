@@ -535,25 +535,44 @@ ingest:
     enabled: false
     interval: 60
     copyMode: hardlink_or_copy
+    # THE RECIPES. Written here, in the site file, exactly like
+    # orthanc.deid.profile — the chart builds the ConfigMap and mounts it, so a
+    # fresh install needs no kubectl and no pre-existing namespace.
+    #
+    # Key is the path under SPEC_DIR, value is the recipe:
+    #
+    #   specs:
+    #     "__default__/medimage@dicom-series.json": |
+    #       FORMAT dicom
+    #
+    #       %header
+    #
+    #       REMOVE PatientName
+    #       REMOVE PatientBirthDate
+    #
+    # A ConfigMap key cannot contain '/' or '@' and a ConfigMap mounts flat, so
+    # the chart sanitises each path into a legal key and maps it back with
+    # items[].path on the volume. That is entirely internal: write the real
+    # paths here and ignore the restriction.
+    specs: {}
 
-    # One directory per project, named for the project ID assign gave the
-    # session, plus an optional "__default__" fallback. Inside each, one pydicom
-    # `deid` recipe per format, named for the format's MIME-like identifier with
-    # '/' replaced by '@' — medimage@dicom-series.json for medimage/dicom-series.
-    #
-    # A recipe is a TEXT file, not JSON, despite the extension:
-    #
-    #   FORMAT dicom
-    #
-    #   %header
-    #
-    #   REMOVE PatientName
-    #   REMOVE PatientBirthDate
-    #
-    # Only the tags a recipe names are removed. A session whose format has no
-    # applicable recipe is skipped and logged rather than uploaded with
-    # identifiers still attached.
+    # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
+    # external pipeline, recipes too large to sit in the site file). Set both,
+    # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
+    # under SPEC_DIR>, doing by hand what specs does automatically.
     specConfigMap: ""
+
+    # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
+    # restricted to [-._a-zA-Z0-9], so the '@' xnat-ingest needs is illegal,
+    # and a ConfigMap mounts flat, so the per-project directory would be lost
+    # too. Both are fixed by mapping each key to the path it must appear at,
+    # which is why this cannot be built with `kubectl create configmap
+    # --from-file` alone.
+    #
+    #   specFiles:
+    #     default-dicom-series.json: "__default__/medimage@dicom-series.json"
+    #     myproject-dicom-series.json: "MYPROJECT/medimage@dicom-series.json"
+    specFiles: {}
 
     # Optional. A URL-safe base64 32-byte key (cryptography's
     # Fernet.generate_key()). Set, mappings are written encrypted as

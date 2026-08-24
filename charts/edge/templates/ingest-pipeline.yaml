@@ -236,6 +236,30 @@ spec:
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
 {{- end }}
+{{- if and .Values.ingest.deidentify.enabled .Values.ingest.deidentify.specs }}
+---
+{{/*
+  The de-identification recipes, from the site file.
+
+  A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
+  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  sanitised into a legal key here and mapped back to the real path with
+  items[].path on the volume below, so the operator writes real paths and never
+  sees the restriction.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-deid-specs
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- range $path, $recipe := .Values.ingest.deidentify.specs }}
+  {{ regexReplaceAll "[^-._a-zA-Z0-9]" $path "-" }}: |
+    {{- $recipe | nindent 4 }}
+  {{- end }}
+{{- end }}
 {{- if .Values.ingest.deidentify.enabled }}
 ---
 apiVersion: apps/v1
@@ -304,7 +328,23 @@ spec:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
         - name: deid-specs
           configMap:
+            {{- if .Values.ingest.deidentify.specs }}
+            name: {{ include "edge.fullname" . }}-deid-specs
+            items:
+              {{- range $path, $recipe := .Values.ingest.deidentify.specs }}
+              - key: {{ regexReplaceAll "[^-._a-zA-Z0-9]" $path "-" | quote }}
+                path: {{ $path | quote }}
+              {{- end }}
+            {{- else }}
             name: {{ .Values.ingest.deidentify.specConfigMap }}
+            {{- if .Values.ingest.deidentify.specFiles }}
+            items:
+              {{- range $key, $path := .Values.ingest.deidentify.specFiles }}
+              - key: {{ $key | quote }}
+                path: {{ $path | quote }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
 {{- end }}
 {{- if .Values.ingest.associate.enabled }}
 ---

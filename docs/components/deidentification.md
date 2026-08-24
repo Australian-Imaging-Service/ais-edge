@@ -13,7 +13,7 @@ site picks **one**; the chart refuses to render with both enabled.
 | reversible | no, by design | yes — writes a re-identification mapping |
 | policy format | JSON profile passed to Orthanc `/modify` | pydicom `deid` recipe, one per project |
 | stable pseudonyms | yes — HMAC of the patient ID with a site salt | no — removes fields rather than hashing them |
-| needs | `orthanc.deid.aetMap`, `profile` | a ConfigMap of recipes |
+| needs | `orthanc.deid.aetMap`, `profile` | `ingest.deidentify.specs` recipes |
 
 The Lua hook is the default because it cleans at the front door: identifiable
 data exists inside Orthanc briefly, the original goes to the facility backup,
@@ -88,15 +88,63 @@ uploaded with identifiers still attached.
 Do not remove `PatientID`: `assign` has already rewritten it to the routed
 project/subject, and `upload` needs it to place the session in XNAT.
 
-### 2. Load them as a ConfigMap
+### 2. Put them in the site file
+
+The recipes go in `sites/<site>/values.yaml`, the same way
+`orthanc.deid.profile` does. The chart builds the ConfigMap and mounts it, so a
+fresh install needs no `kubectl` and nothing has to exist beforehand:
+
+```yaml
+ingest:
+  deidentify:
+    enabled: true
+    specs:
+      "__default__/medimage@dicom-series.json": |
+        FORMAT dicom
+
+        %header
+
+        REMOVE PatientName
+        REMOVE PatientBirthDate
+        REMOVE AccessionNumber
+      "MYPROJECT/medimage@dicom-series.json": |
+        FORMAT dicom
+
+        %header
+
+        REMOVE PatientName
+```
+
+The key is the path under `SPEC_DIR`; the value is the recipe. Changing a
+policy later is a `helm upgrade` with the edited site file — still no
+`kubectl`.
+
+A ConfigMap key cannot contain `/` or `@`, and a ConfigMap mounts flat, so the
+chart sanitises each path into a legal key and maps it back with `items[].path`
+on the volume. That is internal: write the real paths and ignore the
+restriction.
+
+#### Managing the ConfigMap yourself
+
+For recipes that come from elsewhere — sealed-secrets, an external pipeline, or
+files too large to sit in a site file — supply the ConfigMap instead and do the
+mapping by hand. `specs` must then be empty:
 
 ```bash
 kubectl -n xnat-ingest create configmap deid-specs \
-    --from-file=__default__/medimage@dicom-series.json
+    --from-file=default-dicom-series.json=__default__/medimage@dicom-series.json
 ```
 
-For more than one project, build the ConfigMap from the whole tree so the
-per-project directories are preserved.
+```yaml
+ingest:
+  deidentify:
+    specConfigMap: deid-specs
+    specFiles:
+      default-dicom-series.json: "__default__/medimage@dicom-series.json"
+```
+
+Note this route needs the namespace to exist already, so it is a post-install
+step rather than a fresh-install one.
 
 ### 3. Optionally, an encryption key for the reversal map
 
@@ -125,7 +173,7 @@ ingest:
     toProcessLabel: ""           # nothing applies the label now — see above
   deidentify:
     enabled: true
-    specConfigMap: deid-specs
+    specs: {...}                 # from step 2
     reidEncryptKeySecret: reid-key   # optional
 ```
 
@@ -167,6 +215,26 @@ A session that produced no output files is worth checking by hand:
 `/data/deidentified` alongside a populated `/data/assigned` means the layout or
 the recipes are not matching, not that there was nothing to do. See
 [xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+
+## Current limitation
+
+`deidentify` cannot yet be chained to `upload`. The stage itself works — images
+are de-identified and the reversal mapping is written — but its output is one
+directory level deeper than `assign` produces:
+
+```
+/data/deidentified/<session>/<session>/<scan>/DICOM/*.dcm   <- what it writes
+/data/assigned/<session>/<scan>/DICOM/*.dcm                 <- what upload expects
+```
+
+so `upload` reports `Found 0 sessions` and the data stops there. This is
+upstream and no chart setting works around it — the chart already points
+`upload` at the right directory. Tracked as
+[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+
+Until that lands, `ingest.deidentify.enabled: true` is usable for evaluating
+the engine and its recipes, but the Orthanc Lua hook remains the only engine
+that carries data all the way to XNAT.
 
 ## Version notes
 
