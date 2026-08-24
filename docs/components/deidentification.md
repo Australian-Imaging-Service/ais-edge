@@ -299,7 +299,7 @@ A session that produced no output files is worth checking by hand:
 `deidentify` reports success even when it processes nothing, so an empty
 `/data/deidentified` alongside a populated `/data/assigned` means the layout or
 the recipes are not matching, not that there was nothing to do. See
-[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 
 ## Current limitation
 
@@ -315,7 +315,7 @@ directory level deeper than `assign` produces:
 so `upload` reports `Found 0 sessions` and the data stops there. This is
 upstream and no chart setting works around it — the chart already points
 `upload` at the right directory. Tracked as
-[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 
 Until that lands, `ingest.deidentify.enabled: true` is usable for evaluating
 the engine and its recipes, but the Orthanc Lua hook remains the only engine

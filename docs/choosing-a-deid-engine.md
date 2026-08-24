@@ -141,7 +141,7 @@ study WITHOUT the tags  -> __invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_.
 **`deidentify` output cannot yet be consumed by `upload`.** It is written one
 directory level deeper than `assign` produces, so `upload` reports
 `Found 0 sessions`. Tracked as
-[xnat-ingest#140](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/140).
+[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 Until it is fixed, the stage runs and de-identifies correctly but data stops
 there.
 
