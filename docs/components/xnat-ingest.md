@@ -4,8 +4,8 @@
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
 is the AIS-maintained Python tool that turns deid'd DICOMs into
-XNAT-ready sessions and uploads them. As of upstream **0.12.3** the old
-single `sort` command was split into two edge stages:
+XNAT-ready sessions and uploads them. Upstream **0.13.1** is the pinned
+version. The old single `sort` command was split into these stages:
 1. **`group-orthanc`** — REST-pulls deid'd studies from Orthanc and
    groups their DICOMs into per-session directories
 2. **`assign`** — extracts the XNAT project/subject/session/scan IDs from
@@ -17,15 +17,19 @@ uploader that carries the sessions between the edge and the management
 node:
 - **`xnat-ingest group-orthanc`** and **`xnat-ingest assign`** on each
   edge VM
-- **`s3-uploader`** on each edge VM — an `aws s3 sync` loop, not
-  xnat-ingest at all (see "Where it runs")
+- **`s3-uploader`** on each edge VM — an `rclone copy` loop, not
+  xnat-ingest at all (see "Where it runs"). It was `aws s3 sync` until the
+  rclone port; `rclone copy` is deliberate, because `rclone sync` deletes at
+  the destination and `aws s3 sync` does not
 - **`xnat-ingest upload`** on the management node, rendered **once per
   edge site** rather than once for the fleet
 
-> **De-identification is done in Orthanc** (the Lua hook), not in
-> xnat-ingest. Upstream 0.12.3 also ships a standalone, optional
-> `deidentify` command (project-specific JSON specs + reversible
-> re-identification metadata) — this deployment does **not** use it.
+> **De-identification is done in Orthanc by default** (the Lua hook), not in
+> xnat-ingest. The optional `deidentify` stage is also wired into this chart
+> (`ingest.deidentify.enabled`, off by default) — it suits pipelines where
+> studies arrive already carrying their project/subject/session identifiers,
+> and it writes reversible re-identification metadata, which the Lua hook does
+> not. See [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
 
 ## Role in this stack
 
@@ -105,10 +109,10 @@ $(S3_SECRET_KEY)`. That is the only way to seed it.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
-| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.13.1` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.13.1` |
 | `edge-s3-uploader` | edge | `xnat-ingest` | `amazon/aws-cli:2.31.19` (NOT xnat-ingest) |
-| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3` |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.13.1` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
 `install.sh` installs the edge chart as release `edge` and the management
@@ -136,7 +140,7 @@ and no CA plumbing. The two modes are mutually exclusive and the chart
 refuses to render both — enabling both would push every session into
 XNAT twice.
 
-The `0.12.3` tag is the **merged-upstream** AIS build pulled from
+The `0.13.1` tag is the **merged-upstream** AIS build pulled from
 `ghcr.io/australian-imaging-service/xnat-ingest` — it replaces the earlier
 local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
@@ -295,7 +299,7 @@ there is never uploaded — that is what makes the rename a promotion.
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
-| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.12.3` keeps starting pods with no registry at all. There is deliberately no image-import step in `install.sh` — a genuinely air-gapped site has to seed the tag into each node's container runtime itself |
+| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.13.1` keeps starting pods with no registry at all. There is deliberately no image-import step in `install.sh` — a genuinely air-gapped site has to seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)

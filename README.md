@@ -967,7 +967,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| xnat-ingest | `0.12.3` |
+| xnat-ingest | `0.13.1` |
 
 Every one is what is **verified working**, read out of a live deployment rather
 than chosen from a changelog. The previous installer used `/latest/` and
