@@ -62,7 +62,7 @@ storage:
 
 orthanc:
   aet: USYD-TBPET
-  stableAge: 1800
+  stableAge: 3600
   applyStableLabel: true
   expose:
     dicom: nodePort
@@ -84,7 +84,7 @@ ingest:
     interval: 300
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-sorted
-    waitPeriod: 1800
+    waitPeriod: 3600
     copyMode: hardlink_or_copy
   # Pipeline B: Windows RAW-DATA-EXPORT (NFS) -> /data/grouped-fs -> /data/assigned
   fileDrop:
