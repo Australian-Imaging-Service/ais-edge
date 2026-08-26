@@ -62,7 +62,7 @@ storage:
 
 orthanc:
   aet: USYD-TBPET
-  stableAge: 3600
+  stableAge: 86400
   applyStableLabel: true
   expose:
     dicom: nodePort
@@ -84,7 +84,7 @@ ingest:
     interval: 300
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-sorted
-    waitPeriod: 3600
+    waitPeriod: 86400
     copyMode: hardlink_or_copy
   # Pipeline B: Windows RAW-DATA-EXPORT (NFS) -> /data/grouped-fs -> /data/assigned
   fileDrop:
@@ -94,7 +94,7 @@ ingest:
     exportClaim: usyd-data-export
     exportMountPath: /data/usyd-export
     perStudyWalk: true
-    waitPeriod: 1800
+    waitPeriod: 86400
     copyMode: symlink_or_copy
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
   assign:

@@ -152,7 +152,7 @@ session_events() {
 
     events=""
     if [ -n "$new_synced" ]; then
-        events="${events}$(printf '%s\n' "$new_synced" | sed 's/^/✅ `/; s/$/` reached S3 (pipeline complete)/')
+        events="${events}$(printf '%s\n' "$new_synced" | sed 's/^/✅ `/; s/$/` most recent snapshot synced to S3/')
 "
     fi
     if [ -n "$new_invalid" ]; then
