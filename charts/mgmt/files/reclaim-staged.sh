@@ -240,6 +240,18 @@ if [ "$MIN_AGE_S" = "ERR" ]; then
     unavailable minage_unparseable "dataPolicy.derived.s3Staged.minAge=${MIN_AGE} is not a duration I can parse (expected e.g. 0, 90m, 12h, 1d, 2w) — refusing to run rather than treating it as 0"
 fi
 
+# The per-run removal cap is the blast-radius bound, and a non-numeric value
+# does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer
+# expression expected" and exits 2, which `if` reads as false, so the check at
+# the top of the session loop never breaks. Verified: `[ 0 -ge unlimited ]`
+# exits 2. Refuse to run rather than run uncapped. 0 is legal and means
+# "examine everything, remove nothing".
+case "$MAX_REMOVALS" in
+    ''|*[!0-9]*)
+        unavailable maxremovals_invalid "dataPolicy.derived.s3Staged.maxRemovals=${MAX_REMOVALS} is not a whole number — a non-numeric cap silently disables the per-run removal limit rather than clamping it, so refusing to run"
+        ;;
+esac
+
 if ! err=$(aws s3api head-bucket --bucket "$S3_BUCKET" 2>&1); then
     unavailable bucket_unreachable "head-bucket ${S3_BUCKET} failed: ${err}"
 fi

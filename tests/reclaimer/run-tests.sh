@@ -189,6 +189,7 @@ setup_headbucket_fail()  { prefixes "staged/$SESS/"; : > "$CASE_DIR/head-bucket.
 setup_xnat_auth_fail()   { prefixes "staged/$SESS/"; : > "$CASE_DIR/xnat-auth.fail"; }
 setup_list_prefixes_fail() { : > "$CASE_DIR/list-prefixes.fail"; }
 setup_bad_minage()       { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_bad_maxremovals()  { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
 setup_dry_run()          { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
 setup_wrong_reclaim()    { prefixes "staged/$SESS/"; }
 setup_filer_refuses()    { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2
@@ -295,6 +296,7 @@ run_case headbucket_fail       no  reclaim_unavailable
 run_case xnat_auth_fail        no  reclaim_unavailable
 run_case list_prefixes_fail    no  reclaim_unavailable
 run_case bad_minage            no  reclaim_unavailable MIN_AGE=notaduration
+run_case bad_maxremovals       no  reclaim_unavailable MAX_REMOVALS=unlimited
 run_case dry_run               no  reclaim_skipped     DRY_RUN=true
 run_case wrong_reclaim         no  reclaim_unavailable RECLAIM=never
 run_case filer_refuses         no  reclaim_failed
