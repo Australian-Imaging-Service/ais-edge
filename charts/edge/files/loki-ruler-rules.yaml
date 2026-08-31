@@ -94,9 +94,16 @@ groups:
 - name: ais-edge-pipeline-warning
   interval: 1m
   rules:
+  # Selects on the `level` stream label, NOT a regex over message text. The
+  # regex form counted LINES: one Python traceback is ~96 lines, every one
+  # matching /error|failed|exception|traceback/, so a single benign event
+  # cleared a threshold of 5 many times over. Vector sets `level` from the
+  # pod's JSON envelope and defaults it to "unknown" for raw stderr, so a
+  # traceback cannot contribute here. Measured over 4 days: fires for the
+  # genuine 2026-08-28 incident, silent for the traceback that followed it.
   - alert: XNATUploadRetryStorm
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"(?i)error|failed|exception|traceback\" [10m])) > 5\n"
-    for: 2m
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\", level=\"ERROR\"}\n  [10m])) > 5\n"
+    for: 15m
     labels:
       severity: warning
       source: loki-ruler
