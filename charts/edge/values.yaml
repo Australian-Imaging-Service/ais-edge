@@ -123,8 +123,14 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
+      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
+      # a quota below one core is clipped in nearly EVERY CFS period it
+      # runs in, which both trips CPUThrottlingHigh and stretches the
+      # sweep about 11x. requests stays at 5m, so its scheduler weight is
+      # still tiny and it yields under contention; the limit only bounds
+      # a runaway.
       requests: {cpu: 5m, memory: 16Mi}
-      limits:   {cpu: 100m, memory: 64Mi}
+      limits:   {cpu: 1, memory: 64Mi}
 
   # ---------------------------------------------------------------------
   # ORIGINALS
