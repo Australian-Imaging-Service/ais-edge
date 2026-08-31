@@ -129,6 +129,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: make values-consumers
 
+      # Both of these are listed in the Makefile's FAST_STAGES but were never
+      # invoked here, so they had never run on a push. duplicate-names catches two
+      # objects rendering to the same (kind, namespace, name); secrets-encrypted
+      # is the guard that no plaintext secret is ever committed.
+      - name: Duplicate rendered object names
+        if: ${{ !cancelled() }}
+        run: make duplicate-names
+
+      - name: Secrets are encrypted (no plaintext secret is tracked)
+        if: ${{ !cancelled() }}
+        run: make secrets-encrypted
+
       # promtool unit-tests the Prometheus rules only. These run the pinned Loki
       # version in docker and evaluate the REAL rule expressions against fixture
       # logs — the tqdm "401.71it/s" false positive and the flapping reclaimer

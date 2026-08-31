@@ -45,6 +45,7 @@ config/orthanc/deidentification-profile*.json
 
 # Local planning / working notes — not part of the deliverable
 docs/cai-lfs3-deployment-plan.md
+docs/alerting-reclaimer-todo.md
 docs/zip-metadata-extraction-xnat-plan.md
 
 # Personal review notes — not part of the deliverable.
