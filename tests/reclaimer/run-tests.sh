@@ -101,9 +101,9 @@ prefixes() { printf '%s\n' "$*" | tr ' ' '\t' > "$CASE_DIR/list-prefixes.json.ra
 session_with() {   # <session> <nfiles>
     local s="$1" n="$2" items="" i
     for i in $(seq 1 "$n"); do
-        items="$items{\"Key\":\"staged/$s/scan/DICOM/f$i.dcm\",\"LastModified\":\"2020-01-01T00:00:00+00:00\"},"
+        items="$items{\"Key\":\"staged/$s/scan/DICOM/f$i.dcm\",\"Size\":100,\"LastModified\":\"2020-01-01T00:00:00+00:00\"},"
     done
-    items="$items{\"Key\":\"staged/$s/scan/DICOM/__MANIFEST__.json\",\"LastModified\":\"2020-01-01T00:00:00+00:00\"}"
+    items="$items{\"Key\":\"staged/$s/scan/DICOM/__MANIFEST__.json\",\"Size\":42,\"LastModified\":\"2020-01-01T00:00:00+00:00\"}"
     printf '{"Contents":[%s]}' "$items" > "$CASE_DIR/objects.$s.json"
     local cks="" i2
     for i2 in $(seq 1 "$n"); do
@@ -114,15 +114,28 @@ session_with() {   # <session> <nfiles>
         > "$CASE_DIR/get.staged_${s}_scan_DICOM___MANIFEST__.json"
 }
 
-xnat_has() {   # <subject> <expid> <label> <nfiles> [name-prefix] [digest]
+# RECORDED SHAPES. The real server answers every file listing with an empty
+# Result, so what XNAT can tell us is the per-resource file_count and file_size,
+# and both arrive as STRINGS. Fixtures keep them strings for that reason.
+xnat_has() {   # <subject> <expid> <label> <nfiles> [total-bytes] [scan-id]
+    local sid="${6:-1}" bytes="${5:-$(( $4 * 100 ))}"
     printf '{"ResultSet":{"Result":[{"ID":"%s","label":"%s"}]}}' "$2" "$3" \
         > "$CASE_DIR/xnat-exp.$1.json"
-    local rows="" i pfx="${5:-f}" dig="${6:-}"
-    for i in $(seq 1 "$4"); do
-        rows="$rows{\"Name\":\"${pfx}$i.dcm\",\"digest\":\"${dig}\"},"
-    done
-    rows="${rows%,}"
-    printf '{"ResultSet":{"Result":[%s]}}' "$rows" > "$CASE_DIR/xnat-files.$2.json"
+    printf '{"ResultSet":{"Result":[{"ID":"%s","type":"synthetic"}]}}' "$sid" \
+        > "$CASE_DIR/xnat-scans.$2.json"
+    printf '{"ResultSet":{"Result":[{"label":"DICOM","file_count":"%s","file_size":"%s"}]}}' "$4" "$bytes" \
+        > "$CASE_DIR/xnat-res.$2.${sid}.json"
+}
+
+# XNAT resolved the experiment but has not built its stats: file_count arrives
+# empty. That must read as "cannot check", never as zero.
+xnat_stats_unbuilt() {   # <subject> <expid> <label>
+    printf '{"ResultSet":{"Result":[{"ID":"%s","label":"%s"}]}}' "$2" "$3" \
+        > "$CASE_DIR/xnat-exp.$1.json"
+    printf '{"ResultSet":{"Result":[{"ID":"1","type":"synthetic"}]}}' \
+        > "$CASE_DIR/xnat-scans.$2.json"
+    printf '{"ResultSet":{"Result":[{"label":"DICOM","file_count":"","file_size":""}]}}' \
+        > "$CASE_DIR/xnat-res.$2.1.json"
 }
 
 SESS="proj.subj.visit"
@@ -140,26 +153,52 @@ setup_partial_upload() { prefixes "staged/$SESS/"; session_with "$SESS" 400; xna
 
 setup_xnat_absent()      { prefixes "staged/$SESS/"; session_with "$SESS" 2; }
 
-# THE CASE A COUNT CANNOT CATCH: XNAT holds the right NUMBER of files, but
-# they are different files. A count comparison would confirm and delete.
-setup_right_count_wrong_files() { prefixes "staged/$SESS/"; session_with "$SESS" 3
-                                  xnat_has subj EXP1 visit 3 other; }
+# THE ACCEPTED GAP, asserted so it is visible rather than assumed. XNAT holds
+# the right number of files and the right total bytes, but they are different
+# files. Verification is count-and-bytes because no listing endpoint on the real
+# server returns names (measured 2026-09-01), so this session IS confirmed. A
+# swap that preserves both count and total length is not a delivery failure; it
+# is a substitution. If XNAT ever serves names again, tighten this and flip the
+# expectation back.
+setup_same_count_different_files() { prefixes "staged/$SESS/"; session_with "$SESS" 3
+                                     xnat_has subj EXP1 visit 3; }
 
-# One of three missing, the other two present — a count would say 2 != 3 and
-# also keep, but this proves the MISSING NAME is what is reported.
+# One of three missing: the count differs, so it is kept.
 setup_one_file_missing()  { prefixes "staged/$SESS/"; session_with "$SESS" 3
                             xnat_has subj EXP1 visit 2; }
 
-# Names match, digests differ. Only reachable where the XNAT catalog carries
-# checksums; ours does not, so this proves the path works for sites that do.
-setup_checksum_mismatch() { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                            xnat_has subj EXP1 visit 2 f deadbeef; }
+# Right count, WRONG total bytes — a file was truncated or replaced by a
+# shorter one. The count alone would have confirmed this.
+setup_size_mismatch()     { prefixes "staged/$SESS/"; session_with "$SESS" 2
+                            xnat_has subj EXP1 visit 2 199; }
 
-# Names match and digests match — must still remove.
-setup_checksum_match()    { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                            xnat_has subj EXP1 visit 2 f abc; }
+# Right count and right bytes — must remove.
+setup_size_match()        { prefixes "staged/$SESS/"; session_with "$SESS" 2
+                            xnat_has subj EXP1 visit 2 200; }
+
+# XNAT resolved the session but has not built its stats. file_count arrives
+# empty, which must be "cannot check", never zero. This is the exact shape that
+# left the old probe unable to confirm anything for weeks without saying so.
+setup_xnat_stats_unbuilt() { prefixes "staged/$SESS/"; session_with "$SESS" 2
+                             xnat_stats_unbuilt subj EXP1 visit; }
+
+# Objects staged under a resource directory with no manifest beside them. They
+# were never declared, so they were never compared, and confirming would delete
+# them unchecked.
+setup_undeclared_objects() { prefixes "staged/$SESS/"; session_with "$SESS" 2
+    python3 - "$CASE_DIR/objects.$SESS.json" "$SESS" <<'PYEOF'
+import json, sys
+p, sess = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+for i in range(1, 300):
+    d["Contents"].append({"Key": "staged/%s/scan2/DICOM/g%d.dcm" % (sess, i),
+                          "Size": 100, "LastModified": "2020-01-01T00:00:00+00:00"})
+json.dump(d, open(p, "w"))
+PYEOF
+    xnat_has subj EXP1 visit 2; }
+
 setup_xnat_500()         { prefixes "staged/$SESS/"; session_with "$SESS" 2; : > "$CASE_DIR/xnat-exp.subj.fail"; }
-setup_xnat_files_500()   { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-files.EXP1.fail"; }
+setup_xnat_res_500()     { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-res.EXP1.1.fail"; }
 setup_no_manifest()      { prefixes "staged/$SESS/"
                            printf '{"Contents":[{"Key":"staged/%s/scan/DICOM/f1.dcm","LastModified":"2020-01-01T00:00:00+00:00"}]}' "$SESS" \
                              > "$CASE_DIR/objects.$SESS.json"
@@ -273,15 +312,17 @@ assert_preflight_no_listing() {
 
 printf '\n%s== reclaimer decision paths ==%s\n' "$_B" "$_O"
 run_case happy_path            yes reclaim_removed
-run_case xnat_has_more         yes reclaim_removed
+run_case xnat_has_more         no  reclaim_kept
 run_case partial_upload        no  reclaim_kept
 run_case xnat_absent           no  reclaim_kept
-run_case right_count_wrong_files no reclaim_kept
+run_case same_count_different_files yes reclaim_removed
 run_case one_file_missing      no  reclaim_kept
-run_case checksum_mismatch     no  reclaim_kept
-run_case checksum_match        yes reclaim_removed
+run_case size_mismatch         no  reclaim_kept
+run_case size_match            yes reclaim_removed
+run_case xnat_stats_unbuilt    no  reclaim_kept
+run_case undeclared_objects    no  reclaim_kept
 run_case xnat_500              no  reclaim_kept
-run_case xnat_files_500        no  reclaim_kept
+run_case xnat_res_500          no  reclaim_kept
 run_case no_manifest           no  reclaim_kept
 run_case manifest_unreadable   no  reclaim_kept
 run_case listing_fail          no  reclaim_kept

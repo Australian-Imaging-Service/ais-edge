@@ -57,11 +57,30 @@ case "$url" in
     fi
     emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
 
-*/scans/ALL/files\?format=json*)
+# RECORDED FROM THE REAL SERVER, 2026-09-01. Every file-listing endpoint
+# answers 200 with an empty Result — for COMPLETE sessions as well as empty
+# ones. It is not configurable from a fixture on purpose: a stub that can be
+# told to return file rows models an XNAT that does not exist, and that is
+# exactly why a probe which could never confirm anything passed 31/31 tests.
+*/files\?format=json*)
+    emit '{"ResultSet":{"Columns":[{"key":"URI","serverRoot":""}],"Result":[], "title": "Files"}}' '200'; exit 0 ;;
+
+*/scans\?format=json*)
     exp=$(printf '%s' "$url" | sed 's#.*/experiments/##; s#/scans.*##')
-    [ -f "$S/xnat-files.${exp}.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
-    if [ -f "$S/xnat-files.${exp}.json" ]; then
-        emit "$(cat "$S/xnat-files.${exp}.json")" '200'; exit 0
+    [ -f "$S/xnat-scans.${exp}.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
+    if [ -f "$S/xnat-scans.${exp}.json" ]; then
+        emit "$(cat "$S/xnat-scans.${exp}.json")" '200'; exit 0
+    fi
+    emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
+
+# file_count and file_size are STRINGS in the real payload, and empty when XNAT
+# has not built the stats. Fixtures must keep them strings.
+*/resources\?format=json*)
+    exp=$(printf '%s' "$url" | sed 's#.*/experiments/##; s#/scans.*##')
+    sid=$(printf '%s' "$url" | sed 's#.*/scans/##; s#/resources.*##')
+    [ -f "$S/xnat-res.${exp}.${sid}.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
+    if [ -f "$S/xnat-res.${exp}.${sid}.json" ]; then
+        emit "$(cat "$S/xnat-res.${exp}.${sid}.json")" '200'; exit 0
     fi
     emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
 esac
