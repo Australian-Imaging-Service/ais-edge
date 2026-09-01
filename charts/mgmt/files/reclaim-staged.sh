@@ -244,8 +244,14 @@ fi
 # does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer
 # expression expected" and exits 2, which `if` reads as false, so the check at
 # the top of the session loop never breaks. Verified: `[ 0 -ge unlimited ]`
-# exits 2. Refuse to run rather than run uncapped. 0 is legal and means
-# "examine everything, remove nothing".
+# exits 2. Refuse to run rather than run uncapped.
+#
+# 0 is accepted but does NOT mean "examine everything, remove nothing".
+# The cap is tested at the TOP of the session loop and breaks, so 0 stops
+# the run before the first session is examined: one session-less
+# reclaim_skipped, examined=1, and no per-session evidence at all. That
+# starves the staged-session alert, which reads per-session events. If you
+# want confirm-without-delete today, use dryRun, not maxRemovals: 0.
 case "$MAX_REMOVALS" in
     ''|*[!0-9]*)
         unavailable maxremovals_invalid "dataPolicy.derived.s3Staged.maxRemovals=${MAX_REMOVALS} is not a whole number — a non-numeric cap silently disables the per-run removal limit rather than clamping it, so refusing to run"
