@@ -260,6 +260,26 @@ dataPolicy:
       # As above: a recovery window after upload, not a delay before it.
       minAge: 0
 
+
+    # Where the xnat-ingest deidentify stage writes, and what `upload` reads when
+    # ingest.deidentify.enabled. Rendered as a stage ONLY when that is on.
+    #
+    # WHY: without a row this tree is invisible to the engine, so it is absent
+    # from stage_report and therefore from EdgeDiskLow, the only disk-exhaustion
+    # alert on this tier. It is the tree that grows once de-identification is on,
+    # so it was exactly the one the disk alert could not see.
+    #
+    # CAUTION: report only by default. onUploaded cannot be satisfied in
+    # upload.mode=direct, because nothing writes the uploader's state dir, so
+    # setting it here would keep this tree forever while looking like a policy.
+    deidentified:
+      # No `location` key on purpose. The path is DERIVED from
+      # edge.uploadSourceDir, the same helper upload.yaml uses for its argument,
+      # so the stage and the uploader cannot end up pointed at different trees.
+      # Restating it here would also declare a path that does not exist in a
+      # render with de-identification off.
+      reclaim: never             # never | onUploaded
+      minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
     #
