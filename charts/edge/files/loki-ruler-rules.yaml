@@ -94,16 +94,23 @@ groups:
 - name: ais-edge-pipeline-warning
   interval: 1m
   rules:
-  # Selects on the `level` stream label, NOT a regex over message text. The
-  # regex form counted LINES: one Python traceback is ~96 lines, every one
-  # matching /error|failed|exception|traceback/, so a single benign event
-  # cleared a threshold of 5 many times over. Vector sets `level` from the
-  # pod's JSON envelope and defaults it to "unknown" for raw stderr, so a
-  # traceback cannot contribute here. Measured over 4 days: fires for the
-  # genuine 2026-08-28 incident, silent for the traceback that followed it.
+  # Counts one line PER FAILURE, not per line of output. The original form
+  # matched /error|failed|exception|traceback/ against every line, and one
+  # Python traceback is ~96 lines, so a single event cleared a threshold of
+  # 5 many times over.
+  #
+  # Keying on level="ERROR" alone is NOT enough, measured: over 24h this
+  # edge logged 11 tracebacks carrying real failures (DNS resolution and
+  # read timeouts to XNAT) and NOT ONE line at level="ERROR". xnat-ingest
+  # lets those reach stderr uncaught, and Vector labels unlabelled output
+  # "unknown", so an ERROR-only rule is silent through a real outage.
+  #
+  # So: match the traceback HEADER, which appears exactly once per failure,
+  # OR any ERROR-level line. Measured over the same 24h: 4 ten-minute
+  # windows contained failures, 3 to 4 each, hence a threshold of 2.
   - alert: XNATUploadRetryStorm
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\", level=\"ERROR\"}\n  [10m])) > 5\n"
-    for: 15m
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  [10m])) > 2\n"
+    for: 10m
     labels:
       severity: warning
       source: loki-ruler

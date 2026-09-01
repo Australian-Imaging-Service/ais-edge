@@ -170,22 +170,37 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
-2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	Traceback (most recent call last):
-3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	  File "/usr/local/lib/python3.14/dist-packages/xnat_ingest/cli/upload.py", line 88, in upload
-4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	    session = ImagingSession.load(path)
-5	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	  File "/usr/local/lib/python3.14/dist-packages/xnat_ingest/model/session.py", line 402, in load
-6	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	    raise ValueError(f"no manifest in {path}")
-2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	ValueError: no manifest in /data/deidentified/proj.SUBJ.SESS
-3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	During handling of the above exception, another exception occurred:
-4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	Traceback (most recent call last):
-5	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	  File "/usr/local/lib/python3.14/dist-packages/xnat_ingest/cli/upload.py", line 95, in upload
-6	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-noise","level":"unknown"}	    logger.error("upload failed")
-2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:10:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS0: 500 Server Error"}
-3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:11:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS1: 500 Server Error"}
-4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:12:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS2: 500 Server Error"}
-5	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:13:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS3: 500 Server Error"}
-6	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:14:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS4: 500 Server Error"}
-7	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-real","level":"ERROR"}	{"ts":"2026-08-28T01:15:00+0000","level":"ERROR","logger":"xnat-ingest","message":"Error uploading session proj.SUBJ.SESS5: 500 Server Error"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"    retries = retries.increment("}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"    raise reraise(type(error), error, _stacktrace)"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat-test.example.org, port=443)"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    retries = retries.increment("}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    raise reraise(type(error), error, _stacktrace)"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat-test.example.org, port=443)"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    retries = retries.increment("}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    raise reraise(type(error), error, _stacktrace)"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat-test.example.org, port=443)"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    retries = retries.increment("}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"    raise reraise(type(error), error, _stacktrace)"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-many","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat-test.example.org, port=443)"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS0: 500 Server Error"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS1: 500 Server Error"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS2: 500 Server Error"}
 EOF
 }
 
@@ -205,8 +220,9 @@ disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above t
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
-retry_traceback_noise	XNATUploadRetryStorm	retry-noise	nofire	10 traceback lines at level=unknown must never match
-retry_real_errors	XNATUploadRetryStorm	retry-real	fire	6 level=ERROR lines in 10m — upload really is retrying
+retry_one_traceback	XNATUploadRetryStorm	retry-one	nofire	one failure is ~96 lines — must count as ONE, not fire
+retry_many_tracebacks	XNATUploadRetryStorm	retry-many	fire	3 separate failures, none at level=ERROR — the 24h live case
+retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures must still fire on their own
 EOF
 }
 
