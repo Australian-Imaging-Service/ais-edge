@@ -81,12 +81,22 @@ groups:
 - name: ais-edge-pipeline-critical
   interval: 1m
   rules:
+  # Watches component="upload", NOT "s3-uploader". The s3-uploader is only
+  # rendered when upload.mode=s3, and install.sh forces upload.mode=direct on
+  # tier-1, so the old selector matched a component that never runs here and
+  # this alert could not fire at all. Verified: no s3-uploader Deployment
+  # exists on a tier-1 cluster.
+  #
+  # Failure counting is the same shape as XNATUploadRetryStorm: the traceback
+  # header, one per failure, or an ERROR-level line. Success is the PER-SESSION
+  # line; "Upload completed successfully" is per LOOP and is emitted even when
+  # every session was skipped, so it would mask a total outage.
+  # An idle edge logs neither, so it stays quiet.
   - alert: XNATUploadFailingForAllSessions
     annotations:
       description: No completed uploads while failures keep coming. Likely network / SeaweedFS / credential break. Check `kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} logs -n xnat-ingest -l component=s3-uploader`.
       summary: All upload attempts have failed for 15+ minutes on {{ $labels.cluster }}
-    expr: "(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_failed\" [15m])) > 0)\nunless on (cluster)\n(sum by (cluster) (count_over_time(\n\
-      \  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_completed\" [15m])) > 0)\n"
+    expr: "(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  [15m])) > 2)\nunless on (cluster)\n(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files in\" [15m])) > 0)\n"
     for: 15m
     labels:
       severity: critical

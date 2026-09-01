@@ -201,6 +201,29 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS0: 500 Server Error"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS1: 500 Server Error"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-err","level":"ERROR"}	{"message":"Error uploading session proj.SUBJ.SESS2: 500 Server Error"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-all","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS0"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS1"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 EOF
 }
 
@@ -223,6 +246,9 @@ quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined
 retry_one_traceback	XNATUploadRetryStorm	retry-one	nofire	one failure is ~96 lines — must count as ONE, not fire
 retry_many_tracebacks	XNATUploadRetryStorm	retry-many	fire	3 separate failures, none at level=ERROR — the 24h live case
 retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures must still fire on their own
+upload_failing_all	XNATUploadFailingForAllSessions	fail-all	fire	3 failures and not one session landed
+upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, but sessions ARE still landing
+upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
 EOF
 }
 

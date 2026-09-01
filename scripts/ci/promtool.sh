@@ -571,6 +571,7 @@ def norm(o):
 FORCED = {
     "XNATUploadSuccess": "scoped to component=upload — a bare namespace selector matched Loki's own ruler-query log, which contains both the success phrase and the regexp, and fired an alert about its own evaluation",
     "XNATAuthFailure":   "scoped to component=upload — a bare namespace selector matched a 401/403 logged by any pod in the namespace",
+    "XNATUploadFailingForAllSessions": "different uploader, not drift — tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count xnat-ingest's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
 }
 bad = [n for n in sorted(set(t1) & set(t2))
        if n not in FORCED and norm(t1[n]) != norm(t2[n])]
