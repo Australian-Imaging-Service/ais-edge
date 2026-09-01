@@ -561,15 +561,29 @@ xnat_totals() {
     # or ABSENT (it resolved the experiment and there is nothing in it), or
     # ERR (could not ask — never to be read as "nothing there").
     #
-    # WHY COUNT AND BYTES, NOT NAMES. Measured against the live server on
-    # 2026-09-01: EVERY file-listing endpoint returns {"Result":[]} with HTTP
-    # 200, for complete sessions as well as incomplete ones —
-    #     /scans/ALL/files, /files, /scans/{id}/files,
-    #     /scans/{id}/resources/{label}/files
-    # the last of which is the one xnat-ingest itself reads. The catalog is not
-    # populated, and xnat-ingest works around it by POSTing
-    # /data/services/refresh/catalog. A reclaimer must not write to XNAT to
-    # answer a question, so it uses the numbers that ARE reported.
+    # WHY COUNT AND BYTES, NOT NAMES. The file listing is not there when this
+    # runs. Measured against the live server on 2026-09-01, same query, four
+    # sessions of different ages:
+    #
+    #     experiment    age        /scans/ALL/files   /scans/ALL/resources
+    #     XNAT_E00078   minutes    3 rows             3 files
+    #     XNAT_E00074   days       0 rows             3 files
+    #     XNAT_E00069   days       0 rows             5 files
+    #     XNAT_E00068   days       0 rows             1 file
+    #
+    # So the listing IS populated immediately after upload and is empty on every
+    # older session, while the resource stats are correct at every age. Also
+    # measured empty on the older ones: /files, /scans/{id}/files, and
+    # /scans/{id}/resources/{label}/files, the last being the one xnat-ingest
+    # itself reads (it works around the same emptiness by POSTing
+    # /data/services/refresh/catalog when a scan reports no files).
+    #
+    # This matters because of WHEN the reclaimer looks. It only considers a
+    # session older than minAge, which defaults to 1d, so by construction it
+    # always arrives in the regime where the listing is empty. A name-based
+    # probe would confirm a session uploaded minutes ago and fail on every
+    # session it is actually asked about. A reclaimer must not write to XNAT to
+    # answer a question, so it uses the numbers that ARE reported at every age.
     #
     # /scans/{id}/resources gives file_count and file_size per resource, and
     # both are exact: a 5-file session of 9548-byte instances reports
