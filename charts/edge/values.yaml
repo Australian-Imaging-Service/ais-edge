@@ -551,8 +551,18 @@ ingest:
   # project from which machine sent the study. Your modalities must populate
   # project/subject/session in tags they actually send, and ingest.assign
   # .tagMapping must point at those tags — it defaults to the ClinicalTrial*
-  # tags that only the Lua hook writes. The chart refuses the combination rather
-  # than letting every study land in __invalid__ still carrying its PHI.
+  # tags that only the Lua hook writes. The chart refuses THAT DEFAULT at render
+  # time; it cannot detect a mapping that names real tags this site's modalities
+  # do not populate, which looks correct and ends the same way, with every study
+  # in __invalid__ still carrying its PHI.
+  #
+  # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
+  # values out before this stage runs, and ImagingSession.new_empty copies them
+  # into the de-identified session unchanged, so no recipe can alter them. Under
+  # the Lua hook they are already salted hashes; here they are whatever the
+  # modality sent. Pointing subject at PatientID puts the raw medical record
+  # number into XNAT while the headers and pixels are correctly stripped. Choose
+  # tags that are already pseudonymous at the modality.
   #
   # WHEN TO PREFER THIS ONE. It writes a re-identification mapping per session,
   # so the process can be reversed later (a clinical follow-up needing to find

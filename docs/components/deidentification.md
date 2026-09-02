@@ -73,8 +73,12 @@ dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
 > fills up. Measured on a test edge: 531 instances, still carrying the patient
 > name, parked indefinitely with nothing failing loudly.
 >
-> The chart now refuses this combination at render time rather than letting it
-> happen. See *What the chart refuses*.
+> The chart refuses the DEFAULT form of this at render time: `deidentify`
+> enabled while `tagMapping` still names the `ClinicalTrial*` tags. It cannot
+> detect the other form, where `tagMapping` names real tags that this site's
+> modalities happen not to populate — that configuration looks correct and
+> reaches the same end state. Confirm the tags on a real study rather than
+> relying on the guard.
 
 > **CAUTION — choosing `deidentify` gives up AE-title routing.**
 >
@@ -92,14 +96,43 @@ dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
 > ingest:
 >   assign:
 >     tagMapping:
->       project: StudyID          # whatever your modalities actually populate
->       subject: PatientID
->       session: AccessionNumber
+>       project: StudyID          # whatever your modalities actually populate,
+>       subject: <pseudonym tag>  # see the caution below before choosing these
+>       session: <pseudonym tag>
 > ```
 >
 > These three keys default to the `ClinicalTrial*` tags because the default
 > engine is the Lua hook, which writes them. They are values, not constants:
 > re-point them when you change engine.
+
+> **CAUTION — whatever tags you name become the XNAT labels, verbatim and
+> un-de-identified.**
+>
+> `assign` reads the three tags and lifts their values into the session object.
+> Everything after that uses the values, not the tags. `deidentify` builds its
+> output with `ImagingSession.new_empty()`, which copies `project_id`,
+> `subject_id` and `session_id` across unchanged; `save()` names the directory
+> `<project>.<subject>.<session>`; and `upload` creates the XNAT subject and
+> experiment from those same ids.
+>
+> **A recipe cannot change them.** The recipe rewrites DICOM tags, but `assign`
+> has already taken the values out before `deidentify` runs. So the tag you
+> name in `subject` becomes the XNAT subject label exactly as the modality sent
+> it.
+>
+> Under the Lua hook this is safe, because the hook has already replaced those
+> tags with salted hashes before `assign` sees them. Under `deidentify` there is
+> no such step, so pointing `subject` at `PatientID` puts the raw medical record
+> number into XNAT's metadata **while the pixel data and headers are correctly
+> stripped** — the data looks clean and the identifier is in the label.
+>
+> Choose tags that are ALREADY pseudonymous at the modality, or arrange for the
+> modality to send one. Verify on a real study before enabling the engine:
+>
+> ```bash
+> # whatever these print is what will appear in XNAT
+> dcmdump file.dcm | grep -E '<the three tags you configured>'
+> ```
 
 ## The label coupling
 
