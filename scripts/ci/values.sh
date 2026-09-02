@@ -68,9 +68,10 @@ upload:
     endpoint: "https://seaweedfs.ci.198-51-100-10.nip.io"
     bucket: ingest-edge-alpha
     caBundleSecret: ca-bundle
+deid:
+  engine: orthanc
 orthanc:
   deid:
-    enabled: true
     policyReviewed: true
     aetMap:
       SIEMENS_3T: {project: CI_RESEARCH}
@@ -292,15 +293,15 @@ dataPolicy:
   dryRun: false
 EOF
 
-# De-identification off. Requires clearing toProcessLabel, because nothing
-# applies that label with the hook disabled.
+# De-identification off. One key now, and the group label needs no clearing:
+# the chart derives it from the engine, so it cannot be left dangling.
+# policyReviewed is what acknowledges that identifiable data would reach XNAT.
 cat >"$V/edge-deid-off.yaml" <<'EOF'
+deid:
+  engine: none
 orthanc:
   deid:
-    enabled: false
-ingest:
-  orthancGroup:
-    toProcessLabel: ""
+    policyReviewed: true
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -814,11 +815,39 @@ printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
 
-printf 'ingest:\n  deidentify:\n    enabled: true\n    specConfigMap: specs\n' >"$V/neg-edge-deid-both-engines.yaml"
-printf 'orthanc:\n  deid:\n    enabled: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n  deidentify:\n    enabled: true\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
-printf 'orthanc:\n  deid:\n    enabled: false\n    policyReviewed: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n' >"$V/neg-edge-deid-no-engine.yaml"
-printf 'orthanc:\n  deid:\n    enabled: false\ningest:\n  orthancGroup:\n    toProcessLabel: ""\n  deidentify:\n    enabled: true\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
+printf 'deid:\n  engine: ingset\n' >"$V/neg-edge-deid-bad-engine.yaml"
+printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
+printf 'deid:\n  engine: none\northanc:\n  deid:\n    policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
+printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
+
+# The migration guards, which are the upgrade path for every existing site and
+# execute exactly once each, in anger. Nothing had ever run them.
+printf 'orthanc:\n  deid:\n    enabled: true\n'      >"$V/neg-edge-deid-legacy-orthanc-key.yaml"
+printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-ingest-key.yaml"
+
+# onDeidentified is satisfied by the deidentify stage unlinking its own input,
+# so it is meaningless when that stage does not render.
+printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
+
+# A recovery window on a tree the stage deletes at handoff can never elapse.
+# Also the only live exercise of the durationSeconds/int64 path in that guard.
+cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+      minAge: 1d
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
 
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
 storage:
@@ -826,12 +855,22 @@ storage:
     enabled: false
 EOF
 
-# group-orthanc filtering on a label nothing applies: the pipeline stalls with
-# no error anywhere.
-cat >"$V/neg-edge-orphan-toprocesslabel.yaml" <<'EOF'
-orthanc:
-  deid:
-    enabled: false
+# The routing tags only the Lua hook writes, with the Lua hook not selected:
+# every session lands in __invalid__ still carrying its PHI. The old
+# orphaned-toProcessLabel case is gone because the chart now derives that label
+# from the engine, so it cannot be left dangling.
+cat >"$V/neg-edge-deid-lua-tags.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+ingest:
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
 EOF
 
 # Reclaiming the operator's only copy.
@@ -1062,14 +1101,18 @@ neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every 
 neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
-neg-edge-deid-both-engines	charts/edge	edge-base.yaml neg-edge-deid-both-engines.yaml	are both true
+neg-edge-deid-bad-engine	charts/edge	edge-base.yaml neg-edge-deid-bad-engine.yaml	must be one of orthanc, ingest or none
 neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	no recipes are configured
-neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	no de-identification engine is enabled
+neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	deid.engine=none, so nothing in this pipeline de-identifies
 neg-edge-deid-no-specfiles	charts/edge	edge-base.yaml neg-edge-deid-no-specfiles.yaml	specFiles is empty
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
+neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
+neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
+neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
+neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
-neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toprocesslabel.yaml	Nothing applies that label
+neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set

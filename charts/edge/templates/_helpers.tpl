@@ -177,6 +177,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the xnat-ingest de-identification stage." }}
   {{- end }}
 
+  {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
+         configurations where the operator has asked for something the mechanism
+         cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}
+  {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
+    {{- if not (eq (include "edge.deidEngine" .) "ingest") }}
+      {{- fail "dataPolicy.derived.assigned.reclaim=onDeidentified but deid.engine is not ingest. That condition is satisfied by the deidentify STAGE unlinking its own input, and the stage does not render, so nothing would ever retire /data/assigned and it would grow without bound. Use onUploaded, which the data-policy engine can satisfy from the uploader's markers when the uploader reads this tree, or enable the stage." }}
+    {{- end }}
+    {{- $minAge := include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}
+    {{- if and (ne $minAge "-") (gt (int64 $minAge) 0) }}
+      {{- fail (printf "dataPolicy.derived.assigned.minAge=%v is set alongside reclaim=onDeidentified. A recovery window measured on this tree can never elapse under that condition: the deidentify stage deletes each session the moment it has written a complete copy, so there is nothing left for the window to protect. Set minAge to 0, or use onUploaded if you want a window." .Values.dataPolicy.derived.assigned.minAge) }}
+    {{- end }}
+  {{- end }}
+
   {{- /* The reclaim word for /data/assigned depends on WHO reads that tree, and
          the engine decides that. */ -}}
   {{- if and (eq $engine "ingest") (eq .Values.dataPolicy.derived.assigned.reclaim "onUploaded") }}
