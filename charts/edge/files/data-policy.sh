@@ -74,6 +74,9 @@ MAX_REMOVALS="${MAX_REMOVALS:-50}"
 # trees in, and a directory that looks complete mid-copy is exactly how a
 # half-session gets reclaimed.
 SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
+# How long a session may fail its reclaim condition before it is called
+# stuck. 0 or "-" disables the check entirely. See the branch that uses it.
+STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 # The uploader's fingerprint state dir. A file here named after a session is
 # the uploader's own record that it finished pushing that session to S3 — the
 # observable signal `onUploaded` is derived from, needing no change to
@@ -279,6 +282,33 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
         fi
 
         if ! condition_met "$r_word" "$s" "$r_name"; then
+            # A SESSION WHOSE CONDITION NEVER COMES TRUE IS STUCK, AND UNTIL NOW
+            # NOTHING SAID SO. Keeping it is the right call every single time --
+            # the copy is not provably reconstructible, so it stays -- but a
+            # session that has been failing that test for days is not the same
+            # event as one that failed it a minute ago, and both logged the
+            # identical line. The steady drip of reclaim_kept is indistinguishable
+            # from normal operation, which is how a permanently stuck session hid
+            # in this repo twice.
+            #
+            # This does NOT delete or move anything. It raises the event that an
+            # alert can key on, and leaves the data exactly where it is. Moving a
+            # stuck session was the original proposal; it is deliberately not done
+            # here. Quarantining means moving the input AND removing the partial
+            # output as ONE action: doing only the first leaves an orphan with
+            # nothing left to repair it from, which upload would then collect. An
+            # engine that can do half of that should do neither. (Its /data mount
+            # is also read-only unless retention is armed, so a move would work in
+            # one mode and silently not in the other, but the two-operations
+            # argument holds whatever the mount says.)
+            if [ "${STUCK_AFTER_S:--}" != "-" ] && [ "${STUCK_AFTER_S:-0}" -gt 0 ]; then
+                s_age=$(newest_age_s "$d") || s_age=-1
+                if [ "$s_age" -ge "$STUCK_AFTER_S" ]; then
+                    jlog stage_stuck "$r_name" "session has not satisfied '${r_word}' for ${s_age}s and is not being retried by anything — the stage it is waiting on has not produced what this condition looks for" \
+                         ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"age_s\":${s_age}"
+                    continue
+                fi
+            fi
             jlog reclaim_kept "$r_name" "condition ${r_word} not satisfied — nothing downstream proves this copy is reconstructible" \
                  ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\""
             continue

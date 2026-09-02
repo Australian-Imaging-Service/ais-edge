@@ -137,6 +137,34 @@ dataPolicy:
     # before it is considered complete. Both mirror the S3 reclaimer's design.
     maxRemovals: 50
     settleMinutes: 5
+
+    # WHEN TO CALL A SESSION STUCK.
+    #
+    # A session whose reclaim condition never comes true is kept, correctly and
+    # for ever, and every pass logs the same reclaim_kept line. That drip is
+    # indistinguishable from normal operation, so a permanently stuck session
+    # looks exactly like a healthy one that was uploaded a minute ago.
+    #
+    # Past this age the engine raises stage_stuck instead, which an alert keys
+    # on. NOTHING IS MOVED OR DELETED: the data stays exactly where it is, and
+    # this only changes which event is emitted. Set 0 to disable.
+    #
+    # WHY IT ONLY REPORTS. Quarantining a stuck session means moving the input
+    # AND removing the partial output as ONE action. Doing only the first leaves
+    # an orphaned partial output with nothing left to repair it from, and the
+    # upload stage would then collect it. This engine can do the first half, so
+    # it does neither. (Its /data mount is also read-only unless retention is
+    # armed, which would make a move work in one mode and silently not in the
+    # other, but the two-operations argument holds regardless of the mount.)
+    #
+    # WHAT IT CANNOT SEE. The age measured is the newest mtime in the tree, so
+    # this detects a stage that has gone QUIET without progressing. A session
+    # being rewritten on every cycle never accumulates age and is invisible to
+    # it. That case is confined to the deidentified stage running an xnat-ingest
+    # without the metadata write-if-changed fix, where the output's
+    # __METADATA__.json was rewritten every pass; with that fix the tree goes
+    # quiet and this sees it.
+    stuckAfter: 24h
     image:
       # Needs df, find, stat, date, awk AND curl. busybox has the first five but
       # no curl, and its wget cannot issue the DELETE the orthanc-rest backend
