@@ -559,7 +559,8 @@ ingest:
   # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
   # values out before this stage runs, and ImagingSession.new_empty copies them
   # into the de-identified session unchanged, so no recipe can alter them. Under
-  # the Lua hook they are already salted hashes; here they are whatever the
+  # the Lua hook they are already pseudonyms (salted djb2, not an HMAC despite
+  # the salt's name); here they are whatever the
   # modality sent. Pointing subject at PatientID puts the raw medical record
   # number into XNAT while the headers and pixels are correctly stripped. Choose
   # tags that are already pseudonymous at the modality.

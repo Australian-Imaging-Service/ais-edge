@@ -35,7 +35,7 @@ each instance arrives:
 | step | what happens |
 |---|---|
 | project | the calling AE title is looked up in `orthanc.deid.aetMap` |
-| subject / session | the patient identifier is HMACed with a per-site secret salt |
+| subject / session | the patient identifier is hashed with a per-site secret salt (salted djb2, NOT an HMAC) |
 | routing tags | those values are written into the three `ClinicalTrial*` tags |
 | PHI | stripped per the JSON profile passed to Orthanc `/modify` |
 | label | the study is tagged `xnat-ingest-ready` for `group-orthanc` |
@@ -47,7 +47,7 @@ each instance arrives:
 
 * De-identification happens at the door. Every later stage only ever sees
   stripped data.
-* Pseudonyms are stable across visits — the same patient always HMACs to the
+* Pseudonyms are stable across visits — the same patient always hashes to the
   same subject, so a follow-up scan joins the existing XNAT subject.
 * One-way. No mapping back to the original identifiers is kept, so a study
   cannot be re-identified later by any means.
@@ -131,7 +131,7 @@ study WITHOUT the tags  -> __invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_.
 | source of routing identifiers | derives them from the AE title | expects them in the incoming data |
 | needs an AE-title map | yes | no |
 | strips PHI | yes, JSON profile | yes, pydicom `deid` recipe per project |
-| pseudonymises | yes, HMAC + per-site salt | yes, SHA-256 (salt disabled upstream) |
+| pseudonymises | yes, salted djb2 (not an HMAC) | yes, SHA-256 (salt disabled upstream) |
 | re-identification possible | no | yes, via the reid mapping |
 | identifiable data on the pipeline volume | no | yes, until the stage runs |
 | applies the ready label | yes | no — clear `toProcessLabel` when switching |
