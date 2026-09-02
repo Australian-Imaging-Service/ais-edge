@@ -21,7 +21,7 @@ identifiers — the XNAT project, subject and session — come from:
 | source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
 | needs an AE-title map | yes | no |
 | strips PHI | yes, JSON profile via Orthanc `/modify` | yes, pydicom `deid` recipe per project |
-| pseudonymises | yes, HMAC + per-site salt | yes, SHA-256 ([salting disabled upstream](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)) |
+| pseudonymises | yes, salted djb2 (not an HMAC, see below) | yes, SHA-256 ([salting disabled upstream](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)) |
 | re-identification possible | no | yes, via the reid mapping |
 | identifiable data on the pipeline volume | no | yes, until the stage runs |
 | applies the ready label | yes | no |
@@ -42,7 +42,8 @@ ClinicalTrialTimePointID   -> session
 ```
 
 The Lua hook populates them: it maps the calling AE title to a project and
-HMACs the patient identifier into subject and session codes. `deidentify` does
+hashes the patient identifier into subject and session codes (salted djb2, not
+an HMAC — see *Pseudonym strength* below). `deidentify` does
 not — it works on identifiers already present, which is why it needs no AE-title
 map.
 
@@ -120,8 +121,15 @@ dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
 > name in `subject` becomes the XNAT subject label exactly as the modality sent
 > it.
 >
-> Under the Lua hook this is safe, because the hook has already replaced those
-> tags with salted hashes before `assign` sees them. Under `deidentify` there is
+> Under the Lua hook this is safer, because the hook has already replaced those
+> tags with pseudonyms before `assign` sees them. Note what that pseudonym is
+> and is not: a salted djb2 truncated to 48 bits, not an HMAC despite the
+> function's name (`deidentify-and-forward.lua:24` says so itself). It does not
+> collide at any realistic cohort size, but it is not one-way — anyone holding
+> the salt can enumerate a medical-record-number space in minutes. The salt
+> stays on the edge and never reaches XNAT, so it is not reversible by an
+> XNAT-side reader, and that is the property being relied on. Under `deidentify`
+> there is
 > no such step, so pointing `subject` at `PatientID` puts the raw medical record
 > number into XNAT's metadata **while the pixel data and headers are correctly
 > stripped** — the data looks clean and the identifier is in the label.
@@ -133,6 +141,41 @@ dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
 > # whatever these print is what will appear in XNAT
 > dcmdump file.dcm | grep -E '<the three tags you configured>'
 > ```
+
+## Pseudonym strength
+
+The Lua hook's subject and session codes come from a function called
+`hmacShort`. **It is not an HMAC**, and the code says so on the line above it:
+
+```lua
+-- Salted djb2. NOT cryptographic; jodogne/orthanc-plugins doesn't expose
+-- ComputeMd5/Sha1 in Lua. For HMAC-grade switch to jodogne/orthanc-python.
+local function hmacShort(value, length)
+```
+
+The salt's environment variable is `AIS_DEID_HMAC_SALT`, which reinforces the
+same wrong impression. What it actually computes is a salted djb2 with a second
+mixing accumulator, formatted to 16 hex characters and truncated to 12, so 48
+bits of output.
+
+What that is and is not good for:
+
+* **Collisions are not a concern.** 48 bits puts the birthday bound near 2^24,
+  about 16.7 million subjects. No realistic cohort approaches it.
+* **It is not one-way.** djb2 is a cheap rolling hash, and medical record
+  numbers occupy a small space — six to ten digits. Anyone holding the salt can
+  enumerate that space and invert the mapping in minutes.
+
+So the guarantee is not "these pseudonyms cannot be reversed". It is **"the salt
+never leaves the edge"**. It lives in a Kubernetes Secret (`orthanc-deid-salt`)
+on the edge cluster and is never sent to XNAT, so an XNAT-side reader cannot
+reverse the pseudonyms without also compromising the edge. Anyone with read
+access to the edge cluster, or the SOPS key for the site secrets, can.
+
+That may be entirely acceptable for a given site's threat model. It should be a
+decision someone made, not one inherited from a function name. If it is not
+acceptable, the code names its own remedy: switch the hook to
+`jodogne/orthanc-python`, which exposes real digest functions.
 
 ## The label coupling
 

@@ -65,6 +65,11 @@ local function writeAtomic(path, bytes)
 end
 
 local function applyPlaceholders(profile, tags, project)
+  -- NOT an HMAC despite the name; see the comment on hmacShort above. Salted
+  -- djb2 truncated to 48 bits: collision-safe at any realistic cohort size, but
+  -- NOT one-way. Anyone holding the salt can enumerate a medical-record-number
+  -- space in minutes. The salt never leaves the edge, so this is not reversible
+  -- from XNAT, which is the property the pipeline actually relies on.
   local subjectHash = hmacShort(tags.PatientID or "")
   local sessionHash = hmacShort((tags.PatientID or "") .. "|" .. (tags.StudyInstanceUID or ""))
   local birthYear   = string.sub(tags.PatientBirthDate or "19000101", 1, 4)

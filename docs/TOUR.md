@@ -252,7 +252,9 @@ any one of them and every study stalls at assign with "missing metadata fields"
 right up until nothing uploads.
 
 *The `${...}` values are computed, and one of them is salted.* `${SubjectHash}`
-and `${SessionHash}` are HMACs of the original identifiers, keyed with a salt
+and `${SessionHash}` are salted hashes of the original identifiers (salted
+djb2, not HMACs — see docs/components/deidentification.md, Pseudonym strength),
+keyed with a salt
 you generate. Same patient, same hash, every time — which is what lets a
 subject's second visit land on the same XNAT subject. See the warning in section
 3 about what happens if that salt changes.
