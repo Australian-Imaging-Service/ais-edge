@@ -131,7 +131,7 @@ study WITHOUT the tags  -> __invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_.
 | source of routing identifiers | derives them from the AE title | expects them in the incoming data |
 | needs an AE-title map | yes | no |
 | strips PHI | yes, JSON profile | yes, pydicom `deid` recipe per project |
-| pseudonymises | yes, salted djb2 (not an HMAC) | yes, SHA-256 (salt disabled upstream) |
+| pseudonymises | yes, before anything downstream sees the data (salted djb2, not an HMAC, see *Pseudonym strength*) | **no, not by default** — see *What the recipe does not do* |
 | re-identification possible | no | yes, via the reid mapping |
 | identifiable data on the pipeline volume | no | yes, until the stage runs |
 | applies the ready label | yes | no — clear `toProcessLabel` when switching |

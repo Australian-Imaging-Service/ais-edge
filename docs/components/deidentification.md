@@ -21,7 +21,7 @@ identifiers — the XNAT project, subject and session — come from:
 | source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
 | needs an AE-title map | yes | no |
 | strips PHI | yes, JSON profile via Orthanc `/modify` | yes, pydicom `deid` recipe per project |
-| pseudonymises | yes, salted djb2 (not an HMAC, see below) | yes, SHA-256 ([salting disabled upstream](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)) |
+| pseudonymises | yes, before anything downstream sees the data (salted djb2, not an HMAC, see *Pseudonym strength*) | **no, not by default** — see *What the recipe does not do* |
 | re-identification possible | no | yes, via the reid mapping |
 | identifiable data on the pipeline volume | no | yes, until the stage runs |
 | applies the ready label | yes | no |
@@ -176,6 +176,52 @@ That may be entirely acceptable for a given site's threat model. It should be a
 decision someone made, not one inherited from a function name. If it is not
 acceptable, the code names its own remedy: switch the hook to
 `jodogne/orthanc-python`, which exposes real digest functions.
+
+## What the recipe does not do
+
+The engine applies a recipe, and **only the tags the recipe names are touched**.
+That makes the shipped example the policy, and two things about it need stating
+because neither is obvious from reading it.
+
+**The patient identifier.** The example previously kept `PatientID`, justified
+by a note claiming `assign` had already rewritten it and that `upload` needed
+it. Both halves were false. `assign` reads tag values to resolve ids and then
+copies or hardlinks files unchanged — it never writes a dataset. And upload
+places the session from the session object's ids, not from this header. The
+example now removes it. If you write your own recipe, decide about `PatientID`
+explicitly: leaving it means the real medical record number travels with every
+instance while `PatientName`, birth date and institution are stripped, so the
+result passes a spot check.
+
+That matters more than it looks, because upload finishes with:
+
+```
+/data/experiments/<id>?pullDataFromHeaders=true
+```
+
+which asks XNAT to populate its own metadata **from these headers**. An
+identifier left in the header is not merely archived, it is indexed.
+
+**The upstream default transforms are not pseudonymisers.** If you fall back to
+xnat-ingest's own `__default__` specs rather than supplying your own,
+`specs/__default__/medimage/dicom-series.transforms.py` computes:
+
+```python
+"anon_patient_name": lambda ds: str(ds.get("PatientID", "")),
+"anon_patient_id":   lambda ds: f"{ds.get('PatientID','')}-{ds.get('AcquisitionTime','')}",
+"patient_comments":  ... f"Subject={ds.get('PatientID','')}" ...
+```
+
+Each derives its replacement from the raw identifier: the patient's *name*
+becomes their medical record number, and `PatientComments` is rebuilt to
+contain that number twice along with the referring physician. These are the
+identifier with decoration, not pseudonyms. Supply your own recipes and
+transforms rather than relying on those.
+
+Contrast with the Lua hook, which replaces the identifiers with salted hashes
+at the front door, before `group`, `assign` or anything else sees them. On this
+specific property the Lua engine is the stronger of the two, whatever its hash
+weakness.
 
 ## The label coupling
 
