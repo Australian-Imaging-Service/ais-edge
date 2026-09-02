@@ -1,8 +1,11 @@
 # Example de-identification recipe for medimage/dicom-series.
 #
-# Despite the .json extension this is a pydicom `deid` RECIPE, not JSON. The
-# extension is part of the filename convention xnat-ingest uses to map a file
-# to a format: medimage/dicom-series -> medimage@dicom-series.json.
+# This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
+# xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+# is the category and the FILE is the format: medimage/dicom-series. It skips
+# anything at the top level that is not a directory, so a flat file named
+# `medimage@dicom-series.json` is never read and every session fails with
+# "No deidentification specs found".
 #
 # Copy this directory, rename __default__ to your project ID for a
 # project-specific policy, and edit to match your site's approved profile.
