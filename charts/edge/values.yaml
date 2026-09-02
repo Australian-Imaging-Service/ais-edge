@@ -568,7 +568,7 @@ ingest:
     # Key is the path under SPEC_DIR, value is the recipe:
     #
     #   specs:
-    #     "__default__/medimage@dicom-series.json": |
+    #     "__default__/medimage/dicom-series": |
     #       FORMAT dicom
     #
     #       %header
@@ -596,8 +596,8 @@ ingest:
     # --from-file` alone.
     #
     #   specFiles:
-    #     default-dicom-series.json: "__default__/medimage@dicom-series.json"
-    #     myproject-dicom-series.json: "MYPROJECT/medimage@dicom-series.json"
+    #     default-dicom-series: "__default__/medimage/dicom-series"
+    #     myproject-dicom-series: "MYPROJECT/medimage/dicom-series"
     specFiles: {}
 
     # Optional. A URL-safe base64 32-byte key (cryptography's

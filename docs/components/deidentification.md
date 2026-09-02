@@ -98,14 +98,24 @@ Copy `charts/edge/files/deid-specs.example/`, which ships a working default:
 ```
 deid-specs/
     __default__/
-        medimage@dicom-series.json    # fallback for any project
+        medimage/
+            dicom-series              # fallback for any project
     MYPROJECT/
-        medimage@dicom-series.json    # this project only
+        medimage/
+            dicom-series              # this project only
 ```
 
 One directory per project, named for the project ID `assign` gave the session,
-plus an optional `__default__` fallback. Inside each, one file per format,
-named for the format's MIME-like identifier with `/` replaced by `@`.
+plus an optional `__default__` fallback. Inside each, the format's MIME-like
+identifier becomes a PATH rather than a filename: `medimage/dicom-series` is a
+directory `medimage` holding a file `dicom-series`.
+
+That structure is load-bearing. `load_specs` walks
+`<spec-dir>/<category>/<format>` and skips anything at the top level that is not
+a directory, so a flat file named `medimage@dicom-series.json` is never read.
+The stage then finds no recipes at all and fails every session with "No
+deidentification specs found for project ... and no default specs provided",
+leaving the data sitting in `/data/assigned`.
 
 **Despite the `.json` extension the file is a pydicom `deid` recipe, not JSON:**
 
@@ -138,7 +148,7 @@ ingest:
   deidentify:
     enabled: true
     specs:
-      "__default__/medimage@dicom-series.json": |
+      "__default__/medimage/dicom-series": |
         FORMAT dicom
 
         %header
@@ -146,7 +156,7 @@ ingest:
         REMOVE PatientName
         REMOVE PatientBirthDate
         REMOVE AccessionNumber
-      "MYPROJECT/medimage@dicom-series.json": |
+      "MYPROJECT/medimage/dicom-series": |
         FORMAT dicom
 
         %header
@@ -171,7 +181,7 @@ mapping by hand. `specs` must then be empty:
 
 ```bash
 kubectl -n xnat-ingest create configmap deid-specs \
-    --from-file=default-dicom-series.json=__default__/medimage@dicom-series.json
+    --from-file=default-dicom-series=__default__/medimage/dicom-series
 ```
 
 ```yaml
@@ -179,7 +189,7 @@ ingest:
   deidentify:
     specConfigMap: deid-specs
     specFiles:
-      default-dicom-series.json: "__default__/medimage@dicom-series.json"
+      default-dicom-series: "__default__/medimage/dicom-series"
 ```
 
 Note this route needs the namespace to exist already, so it is a post-install
