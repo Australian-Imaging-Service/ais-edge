@@ -196,13 +196,18 @@ groups:
         # is the same failure caught within the hour; both are wanted, because
         # a pre-flight that recovers on its own leaves this one to notice the
         # sessions that went unconfirmed while it was down.
+        # BOTH NAMESPACES ON PURPOSE. The same reclaimer runs in two places: on
+        # mgmt (xnat-upload) against the S3 staging prefix for tier-2, and on an
+        # edge (xnat-ingest) against the terminal stage directory for tier-1.
+        # Same script, same events, same component label, so one rule covers
+        # both and the cluster label says which site fired.
         expr: |
           (sum by (cluster, session) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event=~"reclaim_.*" | session != "" [24h] offset 48h)) > 0)
           unless on (cluster, session)
           (sum by (cluster, session) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_confirmed" [72h])) > 0)
         for: 30m
         labels:
@@ -300,11 +305,11 @@ groups:
         # is the 48h backstop for that case.
         expr: |
           (sum by (cluster, reason) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_unavailable" | session = "" [3h])) > 0)
           unless on (cluster)
           (sum by (cluster) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_finished" [70m])) > 0)
         for: 75m
         labels:

@@ -310,6 +310,141 @@ assert_preflight_no_listing() {
     [ -z "$why" ] || { printf '%s' "$why"; return 1; }
 }
 
+# =============================================================================
+# FILESYSTEM BACKEND (STORAGE=filesystem, tier-1)
+# =============================================================================
+# Same script, same decision, different storage. These cases exist because the
+# S3 cases above cannot reach the fs_* functions at all: the S3 path is stubbed
+# by fake `aws` and `curl` binaries on PATH, and the filesystem path calls
+# neither. Without these, half the reclaimer would ship untested.
+#
+# The deletion assertion differs by necessity. On S3 a delete is an HTTP call the
+# curl stub records in deletes.log; on a filesystem it is a real rm, so the
+# assertion is that the session directory is gone. That is a stronger check, not
+# a weaker one: it fails if the script deletes the wrong thing as well as if it
+# deletes nothing.
+
+# A staged session on disk: <root>/<session>/1.scan/DICOM/{f1..fN}.dcm plus the
+# manifest naming them. Backdated so MIN_AGE never blocks.
+fs_session() {   # <root> <session> <nfiles>
+    local root="$1" s="$2" n="$3" d="$1/$2/1.scan/DICOM" i cks=""
+    mkdir -p "$d"
+    for i in $(seq 1 "$n"); do
+        printf '%0100d' "$i" > "$d/f$i.dcm"
+        cks="$cks\"f$i.dcm\":\"abc\","
+    done
+    printf '{"datatype":"medimage/dicom-series","checksums":{%s}}' "${cks%,}" \
+        > "$d/__MANIFEST__.json"
+    find "$root/$s" -exec touch -d '2020-01-01T00:00:00Z' {} +
+}
+
+run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
+    local name="$1" expect_gone="$2" expect_event="$3"; shift 3
+    local S="$WORK/$name"
+    rm -rf "$S"; mkdir -p "$S"
+    CASE_DIR="$S"
+    local root="$S/staged"
+    mkdir -p "$root"
+    "setup_$name" "$root"
+
+    local out
+    out=$(cd "$S" && env -i \
+        PATH="$HERE:/usr/bin:/bin:/usr/local/bin" \
+        SCENARIO="$S" \
+        HOME="$S" \
+        STORAGE=filesystem \
+        STAGED_ROOT="$root" \
+        CLUSTER_LABEL=edge-dev \
+        RECLAIM=onXnatConfirmed \
+        MIN_AGE=0 \
+        VERIFY_XNAT=true \
+        DRY_RUN=false \
+        XNAT_VERIFY_SSL=false \
+        XNAT_SERVER=https://xnat.example.org \
+        XNAT_USER=u XNAT_PASS=p \
+        "$@" \
+        bash "$SCRIPT" 2>&1)
+
+    printf '%s\n' "$out" > "$S/out.log"
+
+    local gone="no"
+    [ -d "$root/$SESS" ] || gone="yes"
+
+    local ok=1 why=""
+    if [ "$gone" != "$expect_gone" ]; then
+        ok=0; why="expected session-gone=$expect_gone but got $gone"
+    elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
+        ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+    elif declare -F "assert_$name" >/dev/null 2>&1; then
+        local extra
+        if ! extra=$("assert_$name" "$S/out.log" "$root" 2>&1); then ok=0; why="$extra"; fi
+    fi
+
+    if [ "$ok" = "1" ]; then
+        printf '  %sPASS%s  %-34s gone=%-3s %s\n' "$_G" "$_O" "$name" "$gone" "$expect_event"
+        PASS=$((PASS+1))
+    else
+        printf '  %sFAIL%s  %-34s %s\n' "$_R" "$_O" "$name" "$why"
+        FAIL=$((FAIL+1)); FAILED+=("$name: $why")
+        printf '%s\n' "$out" | sed 's/^/          /' | head -12
+    fi
+}
+
+setup_fs_happy_path()   { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_fs_partial_upload() { fs_session "$1" "$SESS" 400; xnat_has subj EXP1 visit 3; }
+setup_fs_xnat_absent()  { fs_session "$1" "$SESS" 2; }
+setup_fs_xnat_has_more() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 5; }
+
+# Dry run must decide exactly as the armed run does and then not act.
+setup_fs_dry_run()      { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+
+# __build__ is the uploader's half-written tree. Reclaiming it would delete a
+# session mid-write, and it carries no manifest, so it must never be listed.
+setup_fs_build_dir_ignored() {
+    fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+    mkdir -p "$1/__build__/1.scan/DICOM"; : > "$1/__build__/1.scan/DICOM/partial.dcm"
+}
+assert_fs_build_dir_ignored() {
+    [ -d "$2/__build__" ] || { echo "__build__ was removed; it must be invisible to the reclaimer"; return 1; }
+    grep -q '__build__' "$1" && { echo "__build__ appeared in the run output"; return 1; }
+    return 0
+}
+
+# A file written after the manifest: not named by it, so not checked against
+# XNAT, so the session cannot be confirmed.
+setup_fs_undeclared_file() {
+    fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+    : > "$1/$SESS/1.scan/DICOM/stray.dcm"
+    touch -d '2020-01-01T00:00:00Z' "$1/$SESS/1.scan/DICOM/stray.dcm"
+}
+
+# Recent files: the settle window protects a session still being written,
+# whatever its size. This is the size-invariance property, asserted.
+setup_fs_min_age_blocks() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+    touch "$1/$SESS/1.scan/DICOM/f1.dcm"; }
+
+printf '\n%s== reclaimer decision paths, filesystem backend ==%s\n' "$_B" "$_O"
+run_fs_case fs_happy_path         yes reclaim_removed
+run_fs_case fs_partial_upload     no  reclaim_kept
+run_fs_case fs_xnat_absent        no  reclaim_kept
+run_fs_case fs_xnat_has_more      no  reclaim_kept
+run_fs_case fs_dry_run            no  reclaim_skipped      DRY_RUN=true
+run_fs_case fs_build_dir_ignored  yes reclaim_removed
+run_fs_case fs_undeclared_file    no  reclaim_kept
+run_fs_case fs_min_age_blocks     no  reclaim_skipped      MIN_AGE=1d
+
+# REFUSALS. Each of these must abort the whole run rather than examine anything:
+# a reclaimer that cannot trust its own configuration must not delete under it.
+# The session is staged normally in every case, so "still there" is a real
+# assertion and not an artefact of nothing having been created.
+setup_fs_root_unsafe()   { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_fs_root_missing()  { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_fs_bad_storage()   { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+
+run_fs_case fs_root_unsafe        no  reclaim_unavailable  STAGED_ROOT=/data
+run_fs_case fs_root_missing       no  reclaim_unavailable  STAGED_ROOT=/nonexistent-staged-root
+run_fs_case fs_bad_storage        no  reclaim_unavailable  STORAGE=nfs
+
 printf '\n%s== reclaimer decision paths ==%s\n' "$_B" "$_O"
 run_case happy_path            yes reclaim_removed
 run_case xnat_has_more         no  reclaim_kept

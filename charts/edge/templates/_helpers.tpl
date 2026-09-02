@@ -190,20 +190,22 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* onUploaded ANYWHERE needs someone to write the uploader's markers, and
-         upload.mode=direct renders no s3-uploader at all. values.yaml says so
-         in a comment beside the key; a comment is not a guard, and the failure
-         it describes is the silent one this repo keeps finding. */ -}}
+  {{- /* onUploaded needs someone to establish that the session reached XNAT.
+         Under upload.mode=s3 that is the s3-uploader's marker. Under direct
+         there is no s3-uploader, so for a long time nothing could satisfy it.
+         The staged reclaimer CronJob now does, for ONE tree: the terminal one
+         the uploader actually drains, which it re-checks against XNAT itself.
+         So the guard is no longer "onUploaded is impossible under direct", it
+         is "onUploaded is impossible for a tree nothing watches". */ -}}
   {{- if eq .Values.upload.mode "direct" }}
-    {{- /* DELIBERATELY NOT `assigned` AS WELL. The same argument applies to it,
-           and the shipped tier-1 site files declare assigned.reclaim=onUploaded,
-           so failing on that would refuse this chart's own default install. It
-           is an unsatisfiable declaration rather than a dangerous one: the tree
-           is kept either way, and StageBacklogAgeing now reports it instead of
-           it growing unwatched. Correcting that default to `never` is a
-           separate, deliberate change. */ -}}
-    {{- if eq .Values.dataPolicy.derived.deidentified.reclaim "onUploaded" }}
-      {{- fail "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct. That condition is satisfied by a marker under the uploader's state directory, and the ONLY thing that writes there is the s3-uploader, which this upload mode does not render. Nothing could ever satisfy it: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it." }}
+    {{- $terminal := include "edge.uploadSourceDir" . }}
+    {{- /* DELIBERATELY NOT `assigned` AS WELL when it is the terminal tree: the
+           shipped tier-1 site files declare assigned.reclaim=onUploaded and the
+           reclaimer now satisfies exactly that. Under deid.engine=ingest the
+           assigned tree is NOT terminal, and the separate guard above already
+           requires onDeidentified there. */ -}}
+    {{- if and (eq .Values.dataPolicy.derived.deidentified.reclaim "onUploaded") (ne $terminal "/data/deidentified") }}
+      {{- fail (printf "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct and deid.engine=%s. Under direct upload the only thing that can establish `uploaded` is the staged reclaimer CronJob, and it watches the tree the uploader drains, which under this engine is %s, not /data/deidentified. Nothing would ever satisfy the condition: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it, or deid.engine=ingest if it should be the tree that is uploaded." (include "edge.deidEngine" .) $terminal) }}
     {{- end }}
   {{- end }}
 

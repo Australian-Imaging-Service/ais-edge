@@ -105,6 +105,8 @@ run_engine() {
         -e ASSIGNED_DIR=/data/assigned \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
+        -e STUCK_AFTER_S="${STUCK_AFTER_T:-0}" \
+        -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         --entrypoint sh "$IMAGE" /s.sh > "$root/out.jsonl" 2>&1
 }
 
@@ -248,6 +250,33 @@ else
     fail orthanc_no_url "expected a backend_unavailable event; got: $(tail -1 "$R/out.jsonl" 2>/dev/null | cut -c1-90)"
 fi
 check orthanc_no_url_nodelete "$R" assigned/s1 exist "and deleted nothing while unconfigured"
+
+# 20 — an unsatisfied condition past stuckAfter IS reported as stage_stuck.
+# The baseline for case 21: without it, 21 could pass because nothing fires at
+# all rather than because the delegation suppressed it.
+R="$WORK/c20"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_T=1 run_engine "$R" "$STAGES_ASSIGNED" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    pass stuck_reported "unsatisfied past stuckAfter is reported as stage_stuck"
+else
+    fail stuck_reported "expected stage_stuck; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 21 — SAME INPUTS, but the stage is named as externally reclaimed. This is
+# upload.mode=direct: onUploaded cannot be satisfied because no s3-uploader
+# exists, and that is the design rather than a stall, because the
+# staged-reclaimer CronJob removes the session once XNAT confirms it. Calling it
+# stuck would page a human nightly for a tree that is draining normally.
+R="$WORK/c21"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_T=1 EXTERNAL_STAGE_T=derived.assigned run_engine "$R" "$STAGES_ASSIGNED" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    fail stuck_delegated "stage_stuck fired for a stage whose deletes belong to the reclaimer"
+elif grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass stuck_delegated "no stage_stuck, and the kept line says the deletes are delegated"
+else
+    fail stuck_delegated "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+check stuck_delegated_nodelete "$R" assigned/s1 exist "and this engine still deleted nothing from that tree"
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi

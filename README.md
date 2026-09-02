@@ -101,6 +101,7 @@ chart is not needed.
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
 | **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**. The only component that deletes patient data. |
+| **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory. Renders **only under `upload.mode: direct`**, where there is no bucket and no s3-uploader to write an `uploaded` marker, so `onUploaded` would otherwise be unsatisfiable and the tree would grow unbounded. Also deletes patient data, under the same XNAT confirmation. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
 | **cert-manager** | mgmt | Issues the internal CA and every server certificate. |
@@ -504,6 +505,14 @@ dataPolicy:
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d,
                      verifyAgainstXnat: true, maxRemovals: 50,
                      schedule: "17 * * * *"}
+    # upload.mode: direct only. NOT a stage of its own: it is the delete
+    # authority for whichever tree above is TERMINAL under the chosen deid
+    # engine (/data/assigned under Orthanc-deid, /data/deidentified under
+    # ais-deid). Under upload.mode: s3 it does not render at all, because the
+    # s3-uploader's marker already answers the same question there.
+    stagedReclaimer: {minAge: 1d, verifyAgainstXnat: true,
+                      maxRemovals: 50, schedule: "17 * * * *",
+                      deadlineSeconds: 3000}
 
   telemetry:
     # the kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi
@@ -656,7 +665,7 @@ scripts/
   ci/                          CI stages (render, negative, promtool, …), one
                                script per stage, invoked by the Makefile
 tests/
-  reclaimer/                   28 cases asserting on what was DELETED
+  reclaimer/                   45 cases asserting on what was DELETED, both backends
   loki-rules/                  the real Loki rule expressions, against fixture
                                logs, evaluated by the pinned Loki
   data-policy/                 the real engine under the real image, asserting
@@ -689,7 +698,7 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | `pvc-retention` | nothing holding data can be auto-deleted |
 | `runtime-templates` | scripts survive Helm rendering |
 | `duplicate-names` | no two objects collide |
-| `reclaimer` | 28 cases, asserting on **what was deleted**, not on log text |
+| `reclaimer` | 45 cases, asserting on **what was deleted**, not on log text. 34 drive the S3 backend through stub `aws`/`curl` binaries; 11 drive the filesystem backend against a real directory tree, where the assertion is that the session directory is gone |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
 | `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |

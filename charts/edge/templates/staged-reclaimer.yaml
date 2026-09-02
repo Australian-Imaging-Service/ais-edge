@@ -1,0 +1,127 @@
+{{- /*
+TERMINAL-STAGE RECLAIMER FOR DIRECT UPLOAD (tier-1).
+
+Under upload.mode=s3 the staged copy lives in the bucket and charts/mgmt reclaims
+it. Under upload.mode=direct there is no bucket and no s3-uploader, so nothing
+ever wrote an `uploaded` marker into the terminal stage directory. That made
+`onUploaded` — the site default for assigned.reclaim — permanently unsatisfiable:
+the tree grew without bound and no data policy could touch it. MEASURED on .240:
+/data/assigned held sessions that had been in XNAT for hours.
+
+This CronJob closes that. It runs the SAME reclaim-staged.sh as charts/mgmt with
+STORAGE=filesystem, so the decision to delete is made by one implementation for
+both tiers. It asks XNAT directly whether the session is there and complete, which
+is the only authority that does not depend on a marker nobody writes.
+
+It is deliberately NOT the uploader's delete path. The uploader deletes what it
+just sent, on its own success. This deletes what XNAT confirms it already holds,
+later, under minAge. The two answer different questions.
+*/}}
+{{- if eq .Values.upload.mode "direct" }}
+{{- $reclaim := include "edge.uploadReclaim" . }}
+{{- if ne $reclaim "never" }}
+{{- $root := . }}
+{{- $stagedRoot := include "edge.uploadSourceDir" . }}
+{{- $armed := and .Values.dataPolicy.enabled (not .Values.dataPolicy.dryRun) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-staged-reclaimer
+  labels: {{- include "edge.labels" . | nindent 4 }}
+data:
+  reclaim-staged.sh: |-
+{{ .Files.Get "files/reclaim-staged.sh" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "edge.fullname" . }}-staged-reclaimer
+  labels: {{- include "edge.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.dataPolicy.derived.stagedReclaimer.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # Shorter than the schedule so a run wedged on an unreachable XNAT is
+      # killed before the next one is due, rather than pinning Forbid forever.
+      activeDeadlineSeconds: {{ .Values.dataPolicy.derived.stagedReclaimer.deadlineSeconds }}
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            {{- toYaml .Values.ingest.podSecurityContext | nindent 12 }}
+          containers:
+            - name: reclaimer
+              # The ingest image, not the curl image: reclaim-staged.sh needs
+              # python3 to parse XNAT's JSON and to walk the staged tree, and
+              # curlimages/curl does not ship it. MEASURED, not assumed.
+              image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
+              imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+              command: ["sh", "/scripts/reclaim-staged.sh"]
+              env:
+                {{- include "edge.logEnv" . | nindent 16 }}
+                - name: STORAGE
+                  value: "filesystem"
+                # Follows the deid engine: /data/deidentified under ais-deid,
+                # /data/assigned under Orthanc-deid. Same helper the uploader
+                # reads, so the reclaimer can never watch a different tree than
+                # the one the uploader drains.
+                - name: STAGED_ROOT
+                  value: {{ $stagedRoot | quote }}
+                - name: CLUSTER_LABEL
+                  value: {{ .Values.clusterLabel | quote }}
+                # TRANSLATED, not passed through. The operator writes `onUploaded`
+                # for the terminal tree, which under s3 means "an uploaded marker
+                # exists". Direct upload writes no such marker — that is the whole
+                # reason this CronJob exists — so the reclaimer establishes the same
+                # fact from the only authority available, XNAT itself. The script's
+                # word for that is onXnatConfirmed. Passing `onUploaded` straight
+                # through would hit its enum check and remove nothing, silently.
+                - name: RECLAIM
+                  value: "onXnatConfirmed"
+                - name: MIN_AGE
+                  value: {{ .Values.dataPolicy.derived.stagedReclaimer.minAge | quote }}
+                - name: VERIFY_XNAT
+                  value: {{ .Values.dataPolicy.derived.stagedReclaimer.verifyAgainstXnat | quote }}
+                - name: MAX_REMOVALS
+                  value: {{ .Values.dataPolicy.derived.stagedReclaimer.maxRemovals | quote }}
+                # dryRun and a disabled policy both mean "report, delete nothing".
+                - name: DRY_RUN
+                  value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
+                - name: XNAT_SERVER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.upload.direct.existingSecret }}
+                      key: server
+                - name: XNAT_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.upload.direct.existingSecret }}
+                      key: username
+                - name: XNAT_PASS
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.upload.direct.existingSecret }}
+                      key: password
+                - name: XNAT_VERIFY_SSL
+                  value: {{ .Values.upload.direct.verifySsl | quote }}
+              volumeMounts:
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                # Read-only unless the policy is armed. A dry run that cannot
+                # write cannot delete even if the script is wrong.
+                - {name: pipeline, mountPath: /data, readOnly: {{ not $armed }}}
+              resources:
+                {{- toYaml .Values.dataPolicy.derived.stagedReclaimer.resources | nindent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ include "edge.fullname" . }}-staged-reclaimer
+                defaultMode: 0555
+            - name: pipeline
+              persistentVolumeClaim: {claimName: {{ include "edge.pipelinePvc" . }}}
+{{- end }}
+{{- end }}

@@ -830,6 +830,11 @@ printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-i
 # so it is meaningless when that stage does not render.
 printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
 
+# onUploaded needs a marker that only the s3-uploader writes, and upload.mode
+# =direct renders no s3-uploader. The condition could never come true, so the
+# tree would be kept for ever while the policy read as if it were being cleaned.
+printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
+
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
 cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
@@ -840,6 +845,30 @@ dataPolicy:
     assigned:
       reclaim: onDeidentified
       minAge: 1d
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
+
+# A COMPLETE ais-deid site that reclaims its terminal tree. Under direct upload
+# that tree is /data/deidentified and nothing used to be able to retire it: the
+# chart failed the render because onUploaded had no writer. The stagedReclaimer
+# CronJob is that writer's replacement, so this combination must now RENDER.
+# Paired with the neg-edge-reclaim-deid-onuploaded case, which keeps the same
+# declaration failing under Orthanc-deid, where the tree really is unwatched.
+cat >"$V/edge-deid-ingest.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+    deidentified:
+      reclaim: onUploaded
 ingest:
   assign:
     tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
@@ -1034,6 +1063,8 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
+edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-s3-mtls	charts/edge	edge-base.yaml edge-s3-mtls.yaml
 edge-s3-mtls-no-cabundle	charts/edge	edge-base.yaml edge-s3-mtls-no-cabundle.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml edge-s3-mtls.yaml
@@ -1111,6 +1142,7 @@ neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
+neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
 neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy

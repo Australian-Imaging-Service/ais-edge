@@ -328,6 +328,15 @@ dataPolicy:
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
+      # OPTION: onUploaded is satisfiable here under BOTH upload modes now. Under
+      # s3 the s3-uploader writes the marker; under direct the stagedReclaimer
+      # CronJob below confirms the session against XNAT instead. It stays `never`
+      # by default because deleting the de-identified copy is a site policy call,
+      # not a technical one: this is the last copy on the edge once the originals
+      # have been reclaimed.
+      # CAUTION: only meaningful under deid.engine=ingest. Under Orthanc-deid the
+      # terminal tree is /data/assigned and the chart fails the render rather than
+      # let this read as though something were watching this one.
       reclaim: never             # never | onUploaded
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
@@ -336,6 +345,37 @@ dataPolicy:
     # NOTE: onXnatConfirmed is not something xnat-ingest does for us — it has
     # no S3 retention at all, which is why staged sessions accumulate and are
     # re-listed every loop. charts/mgmt implements the reclaimer.
+    # -----------------------------------------------------------------
+    # TERMINAL-STAGE RECLAIMER (upload.mode=direct only)
+    # -----------------------------------------------------------------
+    # Under direct upload there is no bucket and no s3-uploader, so nothing
+    # writes the `uploaded` marker that onUploaded waits for. Without this the
+    # terminal tree (/data/assigned, or /data/deidentified under ais-deid)
+    # grows forever and no data policy can reach it.
+    #
+    # Runs the same reclaim-staged.sh as the tier-2 bucket reclaimer, with
+    # STORAGE=filesystem. It does not re-decide WHETHER to reclaim: that stays
+    # with assigned.reclaim / deidentified.reclaim above, whichever the deid
+    # engine makes terminal. Set that one to `never` and this does not render.
+    stagedReclaimer:
+      # Hourly. The uploader deletes on its own success within seconds; this is
+      # the slower, sure path for whatever that missed.
+      schedule: "17 * * * *"
+      # OPTION: raise on a slow link. A session still uploading is protected by
+      # the XNAT check regardless, so this is about noise, not safety.
+      minAge: 1d
+      # Ask XNAT whether it holds the session, complete, before deleting the
+      # only remaining copy. Off means trusting local state alone.
+      # CAUTION: `false` removes the last independent check before deletion.
+      verifyAgainstXnat: true
+      # Ceiling per run. A bug that decides everything is reclaimable removes
+      # this many and stops, leaving the rest to inspect.
+      maxRemovals: 50
+      # Killed if a run hangs on an unreachable XNAT, before the next is due.
+      deadlineSeconds: 3000
+      resources:
+        requests: {cpu: 20m, memory: 64Mi}
+        limits: {memory: 256Mi}
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
       minAge: 1d
