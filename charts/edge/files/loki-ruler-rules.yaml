@@ -129,7 +129,7 @@ groups:
       description: xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n xnat-ingest -l component=upload` for the actual error.
   - alert: SessionUploadStalled
     annotations:
-      description: mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry.
+      description: "The upload started but did not complete within the expected window. Could be a slow network, a large session, or a stuck retry. Deliberately does not name the transfer tool: this text named a binary that had been replaced two migrations earlier, and an alert description is read by someone under pressure who will go looking for it."
       summary: Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes
     expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_started\" [15m])) > 0)\nunless on (cluster, session)\n(sum by\
       \ (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_completed\" [15m])) > 0)\n"
