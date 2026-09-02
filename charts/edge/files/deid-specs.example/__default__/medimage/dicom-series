@@ -39,6 +39,17 @@ REMOVE InstitutionAddress
 # Local accession/order numbers, which are re-identifying within a site.
 REMOVE AccessionNumber
 
+# MARK THE RESULT AS DE-IDENTIFIED. Without these two tags an instance that has
+# been through this stage is indistinguishable, by its own metadata, from one
+# that was never processed, and some downstream tooling keys on them. The
+# Orthanc engine already sets PatientIdentityRemoved in its profile; this is the
+# same assertion for this engine, so the two are not asymmetric.
+#
+# ADD, not REPLACE: the source instance does not carry these, and REPLACE only
+# rewrites a tag that is already present.
+ADD PatientIdentityRemoved YES
+ADD DeidentificationMethod AIS-Edge xnat-ingest recipe
+
 # THE PATIENT IDENTIFIER. Removed, and the reason matters because an earlier
 # version of this file kept it on a premise that is false.
 #

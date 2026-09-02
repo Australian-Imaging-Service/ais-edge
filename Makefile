@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax pvc-retention runtime-templates duplicate-names reclaimer secret-contract secrets-encrypted values-consumers
+FAST_STAGES := render negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer secret-contract secrets-encrypted values-consumers
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -138,6 +138,9 @@ runtime-templates: $(RENDER_DEP)
 # The only stage that needs no render.
 shell-syntax:
 	@scripts/ci/shell-syntax.sh
+
+lua-syntax:
+	@bash scripts/ci/lua-syntax.sh
 
 # The one check standing between an operator and a committed XNAT password.
 # It existed as scripts/site-secrets.sh check and nothing ever ran it.
