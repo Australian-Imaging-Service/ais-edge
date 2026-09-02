@@ -64,7 +64,7 @@
     {
       "type": "stat",
       "title": "S3 objects uploaded (last 1h)",
-      "description": "Sum of the `files` field across upload_completed events. Includes every object written to S3 \u2014 DICOMs AND the per-session MANIFEST.json (and any other staged metadata). Always strictly >= DICOMs uploaded.",
+      "description": "Sum of the `files` field across upload_completed events. Includes every object written to S3 \u2014 DICOMs AND the per-session __MANIFEST__.json (and any other staged metadata). Always strictly >= DICOMs uploaded.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -104,7 +104,7 @@
     {
       "type": "stat",
       "title": "Sessions uploaded (last 1h)",
-      "description": "Count of upload_completed events. One per session that finished mc mirror with exit 0. Each session contains 1 or more DICOMs plus 1 MANIFEST.json.",
+      "description": "Count of upload_completed events. One per session whose transfer to the staging bucket returned success. Each session contains 1 or more DICOMs plus 1 __MANIFEST__.json.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -144,7 +144,7 @@
     {
       "type": "stat",
       "title": "Upload failures (last 1h)",
-      "description": "Count of upload_failed events (mc mirror returned non-zero). 0 = pipeline healthy.",
+      "description": "Count of upload_failed events (the transfer to the staging bucket returned non-zero). 0 = pipeline healthy.",
       "gridPos": {
         "h": 4,
         "w": 6,

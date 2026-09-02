@@ -8,7 +8,7 @@
     {
       "type": "stat",
       "title": "S3 LIST requests — ingest-bucket (1h)",
-      "description": "Count of S3 LIST requests against ingest-bucket in the last hour. Each `mc mirror` cycle on every edge runs a LIST to compare local vs remote, so this is a reliable proxy for s3-uploader liveness. SeaweedFS does NOT increment its s3_request_total counter for the actual `mc mirror` PUT bodies (those go through the volume server directly, bypassing the S3 layer counters), which is why we can't show a true 'PUTs to ingest-bucket' panel.",
+      "description": "Count of S3 LIST requests against ingest-bucket in the last hour. Each uploader cycle on every edge runs a LIST to compare local against remote, so this is a reliable proxy for s3-uploader liveness. SeaweedFS does NOT increment its s3_request_total counter for the actual upload PUT bodies (those go through the volume server directly, bypassing the S3 layer counters), which is why we can't show a true 'PUTs to ingest-bucket' panel.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "expr": "sum(increase(SeaweedFS_s3_request_total{bucket=\"ingest-bucket\",type=\"LIST\",code=\"200\"}[1h])) or vector(0)", "refId": "A" }],
