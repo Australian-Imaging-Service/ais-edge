@@ -454,6 +454,41 @@ groups:
             Free space by growing the volume, or by enabling reclaim for the
             derived stages once you are satisfied with the dry-run decisions.
 
+      - alert: PipelineSessionStuck
+        # dataPolicy.reporter.stuckAfter MADE REAL. A session whose reclaim
+        # condition never comes true is kept for ever, correctly, and every pass
+        # logs the same reclaim_kept line. That drip is indistinguishable from
+        # normal operation, so a permanently stuck session looks exactly like a
+        # healthy one uploaded a minute ago. This is the event that separates
+        # them.
+        expr: |
+          sum by (cluster, stage) (count_over_time(
+            {namespace="xnat-ingest", component="data-policy"}
+            | json | event="stage_stuck" [15m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-pipeline
+        annotations:
+          summary: A session on {{ $labels.cluster }} is stuck at {{ $labels.stage }}
+          description: |
+            A session has been failing its reclaim condition for longer than
+            dataPolicy.reporter.stuckAfter.
+
+            IT IS NOT LOST AND NOTHING HAS BEEN DELETED OR MOVED. The engine is
+            keeping a copy it cannot prove is reconstructible, which is correct.
+            What this says is that the condition will not come true on its own.
+
+            Usual causes: the stage downstream never produced what the condition
+            looks for, or a reclaim word that cannot be satisfied in this
+            configuration.
+
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \
+                -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_stuck
+
+            The event carries the session, the reclaim word and the age.
+
       - alert: QuarantinedDataUnresolved
         # dataPolicy.originals.quarantine.alertAfter MADE REAL — the second key
         # that had no reader before the engine existed.

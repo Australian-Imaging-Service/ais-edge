@@ -119,6 +119,10 @@ spec:
               value: {{ .Values.dataPolicy.reporter.maxRemovals | quote }}
             - name: SETTLE_MINUTES
               value: {{ .Values.dataPolicy.reporter.settleMinutes | quote }}
+            # Report-only: past this age a session failing its reclaim condition is
+            # reported as stage_stuck rather than as another routine reclaim_kept.
+            - name: STUCK_AFTER_S
+              value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
             {{- /* The two condition inputs. Both are DERIVED from other values
                    rather than restated, so they cannot drift from where the
                    uploader and assign actually write. */}}
