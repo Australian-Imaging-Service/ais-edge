@@ -157,6 +157,28 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
     return
   end
 
+  -- ARCHIVE DONE. Everything above this point -- the unmapped-AET quarantine
+  -- and the facility backup of the original -- is this script's job under EVERY
+  -- engine. Only what follows is de-identification.
+  --
+  -- With another engine selected, stopping here is the point: the original is
+  -- archived, the instance is left in Orthanc untouched for group to collect,
+  -- and the stage that does de-identify gets it further down the pipeline.
+  -- Modifying it here as well would mean the re-identification map that stage
+  -- writes recorded pseudonyms rather than originals, so it would reverse to
+  -- nothing while appearing to work.
+  if routing.Defaults.DeidEnabled == false then
+    print(DumpJson({
+      ts         = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      component  = "orthanc-deid",
+      event      = "instance_archived",
+      calledAet  = calledAet,
+      instanceId = instanceId,
+      backupPath = backupPath
+    }, false))
+    return
+  end
+
   local subjectHash, sessionHash
   profile, subjectHash, sessionHash = applyPlaceholders(profile, tags, mapping.project)
   profile.DeidMode = nil  -- ais-only field; /modify rejects unknown fields
