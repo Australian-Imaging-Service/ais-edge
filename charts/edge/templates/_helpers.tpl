@@ -73,12 +73,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
        re-identification map records originals rather than pseudonyms, which is
        what running both would have broken - is now structural. */ -}}
 
-  {{- /* Neither engine on is a legitimate choice — modalities that already
-         de-identify, or staging into a trusted enclave — but it is never the
-         RIGHT default, so it has to be said out loud. */ -}}
-  {{- if and (not (eq (include "edge.deidEngine" .) "orthanc")) (not (eq (include "edge.deidEngine" .) "ingest")) }}
+  {{- /* THE ENGINE SWITCH IS THE ONE THING THAT MUST BE A KNOWN VALUE. An
+         unrecognised word would select neither engine, and "neither" is a
+         configuration that ships identifiable data to XNAT. Checked here rather
+         than in the helper so the message names the key and the alternatives. */ -}}
+  {{- $engine := include "edge.deidEngine" . }}
+  {{- if not (has $engine (list "orthanc" "ingest" "none")) }}
+    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires orthanc.deid.policyReviewed=true." $engine) }}
+  {{- end }}
+  {{- /* `eq $engine "none"`, NOT "neither of the two I know". The broad form
+         meant a TYPO satisfied it: deid.engine=ingset failed with a message
+         asserting the operator had chosen none, which they had not, while the
+         message written for an unknown value sat 96 lines below and was never
+         reached. Which one they got depended on policyReviewed, whose default
+         is false, so the wrong message was the one most people would see. The
+         enum check above runs first, so the value is known by this point. */ -}}
+  {{- if eq $engine "none" }}
     {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it. Otherwise set deid.engine=orthanc for the Lua hook or deid.engine=ingest for the xnat-ingest stage." }}
+      {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
     {{- end }}
   {{- end }}
 
@@ -167,19 +179,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* THE ENGINE SWITCH IS THE ONE THING THAT MUST BE A KNOWN VALUE. An
-         unrecognised word would select neither engine, and "neither" is a
-         configuration that ships identifiable data to XNAT. Checked here rather
-         than in the helper so the message names the key and the alternatives. */ -}}
-  {{- $engine := include "edge.deidEngine" . }}
-  {{- if not (has $engine (list "orthanc" "ingest" "none")) }}
-    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires orthanc.deid.policyReviewed=true." $engine) }}
-  {{- end }}
-  {{- if eq $engine "none" }}
-    {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
-    {{- end }}
-  {{- end }}
 
   {{- /* The two booleans this replaced were read by 24 call sites that all had
          to agree with each other and with the label and the tag mapping. Setting
