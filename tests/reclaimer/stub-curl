@@ -20,10 +20,18 @@ while [ $i -lt ${#args[@]} ]; do
     a="${args[$i]}"
     case "$a" in
         -X) i=$((i+1)); method="${args[$i]}" ;;
+        # `-K -` tells real curl to read its config from STDIN, which is how the
+        # reclaimer passes XNAT credentials without putting them on argv. This stub
+        # ignored stdin and exited, so the `printf` feeding it took SIGPIPE and bash
+        # printed `printf: write error: Broken pipe`. It is a race: on a fast machine
+        # printf finishes before the stub exits and nothing is printed, which is why
+        # this passed locally and only failed on a CI runner. Drain it, as curl would.
+        -K) i=$((i+1)); [ "${args[$i]}" = "-" ] && drain_stdin=1 ;;
         http://*|https://*) url="$a" ;;
     esac
     i=$((i+1))
 done
+[ "${drain_stdin:-0}" = "1" ] && cat >/dev/null 2>&1
 echo "curl $method $url" >> "$CALLS"
 
 emit() { printf '%s' "$1"; printf '\n%s' "$2"; }   # body then \n<code>, matching -w
