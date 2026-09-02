@@ -147,6 +147,25 @@ s3_list_prefixes() {
     return 0
 }
 
+fs_list_prefixes() {
+    [ -d "$STAGED_ROOT" ] || return 1
+    # -mindepth/-maxdepth 1: sessions are the immediate children, and a name
+    # beginning with __ is a build or invalid tree that no stage owns.
+    find "$STAGED_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | grep -v '^__' || true
+    return 0
+}
+
+# EVERY listing goes through here, including the two outside the main pass: the
+# per-session copies in unavailable(), and the post-removal verification at the
+# end. Both called s3_list_prefixes directly and it took an armed run on a real
+# tier-1 box to show it: the removal itself succeeded, then verification died on
+# `S3_BUCKET: unbound variable` and reported reclaim_failed for a session that
+# had in fact been removed correctly. A false failure on the delete path is worse
+# than a real one, because it sends someone looking for data that is gone on
+# purpose.
+st_list_prefixes()  { case "$STORAGE" in filesystem) fs_list_prefixes ;;  *) s3_list_prefixes ;; esac; }
+
 # -----------------------------------------------------------------------------
 # Aborting the run: emits run-level AND per-session reclaim_unavailable, never
 # reclaim_finished. WHY: docs/alerting-architecture.md, "The reclaimer's
@@ -169,7 +188,7 @@ unavailable() {
     local slug="$1" msg="$2" listed session n=0
     jlog reclaim_unavailable "" "$msg" ",\"reason\":\"${slug}\""
 
-    if listed=$(s3_list_prefixes 2>/dev/null); then
+    if listed=$(st_list_prefixes 2>/dev/null); then
         while IFS= read -r session; do
             [ -n "$session" ] || continue
             # Our own state prefix is not a session. The main pass matches the
@@ -467,8 +486,11 @@ numeric_or_err() {
     case "${1:-}" in ''|*[!0-9]*) echo ERR ;; *) echo "$1" ;; esac
 }
 
-# s3_list_prefixes lives ABOVE the pre-flight, not here with its siblings:
-# `unavailable` calls it, and the pre-flight runs before this point in the file.
+# s3_list_prefixes, fs_list_prefixes and st_list_prefixes all live ABOVE the
+# pre-flight, not here with their siblings: `unavailable` calls the dispatcher,
+# and the pre-flight runs before this point in the file. Defining them lower
+# down made an aborted run die with `st_list_prefixes: command not found`
+# instead of reporting why it aborted.
 
 # --output json, NOT --output text.
 #
@@ -810,15 +832,6 @@ fs_marker_set()   {
 }
 fs_marker_clear() { fs_safe_name "$1" || return 0; rm -f "$(fs_state_dir)/${1}.empty" 2>/dev/null || true; }
 
-fs_list_prefixes() {
-    [ -d "$STAGED_ROOT" ] || return 1
-    # -mindepth/-maxdepth 1: sessions are the immediate children, and a name
-    # beginning with __ is a build or invalid tree that no stage owns.
-    find "$STAGED_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
-        | grep -v '^__' || true
-    return 0
-}
-
 fs_object_count() {
     local d; d=$(fs_session_dir "$1")
     [ -d "$d" ] || { echo 0; return; }
@@ -920,7 +933,6 @@ fs_rm() {
 # --- the seam -----------------------------------------------------------------
 # The main loop calls these; each dispatches on STORAGE. Adding a third medium
 # means adding one implementation and one line here, and nothing above changes.
-st_list_prefixes()  { case "$STORAGE" in filesystem) fs_list_prefixes ;;  *) s3_list_prefixes ;; esac; }
 st_object_count()   { case "$STORAGE" in filesystem) fs_object_count "$1" ;;   *) s3_object_count "$1" ;; esac; }
 st_multipart_count(){ case "$STORAGE" in filesystem) fs_multipart_count "$1" ;;*) s3_multipart_count "$1" ;; esac; }
 st_newest_epoch()   { case "$STORAGE" in filesystem) fs_newest_epoch "$1" ;;   *) s3_newest_epoch "$1" ;; esac; }
@@ -1168,7 +1180,7 @@ EOF
 # keep listing it and keep re-alerting, so it is reported as a failure rather
 # than left to be rediscovered from the inbox.
 if [ -n "$removed_list" ]; then
-    if after=$(s3_list_prefixes); then
+    if after=$(st_list_prefixes); then
         while IFS= read -r session; do
             [ -n "$session" ] || continue
             # -F -x: whole-line literal match. A substring or regex match here

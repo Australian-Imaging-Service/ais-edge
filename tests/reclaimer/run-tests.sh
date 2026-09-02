@@ -371,7 +371,18 @@ run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
     [ -d "$root/$SESS" ] || gone="yes"
 
     local ok=1 why=""
-    if [ "$gone" != "$expect_gone" ]; then
+    # CHECKED FIRST, BEFORE THE EXPECTED EVENT. A run can do the right thing and
+    # still be broken afterwards: the armed run that first exercised this backend
+    # removed the correct session, then died on `S3_BUCKET: unbound variable` in
+    # the post-removal verification and reported reclaim_failed for it. Every
+    # assertion below passed, because they only ask whether the expected event is
+    # PRESENT. So an unbound variable, or a shell error of any kind, now fails the
+    # case on its own.
+    if printf '%s' "$out" | grep -qE "unbound variable|command not found|: line [0-9]+:"; then
+        ok=0; why="shell error in an otherwise-passing run: $(printf '%s' "$out" | grep -oE '[^ ]*: line [0-9]+: .*|.*unbound variable' | head -1)"
+    elif printf '%s' "$out" | grep -q '"event":"reclaim_failed"' && [ "$expect_event" != "reclaim_failed" ]; then
+        ok=0; why="reclaim_failed was emitted but not expected"
+    elif [ "$gone" != "$expect_gone" ]; then
         ok=0; why="expected session-gone=$expect_gone but got $gone"
     elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
         ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
