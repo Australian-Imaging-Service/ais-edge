@@ -185,7 +185,7 @@ report_age() {
 # unknown condition word is a keep, not a delete: a typo in values.yaml must not
 # be able to authorise removal.
 # -----------------------------------------------------------------------------
-condition_met() {   # condition_met <reclaim-word> <session-name>
+condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
     case "$1" in
         onUploaded)
             # The uploader wrote its fingerprint for this session, which it only
@@ -197,7 +197,25 @@ condition_met() {   # condition_met <reclaim-word> <session-name>
             # matters: without it, a session whose assigned copy was already
             # reclaimed would pin its grouped copy forever.
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
+        onDeidentified)
+            # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
+            # rather than silently unknown. This condition is satisfied by the
+            # deidentify STAGE, which unlinks each session's input once it has
+            # written a complete de-identified copy. That happens inside
+            # xnat-ingest and leaves no artefact this engine can observe, so the
+            # engine reports the tree and never acts on it. A session still
+            # present under this word is one the stage has not finished with,
+            # and keeping it is the correct answer.
+            return 1 ;;
         *)
+            # AN UNKNOWN WORD IS NOT AN UNMET CONDITION, and until now both
+            # returned 1. A typo -- onDeidentifed, onUpladed -- behaved exactly
+            # like a correctly configured site whose condition had not yet come
+            # true: nothing reclaimed, for ever, logged as normal operation. The
+            # reclaim words are validated nowhere else; the enum in values.yaml
+            # is a comment with no schema behind it.
+            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned or onDeidentified" \
+                 ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"$(jsan "$1")\""
             return 1 ;;
     esac
 }
@@ -240,7 +258,7 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             continue
         fi
 
-        if ! condition_met "$r_word" "$s"; then
+        if ! condition_met "$r_word" "$s" "$r_name"; then
             jlog reclaim_kept "$r_name" "condition ${r_word} not satisfied — nothing downstream proves this copy is reconstructible" \
                  ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\""
             continue

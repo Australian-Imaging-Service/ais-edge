@@ -78,7 +78,7 @@ data:
       "Plugins": {{ toJson . }},
       {{- end }}
 
-      {{- if .Values.orthanc.deid.enabled }}
+      {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else }}
       "LuaScripts": []
@@ -98,7 +98,7 @@ data:
          a real file means it stays lintable and diffable. */}}
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
-{{- if .Values.orthanc.deid.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
 ---
 apiVersion: v1
 kind: ConfigMap

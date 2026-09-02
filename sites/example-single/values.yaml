@@ -30,6 +30,11 @@
 # and appears in alert routing.
 clusterLabel: tier1-example
 
+# The de-identification engine. One key; the chart derives the Lua hook,
+# the xnat-ingest stage, the group label and the reclaim condition from it.
+deid:
+  engine: orthanc
+
 # All pipeline workloads live here. Tier-2 splits ingest (edge cluster) from
 # upload (management cluster) because they are different machines; on one node
 # there is nothing to split.
@@ -76,7 +81,6 @@ orthanc:
   auth:
     enabled: false
   deid:
-    enabled: true
     # THE GATE. The chart refuses to render while this is false and deid is on.
     # Set it only once you have read the profile and the AET map below and agree
     # they are this site's policy. It is not a formality: nothing downstream

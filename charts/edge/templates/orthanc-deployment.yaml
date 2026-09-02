@@ -96,7 +96,7 @@ spec:
             - name: http
               containerPort: {{ .Values.orthanc.httpPort }}
           env:
-            {{- if .Values.orthanc.deid.enabled }}
+            {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
             - name: AIS_ROUTING_FILE
               value: /etc/ais-edge/routing.json
             - name: AIS_DEID_HMAC_SALT
@@ -125,7 +125,7 @@ spec:
             - name: scripts
               mountPath: /etc/orthanc/scripts
               readOnly: true
-            {{- if .Values.orthanc.deid.enabled }}
+            {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
             # Deliberately NOT under /etc/orthanc: Orthanc would read these as
             # server configuration.
             - name: routing
@@ -150,7 +150,7 @@ spec:
           configMap:
             name: {{ include "edge.fullname" . }}-orthanc-scripts
             defaultMode: 0755
-        {{- if .Values.orthanc.deid.enabled }}
+        {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
         - name: routing
           configMap:
             name: {{ include "edge.fullname" . }}-orthanc-routing

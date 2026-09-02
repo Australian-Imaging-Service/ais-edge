@@ -57,7 +57,13 @@ spec:
             - "/data/grouped"
             - "$(ORTHANC_USER)"
             - "$(ORTHANC_PASSWORD)"
-            {{- with .Values.ingest.orthancGroup.toProcessLabel }}
+            {{- /* ONLY when the Lua hook is the engine, because the hook is
+                   what applies this label. Under any other engine nothing
+                   applies it, and filtering on it would make group-orthanc skip
+                   every study and stall the pipeline with no error. Derived
+                   rather than declared so an operator cannot leave it set by
+                   mistake while switching engines. */}}
+            {{- with (eq (include "edge.deidEngine" $) "orthanc") | ternary .Values.ingest.orthancGroup.toProcessLabel "" }}
             # Only studies carrying this label are pulled. The de-id hook
             # applies it in OnStableStudy, AFTER the original has been backed
             # up and the instance de-identified — which is what makes the
@@ -236,7 +242,7 @@ spec:
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
 {{- end }}
-{{- if and .Values.ingest.deidentify.enabled .Values.ingest.deidentify.specs }}
+{{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
 ---
 {{/*
   The de-identification recipes, from the site file.
@@ -260,7 +266,7 @@ data:
     {{- $recipe | nindent 4 }}
   {{- end }}
 {{- end }}
-{{- if .Values.ingest.deidentify.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -301,10 +307,28 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
-            {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onAssigned" }}
-            # Same reasoning as assign: without this, `--loop` rebuilds its
-            # work list from a live listing every cycle and re-processes
-            # sessions it has already done. Deletes hardlinks, not data.
+            {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
+            # dataPolicy.derived.assigned.reclaim = onDeidentified.
+            #
+            # Drop each assigned session once this stage has produced a
+            # COMPLETE de-identified copy of it. xnat-ingest counts the data
+            # files on both sides and refuses the unlink when they disagree, so
+            # a run that produced a short output leaves its input in place to be
+            # retried.
+            #
+            # Without this, /data/assigned is never emptied by anything: the
+            # data-policy engine's `onUploaded` condition looks for a marker the
+            # uploader writes for the tree it READS, which under this engine is
+            # /data/deidentified, not /data/assigned. So the assigned copy of
+            # every session ever processed accumulates on the edge disk.
+            #
+            # THIS TESTED "onAssigned" UNTIL NOW, WHICH COULD NEVER BE TRUE.
+            # onAssigned belongs to the `grouped` key and is not in this key's
+            # enum, so the condition was false at every site and the flag was
+            # never passed. Confirmed on a live edge: the running deidentify
+            # container had no --unlink-source in its arguments.
+            #
+            # Deletes hardlinks, not data, when copyMode is hardlink_or_copy.
             - "--unlink-source"
             - "all"
             {{- end }}

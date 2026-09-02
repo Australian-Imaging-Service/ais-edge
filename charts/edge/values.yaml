@@ -36,6 +36,36 @@ fullnameOverride: ""
 topology: onprem
 
 # =============================================================================
+# DE-IDENTIFICATION ENGINE — ONE SWITCH, and everything else follows from it
+# =============================================================================
+# GUIDING: set this and nothing else about de-identification wiring.
+#
+#   orthanc   the Orthanc Lua hook strips each instance as it ARRIVES, and also
+#             writes the ClinicalTrial* routing tags from the AE-title map and
+#             applies the label group-orthanc filters on. Everything downstream
+#             only ever sees stripped data. One-way: no crosswalk is kept.
+#
+#   ingest    the xnat-ingest `deidentify` stage runs between assign and upload.
+#             REVERSIBLE by design — it writes a per-session re-identification
+#             map recording the original value of every field it changed, which
+#             is why it exists. Costs: identifiable data passes through Orthanc,
+#             group and assign before it is cleaned, there is no AE-title
+#             routing, and ingest.assign.tagMapping must name tags this site's
+#             modalities actually populate.
+#
+#   none      neither. Only for sites whose modalities de-identify upstream.
+#             Requires orthanc.deid.policyReviewed=true to acknowledge it.
+#
+# WHY THIS IS ONE KEY. It used to be two booleans plus a label plus a tag
+# mapping plus a reclaim word, all of which had to agree. They did not have to
+# agree at RENDER time, only at RUN time, so a half-switched site came up clean
+# and then failed silently. Measured on a live edge: 531 instances filed under
+# assigned/__invalid__ with PHI intact and the stage reporting "Found 0
+# sessions" for ever, because one of the five was still on its old value.
+deid:
+  engine: orthanc            # orthanc | ingest | none
+
+# =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
 # =============================================================================
 # GUIDING: pass both values files to the edge release —
@@ -256,8 +286,27 @@ dataPolicy:
     # Output of assign; input to whichever upload mode is enabled.
     assigned:
       location: /data/assigned
-      reclaim: onUploaded        # never | onUploaded
+      # never | onUploaded | onDeidentified
+      #
+      # onUploaded    the data-policy engine removes this tree once the uploader
+      #               has written its marker for the session. Correct when the
+      #               uploader READS this tree, i.e. de-identification is done in
+      #               Orthanc.
+      # onDeidentified  the deidentify STAGE removes each session itself, as soon
+      #               as it has written a complete de-identified copy. Only
+      #               meaningful with ingest.deidentify.enabled.
+      #
+      # WHY onUploaded IS NOT ENOUGH UNDER ais-deid. The uploader then reads
+      # /data/deidentified, so its markers describe THAT tree. Nothing ever
+      # satisfies onUploaded for /data/assigned and the assigned copy of every
+      # session accumulates. onDeidentified is the handoff condition for that
+      # case: this tree's consumer is the deidentify stage, so the stage is what
+      # retires it.
+      reclaim: onUploaded
       # As above: a recovery window after upload, not a delay before it.
+      # Ignored under onDeidentified — the stage deletes at handoff, so there is
+      # no window to measure. The chart refuses the combination rather than
+      # letting a configured window be silently discarded.
       minAge: 0
 
 
@@ -453,7 +502,6 @@ orthanc:
   # xnat-ingest-ready label that group-orthanc filters on.
   # ---------------------------------------------------------------------
   deid:
-    enabled: true
 
     # Refuse to start unless a human has confirmed the profile below matches
     # the site's de-identification policy. Deliberately has no safe default.
@@ -578,7 +626,6 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
-    enabled: false
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file, exactly like

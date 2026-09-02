@@ -42,6 +42,11 @@
 # what the push Ingress pins the CN to.
 clusterLabel: example-edge
 
+# The de-identification engine. One key; the chart derives the Lua hook,
+# the xnat-ingest stage, the group label and the reclaim condition from it.
+deid:
+  engine: orthanc
+
 namespace: xnat-ingest
 
 # onprem  hostPath storage on this node, no cloud load balancer.
@@ -72,7 +77,6 @@ orthanc:
     # DICOM network is already isolated.
     enabled: false
   deid:
-    enabled: true
     # No safe default: this asserts that a human has READ the profile below and
     # accepts what it does and does not remove. The chart refuses to render
     # while it is false and deid is enabled.

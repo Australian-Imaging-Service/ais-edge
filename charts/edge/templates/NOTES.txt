@@ -16,7 +16,7 @@ INGEST
 {{- end }}
 
 DE-IDENTIFICATION
-{{- if .Values.orthanc.deid.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   Enabled. {{ len .Values.orthanc.deid.aetMap }} AE title(s) mapped:
   {{- range $aet, $cfg := .Values.orthanc.deid.aetMap }}
     {{ $aet }} -> XNAT project {{ $cfg.project }}
@@ -66,7 +66,7 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
 {{- if .Values.orthanc.auth.enabled }}
   {{ .Values.orthanc.auth.existingSecret }}   keys: users.json, orthanc-user, orthanc-password
 {{- end }}
-{{- if .Values.orthanc.deid.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   {{ .Values.orthanc.deid.existingSaltSecret }}   key: AIS_DEID_HMAC_SALT
 {{- end }}
 {{- if eq .Values.upload.mode "s3" }}
