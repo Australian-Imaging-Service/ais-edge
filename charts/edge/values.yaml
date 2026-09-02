@@ -36,6 +36,28 @@ fullnameOverride: ""
 topology: onprem
 
 # =============================================================================
+# DE-IDENTIFICATION ENGINE - ONE SWITCH, and everything else follows from it
+# =============================================================================
+# GUIDING: set this and nothing else about de-identification wiring.
+#
+#   orthanc   the Orthanc Lua hook strips each instance as it ARRIVES, and also
+#             writes the ClinicalTrial* routing tags from the AE-title map and
+#             applies the label group-orthanc filters on. One-way: no crosswalk.
+#   ingest    the xnat-ingest `deidentify` stage runs between assign and upload.
+#             REVERSIBLE by design - it writes a per-session re-identification
+#             map. Costs: identifiable data passes through Orthanc, group and
+#             assign before it is cleaned, there is no AE-title routing, and
+#             ingest.assign.tagMapping must name tags the modalities populate.
+#   none      neither. Only for sites whose modalities de-identify upstream.
+#             Requires orthanc.deid.policyReviewed=true to acknowledge it.
+#
+# WHY THIS IS ONE KEY. It used to be two booleans plus a label plus a tag
+# mapping plus a reclaim word, all of which had to agree - but only at RUN time,
+# so a half-switched site came up clean and then failed silently.
+deid:
+  engine: orthanc            # orthanc | ingest | none
+
+# =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
 # =============================================================================
 # GUIDING: pass both values files to the edge release —
@@ -453,7 +475,6 @@ orthanc:
   # xnat-ingest-ready label that group-orthanc filters on.
   # ---------------------------------------------------------------------
   deid:
-    enabled: true
 
     # Refuse to start unless a human has confirmed the profile below matches
     # the site's de-identification policy. Deliberately has no safe default.
@@ -578,7 +599,6 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
-    enabled: false
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file, exactly like
