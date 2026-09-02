@@ -76,6 +76,7 @@ data:
   {{- $dpo := .Values.dataPolicy.originals }}
   {{- $rules = $rules | replace "__DP_MIN_FREE_DISK_PCT__" (printf "%v" $dpo.facilityBackup.minFreeDiskPercent) }}
   {{- $rules = $rules | replace "__DP_QUARANTINE_ALERT_AFTER_S__" (include "edge.durationSeconds" $dpo.quarantine.alertAfter) }}
+  {{- $rules = $rules | replace "__DP_STAGE_AGE_ALERT_AFTER_S__" (include "edge.durationSeconds" $.Values.dataPolicy.reporter.stageAgeAlertAfter) }}
   ais-edge-rules.yaml: |
 {{ $rules | indent 4 }}
 

@@ -262,6 +262,40 @@ groups:
         \ IS DELETED BECAUSE OF THIS. Originals are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\n  kubectl --kubeconfig kubeconfig-{{\
         \ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the\
         \ dry-run decisions.\n"
+  - alert: StageBacklogAgeing
+    # dataPolicy.reporter.stageAgeAlertAfter MADE REAL.
+    #
+    # PipelineSessionStuck is per session and fires only on one whose reclaim
+    # condition keeps failing. A stage whose reclaim is `never` returns before
+    # that check runs, so it can never raise stage_stuck -- and `never` is the
+    # default for the deidentified tree. This is the question that needs no
+    # reclaim condition at all: has the oldest thing here been here too long.
+    expr: |
+      sum by (cluster, stage) (count_over_time(
+        {namespace="xnat-ingest", component="data-policy"}
+        | json | event="stage_report"
+        | oldest_age_s > __DP_STAGE_AGE_ALERT_AFTER_S__ [15m])) > 0
+    for: 15m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-storage
+    annotations:
+      summary: '{{ $labels.stage }} on {{ $labels.cluster }} has entries older than the configured limit'
+      description: |
+        The oldest entry in this stage has been there longer than
+        dataPolicy.reporter.stageAgeAlertAfter.
+    
+        NOTHING IS DELETED BECAUSE OF THIS. It says the stage is not draining
+        at the rate it should, which is either a downstream stage that has
+        stopped consuming, or a retention policy of `never` on a tree that
+        does in fact keep growing.
+    
+          kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\
+            -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_report
+    
+        Check EdgeDiskLow too: a stage that never drains eventually fills the
+        volume, and that alert is the one with the deadline.
   - alert: PipelineSessionStuck
     expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_stuck\" [15m])) > 0\n"
     for: 10m
