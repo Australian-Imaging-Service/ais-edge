@@ -52,6 +52,9 @@ PATH="/opt/rclone:${PATH}"
 
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
 STATE_DIR="${STATE_DIR:-/data/LOGS/s3-uploader-state}"
+# The root the stage directories live under. The marker sweep looks for the
+# session under any of them rather than only this stage's.
+PIPELINE_ROOT="${PIPELINE_ROOT:-/data}"
 INTERVAL="${INTERVAL:-60}"
 SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
 # onUploaded -> remove the local copy after a verified upload.
@@ -297,11 +300,36 @@ while true; do
         fi
     done
 
-    # Drop state for sessions that no longer exist locally, so the state dir
-    # stays proportional to what is on disk rather than growing forever.
+    # Drop state only when NOTHING IN THE PIPELINE CAN STILL ASK ABOUT IT.
+    #
+    # The marker is the only evidence that a session was uploaded, and
+    # data-policy reads it to decide whether a local copy may be reclaimed.
+    # Sweeping it as soon as THIS stage's directory was gone meant that when the
+    # uploader did its own reclaim, the marker was written and removed in the
+    # same pass: data-policy would look, find nothing, and log "condition
+    # onUploaded not satisfied" for ever.
+    #
+    # NO TIMER, DELIBERATELY. A retention window has to be longer than the
+    # slowest session, and the slowest session is not knowable: a large study on
+    # a slow link can outlive any constant, and the marker would then expire
+    # before the engine acted -- the same failure, reached later and harder to
+    # diagnose. So the question asked here is not "how old is this marker" but
+    # "does any stage still hold a session by this name". While one does, the
+    # marker is still load-bearing. When none does, no consumer can ask about it
+    # again, and a session re-staged later under the same name gets a fresh
+    # marker rather than inheriting this one's authority.
+    #
+    # Depth 2 is <pipeline-root>/<stage>/<session>, which is every stage
+    # directory without needing to know their names.
     for state_file in "$STATE_DIR"/*; do
         [ -f "$state_file" ] || continue
-        [ -d "${ASSIGNED_DIR}/$(basename "$state_file")" ] || rm -f "$state_file"
+        sname=$(basename "$state_file")
+        if find "$PIPELINE_ROOT" -mindepth 2 -maxdepth 2 -type d -name "$sname" \
+                -print -quit 2>/dev/null | grep -q .; then
+            continue
+        fi
+        rm -f "$state_file"
+        jlog marker_retired "$sname" "upload marker dropped: no stage directory holds this session any more, so nothing can ask about it again"
     done
 
     sleep "$INTERVAL"

@@ -119,6 +119,10 @@ spec:
               value: {{ .Values.upload.s3.interval | quote }}
             - name: SETTLE_MINUTES
               value: {{ .Values.upload.s3.settleMinutes | quote }}
+            # The marker sweep asks whether ANY stage still holds the session,
+            # rather than how old the marker is. See s3-uploader.sh.
+            - name: PIPELINE_ROOT
+              value: /data
             # Derived by the SAME condition as ASSIGNED_DIR above, so the
             # uploader cannot take its permission to delete from the policy for
             # a tree it is not reading. See edge.uploadReclaim.
