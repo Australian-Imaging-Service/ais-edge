@@ -119,8 +119,11 @@ spec:
               value: {{ .Values.upload.s3.interval | quote }}
             - name: SETTLE_MINUTES
               value: {{ .Values.upload.s3.settleMinutes | quote }}
+            # Derived by the SAME condition as ASSIGNED_DIR above, so the
+            # uploader cannot take its permission to delete from the policy for
+            # a tree it is not reading. See edge.uploadReclaim.
             - name: RECLAIM
-              value: {{ .Values.dataPolicy.derived.assigned.reclaim | quote }}
+              value: {{ include "edge.uploadReclaim" . | quote }}
             # dryRun OR disabled — either one means "upload, but do not
             # reclaim the local copy". Was `and .enabled .dryRun`, which with
             # the default dataPolicy.enabled=false yields DRY_RUN=false: a
