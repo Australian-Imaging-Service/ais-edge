@@ -52,8 +52,16 @@ spec:
       template:
         spec:
           restartPolicy: Never
-          securityContext:
-            {{- toYaml .Values.ingest.podSecurityContext | nindent 12 }}
+          # NO POD securityContext, deliberately, and matching the other ingest
+          # workloads which also set none. They run as root and create
+          # /data/<stage>/<session> owned by root:root; MEASURED on .240. This
+          # job has to UNLINK those directories, so it must be the same user.
+          #
+          # Do not copy dataPolicy.reporter's 10001 here. That job mounts every
+          # stage READ-ONLY and only has to read; this one deletes. Running it as
+          # 10001 would pass a dry run unchanged, report the same decisions, and
+          # then fail with permission denied the first time the policy was armed,
+          # which is the worst moment to discover it.
           containers:
             - name: reclaimer
               # The ingest image, not the curl image: reclaim-staged.sh needs
