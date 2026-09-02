@@ -94,7 +94,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
        matches none of them, and every session is skipped as "no applicable
        spec" — logged, but easy to read as "nothing to do". */ -}}
 {{- if and .Values.ingest.deidentify.enabled .Values.ingest.deidentify.specConfigMap (not .Values.ingest.deidentify.specFiles) }}
-  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap key cannot contain '@' and mounts flat, so the recipes would land as bare keys in one directory and xnat-ingest would match none of them, skipping every session. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series.json: \"__default__/medimage@dicom-series.json\"}." }}
+  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap mounts its keys flat in one directory, but xnat-ingest's load_specs walks <spec-dir>/<category>/<format> and SKIPS anything at the top level that is not a directory, so flat keys match nothing and every session fails with 'No deidentification specs found'. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series: \"__default__/medimage/dicom-series\"}." }}
 {{- end }}
 
 {{- if and .Values.ingest.deidentify.enabled (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
@@ -175,6 +175,39 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- if and .Values.ingest.orthancGroup.enabled (not .Values.orthanc.deid.enabled) }}
     {{- if .Values.ingest.orthancGroup.toProcessLabel }}
       {{- fail "ingest.orthancGroup.toProcessLabel is set but orthanc.deid.enabled=false. Nothing applies that label, so group-orthanc would filter out every study and the pipeline would stall silently. If you are switching to ingest.deidentify (the xnat-ingest engine), clearing toProcessLabel is the expected second step — the Lua hook applies that label as well as de-identifying, so turning it off removes both. Otherwise clear toProcessLabel, or re-enable orthanc.deid." }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* THE SECOND THING THE LUA HOOK SUPPLIES, and the one that is easy to
+         miss because the failure looks like a data problem rather than a
+         configuration one.
+
+         assign reads project, subject and session from the ClinicalTrial*
+         tags. Nothing in a DICOM stream carries those: the Lua hook WRITES
+         them, from the AE-title map. With the hook off, no study has them, so
+         assign resolves nothing and files every session under __invalid__ with
+         INVALID_MISSING_CLINICALTRIAL... in the name.
+
+         Measured on a live edge before this guard existed: 531 instances
+         grouped correctly, landed in assigned/__invalid__, and the deidentify
+         stage then reported "Found 0 sessions" for ever. Because the hook is
+         off, those files still hold their PHI, so the end state is
+         identifiable data at rest in a directory no stage will ever pick up,
+         with nothing failing loudly enough to notice.
+
+         There is deliberately no default substitute. Which real tags carry
+         project, subject and session is a site decision, and guessing one
+         would route studies into the wrong XNAT project. */ -}}
+  {{- if .Values.ingest.deidentify.enabled }}
+    {{- $mapping := .Values.ingest.assign.tagMapping }}
+    {{- $luaOnly := list }}
+    {{- range $key, $tag := $mapping }}
+      {{- if hasPrefix "ClinicalTrial" $tag }}
+        {{- $luaOnly = append $luaOnly (printf "%s=%s" $key $tag) }}
+      {{- end }}
+    {{- end }}
+    {{- if $luaOnly }}
+      {{- fail (printf "ingest.deidentify.enabled=true, but ingest.assign.tagMapping still reads %s. Those tags are written by the Orthanc Lua hook, which is off in this configuration, so no study will carry them: assign resolves no ids and files every session under __invalid__, where no later stage looks. With the hook off nothing has de-identified the data at that point either, so it sits there identifiable. Set ingest.assign.tagMapping to tags this site's modalities actually populate (for example project: StudyID, subject: PatientID, session: AccessionNumber)." (join ", " $luaOnly)) }}
     {{- end }}
   {{- end }}
 
@@ -503,4 +536,26 @@ pre-deidentification copy and the stage would be silently pointless.
 */}}
 {{- define "edge.uploadSourceDir" -}}
 {{- if .Values.ingest.deidentify.enabled }}/data/deidentified{{- else }}/data/assigned{{- end }}
+{{- end }}
+
+{{- /*
+THE DELETE AUTHORITY FOR THAT SAME TREE, chosen by the SAME condition.
+
+The uploader is pointed at edge.uploadSourceDir, so with ais-deid enabled it
+reads /data/deidentified. Its RECLAIM variable used to be read straight from
+dataPolicy.derived.assigned.reclaim regardless, so the uploader took its
+permission to delete from the policy for a DIFFERENT tree: it would delete
+/data/deidentified on the strength of the assigned stage's `onUploaded`, while
+the operator's declared policy for the deidentified tree said `never`.
+
+Path drift was already prevented by deriving the directory from one helper.
+This is the same argument applied to the policy: whichever tree the uploader is
+reading, the authority to delete it comes from THAT tree's own key.
+
+Only the ais-deid case changes. With de-identification in Orthanc, which is how
+every site is configured, both branches resolve to the assigned key exactly as
+before.
+*/}}
+{{- define "edge.uploadReclaim" -}}
+{{- if .Values.ingest.deidentify.enabled }}{{ .Values.dataPolicy.derived.deidentified.reclaim }}{{- else }}{{ .Values.dataPolicy.derived.assigned.reclaim }}{{- end }}
 {{- end }}
