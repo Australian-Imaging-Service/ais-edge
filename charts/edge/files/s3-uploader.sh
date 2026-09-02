@@ -190,7 +190,20 @@ jlog endpoint_ready "" "bucket probe OK"
 # hardlink/symlink trees, and we care about the bytes that would be uploaded,
 # not the link metadata.
 fingerprint() {
-    find -L "$1" -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+    # NO `find -printf` HERE, AND THAT IS NOT A STYLE CHOICE. The data-policy
+    # engine runs on curlimages/curl, which is Alpine: BusyBox find has no
+    # -printf and fails with "unrecognized: -printf". With the error swallowed
+    # by 2>/dev/null that produced the md5 of an EMPTY string, identical every
+    # time and never equal to the uploader's value -- so onUploaded could never
+    # be satisfied on any real deployment and nothing would ever be reclaimed,
+    # silently. Caught by tests/data-policy, which is the only stage that runs
+    # this script in the image it actually ships in.
+    #
+    # `cd` first so %n is relative: the uploader and the engine must agree on
+    # the value, and they do not necessarily see the tree at the same path.
+    # %Y rather than %T@ because BusyBox stat has no fractional seconds.
+    ( cd "$1" 2>/dev/null && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
+        | sort | md5sum | cut -d' ' -f1 )
 }
 
 while true; do
