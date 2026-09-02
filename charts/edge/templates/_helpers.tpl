@@ -66,21 +66,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* TWO ENGINES, ONE JOB. Running both means the Lua hook strips each
-         instance on arrival and xnat-ingest then de-identifies what is already
-         de-identified: the reid mapping it writes records the PSEUDONYMS as if
-         they were the originals, so it looks like a working reversal path and
-         reverses to nothing. */ -}}
-  {{- if and (eq (include "edge.deidEngine" .) "orthanc") (eq (include "edge.deidEngine" .) "ingest") }}
-    {{- fail "orthanc.deid.enabled and ingest.deidentify.enabled are both true. Pick one de-identification engine: the Orthanc Lua hook strips instances as they arrive; xnat-ingest deidentify runs as a stage between assign and upload. Running both makes the re-identification mapping record pseudonyms rather than originals, so it reverses to nothing while appearing to work." }}
-  {{- end }}
+  {{- /* THE "BOTH ENGINES" GUARD WAS REMOVED, NOT LOST. It failed when
+       orthanc.deid.enabled and ingest.deidentify.enabled were both true. With
+       deid.engine that state is unrepresentable: one key selects one engine, so
+       there is nothing left to detect. The property it protected - that the
+       re-identification map records originals rather than pseudonyms, which is
+       what running both would have broken - is now structural. */ -}}
 
   {{- /* Neither engine on is a legitimate choice — modalities that already
          de-identify, or staging into a trusted enclave — but it is never the
          RIGHT default, so it has to be said out loud. */ -}}
   {{- if and (not (eq (include "edge.deidEngine" .) "orthanc")) (not (eq (include "edge.deidEngine" .) "ingest")) }}
     {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "no de-identification engine is enabled (orthanc.deid.enabled=false and ingest.deidentify.enabled=false), so identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
+      {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it. Otherwise set deid.engine=orthanc for the Lua hook or deid.engine=ingest for the xnat-ingest stage." }}
     {{- end }}
   {{- end }}
 
@@ -98,7 +96,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{- if and (eq (include "edge.deidEngine" .) "ingest") (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
-    {{- fail "ingest.deidentify.enabled=true but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
+    {{- fail "deid.engine=ingest but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
   {{- end }}
 
   {{- /* De-identification is the control that stops identifiable data
@@ -106,7 +104,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          a right one from the outside, so a human has to say they read it. */ -}}
   {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
     {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "orthanc.deid.enabled=true requires orthanc.deid.policyReviewed=true — confirm the de-identification profile and AET map match this site's policy before installing." }}
+      {{- fail "deid.engine=orthanc requires orthanc.deid.policyReviewed=true — confirm the de-identification profile and AET map match this site's policy before installing." }}
     {{- end }}
     {{- if not .Values.orthanc.deid.aetMap }}
       {{- fail "orthanc.deid.aetMap is empty: every modality would be quarantined as an unmapped AE title. Map at least one AET to an XNAT project." }}
@@ -165,7 +163,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            removes it from Orthanc. Without that volume there is no archive of
            record and no landing place for unmapped-AET quarantine. */ -}}
     {{- if not .Values.storage.facilityBackup.enabled }}
-      {{- fail "orthanc.deid.enabled=true requires storage.facilityBackup.enabled=true — the de-identification hook writes originals there before modifying them, and quarantines unmapped-AET studies under it." }}
+      {{- fail "deid.engine=orthanc requires storage.facilityBackup.enabled=true — the de-identification hook writes originals there before modifying them, and quarantines unmapped-AET studies under it." }}
     {{- end }}
   {{- end }}
 
@@ -222,7 +220,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       {{- end }}
     {{- end }}
     {{- if $luaOnly }}
-      {{- fail (printf "ingest.deidentify.enabled=true, but ingest.assign.tagMapping still reads %s. Those tags are written by the Orthanc Lua hook, which is off in this configuration, so no study will carry them: assign resolves no ids and files every session under __invalid__, where no later stage looks. With the hook off nothing has de-identified the data at that point either, so it sits there identifiable. Set ingest.assign.tagMapping to tags this site's modalities actually populate (for example project: StudyID, subject: PatientID, session: AccessionNumber)." (join ", " $luaOnly)) }}
+      {{- fail (printf "deid.engine=ingest, but ingest.assign.tagMapping still reads %s. Those tags are written by the Orthanc Lua hook, which is off in this configuration, so no study will carry them: assign resolves no ids and files every session under __invalid__, where no later stage looks. With the hook off nothing has de-identified the data at that point either, so it sits there identifiable. Set ingest.assign.tagMapping to tags this site's modalities actually populate (for example project: StudyID, subject: PatientID, session: AccessionNumber)." (join ", " $luaOnly)) }}
     {{- end }}
   {{- end }}
 
@@ -261,7 +259,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}
   {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
     {{- if not (eq (include "edge.deidEngine" .) "ingest") }}
-      {{- fail "dataPolicy.derived.assigned.reclaim=onDeidentified but ingest.deidentify.enabled=false. That condition is satisfied by the deidentify STAGE unlinking its own input, and the stage does not render, so nothing would ever retire /data/assigned and it would grow without bound. Use onUploaded, which the data-policy engine can satisfy from the uploader's markers when the uploader reads this tree, or enable the stage." }}
+      {{- fail "dataPolicy.derived.assigned.reclaim=onDeidentified but deid.engine is not ingest. That condition is satisfied by the deidentify STAGE unlinking its own input, and the stage does not render, so nothing would ever retire /data/assigned and it would grow without bound. Use onUploaded, which the data-policy engine can satisfy from the uploader's markers when the uploader reads this tree, or enable the stage." }}
     {{- end }}
     {{- $minAge := include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}
     {{- if and (ne $minAge "-") (gt (int64 $minAge) 0) }}
