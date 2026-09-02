@@ -244,6 +244,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail "dataPolicy.derived.grouped.minAge was removed and setting it does nothing. `assign --unlink-source all` deletes each grouped tree at assign time, so a window measured from assign can never elapse; only trees assign FAILED to unlink reach the policy engine, and those are cleaned up immediately. Remove the key. If you want a post-upload recovery window, dataPolicy.derived.assigned.minAge is the one that works." }}
   {{- end }}
 
+  {{- /* onUploaded ANYWHERE needs someone to write the uploader's markers, and
+         upload.mode=direct renders no s3-uploader at all. values.yaml says so
+         in a comment beside the key; a comment is not a guard, and the failure
+         it describes is the silent one this repo keeps finding. */ -}}
+  {{- if eq .Values.upload.mode "direct" }}
+    {{- /* DELIBERATELY NOT `assigned` AS WELL. The same argument applies to it,
+           and the shipped tier-1 site files declare assigned.reclaim=onUploaded,
+           so failing on that would refuse this chart's own default install. It
+           is an unsatisfiable declaration rather than a dangerous one: the tree
+           is kept either way, and StageBacklogAgeing now reports it instead of
+           it growing unwatched. Correcting that default to `never` is a
+           separate, deliberate change. */ -}}
+    {{- if eq .Values.dataPolicy.derived.deidentified.reclaim "onUploaded" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct. That condition is satisfied by a marker under the uploader's state directory, and the ONLY thing that writes there is the s3-uploader, which this upload mode does not render. Nothing could ever satisfy it: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it." }}
+    {{- end }}
+  {{- end }}
+
   {{- /* The reclaim word for /data/assigned depends on WHO reads that tree, and
          that is decided by the engine. Under the ingest engine the uploader
          reads /data/deidentified, so its markers describe that tree and nothing
