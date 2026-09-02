@@ -665,7 +665,7 @@ data:
   {{- $dpOrig := .Values.dataPolicy.originals }}
   {{- $lokiRules = $lokiRules | replace "__DP_MIN_FREE_DISK_PCT__" (printf "%v" $dpOrig.facilityBackup.minFreeDiskPercent) }}
   {{- $lokiRules = $lokiRules | replace "__DP_QUARANTINE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" $dpOrig.quarantine.alertAfter) }}
-  {{- $lokiRules = $lokiRules | replace "__DP_STAGE_AGE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" $dpOrig.quarantine.alertAfter) }}
+  {{- $lokiRules = $lokiRules | replace "__DP_STAGE_AGE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" .Values.dataPolicy.stageAgeAlertAfter) }}
   {{- /* A surviving sentinel is a silent break: the rule would ship with a
          literal __DP_..._ in place of a number, Loki would reject the group at
          load time, and every OTHER rule in the same file would stop evaluating

@@ -112,7 +112,7 @@ groups:
           source: loki-ruler
         annotations:
           summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes"
-          description: "mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry."
+          description: "The upload started but did not complete within the expected window. Could be a slow network, a large session, or a stuck retry. Deliberately does not name the transfer tool: this text named a binary that had been replaced two migrations earlier, and an alert description is read by someone under pressure who will go looking for it."
 
       - alert: SessionStagedNotConfirmedInXNAT
         # THE ONLY ABSENCE ALERT IN THIS FILE, AND THE MOST IMPORTANT ONE.

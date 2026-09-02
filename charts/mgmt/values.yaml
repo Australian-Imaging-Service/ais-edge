@@ -79,6 +79,21 @@ dataPolicy:
     quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}
     fileDrop:       {location: /data/incoming, reclaim: never, minAge: 30d}
 
+  # WHEN A STAGE ITSELF HAS BEEN SITTING TOO LONG.
+  #
+  # Read by StageBacklogAgeing. PipelineSessionStuck is per session and fires
+  # only on one whose reclaim condition keeps failing; reclaim_stage returns at
+  # its `never` guard before that check is reached, so a stage with
+  # reclaim: never can never raise it -- and `never` is the default for the
+  # deidentified tree, which is the one that grows once de-identification moves
+  # into the pipeline. This is the question that needs no reclaim condition:
+  # has the oldest entry here been here longer than it should be.
+  #
+  # Lives here rather than in charts/edge because this chart renders the Loki
+  # rules on this tier, and the threshold is substituted into the expression at
+  # render time. MUST match charts/edge/values.yaml on the single-node tier.
+  stageAgeAlertAfter: 7d
+
   derived:
     orthancStorage: {location: /data/orthanc-storage, backend: orthanc-rest, reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
     grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine

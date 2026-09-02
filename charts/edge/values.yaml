@@ -157,20 +157,6 @@ dataPolicy:
     # __METADATA__.json was rewritten every pass; with that fix the tree goes
     # quiet and this sees it.
     stuckAfter: 24h
-
-    # WHEN A STAGE ITSELF HAS BEEN SITTING TOO LONG.
-    #
-    # stuckAfter above is per SESSION and fires only on one whose reclaim
-    # condition keeps failing. A stage whose reclaim is `never` returns before
-    # that check is reached, so nothing there can ever be reported by it -- and
-    # `never` is the DEFAULT for the deidentified tree, which is the one that
-    # grows when de-identification moves into the pipeline.
-    #
-    # This is the coarser question the engine can always answer from
-    # stage_report: has the oldest entry in this stage been here longer than it
-    # should be. It needs no per-session state and no reclaim condition.
-    # Set 0 to disable.
-    stageAgeAlertAfter: 7d
     image:
       # Needs df, find, stat, date, awk AND curl. busybox has the first five but
       # no curl, and its wget cannot issue the DELETE the orthanc-rest backend
