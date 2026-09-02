@@ -78,7 +78,18 @@ data:
       "Plugins": {{ toJson . }},
       {{- end }}
 
-      {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
+      {{- /* THE HOOK DOES MORE THAN DE-IDENTIFY. It also writes the facility
+             backup (the archive of record, with original identifiers) and
+             quarantines instances from unmapped AE titles. Loading it only when
+             it is the de-identification engine meant that choosing
+             deid.engine=ingest silently gave up BOTH: the archive stopped having
+             a writer, which produces no error and no log line, because an absent
+             writer is indistinguishable from a quiet site.
+      
+             It now loads whenever it has any job left to do, and the
+             de-identification half is switched off from inside the script by
+             Defaults.DeidEnabled. */}}
+      {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else }}
       "LuaScripts": []
@@ -98,7 +109,11 @@ data:
          a real file means it stays lintable and diffable. */}}
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
-{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
+{{- /* Rendered whenever the script is loaded, which is now also the case with
+       another engine selected, because the script still archives originals and
+       quarantines unmapped AE titles. Loading a script whose configuration file
+       does not exist would abort every instance at the first read. */}}
+{{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -115,7 +130,9 @@ data:
       "AETMap": {{ toJson .Values.orthanc.deid.aetMap }},
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
-        "FacilityBackupDir": "/facility-backup"
+        "FacilityBackupDir": "/facility-backup",
+        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script still archives the original and quarantines unmapped AE titles; it just does not modify the instance, because another stage does that instead.",
+        "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }}
       }
     }
   deidentification-profile.json: |
