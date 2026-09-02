@@ -61,7 +61,12 @@ spec:
               # curlimages/curl does not ship it. MEASURED, not assumed.
               image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
               imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-              command: ["sh", "/scripts/reclaim-staged.sh"]
+              # /bin/bash, NOT sh. reclaim-staged.sh declares #!/usr/bin/env bash
+              # and uses bash arrays for CURL_OPTS. charts/mgmt runs it the same
+              # way; running it as sh got as far as the XNAT block and died with
+              # `Syntax error: "(" unexpected` on the first real run, because this
+              # image's /bin/sh is dash rather than the mgmt image's busybox ash.
+              command: ["/bin/bash", "/scripts/reclaim-staged.sh"]
               env:
                 {{- include "edge.logEnv" . | nindent 16 }}
                 - name: STORAGE

@@ -175,4 +175,41 @@ done < <(
 )
 [ "$k0s_bad" -eq 0 ] && ci_pass "every k0s install names a version (or is marked UNPINNED-OK with a reason)"
 
+# =============================================================================
+# The interpreter a template ACTUALLY runs the script with
+# =============================================================================
+# `bash -n` above parses each script with the interpreter its SHEBANG names. A
+# container ignores the shebang: the pod spec's command names the interpreter,
+# and nothing tied the two together.
+#
+# MEASURED, on the first live run of the tier-1 reclaimer: the pod ran a
+# `#!/usr/bin/env bash` script with `command: ["sh", ...]`. It started, resolved
+# its configuration, opened an XNAT session, and then died on
+# `Syntax error: "(" unexpected` at the first bash array. The mgmt copy of the
+# same script had always been run with /bin/bash, and the mgmt image's /bin/sh is
+# busybox ash, which tolerates more than this image's dash. So the mistake was
+# invisible in every environment except the one that mattered.
+#
+# The rule: a script whose shebang says bash must be invoked as bash.
+ci_heading "template command matches script shebang"
+
+shebang_bad=0
+while IFS= read -r tpl; do
+  while IFS= read -r line; do
+    interp=$(printf '%s' "$line" | sed -n 's/.*command: \["\([^"]*\)".*/\1/p')
+    script=$(printf '%s' "$line" | sed -n 's|.*"/scripts/\([^"]*\)".*|\1|p')
+    [ -n "$interp" ] && [ -n "$script" ] || continue
+    chart=$(printf '%s' "$tpl" | sed 's|.*/charts/\([^/]*\)/.*|\1|')
+    src="$REPO_ROOT/charts/$chart/files/$script"
+    [ -f "$src" ] || continue
+    want=$(head -1 "$src" | grep -qE 'bash' && echo bash || echo sh)
+    got=$(basename "$interp")
+    if [ "$want" = "bash" ] && [ "$got" != "bash" ]; then
+      ci_fail "charts/$chart/templates/$(basename "$tpl") runs $script with '$interp', but its shebang is bash. In a container the shebang is ignored and the command wins, so bash syntax in that script is a runtime failure, not a parse error CI can see."
+      shebang_bad=1
+    fi
+  done < <(grep -nE 'command: \["[^"]+", "/scripts/[^"]+"\]' "$tpl" 2>/dev/null)
+done < <(find "$REPO_ROOT/charts" -path '*/templates/*' -name '*.yaml' 2>/dev/null)
+[ "$shebang_bad" -eq 0 ] && ci_pass "every template runs its script with an interpreter its shebang allows"
+
 ci_summary "shell syntax"
