@@ -39,7 +39,34 @@ REMOVE InstitutionAddress
 # Local accession/order numbers, which are re-identifying within a site.
 REMOVE AccessionNumber
 
-# NOTE: PatientID is deliberately NOT removed here. assign has already
-# rewritten it to the project/subject the session was routed to, and upload
-# needs it to place the session in XNAT. Removing it detaches the data from
-# its subject.
+# THE PATIENT IDENTIFIER. Removed, and the reason matters because an earlier
+# version of this file kept it on a premise that is false.
+#
+# It claimed assign had already rewritten PatientID to the routed subject.
+# assign does no such thing: it READS tag values to resolve the project,
+# subject and session ids and then copies or hardlinks the files unchanged. It
+# never opens a dataset for writing. Verified by grepping the package for any
+# write to PatientID; there is none.
+#
+# It also claimed upload needs the tag to place the session. It does not.
+# Placement is explicit: upload builds the XNAT path from the session object's
+# ids, which came from ingest.assign.tagMapping, not from this header. So
+# removing PatientID cannot detach the data from its subject.
+#
+# What DOES happen if it is left: upload finishes by calling
+# /data/experiments/<id>?pullDataFromHeaders=true, which asks XNAT to populate
+# its own metadata FROM THESE HEADERS. So a real medical record number left
+# here is not merely present in the pixel archive, it is pulled into XNAT's
+# fields, while PatientName, birth date and institution are all correctly
+# stripped and the result looks de-identified to a spot check.
+#
+# Measured before this change: an instance de-identified by this recipe and
+# uploaded still carried PatientID verbatim, with PatientIdentityRemoved absent.
+REMOVE PatientID
+
+# QUASI-IDENTIFIERS, left in deliberately but LISTED so the choice is visible.
+# Age and sex are research-relevant and are not direct identifiers, but in a
+# small cohort they narrow it sharply. Decide per site; they are named here
+# rather than omitted so that deciding is not the same as forgetting.
+#   PatientSex
+#   PatientAge
