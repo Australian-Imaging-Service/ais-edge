@@ -185,12 +185,32 @@ report_age() {
 # unknown condition word is a keep, not a delete: a typo in values.yaml must not
 # be able to authorise removal.
 # -----------------------------------------------------------------------------
+# MUST MATCH s3-uploader.sh's fingerprint() EXACTLY. The uploader writes this
+# value into the state file after a successful sync; condition_met recomputes it
+# to check that what is on disk now is what was uploaded then. If the two
+# implementations drift, every session looks changed and nothing is ever
+# reclaimed -- which fails safe, but silently.
+fingerprint() {
+    find -L "$1" -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+}
+
 condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
     case "$1" in
         onUploaded)
-            # The uploader wrote its fingerprint for this session, which it only
-            # does after `aws s3 sync` returned 0.
-            [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
+            # THE MARKER'S CONTENT, NOT ITS EXISTENCE. The uploader writes a
+            # fingerprint of exactly the bytes it uploaded; this recomputes it
+            # and compares.
+            #
+            # Existence alone was safe only while the marker was swept in the
+            # same pass that wrote it, so it could never outlive the data it
+            # described. Now that it survives by age, an existence test would be
+            # a standing permission to delete anything that later appeared under
+            # the same session name: a supplementary or re-sent study would be
+            # authorised for removal on the strength of a marker describing an
+            # upload of different bytes.
+            [ -f "${UPLOAD_STATE_DIR}/$2" ] || return 1
+            [ -d "${ASSIGNED_DIR}/$2" ] || return 0   # already gone; nothing to protect
+            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${ASSIGNED_DIR}/$2")" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already
             # travelled further and assign's copy is gone. The second half
