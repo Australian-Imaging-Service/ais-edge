@@ -478,7 +478,9 @@ groups:
 
             IT IS NOT LOST AND NOTHING HAS BEEN DELETED OR MOVED. The engine is
             keeping a copy it cannot prove is reconstructible, which is correct.
-            What this says is that the condition will not come true on its own.
+            What this alert says is that the condition is never going to come
+            true on its own, and that the steady reclaim_kept line for this
+            session is not routine.
 
             Usual causes: the stage downstream never produced what the condition
             looks for, or a reclaim word that cannot be satisfied in this
@@ -488,7 +490,6 @@ groups:
                 -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_stuck
 
             The event carries the session, the reclaim word and the age.
-
       - alert: QuarantinedDataUnresolved
         # dataPolicy.originals.quarantine.alertAfter MADE REAL — the second key
         # that had no reader before the engine existed.
