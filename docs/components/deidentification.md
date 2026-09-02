@@ -63,6 +63,44 @@ Checking which case applies, on a study a modality actually sends:
 dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
 ```
 
+> **CAUTION — the quarantined studies still hold PHI.**
+>
+> The hook that would have supplied the routing tags is the same hook that
+> strips the patient identifiers. Turning it off removes both, so studies that
+> land in `/data/assigned/__invalid__` for want of routing are sitting there
+> **identified**. Nothing downstream reads that directory, no stage retries it,
+> and the deidentify stage reports `Found 0 sessions` on every cycle while it
+> fills up. Measured on a test edge: 531 instances, still carrying the patient
+> name, parked indefinitely with nothing failing loudly.
+>
+> The chart now refuses this combination at render time rather than letting it
+> happen. See *What the chart refuses*.
+
+> **CAUTION — choosing `deidentify` gives up AE-title routing.**
+>
+> Mapping a calling AE title to a project is an Orthanc Lua feature
+> (`orthanc.deid.aetMap`). The `deidentify` stage has no equivalent and never
+> sees the AE title, so with the Lua hook off **there is no way to derive the
+> project from which machine sent the study**.
+>
+> A site running `deidentify` must therefore have its modalities populate the
+> project, subject and session in tags they actually send, and point
+> `ingest.assign.tagMapping` at those tags. If every modality sends the same
+> value, every study lands in the same project.
+>
+> ```yaml
+> ingest:
+>   assign:
+>     tagMapping:
+>       project: StudyID          # whatever your modalities actually populate
+>       subject: PatientID
+>       session: AccessionNumber
+> ```
+>
+> These three keys default to the `ClinicalTrial*` tags because the default
+> engine is the Lua hook, which writes them. They are values, not constants:
+> re-point them when you change engine.
+
 ## The label coupling
 
 The Lua hook does two jobs, not one. It de-identifies, **and** it applies the
