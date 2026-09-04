@@ -142,6 +142,27 @@ spec:
               value: "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
             - name: ORTHANC_PROCESSED_LABEL
               value: {{ .Values.ingest.orthancGroup.processedLabel | quote }}
+            {{- if .Values.orthanc.auth.enabled }}
+            {{- /* THE SECOND CONSUMER OF THE REST API, and it was never wired.
+                   orthancStorage.backend defaults to orthanc-rest, so this engine
+                   reclaims the Orthanc store over the same API group-orthanc uses.
+                   Without credentials every call returned 401, and the failure was
+                   SILENT: a 401 body is empty, /tools/find returned an empty id list,
+                   and the engine logged backend_idle "nothing to reclaim" -- identical
+                   to a healthy empty store, while the Orthanc store grew unbounded.
+                   Same Secret and keys as group-orthanc, so the two cannot present
+                   different credentials to one Orthanc. */}}
+            - name: ORTHANC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-user
+            - name: ORTHANC_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-password
+            {{- end }}
           {{- /* THE MOUNT IS THE REAL ENFORCEMENT, not the script's own checks.
                  The pipeline volume is writable ONLY when dataPolicy.enabled
                  AND dryRun is false — so in report-only and dry-run modes the

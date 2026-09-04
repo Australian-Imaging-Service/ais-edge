@@ -129,12 +129,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
-    {{- /* Auth on with no Secret named is the one shape that cannot work: the
-         deployment mounts existingSecret non-optionally and Orthanc's
-         RegisteredUsersFile points inside it, so an empty name leaves the pod
-         unable to start with a message about a volume rather than about auth. */ -}}
-  {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
-    {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json (what Orthanc checks, via RegisteredUsersFile), plus orthanc-user and orthanc-password (what group-orthanc authenticates with). If they disagree, Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc." }}
+        {{- /* PREREQUISITES FOR orthanc.auth.enabled=true, ASSERTED AT RENDER.
+
+             There is NO "RegisteredUsersFile" option in Orthanc. The config used
+             to name one; Orthanc ignored it, registered zero users, and with
+             AuthenticationEnabled true refused EVERY request including correct
+             credentials. Users reach Orthanc by mounting users.json INTO
+             /etc/orthanc, which Orthanc scans and merges. */ -}}
+      {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
+        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy store reclaim both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is silently never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem." }}
   {{- end }}
 
   {{- if not .Values.orthanc.deid.existingSaltSecret }}

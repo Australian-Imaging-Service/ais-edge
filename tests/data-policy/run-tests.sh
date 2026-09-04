@@ -105,6 +105,8 @@ run_engine() {
         -e ASSIGNED_DIR=/data/assigned \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
+        -e ORTHANC_USER="${ORTHANC_USER_T:-}" \
+        -e ORTHANC_PASS="${ORTHANC_PASS_T:-}" \
         --entrypoint sh "$IMAGE" /s.sh > "$root/out.jsonl" 2>&1
 }
 
@@ -248,6 +250,66 @@ else
     fail orthanc_no_url "expected a backend_unavailable event; got: $(tail -1 "$R/out.jsonl" 2>/dev/null | cut -c1-90)"
 fi
 check orthanc_no_url_nodelete "$R" assigned/s1 exist "and deleted nothing while unconfigured"
+
+# ORTHANC AUTH. The engine reclaims the Orthanc store over the REST API whenever
+# the backend is orthanc-rest, so with orthanc.auth.enabled it is a SECOND consumer
+# of the credentials, not just group-orthanc.
+#
+# The first case is the failure this pair exists for, and it was silent. Without
+# credentials every call returns 401; a 401 body is empty, so /tools/find yielded an
+# empty id list and the engine logged backend_idle "nothing to reclaim" -- identical
+# to a healthy empty store, while the Orthanc store grew until the disk did. A real
+# Orthanc is used rather than a stub because the bug was in what a real 401 looks
+# like to curl, which a stub would have had to guess.
+ORTHANC_IMG=jodogne/orthanc-plugins:1.12.11
+if docker image inspect "$ORTHANC_IMG" >/dev/null 2>&1 || docker pull -q "$ORTHANC_IMG" >/dev/null 2>&1; then
+    OCFG=$(mktemp -d)
+    printf '{ "Name":"authtest", "RemoteAccessAllowed":true, "AuthenticationEnabled":true, "HttpPort":8042 }\n' >"$OCFG/orthanc.json"
+    printf '{"RegisteredUsers":{"admin":"testpw123"}}\n' >"$OCFG/users.json"
+    OCID=$(docker run -d --rm -v "$OCFG":/etc/orthanc:ro "$ORTHANC_IMG" 2>/dev/null)
+    OIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$OCID" 2>/dev/null)
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        curl -s -o /dev/null --max-time 2 "http://$OIP:8042/system" && break || sleep 1
+    done
+    STAGE="derived.orthancStorage${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest"
+
+    # THIS CASE IS THE ONLY THING STANDING BEHIND --fail IN orthanc_curl.
+    # orthanc_401_nodelete passes without it (an unauthenticated engine finds
+    # nothing to delete either way) and orthanc_authed_ok passes without it
+    # (correct credentials work regardless). Delete or weaken this one and --fail
+    # becomes unguarded, and the silent-empty-store bug can return unnoticed.
+    #
+    # The PAIR is what makes a failure here trustworthy: if the scaffolding were
+    # broken -- Orthanc not up, config not mounted, engine not reaching the URL --
+    # orthanc_authed_ok would fail too. It passing while this one fails localises
+    # the fault to the 401 path rather than the harness.
+    R2="$WORK/auth401"; build_case "$R2"; mk_session "$R2" assigned s1 60
+    ORTHANC_URL_T="http://$OIP:8042" run_engine "$R2" "$STAGE" true false
+    if grep -q '"event":"backend_idle"' "$R2/out.jsonl" 2>/dev/null; then
+        fail orthanc_401_not_idle "a 401 was reported as backend_idle — indistinguishable from an empty store"
+    elif grep -q '"event":"backend_unavailable"' "$R2/out.jsonl" 2>/dev/null; then
+        pass orthanc_401_not_idle "401 reports backend_unavailable, not an empty store"
+    else
+        fail orthanc_401_not_idle "expected backend_unavailable; got: $(grep -o '"event":"[a-z_]*"' "$R2/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+    fi
+    check orthanc_401_nodelete "$R2" assigned/s1 exist "and deleted nothing while unauthenticated"
+
+    R3="$WORK/authok"; build_case "$R3"; mk_session "$R3" assigned s1 60
+    ORTHANC_URL_T="http://$OIP:8042" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+        run_engine "$R3" "$STAGE" true false
+    if grep -q '"event":"backend_unavailable"' "$R3/out.jsonl" 2>/dev/null; then
+        fail orthanc_authed_ok "authenticated query still reported backend_unavailable"
+    elif grep -q '"event":"backend_idle"' "$R3/out.jsonl" 2>/dev/null; then
+        pass orthanc_authed_ok "authenticated query succeeds; empty store reads as empty"
+    else
+        fail orthanc_authed_ok "expected backend_idle; got: $(grep -o '"event":"[a-z_]*"' "$R3/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+    fi
+
+    docker kill "$OCID" >/dev/null 2>&1 || true
+    rm -rf "$OCFG"
+else
+    printf '  SKIP  %-26s %s\n' "orthanc_auth" "$ORTHANC_IMG unavailable"
+fi
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi

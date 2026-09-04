@@ -706,6 +706,11 @@ printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-i
 # so it is meaningless when that stage does not render.
 printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
 
+# onUploaded needs a marker that only the s3-uploader writes, and upload.mode
+# =direct renders no s3-uploader. The condition could never come true, so the
+# tree would be kept for ever while the policy read as if it were being cleaned.
+printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
+
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
 cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
@@ -895,6 +900,16 @@ EOF
 # `helm template`. It is a distinctive fragment of the guard's own message —
 # long enough that a different guard firing cannot satisfy it by accident.
 
+# Orthanc auth ON with a populated Secret: the shape a site that turns auth on
+# actually runs. Without this, the only auth coverage was the negative empty-secret
+# case, so nothing exercised the credential wiring that makes auth work.
+cat >"$V/edge-auth-on.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -918,6 +933,8 @@ edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
+edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
+edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
 EOF
 }
@@ -988,6 +1005,7 @@ neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
+neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
 neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy

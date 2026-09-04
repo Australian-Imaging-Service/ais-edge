@@ -59,9 +59,23 @@ data:
 
       "RemoteAccessAllowed": true,
       "AuthenticationEnabled": {{ .Values.orthanc.auth.enabled }},
-      {{- if .Values.orthanc.auth.enabled }}
-      "RegisteredUsersFile": "/etc/orthanc-credentials/users.json",
-      {{- end }}
+        {{- /* NO "RegisteredUsersFile" KEY HERE, AND THERE NEVER SHOULD HAVE BEEN.
+               Orthanc has no such option. It ignored the key silently, ended up
+               with ZERO registered users, and with AuthenticationEnabled=true
+               refused EVERY request including correct credentials. MEASURED
+               against jodogne/orthanc-plugins:1.12.11, two containers identical
+               but for the mechanism:
+
+                 RegisteredUsersFile:          authenticated=401 anonymous=401
+                 users.json in the config dir: authenticated=200 anonymous=401
+
+               Users are supplied instead by mounting the Secret's users.json
+               INTO /etc/orthanc, which Orthanc scans. Its own startup line is
+               `Scanning folder "/etc/orthanc" for configuration files`, and the
+               Book documents that every .json in that folder is loaded and
+               merged. The Secret's users.json is already shaped as a config
+               fragment, {"RegisteredUsers":{...}}, so it merges as written.
+               The mount is in orthanc-deployment.yaml. */}}
 
       {{- with .Values.orthanc.ingestTranscoding }}
       {{- /* Rewrites pixel data at RECEIVE time, before the Lua hook runs, so

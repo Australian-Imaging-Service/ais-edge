@@ -443,10 +443,10 @@ expire_original() {   # expire_original <name> <location> <retain_seconds> <poli
 orthanc_curl() {   # orthanc_curl <method> <path> [data]
     if [ -n "$ORTHANC_USER" ]; then
         printf 'user = "%s:%s"\n' "$ORTHANC_USER" "$ORTHANC_PASS" \
-            | curl -sS --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
+            | curl -sS --fail --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
                    ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
     else
-        curl -sS --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+        curl -sS --fail --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
     fi
 }
 
@@ -460,9 +460,19 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         return 0
     fi
 
-    ids=$(orthanc_curl POST /tools/find \
-            "{\"Level\":\"Study\",\"Query\":{},\"Labels\":[\"${ORTHANC_PROCESSED_LABEL}\"],\"LabelsConstraint\":\"All\"}" \
-          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$')
+    # THE QUERY AND THE PARSE ARE SEPARATE STATEMENTS ON PURPOSE. This shell runs
+    # with `set -u` and no `pipefail`, so a pipeline reports the status of its LAST
+    # command. Running curl inside the tr/grep pipeline threw curl's status away, so
+    # --fail alone changed nothing: an HTTP failure still read as an empty result and
+    # the engine logged backend_idle "nothing to reclaim", which is exactly what a
+    # healthy empty store logs. Capture first, judge, then parse.
+    o_raw=$(orthanc_curl POST /tools/find \
+            "{\"Level\":\"Study\",\"Query\":{},\"Labels\":[\"${ORTHANC_PROCESSED_LABEL}\"],\"LabelsConstraint\":\"All\"}") || {
+        jlog backend_unavailable "$o_name" "Orthanc refused or failed the study query, so an empty store cannot be told apart from an unreachable one — reclaiming nothing rather than guessing. If orthanc.auth.enabled is true, check the credentials." \
+             ",\"url\":\"$(jsan "$ORTHANC_URL")\""
+        return 0
+    }
+    ids=$(printf '%s' "$o_raw" | tr -d '[]" ' | tr ',' '\n' | grep -v '^$')
     if [ -z "$ids" ]; then
         jlog backend_idle "$o_name" "no studies carry ${ORTHANC_PROCESSED_LABEL} — nothing to reclaim"
         return 0
