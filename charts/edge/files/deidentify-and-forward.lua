@@ -72,7 +72,19 @@ local function applyPlaceholders(profile, tags, project)
   -- from XNAT, which is the property the pipeline actually relies on.
   local subjectHash = hmacShort(tags.PatientID or "")
   local sessionHash = hmacShort((tags.PatientID or "") .. "|" .. (tags.StudyInstanceUID or ""))
-  local birthYear   = string.sub(tags.PatientBirthDate or "19000101", 1, 4)
+  -- ZERO-LENGTH IS NOT ABSENT. Lua treats only nil and false as falsy, so a
+  -- present-but-empty PatientBirthDate -- a legal and common DA value -- passes
+  -- straight through `or`, string.sub("" ,1,4) returns "", and the profile
+  -- resolves "${BirthYearOnly}0101" to the 4-character string "0101". That is
+  -- not a valid DICOM date, and it is written into every instance of the study.
+  -- Length is checked instead of truthiness.
+  --
+  -- MEASURED with lua5.3:
+  --   "19551103" -> 19550101      ""  -> 0101          nil -> 19000101
+  local rawBirth    = tags.PatientBirthDate
+  local birthYear   = (rawBirth and #rawBirth >= 4)
+                        and string.sub(rawBirth, 1, 4)
+                        or "1900"
 
   local subs = {
     ["${ProjectCode}"]   = project,

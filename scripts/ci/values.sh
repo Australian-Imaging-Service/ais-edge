@@ -1041,6 +1041,18 @@ EOF
 # setting that caused it.
 printf 'ingest:\n  orthancGroup:\n    copyMode: copy\n' >"$V/neg-edge-orthanc-copymode.yaml"
 
+# Recipes for an engine that is not selected. deid.engine defaults to orthanc, so
+# this is what a site gets by pasting specs into values.yaml and changing nothing
+# else: the ConfigMap and the deidentify stage are both gated on the engine, so
+# helm succeeds and the recipe is silently never mounted.
+cat >"$V/neg-edge-specs-wrong-engine.yaml" <<'EOF'
+ingest:
+  deidentify:
+    specs:
+      __default__/medimage/dicom-series: |
+        REMOVE PatientBirthDate
+EOF
+
 
 # =============================================================================
 # Case tables
@@ -1178,6 +1190,7 @@ neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.y
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
 neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
+neg-edge-specs-wrong-engine	charts/edge	edge-base.yaml neg-edge-specs-wrong-engine.yaml	is set, but deid.engine=
 EOF
 }
 
