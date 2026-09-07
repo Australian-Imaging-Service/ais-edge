@@ -15,7 +15,7 @@ identifiers — the XNAT project, subject and session — come from:
 
 | | Orthanc Lua hook | xnat-ingest deidentify |
 |---|---|---|
-| values key | `orthanc.deid.enabled` | `ingest.deidentify.enabled` |
+| values key | `deid.engine: orthanc` | `deid.engine: ingest` |
 | chart default | on | off |
 | runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
 | source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
@@ -350,9 +350,13 @@ The recipes go in `sites/<site>/values.yaml`, the same way
 fresh install needs no `kubectl` and nothing has to exist beforehand:
 
 ```yaml
+# THE ENGINE SWITCH COMES FIRST. Without it these recipes are not merely
+# inactive, they are discarded: the ConfigMap and the deidentify stage are both
+# gated on the engine, so helm succeeds, no pod is created and nothing warns.
+deid:
+  engine: ingest
 ingest:
   deidentify:
-    enabled: true
     specs:
       "__default__/medimage/dicom-series": |
         FORMAT dicom
@@ -431,23 +435,38 @@ All three must be present and populated. If they are not, the Lua hook has to
 stay on, because nothing else writes them. See "The Lua hook does more than
 de-identify" above.
 
-### 5. Switch engines — two settings, not one
+### 5. Switch engines — ONE setting
 
 ```yaml
-orthanc:
-  deid:
-    enabled: false               # turn the Lua engine off
-ingest:
-  orthancGroup:
-    toProcessLabel: ""           # nothing applies the label now — see above
-  deidentify:
-    enabled: true
-    specs: {...}                 # from step 2
-    reidEncryptKeySecret: reid-key   # optional
+deid:
+  engine: ingest        # orthanc (default) | ingest
 ```
 
-`upload` follows automatically: it reads `/data/deidentified` instead of
-`/data/assigned` whenever the stage is on.
+That is the whole switch. Everything that used to be set by hand is derived
+from it, because getting any one of them out of step produced a pipeline that
+rendered cleanly and then did not work:
+
+| derived | what it becomes under `ingest` |
+|---|---|
+| the Lua hook's `DeidEnabled` | `false` — it still archives the original and quarantines unmapped AE titles, it just stops modifying the instance |
+| `ingest.orthancGroup.toProcessLabel` | cleared, since nothing applies the label once the hook stops writing it |
+| the `deidentify` stage | rendered |
+| the tree `upload` reads | `/data/deidentified` instead of `/data/assigned` |
+
+An earlier version of this page told you to set `orthanc.deid.enabled: false`
+and `ingest.deidentify.enabled: true` by hand. Both keys are gone. The chart
+refuses to render if you set the second one and tells you to use `deid.engine`
+instead, so following that older advice fails loudly rather than quietly.
+
+**What does NOT fail loudly, and is the trap worth knowing:** writing
+`ingest.deidentify.specs` while leaving `deid.engine` at its default. That was
+silent for a long time — helm exited 0, no ConfigMap was built, no `deidentify`
+pod existed, and the Orthanc profile went on de-identifying, so the install
+looked correct and the recipe simply never ran. The chart now refuses that
+combination too.
+
+There is one more thing the engines do not agree on, and it is easy to miss
+when switching: see "The birth date is coarsened, not jittered" above.
 
 ## Where the stage sits, tier-1 versus tier-2
 
@@ -535,7 +554,7 @@ upstream and no chart setting works around it — the chart already points
 `upload` at the right directory. Tracked as
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
 
-Until that lands, `ingest.deidentify.enabled: true` is usable for evaluating
+Until that lands, `deid.engine: ingest` is usable for evaluating
 the engine and its recipes, but the Orthanc Lua hook remains the only engine
 that carries data all the way to XNAT.
 
