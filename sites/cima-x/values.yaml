@@ -52,6 +52,8 @@ orthanc:
     enabled: false
 
 ingest:
+  image:
+    tag: "0.14.0"
   orthancGroup:
     enabled: true
     interval: 30
@@ -72,7 +74,7 @@ ingest:
     interval: 30
     copyMode: hardlink_or_copy
     tagMapping:
-      project: StudyDescription
+      project: AccessionNumber
       subject: PatientName
       session: PatientID
   associate:
@@ -91,6 +93,14 @@ upload:
     requireManifest: false
     checkChecksums: false
     tempDir: /data/tmp
+  reports:
+    enabled: true
+    source: s3://pro-reports-sydunimri/
+    existingXnatSecret: xnat-credentials
+    existingS3Secret: report-aws-credentials
+    proxyConfigMap: proxy-config
+    image:
+      tag: "0.14.0"
 
 samba:
   enabled: true

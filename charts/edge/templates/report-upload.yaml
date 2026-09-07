@@ -1,0 +1,87 @@
+{{- if .Values.upload.reports.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-report-upload
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: report-upload
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: report-upload
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: report-upload
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: upload
+          image: "{{ .Values.upload.reports.image.repository }}:{{ .Values.upload.reports.image.tag }}"
+          imagePullPolicy: {{ .Values.upload.reports.image.pullPolicy }}
+          command: ["xnat-ingest", "upload"]
+          args:
+            - {{ .Values.upload.reports.source | quote }}
+            - "$(XINGEST_HOST)"
+            - "--always-include"
+            - {{ .Values.upload.reports.alwaysInclude | quote }}
+            - "--loop"
+            - {{ .Values.upload.reports.loop | quote }}
+            {{- if not .Values.upload.reports.requireManifest }}
+            - "--dont-require-manifest"
+            {{- end }}
+            {{- if not .Values.upload.reports.checkChecksums }}
+            - "--dont-check-checksums"
+            {{- end }}
+            {{- if not .Values.upload.reports.verifySsl }}
+            - "--dont-verify-ssl"
+            {{- end }}
+            - "--store-credentials"
+            - "$(S3_ACCESS_KEY)"
+            - "$(S3_SECRET_KEY)"
+          env:
+            - name: XINGEST_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.reports.existingXnatSecret }}
+                  key: server
+            - name: XINGEST_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.reports.existingXnatSecret }}
+                  key: username
+            - name: XINGEST_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.reports.existingXnatSecret }}
+                  key: password
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.reports.existingS3Secret }}
+                  key: {{ .Values.upload.reports.accessKeyKey }}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.upload.reports.existingS3Secret }}
+                  key: {{ .Values.upload.reports.secretKeyKey }}
+          {{- with .Values.upload.reports.proxyConfigMap }}
+          envFrom:
+            - configMapRef:
+                name: {{ . }}
+                optional: true
+          {{- end }}
+          resources:
+            {{- toYaml .Values.upload.reports.resources | nindent 12 }}
+{{- end }}

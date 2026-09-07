@@ -572,6 +572,29 @@ upload:
       requests: {memory: 256Mi, cpu: 100m}
       limits:   {memory: 1Gi,   cpu: "1"}
 
+  # Optional independent S3 source for non-imaging session resources such as
+  # radiology reports. This does not use the pipeline PVC.
+  reports:
+    enabled: false
+    source: ""
+    existingXnatSecret: xnat-credentials
+    existingS3Secret: report-aws-credentials
+    accessKeyKey: access-key-id
+    secretKeyKey: secret-access-key
+    proxyConfigMap: ""
+    loop: 60
+    alwaysInclude: "all"
+    requireManifest: false
+    checkChecksums: false
+    verifySsl: true
+    image:
+      repository: ghcr.io/australian-imaging-service/xnat-ingest
+      tag: "0.13.1"
+      pullPolicy: IfNotPresent
+    resources:
+      requests: {memory: 256Mi, cpu: 100m}
+      limits:   {memory: 1Gi, cpu: "1"}
+
 
 # =============================================================================
 # 6. samba — optional SMB drop-box

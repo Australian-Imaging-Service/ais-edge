@@ -66,6 +66,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- if .Values.upload.reports.enabled }}
+    {{- if not .Values.upload.reports.source }}
+      {{- fail "upload.reports.enabled=true requires upload.reports.source." }}
+    {{- end }}
+    {{- if not (hasPrefix "s3://" .Values.upload.reports.source) }}
+      {{- fail "upload.reports.source must be an s3:// URI." }}
+    {{- end }}
+    {{- if not .Values.upload.reports.existingXnatSecret }}
+      {{- fail "upload.reports.enabled=true requires upload.reports.existingXnatSecret." }}
+    {{- end }}
+    {{- if not .Values.upload.reports.existingS3Secret }}
+      {{- fail "upload.reports.enabled=true requires upload.reports.existingS3Secret." }}
+    {{- end }}
+  {{- end }}
+
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}
