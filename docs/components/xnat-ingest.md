@@ -103,7 +103,7 @@ The DICOM ingest engine downstream of Orthanc.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.12.3`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 

@@ -148,6 +148,19 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            # EXPLICIT, because 0.15.0 changed the default from "avoid" to none at all.
+            # In 0.13.1 `group` defaulted to --on-resource-clash=avoid and a repeated
+            # resource name was silently suffixed _2/_3. In 0.15.0 the option takes a
+            # <policy> <scope> pair and defaults to (), so an uncovered clash RAISES out
+            # of the loop and this stage stops. Passing it restores 0.13.1 behaviour.
+            #
+            # ON THIS STAGE ONLY. `group-orthanc` has no such option and would die with
+            # "no such option", and NOT via XINGEST_ON_RESOURCE_CLASH: that variable is
+            # still a plain click.Choice on `associate` and `deidentify`, where the pair
+            # form "avoid all" is not a valid choice.
+            - "--on-resource-clash"
+            - "avoid"
+            - "all"
             - "--copy-mode"
             - {{ .Values.ingest.fileDrop.copyMode | quote }}
             - "--wait-period"
@@ -304,6 +317,12 @@ spec:
             - "/data/assigned"
             - "/data/deidentified"
             - "/etc/xnat-ingest/deid-specs"
+            # --reid-dir, NOT a fourth positional. xnat-ingest 0.15.0 made reid_dir an
+            # OPTION; passing it positionally is rejected outright:
+            #   Usage: xnat-ingest deidentify [OPTIONS] INPUT_DIR OUTPUT_DIR SPEC_DIR
+            #   Error: Got unexpected extra argument (/data/reid)
+            # Measured against ghcr.io/australian-imaging-service/xnat-ingest:0.15.0.
+            - "--reid-dir"
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
