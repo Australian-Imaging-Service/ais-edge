@@ -363,6 +363,25 @@ dataPolicy:
     # CAUTION: report only by default. onUploaded cannot be satisfied in
     # upload.mode=direct, because nothing writes the uploader's state dir, so
     # setting it here would keep this tree forever while looking like a policy.
+    stagedReclaimer:
+      # Hourly. The uploader deletes on its own success within seconds; this is
+      # the slower, sure path for whatever that missed.
+      schedule: "17 * * * *"
+      # OPTION: raise on a slow link. A session still uploading is protected by
+      # the XNAT check regardless, so this is about noise, not safety.
+      minAge: 1d
+      # Ask XNAT whether it holds the session, complete, before deleting the
+      # only remaining copy. Off means trusting local state alone.
+      # CAUTION: `false` removes the last independent check before deletion.
+      verifyAgainstXnat: true
+      # Ceiling per run. A bug that decides everything is reclaimable removes
+      # this many and stops, leaving the rest to inspect.
+      maxRemovals: 50
+      # Killed if a run hangs on an unreachable XNAT, before the next is due.
+      deadlineSeconds: 3000
+      resources:
+        requests: {cpu: 20m, memory: 64Mi}
+        limits: {memory: 256Mi}
     deidentified:
       # No `location` key on purpose. The path is DERIVED from
       # edge.uploadSourceDir, the same helper upload.yaml uses for its argument,
