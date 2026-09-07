@@ -587,7 +587,7 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.13.1"
+    tag: "0.15.0"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these

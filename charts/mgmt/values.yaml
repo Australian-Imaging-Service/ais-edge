@@ -370,7 +370,7 @@ xnatUpload:
   namespace: xnat-upload
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.13.1"
+    tag: "0.15.0"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password
