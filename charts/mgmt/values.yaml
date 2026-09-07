@@ -79,6 +79,21 @@ dataPolicy:
     quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}
     fileDrop:       {location: /data/incoming, reclaim: never, minAge: 30d}
 
+  # WHEN A STAGE ITSELF HAS BEEN SITTING TOO LONG.
+  #
+  # Read by StageBacklogAgeing. PipelineSessionStuck is per session and fires
+  # only on one whose reclaim condition keeps failing; reclaim_stage returns at
+  # its `never` guard before that check is reached, so a stage with
+  # reclaim: never can never raise it -- and `never` is the default for the
+  # deidentified tree, which is the one that grows once de-identification moves
+  # into the pipeline. This is the question that needs no reclaim condition:
+  # has the oldest entry here been here longer than it should be.
+  #
+  # Lives here rather than in charts/edge because this chart renders the Loki
+  # rules on this tier, and the threshold is substituted into the expression at
+  # render time. MUST match charts/edge/values.yaml on the single-node tier.
+  stageAgeAlertAfter: 7d
+
   derived:
     orthancStorage: {location: /data/orthanc-storage, backend: orthanc-rest, reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
     grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine
@@ -302,6 +317,46 @@ seaweedfs:
     proxyBodySize: 50g        # mc multipart / large session uploads
     tlsSecretName: seaweedfs-tls
 
+    # mTLS on the upload path, the same shape as
+    # observability.loki.push.requireAuth — one client certificate per edge,
+    # verified by the Ingress. It ADDS to the SigV4 key pair, it does not
+    # replace it: the key pair is still what scopes a site to its own bucket.
+    #
+    # TWO SWITCHES, FLIPPED AT DIFFERENT TIMES **ON A RUNNING SITE**:
+    #   1. issue: true         + the certSync entry below   -> helm upgrade
+    #   2. kubectl -n <edge ns> get secret s3-client-tls     on EVERY site
+    #   3. upload.s3.requireClientCert: true in each EDGE site file
+    #   4. require: true                                     -> helm upgrade
+    #
+    # ON A FRESH INSTALL YOU DO NOT NEED THIS SEQUENCE. Set all of them before
+    # the first ./install.sh and the site comes up correct in one pass.
+    # MEASURED, on a from-scratch cloud install with every flag on from step
+    # zero: install exit 0, uploader client_cert=on and endpoint_ready, a study
+    # carried edge -> S3 -> XNAT, no intervention at any point.
+    #
+    # The reason is structural rather than luck. The s3-uploader MOUNTS
+    # ca-bundle and s3-client-tls as volumes, so the kubelet will not start the
+    # pod until both Secrets exist — measured at 2m47s in Pending then
+    # PodInitializing while cert-sync created them, after which it started with
+    # the certificate already in place. There is no window in which it can meet
+    # a cert-demanding endpoint without a certificate, which is a stronger
+    # guarantee than a retry loop would give.
+    #
+    # The staged order matters when the pods are ALREADY RUNNING and connected
+    # — that is upgrade, not install.
+    #
+    # CAUTION: flipping `require` before step 2 has answered breaks every
+    # upload with an error that names nothing. MEASURED: the TLS handshake
+    # still succeeds (TLS 1.3 sends the client cert last), nginx answers HTTP
+    # 400 with an HTML body, and rclone reports it as an S3 XML parse failure
+    # — so it reads as a dead endpoint, not an auth problem. The chart refuses
+    # require without issue, and refuses issue without something delivering the
+    # certificates, but it cannot see whether a Secret actually landed;
+    # scripts/verify-live.sh checks that against a live cluster.
+    clientCerts:
+      issue: false            # mint the anchor + one <edge>-s3-client per edge
+      require: false          # make the Ingress demand one
+
   resources:
     requests: {memory: 512Mi, cpu: 200m}
     limits:   {memory: 4Gi,   cpu: "2"}
@@ -315,7 +370,7 @@ xnatUpload:
   namespace: xnat-upload
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.12.3"
+    tag: "0.13.1"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password
@@ -550,10 +605,26 @@ ingress-nginx:
       limits:   {cpu: 1,    memory: 512Mi}
 
 ingressNginx:
+  # BOTH KEYS HERE ARE READ BY THIS CHART. Two more used to sit alongside them
+  # and were read by nothing:
+  #
+  #   loadBalancerIP   the key you reach for to pin a pre-allocated floating IP
+  #                    on cloud. It did nothing. A parent chart cannot push a
+  #                    value into a subchart, so the address has to be set on
+  #                    the subchart itself, in your SITE file:
+  #                        ingress-nginx:
+  #                          controller:
+  #                            service:
+  #                              loadBalancerIP: "203.0.113.50"
+  #   proxyBodySize    likewise. The real setting is the subchart's own
+  #                    controller.config.proxy-body-size, set to 50g above.
+  #
+  # Both were deleted rather than wired, because a key that reads as configured
+  # and is not is worse than no key: on cloud the first one would have been set
+  # to a floating IP, ignored, and the load balancer would have come up on a
+  # different address than domain.internal names — with nothing to say so.
   enabled: true
   sslPassthrough: true   # required — k0smotron traffic must not terminate here
-  loadBalancerIP: ""
-  proxyBodySize: 50g
 
 
 # =============================================================================
@@ -971,6 +1042,29 @@ vector:
           parsed, err = parse_json(.message)
           if err == null && is_object(parsed) {
             . = merge!(., parsed)
+          }
+          # A Loki label template referencing a missing field does not render
+          # empty — Vector DROPS the event and counts a `template_failed`. The
+          # `level` label below exists only on lines a pod emits as JSON, so
+          # every plain-stdout line was discarded before reaching Loki.
+          # Observed on cai-lfs3: 31 template_failed in a 200-line window, and
+          # the warning about it was itself rate-limited, so the loss was
+          # nearly invisible. Default the field rather than dropping the
+          # label — every alert rule and dashboard panel selects on it.
+          if !exists(.level) {
+            .level = "unknown"
+          }
+          # Same failure, different fields. `app` and `component` come from the
+          # POD'S OWN LABELS, which only this chart's workloads carry — so every
+          # line from coredns, kube-proxy, metrics-server, cert-manager and the
+          # kube-prometheus-stack pods was dropped for want of a label they were
+          # never going to have. That absence looks exactly like those pods
+          # being quiet, which is why it went unnoticed.
+          if !exists(.kubernetes.pod_labels.app) {
+            .kubernetes.pod_labels.app = "unknown"
+          }
+          if !exists(.kubernetes.pod_labels.component) {
+            .kubernetes.pod_labels.component = "unknown"
           }
     sinks:
       loki:

@@ -36,6 +36,28 @@ fullnameOverride: ""
 topology: onprem
 
 # =============================================================================
+# DE-IDENTIFICATION ENGINE - ONE SWITCH, and everything else follows from it
+# =============================================================================
+# GUIDING: set this and nothing else about de-identification wiring.
+#
+#   orthanc   the Orthanc Lua hook strips each instance as it ARRIVES, and also
+#             writes the ClinicalTrial* routing tags from the AE-title map and
+#             applies the label group-orthanc filters on. One-way: no crosswalk.
+#   ingest    the xnat-ingest `deidentify` stage runs between assign and upload.
+#             REVERSIBLE by design - it writes a per-session re-identification
+#             map. Costs: identifiable data passes through Orthanc, group and
+#             assign before it is cleaned, there is no AE-title routing, and
+#             ingest.assign.tagMapping must name tags the modalities populate.
+#   none      neither. Only for sites whose modalities de-identify upstream.
+#             Requires orthanc.deid.policyReviewed=true to acknowledge it.
+#
+# WHY THIS IS ONE KEY. It used to be two booleans plus a label plus a tag
+# mapping plus a reclaim word, all of which had to agree - but only at RUN time,
+# so a half-switched site came up clean and then failed silently.
+deid:
+  engine: orthanc            # orthanc | ingest | none
+
+# =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
 # =============================================================================
 # GUIDING: pass both values files to the edge release —
@@ -107,6 +129,34 @@ dataPolicy:
     # before it is considered complete. Both mirror the S3 reclaimer's design.
     maxRemovals: 50
     settleMinutes: 5
+
+    # WHEN TO CALL A SESSION STUCK.
+    #
+    # A session whose reclaim condition never comes true is kept, correctly and
+    # for ever, and every pass logs the same reclaim_kept line. That drip is
+    # indistinguishable from normal operation, so a permanently stuck session
+    # looks exactly like a healthy one that was uploaded a minute ago.
+    #
+    # Past this age the engine raises stage_stuck instead, which an alert keys
+    # on. NOTHING IS MOVED OR DELETED: the data stays exactly where it is, and
+    # this only changes which event is emitted. Set 0 to disable.
+    #
+    # WHY IT ONLY REPORTS. Quarantining a stuck session means moving the input
+    # AND removing the partial output as ONE action. Doing only the first leaves
+    # an orphaned partial output with nothing left to repair it from, and the
+    # upload stage would then collect it. This engine can do the first half, so
+    # it does neither. (Its /data mount is also read-only unless retention is
+    # armed, which would make a move work in one mode and silently not in the
+    # other, but the two-operations argument holds regardless of the mount.)
+    #
+    # WHAT IT CANNOT SEE. The age measured is the newest mtime in the tree, so
+    # this detects a stage that has gone QUIET without progressing. A session
+    # being rewritten on every cycle never accumulates age and is invisible to
+    # it. That case is confined to the deidentified stage running an xnat-ingest
+    # without the metadata write-if-changed fix, where the output's
+    # __METADATA__.json was rewritten every pass; with that fix the tree goes
+    # quiet and this sees it.
+    stuckAfter: 24h
     image:
       # Needs df, find, stat, date, awk AND curl. busybox has the first five but
       # no curl, and its wget cannot issue the DELETE the orthanc-rest backend
@@ -123,8 +173,14 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
+      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
+      # a quota below one core is clipped in nearly EVERY CFS period it
+      # runs in, which both trips CPUThrottlingHigh and stretches the
+      # sweep about 11x. requests stays at 5m, so its scheduler weight is
+      # still tiny and it yields under contention; the limit only bounds
+      # a runaway.
       requests: {cpu: 5m, memory: 16Mi}
-      limits:   {cpu: 100m, memory: 64Mi}
+      limits:   {cpu: 1, memory: 64Mi}
 
   # ---------------------------------------------------------------------
   # ORIGINALS
@@ -254,12 +310,72 @@ dataPolicy:
       # As above: a recovery window after upload, not a delay before it.
       minAge: 0
 
+
+    # Where the xnat-ingest deidentify stage writes, and what `upload` reads when
+    # ingest.deidentify.enabled. Rendered as a stage ONLY when that is on.
+    #
+    # WHY: without a row this tree is invisible to the engine, so it is absent
+    # from stage_report and therefore from the disk-low alert. It is the tree
+    # that grows once de-identification is on, so it was exactly the one disk
+    # reporting could not see.
+    #
+    # CAUTION: report only by default. In upload.mode=s3 the uploader's own
+    # rm -rf happens to clear it, and in direct mode nothing does, so a reclaim
+    # condition here would be either redundant or unsatisfiable.
+    deidentified:
+      # No `location` key on purpose. The path is DERIVED from
+      # edge.uploadSourceDir, the same helper upload.yaml uses for its argument,
+      # so the stage and the uploader cannot end up pointed at different trees.
+      # Restating it here would also declare a path that does not exist in a
+      # render with de-identification off.
+      # OPTION: onUploaded is satisfiable here under BOTH upload modes now. Under
+      # s3 the s3-uploader writes the marker; under direct the stagedReclaimer
+      # CronJob below confirms the session against XNAT instead. It stays `never`
+      # by default because deleting the de-identified copy is a site policy call,
+      # not a technical one: this is the last copy on the edge once the originals
+      # have been reclaimed.
+      # CAUTION: only meaningful under deid.engine=ingest. Under Orthanc-deid the
+      # terminal tree is /data/assigned and the chart fails the render rather than
+      # let this read as though something were watching this one.
+      reclaim: never             # never | onUploaded
+      minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
     #
     # NOTE: onXnatConfirmed is not something xnat-ingest does for us — it has
     # no S3 retention at all, which is why staged sessions accumulate and are
     # re-listed every loop. charts/mgmt implements the reclaimer.
+    # -----------------------------------------------------------------
+    # TERMINAL-STAGE RECLAIMER (upload.mode=direct only)
+    # -----------------------------------------------------------------
+    # Under direct upload there is no bucket and no s3-uploader, so nothing
+    # writes the `uploaded` marker that onUploaded waits for. Without this the
+    # terminal tree (/data/assigned, or /data/deidentified under ais-deid)
+    # grows forever and no data policy can reach it.
+    #
+    # Runs the same reclaim-staged.sh as the tier-2 bucket reclaimer, with
+    # STORAGE=filesystem. It does not re-decide WHETHER to reclaim: that stays
+    # with assigned.reclaim / deidentified.reclaim above, whichever the deid
+    # engine makes terminal. Set that one to `never` and this does not render.
+    stagedReclaimer:
+      # Hourly. The uploader deletes on its own success within seconds; this is
+      # the slower, sure path for whatever that missed.
+      schedule: "17 * * * *"
+      # OPTION: raise on a slow link. A session still uploading is protected by
+      # the XNAT check regardless, so this is about noise, not safety.
+      minAge: 1d
+      # Ask XNAT whether it holds the session, complete, before deleting the
+      # only remaining copy. Off means trusting local state alone.
+      # CAUTION: `false` removes the last independent check before deletion.
+      verifyAgainstXnat: true
+      # Ceiling per run. A bug that decides everything is reclaimable removes
+      # this many and stops, leaving the rest to inspect.
+      maxRemovals: 50
+      # Killed if a run hangs on an unreachable XNAT, before the next is due.
+      deadlineSeconds: 3000
+      resources:
+        requests: {cpu: 20m, memory: 64Mi}
+        limits: {memory: 256Mi}
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
       minAge: 1d
@@ -384,7 +500,26 @@ orthanc:
     # AuthenticationEnabled: false and was protected only by the accident of
     # being ClusterIP-only.
     enabled: true
-    existingSecret: orthanc-credentials   # keys: users.json, orthanc-user, orthanc-password
+    #
+    # THREE keys, not two. The Secret is consumed by two different things:
+    #
+    #   users.json        mounted at /etc/orthanc-credentials/users.json and
+    #                     named by RegisteredUsersFile. This is what Orthanc
+    #                     itself checks:
+    #                       {"RegisteredUsers":{"admin":"<password>"}}
+    #                     The password is PLAINTEXT inside that JSON, which is
+    #                     why this Secret belongs in secrets.enc.yaml and is
+    #                     SOPS-encrypted at rest.
+    #   orthanc-user      read by group-orthanc, which calls the REST API to
+    #   orthanc-password  list and label studies. If they do not match the user
+    #                     in users.json, Orthanc answers 401 and the pipeline
+    #                     stalls with data sitting in Orthanc and no error
+    #                     anywhere else.
+    #
+    # An earlier version of this comment named only the last two. A Secret
+    # built from it installs cleanly and then Orthanc fails to start, because
+    # RegisteredUsersFile points at a path the volume never supplied.
+    existingSecret: orthanc-credentials
 
   # Rewriting pixel data at receive time happens BEFORE the Lua hook runs, so
   # the facility backup would hold the transcoded copy rather than the wire
@@ -408,7 +543,6 @@ orthanc:
   # xnat-ingest-ready label that group-orthanc filters on.
   # ---------------------------------------------------------------------
   deid:
-    enabled: true
 
     # Refuse to start unless a human has confirmed the profile below matches
     # the site's de-identification policy. Deliberately has no safe default.
@@ -453,7 +587,7 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.12.3"
+    tag: "0.13.1"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -494,6 +628,92 @@ ingest:
       subject: ClinicalTrialSubjectID
       session: ClinicalTrialTimePointID
 
+  # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
+  #
+  # The default engine is the Orthanc Lua hook (orthanc.deid above), which
+  # strips each instance as it arrives. This one runs as its own stage between
+  # assign and upload instead. Pick ONE; the chart refuses both.
+  #
+  # CAUTION: THIS ENGINE GIVES UP AE-TITLE ROUTING. Mapping a calling AE title
+  # to a project is an Orthanc Lua feature (orthanc.deid.aetMap). This stage
+  # never sees the AE title, so with the hook off there is no way to derive the
+  # project from which machine sent the study. Your modalities must populate
+  # project/subject/session in tags they actually send, and ingest.assign
+  # .tagMapping must point at those tags — it defaults to the ClinicalTrial*
+  # tags that only the Lua hook writes. The chart refuses THAT DEFAULT at render
+  # time; it cannot detect a mapping that names real tags this site's modalities
+  # do not populate, which looks correct and ends the same way, with every study
+  # in __invalid__ still carrying its PHI.
+  #
+  # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
+  # values out before this stage runs, and ImagingSession.new_empty copies them
+  # into the de-identified session unchanged, so no recipe can alter them. Under
+  # the Lua hook they are already pseudonyms (salted djb2, not an HMAC despite
+  # the salt's name); here they are whatever the
+  # modality sent. Pointing subject at PatientID puts the raw medical record
+  # number into XNAT while the headers and pixels are correctly stripped. Choose
+  # tags that are already pseudonymous at the modality.
+  #
+  # WHEN TO PREFER THIS ONE. It writes a re-identification mapping per session,
+  # so the process can be reversed later (a clinical follow-up needing to find
+  # the original scan). The Lua hook is one-way by design and cannot do that.
+  #
+  # WHAT IT COSTS. Identifiable data passes through group and assign before it
+  # is cleaned, so it exists on the pipeline volume for longer and in more
+  # places. The Lua hook cleans at the front door and everything downstream only
+  # ever sees stripped data. That is why the Lua hook stays the default.
+  #
+  # The reid mapping is the sensitive part: it is the map BACK to the identities
+  # that were removed. Set reidEncryptKeySecret and keep that key somewhere
+  # other than the volume the mappings are written to.
+  deidentify:
+    interval: 60
+    copyMode: hardlink_or_copy
+    # THE RECIPES. Written here, in the site file, exactly like
+    # orthanc.deid.profile — the chart builds the ConfigMap and mounts it, so a
+    # fresh install needs no kubectl and no pre-existing namespace.
+    #
+    # Key is the path under SPEC_DIR, value is the recipe:
+    #
+    #   specs:
+    #     "__default__/medimage/dicom-series": |
+    #       FORMAT dicom
+    #
+    #       %header
+    #
+    #       REMOVE PatientName
+    #       REMOVE PatientBirthDate
+    #
+    # A ConfigMap key cannot contain '/' or '@' and a ConfigMap mounts flat, so
+    # the chart sanitises each path into a legal key and maps it back with
+    # items[].path on the volume. That is entirely internal: write the real
+    # paths here and ignore the restriction.
+    specs: {}
+
+    # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
+    # external pipeline, recipes too large to sit in the site file). Set both,
+    # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
+    # under SPEC_DIR>, doing by hand what specs does automatically.
+    specConfigMap: ""
+
+    # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
+    # restricted to [-._a-zA-Z0-9], so the '@' xnat-ingest needs is illegal,
+    # and a ConfigMap mounts flat, so the per-project directory would be lost
+    # too. Both are fixed by mapping each key to the path it must appear at,
+    # which is why this cannot be built with `kubectl create configmap
+    # --from-file` alone.
+    #
+    #   specFiles:
+    #     default-dicom-series: "__default__/medimage/dicom-series"
+    #     myproject-dicom-series: "MYPROJECT/medimage/dicom-series"
+    specFiles: {}
+
+    # Optional. A URL-safe base64 32-byte key (cryptography's
+    # Fernet.generate_key()). Set, mappings are written encrypted as
+    # <session>.json.enc and are unreadable without it. Unset, they are plain
+    # JSON on the same volume as the data they de-identify.
+    reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
+
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.
   associate:
@@ -528,28 +748,98 @@ upload:
     # management chart derived for this site.
     bucket: ""   # e.g. ingest-edge-dev
     prefix: staged
-    region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
+    region: us-east-1                  # SeaweedFS ignores it; SigV4 signs over it
 
-    # No addressing-style key here on purpose: AWS_ENDPOINT_URL alone makes
-    # botocore resolve with ForcePathStyle=True — measured against SeaweedFS
-    # 3.99, the request URL comes out path-style, which the single-SAN cert
-    # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not a botocore env
-    # var, so a values entry for it would be silently ignored.
+    # No addressing-style key here on purpose: rclone's s3 backend defaults
+    # force_path_style=true and keeps it true for provider=SeaweedFS —
+    # measured, the request URL comes out path-style
+    # (https://<endpoint>/<bucket>?…), which the single-SAN cert needs. A
+    # values entry for it could only turn that off.
 
     existingSecret: s3-edge-credentials  # keys: access-key, secret-key
 
     # PEM holding the CA that signed the SeaweedFS server certificate.
-    # CAUTION: an EMPTY AWS_CA_BUNDLE does not fall back to the system trust
-    # store — it disables certificate verification entirely, silently
-    # (measured: a request to a hostname the cert does not cover succeeded
-    # anyway). The chart refuses to render an https endpoint with no CA
-    # configured; never let this render empty.
+    # CAUTION, and it changed with the client: an EMPTY AWS_CA_BUNDLE did not
+    # fall back to the system trust store — it disabled certificate
+    # verification entirely, silently (measured: a request to a hostname the
+    # cert does not cover succeeded anyway). RCLONE_CA_CERT="" is NOT that
+    # trap — measured on rclone 1.75.0, empty behaves as unset and still
+    # verifies against the system store. Do not let it render empty regardless:
+    # against a privately-signed SeaweedFS that is a failed handshake on every
+    # transfer instead of a silent downgrade. The chart still refuses to render
+    # an https endpoint with no CA configured.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
+
+    # ---- mTLS: THIS SITE'S OWN IDENTITY ON THE UPLOAD PATH -----------------
+    # INDEPENDENT OF caBundleSecret ABOVE, and the two are easy to confuse:
+    #   caBundleSecret    who WE trust — the CA that signed the SeaweedFS
+    #                     server certificate. May legitimately be empty on
+    #                     cloud, where that certificate can come from a public
+    #                     CA already in the system trust store.
+    #   clientCertSecret  who WE ARE — a certificate signed by the fleet's own
+    #                     CA and delivered by the management cert-sync CronJob.
+    #                     Never comes from a public CA, on any topology.
+    # Setting one has no bearing on the other.
+    #
+    # Mirrors observability.loki.push.requireAuth on the management side. Ships
+    # OFF: the certificate is delivered by cert-sync, the mount below is NOT
+    # optional (a silent start with no identity is the failure this prevents),
+    # and a site that turns this on before its Secret has landed gets an
+    # uploader stuck in CreateContainerConfigError.
+    # CAUTION: the management half is a separate flag —
+    # seaweedfs.ingress.clientCerts.require. Turn THIS on first; presenting a
+    # certificate nobody asks for is harmless, being asked for one you do not
+    # have is not — measured, that is an HTTP 400 whose body rclone reports as
+    # an S3 XML parse error, so the logs name neither certificates nor auth.
+    requireClientCert: false
+    # kubernetes.io/tls — keys tls.crt / tls.key, fixed by Kubernetes. Must
+    # match the certSync destination in the MANAGEMENT site values.
+    clientCertSecret: s3-client-tls
+
+    # THE S3 CLIENT. rclone, replacing amazon/aws-cli:2.31.19.
+    #
+    # PINNED to an exact release, like every other image here. `latest` on this
+    # one is worse than most: rclone ships roughly monthly and its S3 backend
+    # defaults (force_path_style, checksum headers, per-provider quirks) are
+    # the part this deployment depends on.
+    # 1.75.0 is the current stable release; verified end to end against the
+    # SeaweedFS 4.34 this fleet pins.
+    #
+    # CAUTION: this image is Alpine, and the uploader loop does NOT run in it —
+    # see shell.image below before changing either.
     image:
-      repository: amazon/aws-cli
-      tag: "2.31.19"
+      repository: rclone/rclone
+      tag: "1.75.0"
       pullPolicy: IfNotPresent
+
+    # THE USERLAND THE LOOP RUNS IN — not an S3 client, despite the name of the
+    # repository. files/s3-uploader.sh needs bash, GNU findutils (`find -L
+    # -printf`, `find -xtype l`) and GNU coreutils (`du -sb`, `md5sum`).
+    # rclone/rclone is Alpine and has none of them: MEASURED there, the pod
+    # cannot even start (no /bin/bash), and if it could, fingerprint() would
+    # return the md5 of an empty string for every session and the
+    # dangling-symlink guard would never fire — both silent. The busybox
+    # userland is what the migration off `minio/mc` was partly about
+    # (docs/components/mc.md, "A full userland"); this is not a wall worth
+    # walking into a second time.
+    #
+    # So upload.yaml runs the loop here and stages the rclone binary in from
+    # image above with an initContainer. rclone is a static Go binary, so it
+    # runs in this glibc image unchanged.
+    #
+    # amazon/aws-cli:2.31.19 specifically, and NOT because anything still calls
+    # `aws`: it is the image this loop already ran in, so the userland the
+    # script is proven against does not change at all, and it is already
+    # present on every edge node and already pinned twice elsewhere in this
+    # repo — no new pull on upgrade, which matters on constrained sites. Any
+    # bash + GNU-coreutils image would do; swapping it is a userland change and
+    # deserves the same measurement the note above records.
+    shell:
+      image:
+        repository: amazon/aws-cli
+        tag: "2.31.19"
+        pullPolicy: IfNotPresent
     interval: 60
     # Don't touch a session until it has been quiet this long — assign may
     # still be writing into it.

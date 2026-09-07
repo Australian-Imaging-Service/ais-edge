@@ -1,3 +1,19 @@
+
+======================================================================
+FIRST, PROVE IT WORKS
+
+  make verify-live SITE=<site>
+
+  Helm having accepted these objects does not mean the deployment runs.
+  That script reads the same sites/<site>/values.yaml this install used —
+  nothing in it is hardcoded — and checks readiness rather than pod phase,
+  the CA and every Certificate from it, the S3 Service, each edge's hosted
+  control plane, and XNAT reachability. Exit code = number of failures.
+
+  It cannot see the edges' DICOM hostPort from inside the cluster, so it
+  reports that leg as SKIP rather than as a pass. Prove it with a real
+  C-STORE from a machine that will send studies.
+======================================================================
 AIS Edge — {{ .Values.clusterLabel }}  (release {{ .Release.Name }}, namespace {{ .Values.namespace }})
 
 INGEST
@@ -16,7 +32,7 @@ INGEST
 {{- end }}
 
 DE-IDENTIFICATION
-{{- if .Values.orthanc.deid.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   Enabled. {{ len .Values.orthanc.deid.aetMap }} AE title(s) mapped:
   {{- range $aet, $cfg := .Values.orthanc.deid.aetMap }}
     {{ $aet }} -> XNAT project {{ $cfg.project }}
@@ -66,13 +82,16 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
 {{- if .Values.orthanc.auth.enabled }}
   {{ .Values.orthanc.auth.existingSecret }}   keys: users.json, orthanc-user, orthanc-password
 {{- end }}
-{{- if .Values.orthanc.deid.enabled }}
+{{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   {{ .Values.orthanc.deid.existingSaltSecret }}   key: AIS_DEID_HMAC_SALT
 {{- end }}
 {{- if eq .Values.upload.mode "s3" }}
   {{ .Values.upload.s3.existingSecret }}   keys: access-key, secret-key
   {{- if .Values.upload.s3.caBundleSecret }}
   {{ .Values.upload.s3.caBundleSecret }}   key: {{ .Values.upload.s3.caBundleKey }}
+  {{- end }}
+  {{- if .Values.upload.s3.requireClientCert }}
+  {{ .Values.upload.s3.clientCertSecret }}   keys: tls.crt, tls.key   (delivered by the management cert-sync CronJob)
   {{- end }}
 {{- else }}
   {{ .Values.upload.direct.existingSecret }}   keys: server, username, password

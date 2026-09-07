@@ -11,15 +11,23 @@ multi-cluster + long-retention deployments.
 ## Why this doc exists if Mimir isn't deployed
 
 The user explicitly asked us to document Mimir as a future option.
-We currently use **vanilla Prometheus** with 30-day local-PV retention
+We currently use **vanilla Prometheus** with 15-day local-PV retention
 because:
 - Single management cluster, single-digit edges → small TSDB
 - Local PV is simpler than running a distributed system
 - Mimir adds 6+ pod kinds (querier, query-frontend, ingester,
   store-gateway, compactor, distributor); operational overhead
 
+The 15 days is `kube-prometheus-stack.prometheus.prometheusSpec.retention`
+(`charts/mgmt/values.yaml:671`, "THE one place Prometheus retention is set")
+on a 20Gi `local-path` PVC (`:581`, `:692`). Don't confuse it with the 30d at
+`charts/mgmt/values.yaml:849`, which is **Loki's** `retention_period` for logs
+— the two stores are sized and retained separately on purpose, because log
+volume and metric volume grow at different rates.
+
 Switch to Mimir when any of these become true:
-- Retention requirements exceed ~3 months (TSDB grows beyond a single PV)
+- Retention requirements exceed ~3 months (TSDB grows beyond a single PV;
+  that is a 6× stretch on today's 15 days, not a small bump)
 - Multi-cluster: each child cluster pushes its metrics to a central
   store (today we'd push edge metrics through Loki only)
 - Multi-tenant: different teams need isolated query namespaces
@@ -44,44 +52,81 @@ data source becomes Mimir instead of Prometheus.
 ## What Mimir would have access to
 
 - **Object storage** for chunks + index — would use a SeaweedFS
-  `metrics-bucket` (we'd add a `mimir-writer` IAM identity to script 03)
+  `metrics-bucket`, added as a third entry under `seaweedfs.buckets`
+  alongside `ingest` and `logs` (`charts/mgmt/values.yaml:285-289`), with a
+  `mimir-writer` identity scoped to it only. There is no `scripts/03-*` to
+  edit any more: S3 identities are assembled **inside the pod** by the
+  `build-s3-identities` init container from projected Secrets
+  (`charts/mgmt/templates/seaweedfs.yaml:150-257`), so adding one means an
+  `emit 'mimir-writer' "$SRC/mimir" '["Read:metrics-bucket",…]'` line there
+  plus a `mimirS3SecretRef` alongside `observability.loki.s3SecretRef`
+  (`charts/mgmt/values.yaml:593`). The init container refuses to start on a
+  blank or duplicated access key, so a half-added identity fails loudly
+  rather than 403-ing days later.
 - **No direct cluster API** — receives metrics via remote_write from
   Prometheus
 - A persistent volume (per component) for transient state
 
 ## Where it would run
 
-- Namespace: `observability` (alongside Loki)
+- Namespace: `ais-mgmt` — the management release's namespace
+  (`install.sh:121`), alongside Loki. There is no `observability` namespace;
+  that was the pre-chart shell installer's, and the charts put every mgmt
+  workload in `.Release.Namespace`
 - Workloads: 6+ StatefulSets/Deployments depending on the deployment
   mode (`SingleBinary` or `Distributed`)
 - Image: `grafana/mimir`
-- Helm chart: `grafana/mimir-distributed`
+- Helm chart: `grafana/mimir-distributed`, vendored into
+  `charts/mgmt/charts/` and pinned in `Chart.yaml` the way Loki,
+  kube-prometheus-stack, ingress-nginx, cert-manager and Vector already are
 
 ## Configuration sketch
 
-A new `mimir-values.yaml.tpl` would mirror the Loki one:
+A new `mimir:` block in `charts/mgmt/values.yaml` would mirror the `loki:`
+one at `:813-928` — the subchart is configured inline there, not from a
+template file. There are no `*-values.yaml.tpl` files left in the repo.
+
+One trap inherited from that block, recorded at
+`charts/mgmt/values.yaml:650-661`: **Helm does not template `values.yaml`**.
+A subchart value cannot say `{{ .Release.Name }}-something` unless the
+subchart itself runs `tpl` over that field. Loki's S3 `endpoint` works only
+because the loki chart does; every other cross-reference below is a literal
+kept in step by hand, which is why `mgmt-loki` is pinned with
+`fullnameOverride` rather than derived. Mimir would need the same treatment.
 
 ```yaml
-deploymentMode: SingleBinary    # then Distributed when scale demands
-
+# charts/mgmt/values.yaml, a sibling of the existing `loki:` block
 mimir:
-  structuredConfig:
-    blocks_storage:
-      backend: s3
-      s3:
-        endpoint: seaweedfs.seaweedfs.svc.cluster.local:8333
-        bucket_name: metrics-bucket
-        access_key_id: "${MIMIR_S3_ACCESS_KEY}"
-        secret_access_key: "${MIMIR_S3_SECRET_KEY}"
-        insecure: true
+  # Pin the name the way loki.fullnameOverride is pinned, so the remote_write
+  # URL below (a literal, see above) does not have to track .Release.Name.
+  fullnameOverride: mgmt-mimir
+  deploymentMode: SingleBinary  # then Distributed when scale demands
 
-minio: { enabled: false }
+  mimir:
+    structuredConfig:
+      blocks_storage:
+        backend: s3
+        s3:
+          # Same shape as the Loki sink: the in-cluster SeaweedFS Service is
+          # <release>-seaweedfs in the release namespace, plain http because
+          # the hop never leaves the node.
+          endpoint: mgmt-seaweedfs.ais-mgmt.svc.cluster.local:8333
+          bucket_name: metrics-bucket
+          # Expanded by Mimir at startup, never by Helm, so the key never
+          # lands in a rendered manifest or in git — as with LOKI_S3_*.
+          access_key_id: "${MIMIR_S3_ACCESS_KEY}"
+          secret_access_key: "${MIMIR_S3_SECRET_KEY}"
+          insecure: true
 
-# Then in kube-prometheus-stack-values.yaml.tpl:
-prometheus:
-  prometheusSpec:
-    remoteWrite:
-      - url: http://mimir-distributor.observability.svc.cluster.local:8080/api/v1/push
+  minio: { enabled: false }
+
+# Then under the existing `kube-prometheus-stack:` key in the same file
+# (charts/mgmt/values.yaml:663-810):
+kube-prometheus-stack:
+  prometheus:
+    prometheusSpec:
+      remoteWrite:
+        - url: http://mgmt-mimir-distributor.ais-mgmt.svc.cluster.local:8080/api/v1/push
 ```
 
 The migration from Prometheus-only to Prometheus+Mimir is **drop-in**:
@@ -105,12 +150,13 @@ points at Mimir. No alert / dashboard changes (PromQL is identical).
 |---|---|---|
 | More moving parts | More operational load | Start in `SingleBinary` mode (one pod); switch to `Distributed` later |
 | Object-store dependency | If SeaweedFS down, Mimir can't ingest | Same pattern as Loki today |
-| Migration window | Need to dual-write or accept a gap | Run both for 30 days, then drop local Prometheus retention |
+| Migration window | Need to dual-write or accept a gap | Run both for at least one full local-retention window (15 days today) before shortening `prometheusSpec.retention` |
 | Larger memory footprint | Bigger nodes / requests | Sizing guide on grafana.com/docs/mimir |
 
 ## When NOT to use Mimir
 
-- Single cluster, single team, < 30-day retention → vanilla Prometheus is simpler
+- Single cluster, single team, retention around today's 15 days (or anything
+  a single 20Gi PV holds) → vanilla Prometheus is simpler
 - Cost-sensitive deployments where adding 4 GB+ of pods is too much
 - Sites with no S3 (SeaweedFS removes this constraint)
 
@@ -127,10 +173,17 @@ points at Mimir. No alert / dashboard changes (PromQL is identical).
 
 ## Migration checklist (when the time comes)
 
-1. Add `metrics-bucket` + `mimir-writer` identity to script 03
-2. Drop in `mimir-values.yaml.tpl`
-3. Helm install `grafana/mimir-distributed` to `observability`
-4. Add `remoteWrite` to the kube-prometheus-stack values
+1. Add `metrics-bucket` to `seaweedfs.buckets` and a `mimir-writer` identity
+   to the `build-s3-identities` init container in
+   `charts/mgmt/templates/seaweedfs.yaml` (there is no `scripts/03-*`), plus
+   its credentials Secret in `sites/<site>/secrets.enc.yaml`
+2. Vendor `grafana/mimir-distributed` into `charts/mgmt/charts/` and pin it in
+   `charts/mgmt/Chart.yaml`, then add the `mimir:` block to
+   `charts/mgmt/values.yaml` (there are no `*-values.yaml.tpl` files)
+3. `./install.sh -y <site>` — step 4/7 rolls the management release, so Mimir
+   arrives in `ais-mgmt` with everything else. No separate `helm install`
+4. Add `remoteWrite` under the `kube-prometheus-stack:` key in the same
+   values file
 5. Update Grafana datasource to point at Mimir
 6. (Optional) reduce local Prometheus retention to a few hours; Mimir
    becomes the long-term store

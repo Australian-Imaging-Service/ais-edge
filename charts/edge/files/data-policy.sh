@@ -74,6 +74,9 @@ MAX_REMOVALS="${MAX_REMOVALS:-50}"
 # trees in, and a directory that looks complete mid-copy is exactly how a
 # half-session gets reclaimed.
 SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
+# How long a session may fail its reclaim condition before it is called
+# stuck. 0 or "-" disables the check entirely. See the branch that uses it.
+STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 # The uploader's fingerprint state dir. A file here named after a session is
 # the uploader's own record that it finished pushing that session to S3 — the
 # observable signal `onUploaded` is derived from, needing no change to
@@ -81,6 +84,19 @@ SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
+
+# THE STAGE WHOSE DELETES BELONG TO SOMEONE ELSE. Empty everywhere except
+# upload.mode=direct, where the staged-reclaimer CronJob holds the delete
+# authority for the terminal tree and confirms each session against XNAT before
+# removing it.
+#
+# This engine still EVALUATES that stage, still reports its size, and still
+# refuses to delete from it (onUploaded cannot be satisfied without an
+# s3-uploader, which is the whole reason the CronJob exists). What it must not
+# do is call it STUCK. `stage_stuck` means "waiting on something that is not
+# coming"; here something is coming, hourly, and saying otherwise would page a
+# human every night for a tree that is draining normally.
+EXTERNAL_RECLAIM_STAGE="${EXTERNAL_RECLAIM_STAGE:-}"
 
 # --- originals ----------------------------------------------------------------
 # THE THIRD SWITCH. Originals are the only identifiable copy of a study, so
@@ -154,6 +170,10 @@ report_disk() {
 # matters even when the count is 1.
 #
 # busybox find has no -printf, so `-exec stat -c %Y` is the portable form.
+# Batched with `{} +`, NOT `{} \;`: the terminator form forks one stat per
+# file, which makes every sweep O(files) in process spawns. Measured in this
+# image over 2000 files, 24.5s vs 1.6s under a 100m quota. busybox find
+# supports `+`; verified in curlimages/curl:8.11.1.
 report_age() {
     path="$1"
     ENTRIES=$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -162,7 +182,7 @@ report_age() {
         OLDEST_AGE_S=0
         return 0
     fi
-    oldest=$(find "$path" -type f -exec stat -c %Y {} \; 2>/dev/null | sort -n | head -n1)
+    oldest=$(find "$path" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n1)
     case "${oldest:-}" in
         ''|*[!0-9]*) OLDEST_AGE_S=-1; return 1 ;;
     esac
@@ -181,19 +201,66 @@ report_age() {
 # unknown condition word is a keep, not a delete: a typo in values.yaml must not
 # be able to authorise removal.
 # -----------------------------------------------------------------------------
-condition_met() {   # condition_met <reclaim-word> <session-name>
+# MUST MATCH s3-uploader.sh's fingerprint() EXACTLY. The uploader writes this
+# value into the state file after a successful sync; condition_met recomputes it
+# to check that what is on disk now is what was uploaded then. If the two
+# implementations drift, every session looks changed and nothing is ever
+# reclaimed -- which fails safe, but silently.
+fingerprint() {
+    # NO `find -printf` HERE, AND THAT IS NOT A STYLE CHOICE. The data-policy
+    # engine runs on curlimages/curl, which is Alpine: BusyBox find has no
+    # -printf and fails with "unrecognized: -printf". With the error swallowed
+    # by 2>/dev/null that produced the md5 of an EMPTY string, identical every
+    # time and never equal to the uploader's value -- so onUploaded could never
+    # be satisfied on any real deployment and nothing would ever be reclaimed,
+    # silently. Caught by tests/data-policy, which is the only stage that runs
+    # this script in the image it actually ships in.
+    #
+    # `cd` first so %n is relative: the uploader and the engine must agree on
+    # the value, and they do not necessarily see the tree at the same path.
+    # %Y rather than %T@ because BusyBox stat has no fractional seconds.
+    ( cd "$1" 2>/dev/null && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
+        | sort | md5sum | cut -d' ' -f1 )
+}
+
+condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
     case "$1" in
         onUploaded)
-            # The uploader wrote its fingerprint for this session, which it only
-            # does after `aws s3 sync` returned 0.
-            [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
+            # THE MARKER'S CONTENT, NOT ITS EXISTENCE. The uploader writes a
+            # fingerprint of exactly the bytes it uploaded; this recomputes it
+            # and compares.
+            #
+            # Existence alone was safe only while the marker was swept in the
+            # same pass that wrote it, so it could never outlive the data it
+            # described. Now that it survives by age, an existence test would be
+            # a standing permission to delete anything that later appeared under
+            # the same session name: a supplementary or re-sent study would be
+            # authorised for removal on the strength of a marker describing an
+            # upload of different bytes.
+            [ -f "${UPLOAD_STATE_DIR}/$2" ] || return 1
+            [ -d "${ASSIGNED_DIR}/$2" ] || return 0   # already gone; nothing to protect
+            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${ASSIGNED_DIR}/$2")" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already
             # travelled further and assign's copy is gone. The second half
             # matters: without it, a session whose assigned copy was already
             # reclaimed would pin its grouped copy forever.
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
+        onDeidentified)
+            # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
+            # rather than silently unknown. This condition is satisfied by the
+            # deidentify STAGE, which unlinks each session's input once it has
+            # written a complete de-identified copy. That happens inside
+            # xnat-ingest and leaves no artefact this engine can observe, so the
+            # engine reports the tree and never acts on it.
+            return 1 ;;
         *)
+            # AN UNKNOWN WORD IS NOT AN UNMET CONDITION, and until now both
+            # returned 1. A typo behaved exactly like a correctly configured
+            # site whose condition had not yet come true: nothing reclaimed, for
+            # ever, logged as normal operation.
+            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned or onDeidentified" \
+                 ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"$(jsan "$1")\""
             return 1 ;;
     esac
 }
@@ -202,7 +269,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name>
 # been quiet long enough", and one freshly-written file means the answer is no
 # even if everything beside it is ancient.
 newest_age_s() {
-    newest=$(find "$1" -type f -exec stat -c %Y {} \; 2>/dev/null | sort -n | tail -n1)
+    newest=$(find "$1" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -n1)
     case "${newest:-}" in
         ''|*[!0-9]*) echo -1; return 1 ;;
     esac
@@ -236,7 +303,39 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             continue
         fi
 
-        if ! condition_met "$r_word" "$s"; then
+        if ! condition_met "$r_word" "$s" "$r_name"; then
+            # A SESSION WHOSE CONDITION NEVER COMES TRUE IS STUCK, AND UNTIL NOW
+            # NOTHING SAID SO. Keeping it is the right call every single time --
+            # the copy is not provably reconstructible, so it stays -- but a
+            # session that has been failing that test for days is not the same
+            # event as one that failed it a minute ago, and both logged the
+            # identical line. The steady drip of reclaim_kept is indistinguishable
+            # from normal operation, which is how a permanently stuck session hid
+            # in this repo twice.
+            #
+            # This does NOT delete or move anything. It raises the event that an
+            # alert can key on, and leaves the data exactly where it is. Moving a
+            # stuck session was the original proposal; it is deliberately not done
+            # here. Quarantining means moving the input AND removing the partial
+            # output as ONE action: doing only the first leaves an orphan with
+            # nothing left to repair it from, which upload would then collect. An
+            # engine that can do half of that should do neither. (Its /data mount
+            # is also read-only unless retention is armed, so a move would work in
+            # one mode and silently not in the other, but the two-operations
+            # argument holds whatever the mount says.)
+            if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
+                jlog reclaim_kept "$r_name" "condition ${r_word} is not satisfiable in this upload mode and is not meant to be — the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
+                     ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
+                continue
+            fi
+            if [ "${STUCK_AFTER_S:--}" != "-" ] && [ "${STUCK_AFTER_S:-0}" -gt 0 ]; then
+                s_age=$(newest_age_s "$d") || s_age=-1
+                if [ "$s_age" -ge "$STUCK_AFTER_S" ]; then
+                    jlog stage_stuck "$r_name" "session has not satisfied '${r_word}' for ${s_age}s and is not being retried by anything — the stage it is waiting on has not produced what this condition looks for" \
+                         ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"age_s\":${s_age}"
+                    continue
+                fi
+            fi
             jlog reclaim_kept "$r_name" "condition ${r_word} not satisfied — nothing downstream proves this copy is reconstructible" \
                  ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\""
             continue

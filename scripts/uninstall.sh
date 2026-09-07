@@ -86,6 +86,12 @@ EDGE_COUNT="$(python3 -c "import json;print(len(json.loads('''$EDGES_JSON''')))"
 MGMT_NS="$(cfg namespace ais-mgmt)"; MGMT_NS="ais-mgmt"
 EDGE_NS="$(cfg namespace xnat-ingest)"
 INTERNAL_DOMAIN="$(cfg domain.internal)"
+# Must match what install.sh gave `k0s install controller --data-dir`. `k0s
+# reset` takes the same flag and defaults it to /var/lib/k0s independently of
+# how the node was installed — so on a relocated install a bare `k0s reset`
+# cleans a directory that was never used and leaves the real state behind.
+DATA_ROOT="$(cfg storage.dataRoot)"
+TOPOLOGY="$(cfg topology onprem)"
 
 # --- confirm -----------------------------------------------------------------
 echo "============================================"
@@ -191,6 +197,49 @@ done
 echo
 echo "--- management cluster ---"
 if kubectl version >/dev/null 2>&1; then
+    # ---------------------------------------------------------------------
+    # CLOUD ONLY: release the load balancer FIRST, and wait for it.
+    # ---------------------------------------------------------------------
+    # The cloud controller runs inside this cluster. Tear the cluster down with
+    # the Service still present and nothing is left to call the cloud API, so
+    # the balancer survives — holding its floating IP and consuming quota — and
+    # the next install asks for an address that is already spoken for.
+    #
+    # Octavia will not delete a balancer while a listener or pool is attached,
+    # so the manual recovery below has to go in order. Deleting the Service and
+    # letting the controller do it is the path that gets that right for free.
+    if [ "$TOPOLOGY" = "cloud" ]; then
+        lb_svc="$(kubectl get svc -n "$MGMT_NS" -l app.kubernetes.io/name=ingress-nginx \
+                  -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].metadata.name}' 2>/dev/null || true)"
+        if [ -n "$lb_svc" ]; then
+            lb_addr="$(kubectl get svc -n "$MGMT_NS" "$lb_svc" \
+                       -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            info "releasing cloud load balancer ${lb_svc}${lb_addr:+ (${lb_addr})}"
+            kubectl delete svc -n "$MGMT_NS" "$lb_svc" --wait=false >/dev/null 2>&1 || true
+            # Wait for the controller to actually finish with the cloud, not just
+            # for the object to disappear from the API.
+            for _ in $(seq 1 60); do
+                kubectl get svc -n "$MGMT_NS" "$lb_svc" >/dev/null 2>&1 || break
+                sleep 5
+            done
+            if kubectl get svc -n "$MGMT_NS" "$lb_svc" >/dev/null 2>&1; then
+                warn "load balancer ${lb_svc} did not release within 5 minutes"
+                echo "         The cloud object may outlive this cluster and keep its address."
+                echo "         On OpenStack, delete it IN THIS ORDER once the cluster is gone —"
+                echo "         Octavia refuses while a listener or pool is still attached:"
+                echo "           openstack loadbalancer pool list     --loadbalancer <lb>"
+                echo "           openstack loadbalancer pool delete   <pool>"
+                echo "           openstack loadbalancer listener list --loadbalancer <lb>"
+                echo "           openstack loadbalancer listener delete <listener>"
+                echo "           openstack loadbalancer delete <lb>"
+                echo "         Then release the floating IP if it was allocated for this install:"
+                echo "           openstack floating ip delete ${lb_addr:-<address>}"
+            else
+                info "load balancer released"
+            fi
+        fi
+    fi
+
     # Current layout.
     helm uninstall mgmt -n "$MGMT_NS" --wait --timeout 5m >/dev/null 2>&1 && info "mgmt release removed" || true
     helm uninstall cert-manager -n cert-manager --wait --timeout 3m >/dev/null 2>&1 && info "cert-manager release removed" || true
@@ -283,10 +332,15 @@ info "generated artefacts"
 rm -f "${SCRIPT_DIR}"/kubeconfig-* "${SCRIPT_DIR}"/join-token-* "${SCRIPT_DIR}"/ais-edge-ca.crt 2>/dev/null || true
 
 if [ "$KEEP_CLUSTER" = false ]; then
-    info "k0s reset on this node"
+    info "k0s reset on this node${DATA_ROOT:+ (data-dir ${DATA_ROOT}/k0s)}"
     sudo k0s stop 2>/dev/null || true
-    sudo k0s reset 2>/dev/null || true
-    sudo rm -rf /var/lib/k0s /etc/k0s /run/k0s 2>/dev/null || true
+    # shellcheck disable=SC2086
+    sudo k0s reset ${DATA_ROOT:+--data-dir "${DATA_ROOT}/k0s"} 2>/dev/null || true
+    # Both layouts: /var/lib/k0s is the default location, ${DATA_ROOT}/k0s the
+    # relocated one. The /data wipe above already covers the latter, but a site
+    # whose dataRoot changed between install and uninstall would otherwise leave
+    # the older of the two behind.
+    sudo rm -rf /var/lib/k0s /etc/k0s /run/k0s ${DATA_ROOT:+"${DATA_ROOT}/k0s"} 2>/dev/null || true
     rm -f "$HOME/.kube/config" 2>/dev/null || true
 fi
 

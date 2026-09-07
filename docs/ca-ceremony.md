@@ -242,11 +242,61 @@ names are the same, because sharing them means a later switch back to
 `selfSigned` would let cert-manager overwrite your offline-signed intermediate
 with a freshly generated root.
 
+### 6b. And re-point cert-sync at the Secret that now holds the root
+
+Not optional, and nothing catches it for you. `certSync.secrets[0]` sources the
+edge `ca-bundle` from `ais-edge-ca-secret` in the `cert-manager` namespace — the
+Secret **cert-manager generates from the CA `Certificate`**. In `intermediate`
+mode the chart renders no CA `Certificate` and no bootstrap `Issuer` at all
+(that absence is the whole point: the root key is offline), so
+`ais-edge-ca-secret` is never created. Left as-is, every cert-sync run logs
+`sync_failed` for a Secret that does not exist, no edge ever receives
+`ca-bundle`, and the edge pods that mount it sit in
+`CreateContainerConfigError` — the first row of the troubleshooting table in
+`README.md`, reached from a change that looked like it only touched the CA.
+
+The render guards do not stop this: the checks in
+`charts/mgmt/templates/cert-sync.yaml` are keyed on
+`$src.name == certManager.ca.secretName` and are mode-blind, so they say nothing
+when the mode makes that Secret unreachable.
+
+The ceremony Secret already carries the right material — step 5 put the **root**
+in its `ca.crt`, which is exactly what edges pin. So point the entry at it:
+
+```yaml
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager        # certManager.clusterResourceNamespace
+        name: ais-edge-intermediate-ca # == certManager.ca.intermediate.secretRef
+        keys:
+          ca.crt: ca.crt               # ca.crt ONLY — see below
+      destination:
+        namespace: <the edge namespace>
+        name: ca-bundle
+        type: Opaque
+```
+
+CAUTION: copy `ca.crt` and nothing else. The chart's "never distribute
+`tls.key`" guard only fires for `certManager.ca.secretName`, so with the
+intermediate named here it is silent — and `tls.key` in this Secret is the
+intermediate's signing key. Distributing it would let any edge mint a
+certificate for any hostname in the fleet.
+
 Then:
 
 ```bash
-helm upgrade --install mgmt charts/mgmt -f sites/<site>/values.yaml
+helm upgrade --install mgmt charts/mgmt \
+  --namespace ais-mgmt --create-namespace \
+  -f sites/<site>/values.yaml --timeout 15m
 ```
+
+`--namespace` is load-bearing, not decoration. `install.sh` installs this
+release as `mgmt` into `ais-mgmt` (`MGMT_RELEASE` / `MGMT_NS`). Helm scopes a
+release to a namespace, so the same command without `--namespace` targets your
+kubeconfig's current namespace — normally `default` — and creates a **second,
+separate** `mgmt` release there. It reports a successful upgrade, the live
+release in `ais-mgmt` is untouched, and nothing about the CA has changed.
 
 ---
 
@@ -261,9 +311,12 @@ kubectl get clusterissuer ais-edge-ca -o wide
 #    Expect READY=True. "secret not found" means wrong namespace;
 #    "failed to get keypair" means a missing or malformed tls.crt/tls.key.
 
-# 2. Something actually gets issued from it.
-kubectl -n observability get certificate
-kubectl -n observability describe certificate loki-tls | tail -20
+# 2. Something actually gets issued from it. The leaf certificates live in
+#    the RELEASE namespace — ais-mgmt with the installer's defaults. There
+#    is no `observability` namespace: observability is a set of subcharts of
+#    charts/mgmt and renders wherever the release is installed.
+kubectl -n ais-mgmt get certificate
+kubectl -n ais-mgmt describe certificate loki-tls | tail -20
 
 # 3. THE ONE THAT MATTERS: what the server presents must include the
 #    intermediate. Measured locally with openssl 3.0.2: a leaf signed by
@@ -277,7 +330,7 @@ kubectl -n observability describe certificate loki-tls | tail -20
 #    This chart has NOT been run in intermediate mode against a live
 #    cluster, so whether cert-manager's CA issuer emits the full chain into
 #    tls.crt is UNVERIFIED here. Check it before migrating any site:
-kubectl -n observability get secret loki-tls -o jsonpath='{.data.tls\.crt}' \
+kubectl -n ais-mgmt get secret loki-tls -o jsonpath='{.data.tls\.crt}' \
   | base64 -d | grep -c "BEGIN CERTIFICATE"
 #    Expect 2 (leaf + intermediate), not 1.
 
@@ -309,8 +362,11 @@ touched, because the root they pin has not changed.
      --from-file=tls.key=ais-edge-intermediate-2031.key \
      --from-file=ca.crt=ais-edge-root-ca.crt
    ```
-3. Point `certManager.ca.intermediate.secretRef` at the new Secret and
-   `helm upgrade`. Confirm `clusterissuer/ais-edge-ca` is READY again.
+3. Point `certManager.ca.intermediate.secretRef` at the new Secret — and the
+   `certSync` entry from step 6b with it, since that is the Secret the edges'
+   `ca-bundle` is now copied from — then `helm upgrade` **with
+   `--namespace ais-mgmt`**, for the reason given in step 6. Confirm
+   `clusterissuer/ais-edge-ca` is READY again.
 4. Re-issue the leaf certificates, so nothing is still serving a chain that
    ends at the retired intermediate. Either `cmctl renew --all` in each
    namespace, or delete the leaf Secrets and let cert-manager re-create them.
@@ -326,12 +382,27 @@ race.
 ## When the root expires
 
 It does not rotate cheaply; that is the trade. A new root is a new trust
-anchor, so every edge needs the new `ca-bundle` before the old root expires —
-the same fleet-wide two-phase redistribution `scripts/rotate-ca.sh` performs,
-which is exactly what this design is trying to make rare rather than
-impossible. Plan it with a year of overlap, distribute a bundle containing
-**both** roots, and only then start issuing from an intermediate under the new
-one.
+anchor, so every edge needs a bundle containing **both** roots before the old
+one expires. That is the fleet-wide two-phase redistribution
+`scripts/rotate-ca.sh` was written for — and it is exactly what this design is
+trying to make rare rather than impossible. Plan it with a year of overlap,
+distribute the two-root bundle, and only then start issuing from an
+intermediate under the new one.
+
+CAUTION — `rotate-ca.sh` is not currently usable against this chart, in either
+mode. Its names predate the chart and no longer match what renders: it
+re-points a ClusterIssuer called `ais-edge-ca-issuer` and signs the successor
+root from a ClusterIssuer called `selfsigned-bootstrap`, while the chart
+renders `ais-edge-ca` (from `certManager.issuer`) and
+`<release>-selfsigned-bootstrap` (from `certManager.ca.bootstrapIssuerName`,
+defaulting to `mgmt-selfsigned-bootstrap` with the installer's default release
+name). Both chart names are values, so a brownfield cluster adopted from the
+pre-chart installer may still carry the script's names — which is exactly why
+this has to be checked rather than assumed. Its phase-2 re-issue loop also selects
+Certificates by `spec.issuerRef.name == "ais-edge-ca-issuer"`, which matches
+none of them. Treat the script as the *procedure* — two phases, a grace period,
+a both-roots bundle, then retirement — and check the names against
+`kubectl get clusterissuer` before running any of it.
 
 ---
 
@@ -343,13 +414,31 @@ Recorded rather than implied away.
   Everything above renders, and the openssl half was executed and its output
   checked; the cert-manager half — chain construction in issued Secrets in
   particular — is unverified. See the verification section.
-* **`scripts/02b-bootstrap-ca.sh` assumes `selfSigned`.** It waits on
-  `certificate/ais-edge-ca` and exports the CA from `ais-edge-ca-secret`,
-  neither of which exists in `intermediate` mode. Run the ceremony instead;
-  the bundle edges need is `ais-edge-root-ca.crt` from step 1.
+* **There is no longer a CA bootstrap script to assume `selfSigned`.**
+  `scripts/02b-bootstrap-ca.sh` was deleted: `install.sh` says outright that
+  "Steps 4 and 7 replace what used to be scripts 02b/02c/02d/03/04/07/07b/07c".
+  CA bootstrap is now the chart itself (`templates/cert-issuers.yaml` renders
+  the bootstrap `ClusterIssuer` and the `ais-edge-ca` `Certificate` in
+  `selfSigned` mode, and neither in `intermediate` mode), plus the one-shot
+  cert-sync seeding `install.sh` performs per edge after step 7 — it runs the
+  edge's cert-sync CronJob immediately with `create job --from=cronjob`, so the
+  site is not waiting up to six hours for its `ca-bundle`. What the old script's
+  assumption has become is the gap recorded in **step 6b**: the CA distribution
+  path still names `ais-edge-ca-secret`, which `intermediate` mode never
+  creates, and you must re-point it by hand. The bundle edges need is still
+  `ais-edge-root-ca.crt` from step 1 — the same bytes as `ca.crt` in the
+  ceremony Secret.
+* **A stale reference to that script survives in the chart.** The naming
+  rationale block in `charts/mgmt/templates/cert-issuers.yaml` still explains
+  the fixed `ais-edge-ca` Certificate name by citing
+  `scripts/02b-bootstrap-ca.sh`. The name is still fixed and still load-bearing
+  — `rotate-ca.sh` and the operator runbook depend on it — but the script it
+  cites as the reason is gone. Recorded here so nobody goes looking for it.
 * **`scripts/rotate-ca.sh` rotates the root**, not the intermediate. In
   `intermediate` mode the routine operation is "Rotating the intermediate"
-  above, and `rotate-ca.sh` is only for the root-expiry case.
+  above, and `rotate-ca.sh` is only for the root-expiry case — where its
+  hardcoded issuer names no longer match what the chart renders. See the
+  caution under "When the root expires".
 * **Nothing enforces the Secret's contents at render time.** A Secret with a
   leaf certificate instead of a CA, or with `ca.crt` missing, renders exactly
   the same and fails at runtime as a NotReady issuer.

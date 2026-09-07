@@ -1,7 +1,13 @@
 # Azure install (AKS)
 
-> Status: **untested, design complete**. Same pattern as AWS/GCP — AKS
-> bundles its own cloud-controller-manager, so step 01b auto-skips.
+> Status: **untested, design complete, and written against the pre-Helm
+> installer**. Same pattern as AWS/GCP — AKS bundles its own
+> cloud-controller-manager, so there is nothing for you to install on that
+> front. Note that this repo never installed one either: the numbered
+> `scripts/01b-install-cloud-controller.sh` this guide was written around is
+> gone, along with the rest of the imperative installer (`install.sh:35`).
+> `topology: cloud` is a chart value but a parked one, so treat the commands
+> below as a design record and expect to correct them as you go.
 
 ## TL;DR
 
@@ -13,8 +19,48 @@ az aks create --resource-group ais-edge-rg --name ais-edge-mgmt \
 az network public-ip create --resource-group ais-edge-rg \
   --name ais-edge-lb-ip --sku Standard --allocation-method Static
 # Edit sites/<site>/values.yaml (topology: cloud, installMode: existing, etc.)
-./install.sh -y
+./install.sh -y <site>          # the site argument is mandatory (install.sh:80)
 ```
+
+## Which ingress shape, and what the pre-flight checks
+
+AKS runs a cloud controller, so `type: LoadBalancer` works out of the box and is the right choice here.
+
+```yaml
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+      loadBalancerIP: "<your static public IP>"
+```
+
+If you would rather front the cluster with a balancer you build and manage
+yourself, `NodePort` is equally supported and is the DEFAULT for self-managed
+clusters, which have no controller to answer a `LoadBalancer` request:
+
+```yaml
+    service:
+      type: NodePort
+      nodePorts:            # pin them, or Kubernetes picks fresh ports each
+        http: 30080         # install and silently breaks your target group
+        https: 30443
+```
+
+Before doing any work, `install.sh` checks on `topology: cloud`:
+
+* **`domain.internal` resolves.** Edges resolve this name to find the
+  management cluster; if there is no record yet there is no point installing.
+* **it does not resolve to a node itself.** That works until the node is
+  replaced, then every edge loses the cluster.
+* **on the `LoadBalancer` path:** that a cloud controller is running and that
+  no node still carries `node.cloudprovider.kubernetes.io/uninitialized`. On
+  AKS this is satisfied out of the box; the check is there for the
+  self-managed case and costs nothing here.
+
+`SKIP_CLOUD_PREFLIGHT=1` overrides all of them.
+
 
 ## Prerequisites
 
@@ -83,7 +129,9 @@ az role assignment create --assignee $PRINCIPAL_ID \
 
 ## Step 3 — DNS
 
-**Dev**: `INTERNAL_DOMAIN="dev.<ip-with-dashes>.nip.io"`
+**Dev**: `domain.internal: dev.<ip-with-dashes>.nip.io` in the site file.
+`nip.io` cannot satisfy an ACME DNS-01 challenge, so dev stays on the default
+internal CA (`certManager.issuer: ais-edge-ca`).
 
 **Prod** (Azure DNS):
 ```bash
@@ -95,45 +143,99 @@ az network dns record-set a add-record \
 
 ## Step 4 — Config
 
-`sites/<site>/values.yaml`:
+`sites/<site>/values.yaml` is **YAML**, read with `yaml.safe_load`
+(`install.sh:95-113`) and then handed to Helm with `-f`. Nothing sources it,
+so shell `export` lines in it are inert — and `CLOUD_PROVIDER`,
+`CLOUD_CREDENTIALS_FILE`, `LB_PUBLIC_IP`, `CERT_ISSUER` and `DNS_PROVIDER`
+have no reader anywhere in `charts/`, `scripts/`, `sites/` or `install.sh`.
+The live keys are:
 
-```bash
-export CLOUD_PROVIDER="azure"
-export CLOUD_CREDENTIALS_FILE=""           # az CLI keeps creds in ~/.azure
-export INSTALL_MODE="existing"             # we're using AKS
-export INSTALL_TOPOLOGY="cloud"
-export LB_PUBLIC_IP="20.x.y.z"             # the reserved static IP
-export INTERNAL_DOMAIN="aisedge.example.com"
-export CERT_ISSUER="letsencrypt-prod"
-export DNS_PROVIDER="azuredns"             # for cert-manager DNS-01
-```
-
-The AKS-specific annotation that pins the LB to your pre-allocated IP is
-already in `manifests/01-management/nginx-ingress-values-cloud.yaml.tpl`
-in spirit — but you may need to add this annotation if AKS doesn't pick
-up `loadBalancerIP`:
 ```yaml
-service.beta.kubernetes.io/azure-load-balancer-resource-group: ais-edge-rg
+installMode: existing        # we're using AKS; install.sh:134
+topology: cloud              # charts/mgmt/values.yaml:32 — onprem | cloud
+
+domain:
+  internal: aisedge.example.com
+  mgmtNodeIP: "20.x.y.z"     # the reserved static IP
+
+certManager:
+  issuer: letsencrypt-prod   # default is ais-edge-ca, the internal CA
+  acme:
+    email: ops@example.com   # both acme keys are REQUIRED with letsencrypt-*
+    dns01Solver:             # passed through verbatim; Azure DNS shape below
+      azureDNS:
+        hostedZoneName: aisedge.example.com
+        resourceGroupName: ais-edge-rg
+        subscriptionID: <your-subscription>
+        environment: AzurePublicCloud
 ```
+
+`certManager.acme.email` and `certManager.acme.dns01Solver` are not optional
+on a `letsencrypt-*` issuer: `charts/mgmt/templates/_helpers.tpl` fails the
+render without them, deliberately, so a missing solver surfaces at
+`helm template` rather than as Certificates that sit Pending forever.
+
+Pin the LB to your reserved IP in the same file. It is layered onto the
+management chart with `-f`, so a top-level `ingress-nginx:` key overrides the
+vendored subchart's defaults at `charts/mgmt/values.yaml:523-550` — which are
+the on-prem ones, `hostNetwork: true` + `service.type: ClusterIP`. Left
+untouched on AKS, the reserved 20.x.y.z never attaches and Step 6 can never
+pass:
+
+```yaml
+ingress-nginx:
+  controller:
+    hostNetwork: false        # AKS has a cloud controller; no need to own the node's :443
+    dnsPolicy: ClusterFirst   # ClusterFirstWithHostNet only makes sense with hostNetwork
+    service:
+      type: LoadBalancer
+      loadBalancerIP: "20.x.y.z"
+      annotations:
+        # only needed when the public IP is NOT in the AKS node resource group (see Step 2)
+        service.beta.kubernetes.io/azure-load-balancer-resource-group: ais-edge-rg
+```
+
+Two traps in that block:
+- The LB address belongs under `ingress-nginx.controller.service.loadBalancerIP`.
+  A top-level `ingressNginx.loadBalancerIP` used to sit in the chart defaults
+  and was read by nothing; it has been removed rather than left looking like
+  the obvious place.
+- Override only the keys above. The inherited
+  `controller.extraArgs.enable-ssl-passthrough: "true"` and
+  `ingressNginx.sslPassthrough: true` must stay:
+  `charts/mgmt/templates/edge-clusters.yaml:72-73` hard-fails the render if
+  passthrough is turned off, because the k0s API and konnectivity are mTLS end
+  to end and terminating here breaks only the edge workers' join.
 
 ## Step 5 — Run install.sh
 
 ```bash
-./install.sh -y
+./install.sh -y <site>
 ```
+
+`install.sh` is a seven-step installer now, not the old numbered-script chain.
+`install.sh:35` records that steps 4 and 7 replaced
+`02b/02c/02d/03/04/07/07b/07c`, and there is no `01b` to skip — the repo
+installs no cloud controller in any topology, on AKS or anywhere else:
 
 | Step | What happens on AKS |
 |---|---|
-| 01  | Skipped (`INSTALL_MODE=existing`) |
-| 01b | Skipped (`CLOUD_PROVIDER=azure` → managed K8s) |
-| 02–04, 02d | Standard |
-| 02c | nginx-ingress → AKS provisions Azure Standard LB, attaches static IP |
-| 05–07c | Standard edge setup |
+| 1/7 k0s management cluster | Skipped (`installMode: existing` — AKS is already there) |
+| 2/7 cert-manager CRDs + k0smotron operator | Standard; both are pinned |
+| 3/7 site Secrets (SOPS → cluster) | Standard |
+| 4/7 helm: management chart | SeaweedFS, uploader, observability, CA, ingress, hosted control planes. This is where the `ingress-nginx:` override lands and AKS provisions the Azure Standard LB against your static IP |
+| 5/7 per edge: child kubeconfig + join token | Standard edge setup |
+| 6/7 per edge: join the k0s worker over SSH | Standard edge setup |
+| 7/7 per edge: helm: edge chart | Orthanc, de-id, pipeline, uploader, Vector |
 
 ## Step 6 — Verify
 
+The ingress-nginx Service is part of the management release, so it carries the
+release prefix and lives in the release namespace (`mgmt` / `ais-mgmt`,
+`install.sh:121-122`) — there is no `ingress-nginx` namespace:
+
 ```bash
-kubectl -n ingress-nginx get svc ingress-nginx-controller
+kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
 # EXTERNAL-IP should equal 20.x.y.z
 
 curl -v https://loki.aisedge.example.com/ready

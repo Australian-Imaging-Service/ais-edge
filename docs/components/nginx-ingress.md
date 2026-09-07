@@ -15,12 +15,33 @@ nginx-ingress owns directly via `hostNetwork: true`. nginx reads the
 SNI from the TLS ClientHello and forwards to the right backend:
 
 ```
-seaweedfs.aisedge.local   →  TLS terminate  →  svc/seaweedfs:8333  (HTTP, in-cluster)
-k0s.aisedge.local         →  ssl-passthrough →  kmc-edge-dev-nodeport:30443 (mTLS to k0s API)
-konnect.aisedge.local     →  ssl-passthrough →  kmc-edge-dev-nodeport:30132 (gRPC tunnel)
-grafana.aisedge.local     →  TLS terminate  →  svc/...-grafana:80
-loki.aisedge.local        →  TLS terminate  →  svc/loki:3100
+seaweedfs.aisedge.local              →  TLS terminate   →  svc/mgmt-seaweedfs:8333 (HTTP, in-cluster)
+grafana.aisedge.local                →  TLS terminate   →  svc/mgmt-grafana:80
+loki.aisedge.local                   →  TLS terminate   →  svc/mgmt-loki:3100
+k0s-edge-dev.aisedge.local           →  ssl-passthrough →  kmc-edge-dev-nodeport:30443 (mTLS to k0s API)
+konnectivity-edge-dev.aisedge.local  →  ssl-passthrough →  kmc-edge-dev-nodeport:30132 (gRPC tunnel)
 ```
+
+Note the shape of the last two: the k0s API and konnectivity hostnames are
+**per-edge**, `<apiPrefix>-<name>.<domain>` and
+`<konnectivityPrefix>-<name>.<domain>`, with the prefixes defaulting to `k0s`
+and `konnectivity` (`charts/mgmt/values.yaml:222-227`,
+`charts/mgmt/templates/edge-clusters.yaml:19-35`). A site can pin its own
+names per edge via `edges[].apiHost` / `edges[].konnectivityHost`. Fleet-wide
+`hostnames.k0sApi` / `hostnames.konnectivity` keys are gone and their return
+is a render-time failure (`edge-clusters.yaml:85-87`): they gave every edge
+the same two hostnames, so the second site's Ingress claimed a hostname the
+first one already owned and its workers were silently routed to the wrong
+API server. `charts/mgmt/values.yaml:48-51` carries the same warning next to
+the surviving fleet-wide `hostnames:` block, which holds only the three
+management names above.
+
+The three management backends are release-prefixed subchart Services —
+`<release>-seaweedfs`, `<release>-grafana`, `<release>-loki`, i.e. `mgmt-*`
+with the release name `install.sh:122` sets. `charts/mgmt/templates/observability.yaml:43-44`
+derives the Grafana and Loki names from `.Release.Name` rather than from
+`mgmt.fullname` precisely so a `fullnameOverride` cannot point these Ingresses
+at a Service that does not exist.
 
 ssl-passthrough vs TLS terminate:
 - **TLS terminate** — nginx decrypts, makes routing/auth decisions,
@@ -42,19 +63,32 @@ ssl-passthrough vs TLS terminate:
 ## Where it runs
 
 - Cluster: management cluster only
-- Namespace: `ingress-nginx`
-- Workload: Deployment `ingress-nginx-controller` (single replica;
-  hostNetwork pods can't be load-balanced via Service)
-- Image: from helm chart default (current `ingress-nginx-controller`)
+- Namespace: `ais-mgmt` — the management release's namespace
+  (`install.sh:121`). The subchart leaves `namespaceOverride: ""` and
+  `charts/mgmt` does not set it, so there is no separate `ingress-nginx`
+  namespace to look in
+- Workload: Deployment `mgmt-ingress-nginx-controller` (single replica;
+  hostNetwork pods can't be load-balanced via Service). The name is
+  `<release>-ingress-nginx-controller` — substitute your release name if it
+  is not the `mgmt` that `install.sh:122` sets
+- Image: from the pinned subchart's default — `ingress-nginx/controller`
+  `v1.15.1`, from `charts/mgmt/charts/ingress-nginx-4.15.1.tgz`
 - Metrics: `:10254/metrics`
 
 ## Configuration
 
 | File | Purpose |
 |---|---|
-| `manifests/01-management/nginx-ingress-values.yaml.tpl` | helm values — hostNetwork, ssl-passthrough enabled, body size limits |
-| `scripts/02c-install-nginx-ingress.sh` | helm install |
-| Various `*-ingress.yaml.tpl` files | per-service Ingress definitions with the right TLS / passthrough annotations |
+| `charts/mgmt/charts/ingress-nginx-4.15.1.tgz` | the pinned upstream subchart — the controller itself is vendored, not fetched at install time |
+| `charts/mgmt/values.yaml:523-550` (`ingress-nginx:` key) | subchart values — hostNetwork, ssl-passthrough enabled, body size limits. Overridable per site in `sites/<site>/values.yaml`, which is layered on with `-f` |
+| `charts/mgmt/values.yaml:552-556` (`ingressNginx:` key) | this chart's own view of the ingress: `enabled`, `sslPassthrough`, `proxyBodySize`. Read by `charts/mgmt` templates, not by the subchart |
+| `charts/mgmt/templates/seaweedfs.yaml` (S3) and `charts/mgmt/templates/observability.yaml` (Grafana, Loki) | the management Ingress definitions, with the right TLS / body-size / mTLS annotations |
+| `charts/mgmt/templates/edge-clusters.yaml` (`spec.ingress`) | the per-edge k0s API + konnectivity Ingresses are not written here — k0smotron creates them itself from this block, with `ssl-passthrough: "true"` and `backend-protocol: "HTTPS"` |
+
+Installed as part of the management release by `install.sh:364-365` (step 4/7),
+not by a script of its own — `install.sh:35` records that the old
+`scripts/02c-install-nginx-ingress.sh` and the `*-ingress.yaml.tpl` templates
+were replaced by the two Helm releases.
 
 Critical settings (in values):
 - `controller.hostNetwork: true` — direct binding of host port 443
@@ -68,13 +102,19 @@ Critical settings (in values):
 
 ## Operations
 
+Everything below runs in `ais-mgmt`, the management release's namespace —
+`kubectl -n ingress-nginx` returns NotFound.
+
 ```bash
 # Pod state
-kubectl get pods -n ingress-nginx
+kubectl get pods -n ais-mgmt -l app.kubernetes.io/name=ingress-nginx
 
 # Live config (full nginx.conf)
-POD=$(kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller -o name | head -1)
-kubectl exec -n ingress-nginx $POD -- cat /etc/nginx/nginx.conf | head -60
+POD=$(kubectl get pods -n ais-mgmt -l app.kubernetes.io/component=controller -o name | head -1)
+kubectl exec -n ais-mgmt $POD -- cat /etc/nginx/nginx.conf | head -60
+
+# Every SNI route currently served, management and per-edge
+kubectl get ingress -A
 
 # Reach the host port
 sudo ss -tln | grep :443
@@ -84,7 +124,7 @@ curl -kv --resolve grafana.aisedge.local:443:$(MGMT_IP) \
   https://grafana.aisedge.local/api/health
 
 # Look at access logs (per-request lines)
-kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=20
+kubectl logs -n ais-mgmt -l app.kubernetes.io/component=controller --tail=20
 ```
 
 ## Benefits
@@ -104,7 +144,7 @@ kubectl logs -n ingress-nginx -l app.kubernetes.io/component=controller --tail=2
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Single replica on hostNetwork | Pod restart = brief 443 outage | Acceptable for the staging buffer (edges retry); HA needs dropping hostNetwork + a real LB |
-| Misconfigured ssl-passthrough | TLS terminate at nginx breaks mTLS-only backends | Only the k0s + konnect Ingresses use passthrough; verified via curl + s_client |
+| Misconfigured ssl-passthrough | TLS terminate at nginx breaks mTLS-only backends | Only each edge's `k0s-<name>` + `konnectivity-<name>` Ingresses use passthrough; verified via curl + s_client, and `charts/mgmt/templates/edge-clusters.yaml:72-73` refuses to render at all with `ingressNginx.sslPassthrough: false` |
 | Body-size limit too low | Multipart uploads truncated | `proxy-body-size: 50g` set globally + per-Ingress |
 | Self-signed cert mistrusted by browsers | Cert warnings | Distribute `ais-edge-ca.crt` to operators or use a public ACME issuer for browser-facing routes |
 | Controller pod stuck in Pending | No external access | Single-node mgmt with hostNetwork → can't be scheduled if the node is taint-fenced; the install script waits for Ready |

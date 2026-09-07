@@ -16,7 +16,15 @@ etc.
 The source of truth for "is this thing in the right state?" Most of
 our alerts depend on it:
 - `EdgeWorkerDisconnected` — `kube_node_status_condition{condition="Ready"}`
-- `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment="seaweedfs"}`
+- `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment=~".*seaweedfs.*"}`
+  (a REGEX, deliberately: the imperative installer made `Deployment/seaweedfs`,
+  the chart makes `<release>-seaweedfs` in the release namespace, so an exact
+  `deployment="seaweedfs"` matcher selects nothing the moment you install from
+  the chart — the alert would simply stop firing and nothing would say so.
+  `charts/mgmt/files/prometheus-rules/critical.yaml` is loaded with
+  `.Files.Get` because it carries `{{ $labels }}` Helm must not touch, so it
+  cannot be templated with the release name; the regex is what makes one rule
+  cover both layouts)
 - `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
 
 Two caveats on that list, both measured on the live management Prometheus
@@ -65,11 +73,19 @@ rather than assumed:
 ## Where it runs
 
 - Cluster: management cluster only
-- Namespace: `observability`
-- Workload: Deployment `kube-prometheus-stack-kube-state-metrics`
-  (single replica)
+- Namespace: `ais-mgmt` — the management release's namespace
+  (`install.sh:121`). There is no `observability` namespace; that was the
+  old imperative installer's layout, and everything in the stack now lands
+  in the release namespace instead
+- Workload: Deployment `mgmt-kube-state-metrics` (single replica). Note the
+  name is `<release>-kube-state-metrics`, NOT
+  `<release>-kube-prometheus-stack-kube-state-metrics` — KSM is a subchart of
+  a subchart and is named for its own chart, unlike Prometheus itself, which
+  renders as `mgmt-kube-prometheus-stack-prometheus`. Verified by rendering:
+  `helm template mgmt charts/mgmt -n ais-mgmt -f sites/example-mgmt/values.yaml`
 - Image: from kube-prometheus-stack chart default
 - Scraped by the bundled Prometheus via auto-generated ServiceMonitor
+  (`ServiceMonitor/mgmt-kube-state-metrics`, same namespace)
 
 ## Configuration
 
@@ -88,17 +104,17 @@ kube-state-metrics:
 ## Operations
 
 ```bash
-# Pod state
-kubectl get pods -n observability -l app.kubernetes.io/name=kube-state-metrics
+# Pod state  (release `mgmt` in namespace `ais-mgmt` throughout)
+kubectl get pods -n ais-mgmt -l app.kubernetes.io/name=kube-state-metrics
 
 # Sample metrics
-kubectl port-forward -n observability \
-  svc/kube-prometheus-stack-kube-state-metrics 8080:8080 &
+kubectl port-forward -n ais-mgmt \
+  svc/mgmt-kube-state-metrics 8080:8080 &
 curl -s localhost:8080/metrics | grep "^kube_pod_status_phase" | head
 
 # Verify Prometheus is scraping
-kubectl port-forward -n observability \
-  svc/kube-prometheus-stack-prometheus 9090:9090 &
+kubectl port-forward -n ais-mgmt \
+  svc/mgmt-kube-prometheus-stack-prometheus 9090:9090 &
 xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 ```
 
@@ -117,7 +133,7 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 | KSM down | Alerts that depend on its metrics stop firing | Auto-restarts; KPS scrapes regenerate state quickly |
 | API rate-limited | Stale metrics | KSM uses informers (cached); rate-limiting unlikely at our scale |
 | Cluster CRD added | New object kinds not exported | KSM has built-in support for popular CRDs (cert-manager, k0smotron); custom kinds need a CRD allow-list |
-| RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole; verify with `kubectl auth can-i list pods --as=system:serviceaccount:observability:kube-prometheus-stack-kube-state-metrics` |
+| RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole (`mgmt-kube-state-metrics`, cluster-scoped); verify with `kubectl auth can-i list pods --as=system:serviceaccount:ais-mgmt:mgmt-kube-state-metrics` |
 
 ## Replacements / future
 

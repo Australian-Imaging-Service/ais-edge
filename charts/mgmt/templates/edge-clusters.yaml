@@ -110,6 +110,22 @@ be a deliberate `kubectl delete cluster.k0smotron.io/<name> -n <name>`.
     {{- fail (printf "edge %q has exposure %q. Valid values are \"nodePort\" (spec.service.type NodePort with explicit apiNodePort/konnectivityNodePort) and \"sni\" (ClusterIP behind the ssl-passthrough Ingress on :443)." $edge.name $mode) }}
   {{- end }}
 
+    {{- /* nodePort ON CLOUD REACHES NOTHING, OR REACHES IT EXPENSIVELY.
+           A node port lives on the NODE, not behind the load balancer. On cloud
+           the management node is usually behind the balancer with no public
+           address of its own, so the port is unreachable and the mode renders
+           perfectly while giving the edge nowhere to connect. If the node IS
+           public, every additional edge adds two more ports to the security
+           group -- on the management side, for a path the ssl-passthrough
+           Ingress already serves on :443, which is open.
+
+           sni costs nothing extra: the Ingress is rendered in BOTH modes
+           anyway, so on cloud it is already the working path and nodePort only
+           adds a second one that usually is not. */ -}}
+    {{- if and (eq $.Values.topology "cloud") (eq $mode "nodePort") }}
+      {{- fail (printf "edge %q has exposure=nodePort with topology=cloud. A node port is published on the node itself, not behind the load balancer -- on cloud the management node normally has no public address, so nothing can reach it and the edge has nowhere to connect. Where the node IS public, each edge adds two more ports to the security group for a path the ssl-passthrough Ingress already serves on :443. Use exposure: sni. NOTE that nodePort is the CHART DEFAULT, so an edge entry that simply omits `exposure` lands here -- set it explicitly." $edge.name) }}
+    {{- end }}
+
   {{- $api := include "mgmt.edgeApiHost" (list $ $edge) }}
   {{- $kon := include "mgmt.edgeKonnectivityHost" (list $ $edge) }}
   {{- range $pair := (list (list $api "api") (list $kon "konnectivity")) }}

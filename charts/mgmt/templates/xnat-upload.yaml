@@ -133,12 +133,6 @@ spec:
             {{- if not $root.Values.xnatUpload.verifySsl }}
             - "--dont-verify-ssl"
             {{- end }}
-            # xnat-ingest has no S3 env-var path of its own; it persists the
-            # keys into its own credential store on first run, and this is the
-            # only way to seed it.
-            - "--store-credentials"
-            - "$(S3_ACCESS_KEY)"
-            - "$(S3_SECRET_KEY)"
           env:
             - name: XINGEST_HOST
               valueFrom:
@@ -165,6 +159,25 @@ spec:
                 secretKeyRef:
                   name: {{ $edge.uploadSecretRef | default $root.Values.xnatUpload.s3SecretRef }}
                   key: secret-key
+            # THE CREDENTIALS GO IN THE ENVIRONMENT, NOT IN argv.
+            #
+            # They used to be passed as `--store-credentials <key> <secret>`, which puts
+            # the secret key in the process command line: `ps` inside the pod, and
+            # anything reading /proc/*/cmdline on the node, shows it in full. argv is
+            # world-readable; the environment is not.
+            #
+            # The comment that used to sit above those arguments said xnat-ingest had no
+            # env path for this. It does: upload_cli.py declares
+            # envvar="XINGEST_STORE_CREDENTIALS" on the same option. Because the option
+            # takes nargs=2, click splits the value on WHITESPACE, so one variable
+            # carries both halves. Verified against the image rather than assumed:
+            #   'KEY SECRET'  -> ('KEY', 'SECRET')
+            #   'KEY:SECRET'  -> BadParameter, takes 2 values but 1 was given
+            #
+            # $(VAR) expands from the two entries above, which must stay declared
+            # before this one.
+            - name: XINGEST_STORE_CREDENTIALS
+              value: "$(S3_ACCESS_KEY) $(S3_SECRET_KEY)"
 
             # --- boto3 / SeaweedFS -----------------------------------------
             # In-cluster Service address, plain http. This traffic never leaves

@@ -8,6 +8,9 @@ topology: onprem
 hostAliases:
   enabled: false
 
+deid:
+  engine: none
+
 # Preserve all data during migration. Retention can be enabled separately only
 # after the new deployment has been observed and approved.
 dataPolicy:
@@ -49,7 +52,8 @@ orthanc:
   # Preserve the current receive-time transcoding behaviour.
   ingestTranscoding: "1.2.840.10008.1.2.1"
   deid:
-    enabled: false
+    # CIMA-X currently receives data without applying either chart de-id engine.
+    policyReviewed: true
 
 ingest:
   image:

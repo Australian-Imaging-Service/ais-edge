@@ -1,0 +1,83 @@
+# Example de-identification recipe for medimage/dicom-series.
+#
+# This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
+# xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+# is the category and the FILE is the format: medimage/dicom-series. It skips
+# anything at the top level that is not a directory, so a flat file named
+# `medimage@dicom-series.json` is never read and every session fails with
+# "No deidentification specs found".
+#
+# Copy this directory, rename __default__ to your project ID for a
+# project-specific policy, and edit to match your site's approved profile.
+# __default__ is the fallback for any project without its own directory.
+#
+# ONLY THE TAGS NAMED HERE ARE REMOVED. Anything not listed passes through
+# untouched, so this list IS the policy — review it as such.
+#
+# Compare with files/deidentification-profile.example.json, which is the
+# equivalent for the Orthanc Lua engine and has a different syntax.
+
+FORMAT dicom
+
+%header
+
+# Direct identifiers.
+REMOVE PatientName
+REMOVE PatientBirthDate
+REMOVE PatientAddress
+REMOVE PatientTelephoneNumbers
+REMOVE OtherPatientIDs
+REMOVE OtherPatientNames
+
+# Care-team and institution.
+REMOVE ReferringPhysicianName
+REMOVE PerformingPhysicianName
+REMOVE OperatorsName
+REMOVE InstitutionName
+REMOVE InstitutionAddress
+
+# Local accession/order numbers, which are re-identifying within a site.
+REMOVE AccessionNumber
+
+# MARK THE RESULT AS DE-IDENTIFIED. Without these two tags an instance that has
+# been through this stage is indistinguishable, by its own metadata, from one
+# that was never processed, and some downstream tooling keys on them. The
+# Orthanc engine already sets PatientIdentityRemoved in its profile; this is the
+# same assertion for this engine, so the two are not asymmetric.
+#
+# ADD, not REPLACE: the source instance does not carry these, and REPLACE only
+# rewrites a tag that is already present.
+ADD PatientIdentityRemoved YES
+ADD DeidentificationMethod AIS-Edge xnat-ingest recipe
+
+# THE PATIENT IDENTIFIER. Removed, and the reason matters because an earlier
+# version of this file kept it on a premise that is false.
+#
+# It claimed assign had already rewritten PatientID to the routed subject.
+# assign does no such thing: it READS tag values to resolve the project,
+# subject and session ids and then copies or hardlinks the files unchanged. It
+# never opens a dataset for writing. Verified by grepping the package for any
+# write to PatientID; there is none.
+#
+# It also claimed upload needs the tag to place the session. It does not.
+# Placement is explicit: upload builds the XNAT path from the session object's
+# ids, which came from ingest.assign.tagMapping, not from this header. So
+# removing PatientID cannot detach the data from its subject.
+#
+# What DOES happen if it is left: upload finishes by calling
+# /data/experiments/<id>?pullDataFromHeaders=true, which asks XNAT to populate
+# its own metadata FROM THESE HEADERS. So a real medical record number left
+# here is not merely present in the pixel archive, it is pulled into XNAT's
+# fields, while PatientName, birth date and institution are all correctly
+# stripped and the result looks de-identified to a spot check.
+#
+# Measured before this change: an instance de-identified by this recipe and
+# uploaded still carried PatientID verbatim, with PatientIdentityRemoved absent.
+REMOVE PatientID
+
+# QUASI-IDENTIFIERS, left in deliberately but LISTED so the choice is visible.
+# Age and sex are research-relevant and are not direct identifiers, but in a
+# small cohort they narrow it sharply. Decide per site; they are named here
+# rather than omitted so that deciding is not the same as forgetting.
+#   PatientSex
+#   PatientAge

@@ -58,7 +58,30 @@ mk_session() {  # mk_session <root> <stage-dir> <name> <age-minutes>
     d="$1/$2/$3"; mkdir -p "$d"; echo data > "$d/img.dcm"
     touch -d "$4 minutes ago" "$d/img.dcm" "$d"
 }
-mk_uploaded() { touch "$1/LOGS/s3-uploader-state/$2"; }   # the uploader's marker
+mk_uploaded() {  # mk_uploaded <root> <name>
+    # THE MARKER CARRIES A FINGERPRINT, NOT MERELY EXISTENCE. The uploader
+    # writes a fingerprint of exactly the bytes it uploaded, and condition_met
+    # recomputes it and compares. Existence alone was safe only while the marker
+    # was swept in the same pass that wrote it, so it could never outlive the
+    # data it described; now that it survives, an existence test would be a
+    # standing permission to delete anything later appearing under the same
+    # session name.
+    #
+    # MUST match fingerprint() in charts/edge/files/data-policy.sh and
+    # s3-uploader.sh. scripts/ci/fingerprint-contract.sh keeps those two in
+    # step with each other; this is the third copy and it is deliberate,
+    # because a test that computed it a different way would pass while the
+    # engine failed.
+    if [ -d "$1/assigned/$2" ]; then
+        ( cd "$1/assigned/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
+            | sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
+    else
+        # The session has already moved past the assigned stage. The engine
+        # returns "satisfied" before it compares anything, so the content here
+        # is irrelevant -- but the marker must still exist.
+        echo "moved-on" > "$1/LOGS/s3-uploader-state/$2"
+    fi
+}
 
 # run_engine <root> <stages.tsv contents> <RECLAIM_ENABLED> <DRY_RUN> [MAX_REMOVALS]
 run_engine() {
@@ -82,6 +105,8 @@ run_engine() {
         -e ASSIGNED_DIR=/data/assigned \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
+        -e STUCK_AFTER_S="${STUCK_AFTER_T:-0}" \
+        -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         --entrypoint sh "$IMAGE" /s.sh > "$root/out.jsonl" 2>&1
 }
 
@@ -105,6 +130,20 @@ check removed_when_eligible "$R" assigned/s1 gone "uploaded + past minAge + arme
 R="$WORK/c2"; build_case "$R"; mk_session "$R" assigned s1 60; mk_uploaded "$R" s1
 run_engine "$R" "derived.assigned${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onUploaded${TAB}86400${TAB}filesystem" true false
 check kept_inside_minage "$R" assigned/s1 exist "minAge 24h not yet elapsed — the recovery window"
+
+# 2b — a marker describing DIFFERENT bytes must not authorise removal.
+# This is the case the fingerprint comparison exists for: a session re-staged
+# under a name that was uploaded before (a supplementary or re-sent study)
+# would otherwise inherit the old marker's authority and be deleted without
+# ever having been uploaded.
+R="$WORK/c2b"; build_case "$R"; mk_session "$R" assigned s1 60; mk_uploaded "$R" s1
+# Re-staged under the SAME NAME with different content. mk_session alone would
+# not do: it writes identical bytes at an identical backdated mtime, so the
+# fingerprint would match and the case would prove nothing.
+echo "a supplementary study, different bytes" > "$R/assigned/s1/img.dcm"
+touch -d "60 minutes ago" "$R/assigned/s1/img.dcm" "$R/assigned/s1"
+run_engine "$R" "$STAGES_ASSIGNED" true false
+check kept_stale_fingerprint "$R" assigned/s1 exist "marker describes an earlier upload of different bytes"
 
 # 3 — never uploaded -> kept regardless of age
 R="$WORK/c3"; build_case "$R"; mk_session "$R" assigned s1 600
@@ -211,6 +250,33 @@ else
     fail orthanc_no_url "expected a backend_unavailable event; got: $(tail -1 "$R/out.jsonl" 2>/dev/null | cut -c1-90)"
 fi
 check orthanc_no_url_nodelete "$R" assigned/s1 exist "and deleted nothing while unconfigured"
+
+# 20 — an unsatisfied condition past stuckAfter IS reported as stage_stuck.
+# The baseline for case 21: without it, 21 could pass because nothing fires at
+# all rather than because the delegation suppressed it.
+R="$WORK/c20"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_T=1 run_engine "$R" "$STAGES_ASSIGNED" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    pass stuck_reported "unsatisfied past stuckAfter is reported as stage_stuck"
+else
+    fail stuck_reported "expected stage_stuck; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 21 — SAME INPUTS, but the stage is named as externally reclaimed. This is
+# upload.mode=direct: onUploaded cannot be satisfied because no s3-uploader
+# exists, and that is the design rather than a stall, because the
+# staged-reclaimer CronJob removes the session once XNAT confirms it. Calling it
+# stuck would page a human nightly for a tree that is draining normally.
+R="$WORK/c21"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_T=1 EXTERNAL_STAGE_T=derived.assigned run_engine "$R" "$STAGES_ASSIGNED" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    fail stuck_delegated "stage_stuck fired for a stage whose deletes belong to the reclaimer"
+elif grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass stuck_delegated "no stage_stuck, and the kept line says the deletes are delegated"
+else
+    fail stuck_delegated "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+check stuck_delegated_nodelete "$R" assigned/s1 exist "and this engine still deleted nothing from that tree"
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi
