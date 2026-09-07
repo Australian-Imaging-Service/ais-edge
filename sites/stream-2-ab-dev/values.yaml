@@ -79,7 +79,7 @@ orthanc:
   # The AE title modalities C-STORE to, on this node's port 4242.
   aet: AISEDGE
   auth:
-    enabled: false
+    enabled: true
   deid:
     # THE GATE. The chart refuses to render while this is false and deid is on.
     # Set it only once you have read the profile and the AET map below and agree
