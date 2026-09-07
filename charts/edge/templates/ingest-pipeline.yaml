@@ -304,6 +304,7 @@ spec:
             - "/data/assigned"
             - "/data/deidentified"
             - "/etc/xnat-ingest/deid-specs"
+            - "--reid-dir"
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
