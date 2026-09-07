@@ -1018,12 +1018,28 @@ EOF
 # Orthanc auth on with nothing to authenticate against. The deployment mounts
 # existingSecret non-optionally, so an empty name fails as a volume error
 # rather than as an auth error.
+# Orthanc auth ON with a populated Secret: the shape a site that turns auth on
+# actually runs. Renders both consumers, so the values-consumers and render
+# stages see the credential wiring rather than only the negative case.
+cat >"$V/edge-auth-on.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+EOF
+
 cat >"$V/neg-edge-auth-no-secret.yaml" <<'EOF'
 orthanc:
   auth:
     enabled: true
     existingSecret: ""
 EOF
+
+# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# NotImplementedError at RUN TIME for anything else, so without this guard the
+# pod renders, starts and then CrashLoops with a message that never names the
+# setting that caused it.
+printf 'ingest:\n  orthancGroup:\n    copyMode: copy\n' >"$V/neg-edge-orthanc-copymode.yaml"
 
 
 # =============================================================================
@@ -1067,6 +1083,8 @@ edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml ed
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-s3-mtls	charts/edge	edge-base.yaml edge-s3-mtls.yaml
 edge-s3-mtls-no-cabundle	charts/edge	edge-base.yaml edge-s3-mtls-no-cabundle.yaml
+edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
+edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml edge-s3-mtls.yaml
 EOF
 }
@@ -1159,6 +1177,7 @@ neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
+neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
 EOF
 }
 

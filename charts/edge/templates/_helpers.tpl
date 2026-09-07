@@ -147,6 +147,23 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
+           auth to work, checked here rather than discovered on a live box. */ -}}
+      {{- /* group-orthanc IGNORES nothing and IMPLEMENTS nothing here: xnat-ingest
+         raises outright. api/group_api.py:252 refuses any copy_mode other than
+         hardlink_or_copy for the Orthanc path:
+
+           NotImplementedError: 'unlink_source', copy_mode' and 'raise_errors'
+           are not yet implemented for Orthanc grouping.
+
+         It is a RUNTIME raise, so the pod renders, schedules, starts and then
+         CrashLoops, and the message says nothing about which value caused it.
+         MEASURED against 0.15.0; the same raise is in 0.13.1, so this is not a
+         version regression, it is a long-standing footgun with no guard.
+         The other stages accept the full set, which is why this key looks safe
+         to change and is not. */ -}}
+  {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
+    {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
+  {{- end }}
     {{- /* Auth on with no Secret named is the one shape that cannot work: the
          deployment mounts existingSecret non-optionally and Orthanc's
          RegisteredUsersFile points inside it, so an empty name leaves the pod
