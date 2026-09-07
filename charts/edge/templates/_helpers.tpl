@@ -111,6 +111,33 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail "deid.engine=ingest but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
   {{- end }}
 
+  {{- /* THE MIRROR OF THE GUARD ABOVE, and the one that was missing. Recipes
+         supplied while some OTHER engine is selected are not a smaller mistake
+         than recipes missing: they are discarded in silence.
+
+         ingest-pipeline.yaml gates the deid-specs ConfigMap on the engine
+         (line 258) and the whole deidentify Deployment on it again (line 282),
+         and deid.engine defaults to "orthanc". So a site that pastes recipes
+         into values.yaml and leaves the engine alone gets:
+
+           helm rc=0, 0 deid-specs ConfigMaps, 0 deidentify Deployments,
+           the recipe text absent from the render, and no warning anywhere.
+
+         MEASURED on the shipped example site with only specs added. The Orthanc
+         Lua profile keeps running, so de-identification still happens; what is
+         lost is the CHANGE the operator believed they had made. That is the
+         dangerous shape: a tightened recipe added after an ethics review reads
+         as applied and is not. */ -}}
+{{- if ne (include "edge.deidEngine" .) "ingest" }}
+  {{- $supplied := list }}
+  {{- if .Values.ingest.deidentify.specs }}{{- $supplied = append $supplied "specs" }}{{- end }}
+  {{- if .Values.ingest.deidentify.specConfigMap }}{{- $supplied = append $supplied "specConfigMap" }}{{- end }}
+  {{- if .Values.ingest.deidentify.specFiles }}{{- $supplied = append $supplied "specFiles" }}{{- end }}
+  {{- if $supplied }}
+    {{- fail (printf "ingest.deidentify.%s is set, but deid.engine=%s. Those recipes belong to the xnat-ingest de-identification stage, which only renders under deid.engine=ingest, so nothing would mount them and no deidentify pod would exist: the chart would install cleanly and your recipe would never run. De-identification would still happen, via the Orthanc Lua profile in orthanc.deid.profile, which is a DIFFERENT recipe. Either set deid.engine=ingest to use what you have written here, or edit orthanc.deid.profile instead, which is what the selected engine reads." (join ", ingest.deidentify." $supplied) (include "edge.deidEngine" .)) }}
+  {{- end }}
+{{- end }}
+
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}

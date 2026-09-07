@@ -223,6 +223,39 @@ at the front door, before `group`, `assign` or anything else sees them. On this
 specific property the Lua engine is the stronger of the two, whatever its hash
 weakness.
 
+**The birth date is coarsened, not jittered, and the two engines disagree about
+it.** The shipped Orthanc profile sets
+
+```yaml
+PatientBirthDate: ${BirthYearOnly}0101
+```
+
+and the Lua hook resolves `${BirthYearOnly}` by taking the first four characters
+of the incoming date:
+
+```lua
+local birthYear = (rawBirth and #rawBirth >= 4) and string.sub(rawBirth, 1, 4) or "1900"
+```
+
+So `19551103` becomes `19550101`. The day and month are discarded and **the
+patient's true birth year is kept**. That is truncation to the year, and it is a
+deliberate research trade-off: age at scan stays computable to within a year.
+It is *not* jitter, and nothing here offsets the date by a random amount, so do
+not read a changed-looking date as evidence that it was randomised. If your
+ethics approval does not permit retaining the real year, remove the tag rather
+than reshaping it.
+
+The ais-deid recipe makes the opposite choice: `REMOVE PatientBirthDate` drops
+it entirely. A site that switches engines therefore changes what reaches XNAT in
+this field with nothing in the switch that says so.
+
+A zero-length birth date used to fall through this. Lua treats only `nil` and
+`false` as falsy, so a present-but-empty `PatientBirthDate` skipped the `or`
+fallback and resolved to the four-character string `0101`, which is not a valid
+DICOM date, written into every instance of that study. The length is checked
+now, and an absent, empty or malformed date all yield `19000101`.
+
+
 ## The label coupling
 
 The Lua hook does two jobs, not one. It de-identifies, **and** it applies the
