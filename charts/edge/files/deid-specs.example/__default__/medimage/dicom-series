@@ -86,6 +86,22 @@ REMOVE PatientID
 # Application Level Confidentiality tags in DICOM PS3.15.
 REMOVE StationName
 REMOVE DeviceSerialNumber
+# THE REFERRAL, which the earlier pass missed by naming only two of the three
+# person-name fields. ReferringPhysicianName and PerformingPhysicianName were
+# removed; RequestingPhysician was not, and it carries the same name.
+# AdmittingDiagnosesDescription is free text stating why the patient was
+# admitted, so it is clinical information about that patient rather than about
+# the acquisition.
+#
+# MEASURED on a live tier-1 install with the Orthanc engine: a study whose
+# RequestingPhysician was "NGUYEN^THI^LAN" and whose
+# AdmittingDiagnosesDescription was "Suspected pulmonary embolism" reached the
+# staged output with both verbatim. OtherPatientIDs ("URN-99887766") survived
+# the Orthanc profile too, though this recipe already removed it, which is
+# exactly the kind of drift between the two engines worth closing. All three
+# are Basic Application Level Confidentiality tags in DICOM PS3.15.
+REMOVE RequestingPhysician
+REMOVE AdmittingDiagnosesDescription
 
 # PRIVATE TAGS PASS THROUGH, and that is a decision, not an oversight. The
 # Orthanc engine states it explicitly as "RemovePrivateTags": false; this recipe
