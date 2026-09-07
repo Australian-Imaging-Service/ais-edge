@@ -147,6 +147,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
+      {{- /* PREREQUISITES FOR orthanc.auth.enabled=true, ASSERTED AT RENDER.
+
+           This option was shipped for a long time in a state where turning it on
+           could not work: the config named a "RegisteredUsersFile" key Orthanc
+           does not have, so Orthanc registered NO users and answered 401 to
+           everyone, group-orthanc crash-looped, and data-policy silently
+           reclaimed nothing. Everything below is a thing that has to be true for
            auth to work, checked here rather than discovered on a live box. */ -}}
       {{- /* group-orthanc IGNORES nothing and IMPLEMENTS nothing here: xnat-ingest
          raises outright. api/group_api.py:252 refuses any copy_mode other than
@@ -164,13 +171,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
     {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
   {{- end }}
-    {{- /* Auth on with no Secret named is the one shape that cannot work: the
-         deployment mounts existingSecret non-optionally and Orthanc's
-         RegisteredUsersFile points inside it, so an empty name leaves the pod
-         unable to start with a message about a volume rather than about auth. */ -}}
-  {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
-    {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json (what Orthanc checks, via RegisteredUsersFile), plus orthanc-user and orthanc-password (what group-orthanc authenticates with). If they disagree, Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc." }}
-  {{- end }}
+
+  {{- if .Values.orthanc.auth.enabled }}
+      {{- if not .Values.orthanc.auth.existingSecret }}
+        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy engine both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem, which stops it using the REST API." }}
+      {{- end }}
+    {{- end }}
 
   {{- if not .Values.orthanc.deid.existingSaltSecret }}
       {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}

@@ -105,6 +105,8 @@ run_engine() {
         -e ASSIGNED_DIR=/data/assigned \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
+        -e ORTHANC_USER="${ORTHANC_USER_T:-}" \
+        -e ORTHANC_PASS="${ORTHANC_PASS_T:-}" \
         -e STUCK_AFTER_S="${STUCK_AFTER_T:-0}" \
         -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         --entrypoint sh "$IMAGE" /s.sh > "$root/out.jsonl" 2>&1
@@ -277,6 +279,63 @@ else
     fail stuck_delegated "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
 fi
 check stuck_delegated_nodelete "$R" assigned/s1 exist "and this engine still deleted nothing from that tree"
+
+# 22, 23 — ORTHANC AUTH. The engine reclaims the Orthanc store over the REST API
+# whenever the backend is orthanc-rest, so when orthanc.auth.enabled is true it
+# is a SECOND consumer of the credentials, not just group-orthanc.
+#
+# 22 is the failure this pair exists for, and it was silent. Without credentials
+# every call returns 401; a 401 body is empty, so /tools/find yielded an empty id
+# list and the engine logged backend_idle "nothing to reclaim" -- byte-identical
+# to a healthy empty store, while the Orthanc store grew until the disk did.
+# A real Orthanc is used rather than a stub because the bug was in what a real
+# 401 looks like to curl, which a stub would have had to guess.
+ORTHANC_IMG=jodogne/orthanc-plugins:1.12.11
+if docker image inspect "$ORTHANC_IMG" >/dev/null 2>&1 || docker pull -q "$ORTHANC_IMG" >/dev/null 2>&1; then
+    OCFG=$(mktemp -d)
+    cat >"$OCFG/orthanc.json" <<'EOF'
+{ "Name":"authtest", "RemoteAccessAllowed":true, "AuthenticationEnabled":true, "HttpPort":8042 }
+EOF
+    cat >"$OCFG/users.json" <<'EOF'
+{"RegisteredUsers":{"admin":"testpw123"}}
+EOF
+    OCID=$(docker run -d --rm -v "$OCFG":/etc/orthanc:ro "$ORTHANC_IMG" 2>/dev/null)
+    OIP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$OCID" 2>/dev/null)
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        curl -s -o /dev/null --max-time 2 "http://$OIP:8042/system" && break || sleep 1
+    done
+    STAGE="derived.orthancStorage${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest"
+
+    # 22 — auth on, engine given NO credentials: must report, not invent "empty".
+    R="$WORK/c22"; build_case "$R"; mk_session "$R" assigned s1 60
+    ORTHANC_URL_T="http://$OIP:8042" run_engine "$R" "$STAGE" true false
+    if grep -q '"event":"backend_idle"' "$R/out.jsonl" 2>/dev/null; then
+        fail orthanc_401_not_idle "a 401 was reported as backend_idle — indistinguishable from an empty store"
+    elif grep -q '"event":"backend_unavailable"' "$R/out.jsonl" 2>/dev/null; then
+        pass orthanc_401_not_idle "401 reports backend_unavailable, not an empty store"
+    else
+        fail orthanc_401_not_idle "expected backend_unavailable; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+    fi
+    check orthanc_401_nodelete "$R" assigned/s1 exist "and deleted nothing while unauthenticated"
+
+    # 23 — same Orthanc, correct credentials: the query succeeds, and an empty
+    # store is now legitimately reported as empty.
+    R="$WORK/c23"; build_case "$R"; mk_session "$R" assigned s1 60
+    ORTHANC_URL_T="http://$OIP:8042" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+        run_engine "$R" "$STAGE" true false
+    if grep -q '"event":"backend_unavailable"' "$R/out.jsonl" 2>/dev/null; then
+        fail orthanc_authed_ok "authenticated query still reported backend_unavailable"
+    elif grep -q '"event":"backend_idle"' "$R/out.jsonl" 2>/dev/null; then
+        pass orthanc_authed_ok "authenticated query succeeds; empty store reads as empty"
+    else
+        fail orthanc_authed_ok "expected backend_idle; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+    fi
+
+    docker kill "$OCID" >/dev/null 2>&1 || true
+    rm -rf "$OCFG"
+else
+    printf '  SKIP  %-26s %s\n' "orthanc_auth" "$ORTHANC_IMG unavailable"
+fi
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi

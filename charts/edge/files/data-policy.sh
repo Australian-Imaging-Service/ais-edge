@@ -455,12 +455,28 @@ expire_original() {   # expire_original <name> <location> <retain_seconds> <poli
 # but that is a reason to be careful rather than a licence to guess.
 # -----------------------------------------------------------------------------
 orthanc_curl() {   # orthanc_curl <method> <path> [data]
+    # --fail, AND IT IS LOAD-BEARING TWICE.
+    #
+    # Without it curl exits 0 on an HTTP error, so the two callers both read a
+    # 4xx as success:
+    #
+    #   /tools/find  a 401 returns an EMPTY BODY, so the id list is empty and the
+    #                caller logs backend_idle "nothing to reclaim". Identical to a
+    #                genuinely empty store. The Orthanc store grows until the disk
+    #                does and nothing says why. MEASURED: anonymous against an
+    #                authenticating Orthanc gives body='' HTTP=401 curl_exit=0.
+    #   DELETE       `if orthanc_curl DELETE ...; then` recorded a REFUSED delete
+    #                as reclaim_removed. It reported deleting patient data it had
+    #                not deleted.
+    #
+    # With --fail curl exits 22 on >=400, both callers take their error branch,
+    # and the engine reports backend_unavailable rather than inventing a result.
     if [ -n "$ORTHANC_USER" ]; then
         printf 'user = "%s:%s"\n' "$ORTHANC_USER" "$ORTHANC_PASS" \
-            | curl -sS --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
+            | curl -sS --fail --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
                    ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
     else
-        curl -sS --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+        curl -sS --fail --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
     fi
 }
 
@@ -474,9 +490,19 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         return 0
     fi
 
-    ids=$(orthanc_curl POST /tools/find \
-            "{\"Level\":\"Study\",\"Query\":{},\"Labels\":[\"${ORTHANC_PROCESSED_LABEL}\"],\"LabelsConstraint\":\"All\"}" \
-          | tr -d '[]" ' | tr ',' '\n' | grep -v '^$')
+    # THE QUERY AND THE PARSE ARE SEPARATE STATEMENTS ON PURPOSE. This shell
+    # runs with `set -u` and no `pipefail`, so a pipeline reports the status of
+    # its LAST command. Running curl inside the tr/grep pipeline threw curl's
+    # status away, and an HTTP failure then read as an empty result: the engine
+    # logged backend_idle "nothing to reclaim", which is exactly what a healthy
+    # empty store logs. Capture first, judge, then parse.
+    o_raw=$(orthanc_curl POST /tools/find \
+            "{\"Level\":\"Study\",\"Query\":{},\"Labels\":[\"${ORTHANC_PROCESSED_LABEL}\"],\"LabelsConstraint\":\"All\"}") || {
+        jlog backend_unavailable "$o_name" "Orthanc refused or failed the study query, so an empty store cannot be told apart from an unreachable one — reclaiming nothing rather than guessing. If orthanc.auth.enabled is true, check the credentials." \
+             ",\"url\":\"$(jsan "$ORTHANC_URL")\""
+        return 0
+    }
+    ids=$(printf '%s' "$o_raw" | tr -d '[]" ' | tr ',' '\n' | grep -v '^$')
     if [ -z "$ids" ]; then
         jlog backend_idle "$o_name" "no studies carry ${ORTHANC_PROCESSED_LABEL} — nothing to reclaim"
         return 0

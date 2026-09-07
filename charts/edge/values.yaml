@@ -501,24 +501,42 @@ orthanc:
     # being ClusterIP-only.
     enabled: true
     #
-    # THREE keys, not two. The Secret is consumed by two different things:
+    # THREE keys, not two. The Secret is consumed by three different things:
     #
-    #   users.json        mounted at /etc/orthanc-credentials/users.json and
-    #                     named by RegisteredUsersFile. This is what Orthanc
-    #                     itself checks:
+    #   users.json        mounted INTO the Orthanc configuration directory, at
+    #                     /etc/orthanc/users.json. It is not a credentials file
+    #                     in a format of our own: it is an Orthanc CONFIG
+    #                     FRAGMENT, and must be exactly
     #                       {"RegisteredUsers":{"admin":"<password>"}}
+    #                     Orthanc scans /etc/orthanc and merges every .json it
+    #                     finds, which is how these users reach it. Its own
+    #                     startup log names both files:
+    #                       Reading the configuration from: /etc/orthanc/orthanc.json
+    #                       Reading the configuration from: /etc/orthanc/users.json
     #                     The password is PLAINTEXT inside that JSON, which is
     #                     why this Secret belongs in secrets.enc.yaml and is
     #                     SOPS-encrypted at rest.
-    #   orthanc-user      read by group-orthanc, which calls the REST API to
-    #   orthanc-password  list and label studies. If they do not match the user
-    #                     in users.json, Orthanc answers 401 and the pipeline
-    #                     stalls with data sitting in Orthanc and no error
-    #                     anywhere else.
+    #   orthanc-user      read by group-orthanc, which lists and labels studies,
+    #   orthanc-password  and by the data-policy engine, which reclaims the
+    #                     Orthanc store over the same REST API whenever
+    #                     dataPolicy.derived.orthancStorage.backend is
+    #                     orthanc-rest. Both take them from HERE, so the two
+    #                     cannot present different credentials to one Orthanc.
+    #                     If they do not match the user in users.json, Orthanc
+    #                     answers 401: group-orthanc crash-loops, and the store
+    #                     reclaim finds nothing to do.
     #
-    # An earlier version of this comment named only the last two. A Secret
-    # built from it installs cleanly and then Orthanc fails to start, because
-    # RegisteredUsersFile points at a path the volume never supplied.
+    # THERE IS NO "RegisteredUsersFile" OPTION IN ORTHANC, and an earlier version
+    # of this comment said there was. The config carried that key, Orthanc
+    # ignored it silently, registered NO users, and with AuthenticationEnabled
+    # true refused EVERY request including correct credentials. It was never a
+    # mounting problem and no path would have fixed it. MEASURED on
+    # jodogne/orthanc-plugins:1.12.11, two containers identical but for the
+    # mechanism:
+    #     RegisteredUsersFile:          authenticated=401 anonymous=401
+    #     users.json in the config dir: authenticated=200 anonymous=401
+    # If you are reading this because you saw a 401, check that users.json is
+    # mounted inside /etc/orthanc and that its password equals orthanc-password.
     existingSecret: orthanc-credentials
 
   # Rewriting pixel data at receive time happens BEFORE the Lua hook runs, so

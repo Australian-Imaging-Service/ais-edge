@@ -134,7 +134,17 @@ spec:
             {{- end }}
             {{- if .Values.orthanc.auth.enabled }}
             - name: credentials
-              mountPath: /etc/orthanc-credentials
+              # INTO THE CONFIG DIRECTORY, not a directory of its own. Orthanc scans
+              # /etc/orthanc and merges every .json it finds there; it has no option
+              # that reads a users file from anywhere else. Mounted at a path rather
+              # than over the directory, so the ConfigMap's orthanc.json survives.
+              #
+              # subPath is deliberate and has a cost: the file does NOT refresh when
+              # the Secret changes. That is acceptable here because Orthanc reads its
+              # configuration once at startup, so a credential change needs a restart
+              # either way.
+              mountPath: /etc/orthanc/users.json
+              subPath: users.json
               readOnly: true
             {{- end }}
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
