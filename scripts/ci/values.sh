@@ -825,6 +825,12 @@ orthanc:
     existingSecret: ""
 EOF
 
+# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# NotImplementedError at RUN TIME for anything else, so without this guard the
+# pod renders, starts and then CrashLoops with a message that never names the
+# setting that caused it.
+printf 'ingest:\n  orthancGroup:\n    copyMode: copy\n' >"$V/neg-edge-orthanc-copymode.yaml"
+
 # -- the deid profile is a contract with assign, not only a privacy policy -----
 # Removing one ClinicalTrial* tag is the plausible mistake: they read as trial
 # bookkeeping, so tightening a profile invites deleting them. Nothing fails at
@@ -1023,6 +1029,7 @@ neg-edge-ruler-am-drift	charts/edge	edge-base.yaml neg-edge-ruler-am-drift.yaml	
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
+neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
 EOF
 }
 
