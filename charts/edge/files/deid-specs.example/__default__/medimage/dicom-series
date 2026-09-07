@@ -75,6 +75,30 @@ ADD DeidentificationMethod AIS-Edge xnat-ingest recipe
 # uploaded still carried PatientID verbatim, with PatientIdentityRemoved absent.
 REMOVE PatientID
 
+# THE SCANNER, not the patient, and still identifying. StationName names one
+# machine in one room; DeviceSerialNumber is globally unique to a device. With
+# InstitutionName already removed these are what put a study back in a building.
+#
+# MEASURED, and the reason they are here: a synthetic study carrying
+# StationName "CT-SCANNER-03" and DeviceSerialNumber "SN-CT-778812" was run
+# through this recipe and reached the de-identified output with BOTH verbatim,
+# because neither this recipe nor the Orthanc profile named them. Both are Basic
+# Application Level Confidentiality tags in DICOM PS3.15.
+REMOVE StationName
+REMOVE DeviceSerialNumber
+
+# PRIVATE TAGS PASS THROUGH, and that is a decision, not an oversight. The
+# Orthanc engine states it explicitly as "RemovePrivateTags": false; this recipe
+# said nothing, which made the same choice invisible on this side. Vendors put
+# reconstruction parameters research needs in private blocks, and they also put
+# scheduling references and operator notes there. MEASURED: a private block
+# carrying "local-scheduling-ref-8842" survives this recipe intact.
+#
+# If your site cannot accept that, remove them per-block by tag number; there is
+# no blanket switch here. Decide, do not inherit this by default.
+
+
+
 # QUASI-IDENTIFIERS, left in deliberately but LISTED so the choice is visible.
 # Age and sex are research-relevant and are not direct identifiers, but in a
 # small cohort they narrow it sharply. Decide per site; they are named here

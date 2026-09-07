@@ -294,8 +294,21 @@ through untouched, so the recipe *is* the policy — review it as one. A session
 whose format has no applicable recipe is skipped and logged rather than
 uploaded with identifiers still attached.
 
-Do not remove `PatientID`: `assign` has already rewritten it to the routed
-project/subject, and `upload` needs it to place the session in XNAT.
+**Remove `PatientID`.** An earlier version of this page said not to, on the
+grounds that `assign` had already rewritten it to the routed subject and that
+`upload` needed it for placement. Both claims were wrong. `assign` only READS tag
+values to resolve ids and then copies or hardlinks the files unchanged; it never
+opens a dataset for writing. Placement is explicit, built from the session's ids
+which came from `ingest.assign.tagMapping`, not from this header.
+
+What actually happens if it is left: `upload` finishes by calling
+`/data/experiments/<id>?pullDataFromHeaders=true`, which asks XNAT to populate its
+own metadata FROM THESE HEADERS. A real medical record number left here is not
+merely present in the pixel archive, it is pulled into XNAT's fields, while
+PatientName, birth date and institution are correctly stripped, so the result
+looks de-identified to a spot check. Measured: an instance de-identified under the
+old advice reached XNAT with `PatientID` verbatim and `PatientIdentityRemoved`
+absent. The shipped recipe now ends `REMOVE PatientID`.
 
 ### 2. Put them in the site file
 

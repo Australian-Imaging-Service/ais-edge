@@ -28,6 +28,8 @@
     "PerformingPhysicianName": "",
     "OperatorsName": "",
     "PatientBirthName": "",
+    "StationName": "",
+    "DeviceSerialNumber": "",
     "PatientAddress": "",
     "PatientTelephoneNumbers": "",
     "PatientComments": "",
