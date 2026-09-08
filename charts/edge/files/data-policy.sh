@@ -85,6 +85,19 @@ UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
 
+# THE STAGE WHOSE DELETES BELONG TO SOMEONE ELSE. Empty everywhere except
+# upload.mode=direct, where the staged-reclaimer CronJob holds the delete
+# authority for the terminal tree and confirms each session against XNAT before
+# removing it.
+#
+# This engine still EVALUATES that stage, still reports its size, and still
+# refuses to delete from it (onUploaded cannot be satisfied without an
+# s3-uploader, which is the whole reason the CronJob exists). What it must not
+# do is call it STUCK. `stage_stuck` means "waiting on something that is not
+# coming"; here something is coming, hourly, and saying otherwise would page a
+# human every night for a tree that is draining normally.
+EXTERNAL_RECLAIM_STAGE="${EXTERNAL_RECLAIM_STAGE:-}"
+
 # --- originals ----------------------------------------------------------------
 # THE THIRD SWITCH. Originals are the only identifiable copy of a study, so
 # expiring one is not the same act as reclaiming a derived tree and does not
@@ -314,6 +327,30 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             # is also read-only unless retention is armed, so a move would work in
             # one mode and silently not in the other, but the two-operations
             # argument holds whatever the mount says.)
+            # A SESSION WHOSE CONDITION NEVER COMES TRUE IS STUCK, AND UNTIL NOW
+            # NOTHING SAID SO. Keeping it is the right call every single time --
+            # the copy is not provably reconstructible, so it stays -- but a
+            # session that has been failing that test for days is not the same
+            # event as one that failed it a minute ago, and both logged the
+            # identical line. The steady drip of reclaim_kept is indistinguishable
+            # from normal operation, which is how a permanently stuck session hid
+            # in this repo twice.
+            #
+            # This does NOT delete or move anything. It raises the event that an
+            # alert can key on, and leaves the data exactly where it is. Moving a
+            # stuck session was the original proposal; it is deliberately not done
+            # here. Quarantining means moving the input AND removing the partial
+            # output as ONE action: doing only the first leaves an orphan with
+            # nothing left to repair it from, which upload would then collect. An
+            # engine that can do half of that should do neither. (Its /data mount
+            # is also read-only unless retention is armed, so a move would work in
+            # one mode and silently not in the other, but the two-operations
+            # argument holds whatever the mount says.)
+            if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
+                jlog reclaim_kept "$r_name" "condition ${r_word} is not satisfiable in this upload mode and is not meant to be — the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
+                     ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
+                continue
+            fi
             if [ "${STUCK_AFTER_S:--}" != "-" ] && [ "${STUCK_AFTER_S:-0}" -gt 0 ]; then
                 s_age=$(newest_age_s "$d") || s_age=-1
                 if [ "$s_age" -ge "$STUCK_AFTER_S" ]; then
