@@ -81,7 +81,7 @@ for case in "orthanc:" "ingest:charts/edge/files/deid-specs.example"; do
 
     # shellcheck disable=SC2086
     out="$($HELM_BIN template t charts/edge -f sites/example-single/values.yaml \
-        --set orthanc.deid.policyReviewed=true \
+        --set deid.policyReviewed=true \
         --set dataPolicy.enabled=true --set dataPolicy.dryRun=false $extra 2>/dev/null)" || {
         echo "  SKIP       engine=$name — chart did not render" ; continue ; }
 

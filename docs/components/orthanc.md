@@ -101,7 +101,7 @@ those values.
 | `orthanc.expose.dicom` / `.http` | `hostPort` \| `nodePort` \| `both` for DICOM; `ClusterIP` \| `nodePort` for the REST API. Do not expose HTTP without `orthanc.auth.enabled` — the REST API can delete studies |
 | `orthanc.deid.aetMap` | **Per-site**: each modality's Called-AET → XNAT project. THE routing table. Rendered into `routing.json`'s `AETMap`. Keep project IDs within `[A-Za-z0-9_]`; `assign` normalises to that set |
 | `orthanc.deid.profile` | The site's deid contract, passed verbatim to Orthanc `/modify` (`Keep` / `Replace` / `Force` / `RemovePrivateTags`, plus the AIS-only `DeidMode`). A single profile is applied to every accepted study. Start from [`charts/edge/files/deidentification-profile.example.json`](../../charts/edge/files/deidentification-profile.example.json) |
-| `orthanc.deid.policyReviewed` | Render-time gate, no safe default. The chart refuses to template while deid is on and this is false |
+| `deid.policyReviewed` | **Not under `orthanc.`** (moved; the old path now fails the render). Render-time gate, no safe default, and it covers every `deid.engine` rather than just the Lua hook. The chart refuses to template while this is false |
 | `orthanc.image.tag` | Pinned Orthanc version |
 
 The Lua hook itself,
@@ -134,7 +134,7 @@ published in this repository.
 Render-time gates that exist because each of these fails **silently** at
 runtime (all in `charts/edge/templates/_helpers.tpl`):
 
-- `orthanc.deid.policyReviewed` must be true;
+- `deid.policyReviewed` must be true, under every engine;
 - `orthanc.deid.aetMap` must be non-empty, or every modality is quarantined;
 - `orthanc.deid.profile` must be non-empty, or `/modify` is given nothing to
   change and studies reach XNAT with PHI intact while nothing looks wrong;
@@ -166,7 +166,7 @@ storescu -aec <AET-from-aetMap> -aet TEST_MOD <nodeIP> 4242 /path/to/study/*.dcm
 
 - **Cleanup of deid'd instances is off by default.** `dataPolicy.derived.orthancStorage` reclaims them (`backend: orthanc-rest`, `reclaim: onGrouped`, plus `minAge`) by asking Orthanc for studies carrying `ingest.orthancGroup.processedLabel` and deleting them through its API — a directory walk cannot, because Orthanc names files by UUID. But `dataPolicy.enabled` is false and `dryRun` is true on a fresh install, so nothing is removed until a site turns them on.
 - **Pure-Lua salted hash instead of true HMAC** for SubjectHash / SessionHash — a salted djb2, not a cryptographic hash, because `jodogne/orthanc-plugins` doesn't expose `Compute*` crypto in Lua. Adequate for research deid; switch to `jodogne/orthanc-python` for HMAC-grade.
-- **Profile authoring is by hand** — no validation that referenced DICOM tags exist in Orthanc's dictionary before deployment. `orthanc.deid.policyReviewed` forces an explicit human confirmation of the AET map and profile, but it confirms intent, not correctness.
+- **Profile authoring is by hand** — no validation that referenced DICOM tags exist in Orthanc's dictionary before deployment. `deid.policyReviewed` forces an explicit human confirmation of the AET map and profile, but it confirms intent, not correctness.
 - **Hardlinks require shared filesystem** — `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` are all under the one `<release>-pipeline` PVC for this reason. Split them across mounts and `group-orthanc` degrades to a full copy (EXDEV).
 - **Modalities with unmapped CalledAETs are quarantined, not dropped.** The modality has already been given a C-STORE SUCCESS and will never retry, so discarding would be permanent silent data loss. The original bytes — identifiers intact — are written to `/facility-backup/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm` and only then removed from Orthanc; if that write fails the instance stays in Orthanc. Add the AET to `orthanc.deid.aetMap` and re-send. The log line keeps the wording `REJECT: no project mapped for CalledAET <AET>` because the unmapped-AET alert rule matches on it, and `dataPolicy.originals.quarantine.alertAfter` nags while the tree is non-empty.
 - **`AIS_DEID_HMAC_SALT` rotation breaks subject linkage** — rotating the salt produces a different SubjectHash for the same patient, and nothing detects it because both old and new look valid. Rotate only deliberately, and back the salt up alongside the age key.

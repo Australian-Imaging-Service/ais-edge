@@ -70,9 +70,9 @@ upload:
     caBundleSecret: ca-bundle
 deid:
   engine: orthanc
+  policyReviewed: true
 orthanc:
   deid:
-    policyReviewed: true
     aetMap:
       SIEMENS_3T: {project: CI_RESEARCH}
     profile:
@@ -246,9 +246,7 @@ EOF
 cat >"$V/edge-deid-off.yaml" <<'EOF'
 deid:
   engine: none
-orthanc:
-  deid:
-    policyReviewed: true
+  policyReviewed: true
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -679,7 +677,10 @@ printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-en
 # one bucket can read and delete every other site's staged imaging.
 printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
 printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
-printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
+printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-not-reviewed.yaml"
+# The pre-0.6.0 path. Accepting it as an alias would leave the very confusion
+# the move exists to end, so it must fail and name the new key.
+printf 'orthanc:\n  deid:\n    policyReviewed: true\n' >"$V/neg-edge-deid-moved-key.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
 
@@ -693,7 +694,7 @@ printf 'deid:\n  engine: ingset\n' >"$V/neg-edge-deid-bad-engine.yaml"
 printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
 
 # Neither engine, unacknowledged: identifiable data would reach XNAT unchanged.
-printf 'deid:\n  engine: none\northanc:\n  deid:\n    policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
+printf 'deid:\n  engine: none\n  policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
 
 # A spec ConfigMap with no key->path mapping: the recipes mount flat, xnat-ingest
 # matches none of them, and every session is skipped.
@@ -1077,7 +1078,8 @@ neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode 
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
-neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
+neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
+neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
 neg-edge-deid-bad-engine	charts/edge	edge-base.yaml neg-edge-deid-bad-engine.yaml	must be one of orthanc, ingest or none
 neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	no recipes are configured

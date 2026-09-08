@@ -174,7 +174,7 @@ ${ROLE_USAGE}" ;;
         echo "    * the XNAT account. Tier-1 uploads to XNAT from this machine, so"
         echo "      scope that account to the projects in this site's aetMap only."
         echo
-        echo "  And one in values.yaml: orthanc.deid.policyReviewed must be set to"
+        echo "  And one in values.yaml: deid.policyReviewed must be set to"
         echo "  true, deliberately, once you have read the profile and the AET map."
     fi
     ;;

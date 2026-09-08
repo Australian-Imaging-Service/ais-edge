@@ -260,7 +260,7 @@ Reproduce the stack half of this document without installing anything:
 
 ```bash
 helm template t1 charts/edge -n xnat-ingest -f sites/example-single/values.yaml \
-    --set orthanc.deid.policyReviewed=true \
+    --set deid.policyReviewed=true \
     --set observability.stack.enabled=true
 ```
 

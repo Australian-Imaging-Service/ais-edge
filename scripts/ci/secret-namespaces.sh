@@ -79,7 +79,7 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 #   this stage went green while a real `helm install` against the example values
 #   failed outright. A check that turns off part of the chart is not checking
 #   the chart.
-#   orthanc.deid.policyReviewed    the example deliberately ships false — it
+#   deid.policyReviewed            the example deliberately ships false — it
 #                                  must not assert that a human reviewed a
 #   observability.stack.alerting.emailTo / .smtpHost
 #                                  same shape: the local stack has no alert
@@ -124,7 +124,7 @@ fi
 # hostAliases are all DERIVED from the management file's domain and hostnames,
 # so on its own the edge chart has nothing to derive them from.
 render edge charts/edge xnat-ingest "$VALUES_MGMT" "$VALUES_EDGE" \
-    --set orthanc.deid.policyReviewed=true \
+    --set deid.policyReviewed=true \
     --set observability.stack.alerting.emailTo=ci@example.org \
     --set observability.stack.alerting.smtpHost=smtp.example.org > "$WORK/edge.yaml"
 if [ ! -s "$WORK/edge.yaml" ]; then

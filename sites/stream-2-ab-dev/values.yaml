@@ -35,6 +35,12 @@ clusterLabel: stream-2-ab-dev
 deid:
   engine: orthanc
 
+  # THE GATE. The chart refuses to render while this is false. Set it only once
+  # you have read the recipe the engine above selects and agree it is this
+  # site's policy. Not a formality: nothing downstream re-checks what was
+  # removed.
+  policyReviewed: true
+
 # All pipeline workloads live here. Tier-2 splits ingest (edge cluster) from
 # upload (management cluster) because they are different machines; on one node
 # there is nothing to split.
@@ -81,11 +87,6 @@ orthanc:
   auth:
     enabled: true
   deid:
-    # THE GATE. The chart refuses to render while this is false and deid is on.
-    # Set it only once you have read the profile and the AET map below and agree
-    # they are this site's policy. It is not a formality: nothing downstream
-    # re-checks what was removed.
-    policyReviewed: true
     existingSaltSecret: orthanc-deid-salt
 
     # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
@@ -169,7 +170,8 @@ upload:
   mode: direct
   direct:
     existingSecret: xnat-credentials
-    # Poll interval. Tier-1's old default was 60; the chart's is 300.
+    # Poll interval. The chart default is 120; 60 matches every other stage
+    # in the pipeline, so a session is not left waiting on this one.
     loop: 60
     # Quiet period before a session is considered complete.
     waitPeriod: 60

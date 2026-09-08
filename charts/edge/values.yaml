@@ -54,7 +54,7 @@ topology: onprem
 #             modalities actually populate.
 #
 #   none      neither. Only for sites whose modalities de-identify upstream.
-#             Requires orthanc.deid.policyReviewed=true to acknowledge it.
+#             Requires deid.policyReviewed=true to acknowledge it.
 #
 # WHY THIS IS ONE KEY. It used to be two booleans plus a label plus a tag
 # mapping plus a reclaim word, all of which had to agree. They did not have to
@@ -94,6 +94,27 @@ deid:
   # And orthanc.deid.profile becomes the recipe that matters. It is already
   # filled in below, so it needs reading, not writing.
   engine: ingest             # ingest | orthanc | none
+
+  # THE GATE. The chart refuses to render until a human confirms this site's
+  # de-identification policy. Deliberately has no safe default.
+  #
+  # It gates EVERY value of `engine`, which is why it lives here and not under
+  # the component that happens to apply the recipe. What you are confirming
+  # follows from `engine`:
+  #
+  #   ingest    ingest.deidentify.specs   (the default)
+  #   orthanc   orthanc.deid.profile
+  #   none      nothing here de-identifies; you are confirming the modalities
+  #             already did it upstream
+  #
+  # You are confirming the POLICY, not the component. Nothing downstream
+  # re-checks what was removed, under any engine.
+  #
+  # MOVED from orthanc.deid.policyReviewed. It was never Orthanc's: under
+  # `engine: ingest` it asked an operator to confirm the Lua profile while the
+  # recipe that actually ran was ingest.deidentify.specs. The old path now
+  # fails the render with a message naming this one.
+  policyReviewed: false
 
 # =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
@@ -594,10 +615,6 @@ orthanc:
   # ---------------------------------------------------------------------
   deid:
 
-    # Refuse to start unless a human has confirmed the profile below matches
-    # the site's de-identification policy. Deliberately has no safe default.
-    policyReviewed: false
-
     # Salt for the subject/session pseudonym hashes. Changing it re-links
     # every pseudonym, so existing XNAT subjects stop matching new arrivals.
     # Preserve it across reinstalls; never rotate casually.
@@ -857,7 +874,12 @@ upload:
   direct:
     replicas: 1
     existingSecret: xnat-credentials    # keys: server, username, password
-    loop: 300
+    # Poll interval. Every other stage in the pipeline runs at 60, so a large
+    # value here is the whole delivery latency. It is also NOT the only wait: a
+    # session touched within waitPeriod is skipped for the WHOLE next cycle, so
+    # the worst case is loop + waitPeriod, not loop. Both shipped site files
+    # use 60.
+    loop: 120
     waitPeriod: 60
     # CAUTION: this also feeds an alert. The SessionUploadStalled rule detects a
     # started-but-never-finished upload by matching the uploader's log line

@@ -212,11 +212,14 @@ unsure. Switching is five edits, not one, and the site file lists them next to
 something that quietly does nothing.
 
 ```yaml
+deid:
+  engine: ingest                   # ingest | orthanc | none
+  policyReviewed: false            # <- the gate, for whichever engine you pick
+
 orthanc:
   aet: AISEDGE
   deid:
     enabled: true
-    policyReviewed: false          # <- the gate
     existingSaltSecret: orthanc-deid-salt
     aetMap:
       AISEDGE:
@@ -224,10 +227,13 @@ orthanc:
     profile: { ... }
 ```
 
-**`policyReviewed` is a gate, not a formality.** The chart refuses to render
-while it is `false` and de-identification is enabled. Set it to `true` only once
-you have read the profile below and the AE-title map above and agree that they
-are *your site's policy* — not the example's.
+**`policyReviewed` is a gate, not a formality.** It sits at the top level under
+`deid:`, beside `engine:`, because it gates **every** engine and not only the Lua
+one. The chart refuses to render while it is `false`. Set it to `true` only once
+you have read the recipe your chosen engine actually applies, which is
+`ingest.deidentify.specs` under the default `ingest` engine and
+`orthanc.deid.profile` under `orthanc`, plus the AE-title map above, and agree
+that they are *your site's policy* rather than the example's.
 
 **The AE-title map** is the most site-specific thing in the file. It answers:
 when a study arrives addressed to **called** AE title X, which XNAT project does

@@ -109,7 +109,7 @@ scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 #   studies have stopped reaching XNAT. Set emailTo and smtpHost.
 
 # 5. Confirm the de-id policy, deliberately: set
-#      orthanc.deid.policyReviewed: true
+#      deid.policyReviewed: true
 #    in sites/my-hospital/values.yaml. The chart REFUSES to render while it is
 #    false and deid is on — nothing downstream re-checks what was removed.
 
@@ -322,9 +322,9 @@ Single node                                    XNAT
 ```
 
 - **De-identification happens on-node, before anything is uploaded.** Only deid'd
-  data is assigned and sent to XNAT. `orthanc.deid.policyReviewed` must be set to
-  true by a human before the chart will render: a wrong-but-present profile looks
-  identical to a right one from the outside.
+  data is assigned and sent to XNAT. `deid.policyReviewed` must be set to
+  true by a human before the chart will render, whichever engine is selected: a
+  wrong-but-present profile looks identical to a right one from the outside.
 - **Original DICOMs stay put.** They live only in `/data/facility-backup` under
   site-controlled retention and are never transmitted anywhere.
 - **Credentials are never in a chart or a values file.** Every one is referenced

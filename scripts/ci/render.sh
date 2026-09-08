@@ -215,7 +215,7 @@ else
                 # for the operator on purpose, so a render from it must supply them here or
                 # this check learns nothing and fails with an empty component list.
     deployed="$(helm template ci "$REPO_ROOT/$(ci_obs_chart)" -f "$SITE_VALUES" \
-                  --set orthanc.deid.policyReviewed=true \
+                  --set deid.policyReviewed=true \
                   --set observability.stack.alerting.emailTo=ci@example.org \
                   --set observability.stack.alerting.smtpHost=smtp.example.org 2>/dev/null \
                 | grep -o 'component: [a-z0-9-]*' | sed 's/component: //' | sort -u)"
