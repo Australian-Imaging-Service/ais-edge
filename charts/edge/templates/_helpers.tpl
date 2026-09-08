@@ -35,6 +35,64 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/* Catching them at `helm template` time is the whole point.             */}}
 {{/* ===================================================================== */}}
 {{- define "edge.validate" -}}
+  {{- /* A GUARD MUST BE GATED ON WHAT CONSUMES THE VALUE, not on the section
+         heading the value sits under. Both of these live beneath `orthanc:` and
+         both were gated on deid.engine=orthanc; neither value is consumed on that
+         condition. Verified against this branch rather than assumed:
+
+           ORTHANC_USER / ORTHANC_PASSWORD  ingest-pipeline.yaml:84 mounts them on
+             `if .Values.orthanc.auth.enabled` with no engine test. The group stage
+             and the data-policy engine both call the REST API whoever
+             de-identifies. Measured on this branch: 2 references under EVERY engine.
+
+           AIS_DEID_HMAC_SALT  orthanc-deployment.yaml:99 mounts it on
+             `or (engine == "orthanc") storage.facilityBackup.enabled`, the
+             condition the Lua hook loads on.
+
+         With either name empty the manifest renders a secretKeyRef with NO NAME:
+         helm succeeds, the YAML is valid, and the pod fails at start with
+         CreateContainerConfigError. For the salt that pod is Orthanc itself, so
+         nothing can be received. Reachable on a default install since ingest
+         became the default engine. */ -}}
+  {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
+        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy engine both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem, which stops it using the REST API." }}
+  {{- end }}
+  {{- if and (or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled) (not .Values.orthanc.deid.existingSaltSecret) }}
+      {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
+  {{- end }}
+
+  {{- /* THE FACILITY BACKUP IS REQUIRED UNDER BOTH ENGINES, and it used to be
+         gated as though it were an orthanc-only concern. It became reachable
+         when ingest became the default, which is how the gating was found.
+
+         The hook loads on:  or (engine == "orthanc") (facilityBackup.enabled)
+
+         so the two ways to get here fail DIFFERENTLY, and the message says both:
+
+         orthanc + disabled -> the hook LOADS and writes the original at
+           deidentify-and-forward.lua:124, before it consults DeidEnabled at :148,
+           and returns if that write fails:
+               if not writeAtomic(backupPath, origBytes) then
+                 print("ABORT: facility backup write failed for " .. instanceId)
+                 return
+           Every instance is dropped at the front door while the modality is told
+           the transfer succeeded. Loud in its own way: the pipeline stops.
+
+         ingest + disabled -> the hook is NOT LOADED at all. Nothing drops.
+           Studies arrive, are grouped, de-identified by the ingest stage and
+           uploaded, and the site looks entirely healthy. What silently does not
+           exist is the archive of record and the unmapped-AET quarantine, because
+           the hook is the only thing that writes either. That is the worse of the
+           two: it looks like a working system until someone needs the original.
+
+         engine=none is exempt: the hook is not loaded and there is nothing to
+         archive from, since nothing de-identifies either. */ -}}
+  {{- if ne (include "edge.deidEngine" .) "none" }}
+    {{- if not .Values.storage.facilityBackup.enabled }}
+      {{- fail (printf "storage.facilityBackup.enabled=false is not supported under deid.engine=%s. Under deid.engine=orthanc the Lua hook loads, writes every original to that volume BEFORE anything else, and returns if the write fails, so every incoming instance is dropped at the front door while the sending modality is told the transfer succeeded. Under deid.engine=ingest the hook is not loaded at all, so nothing is dropped and nothing complains: what is silently missing is the archive of record and the unmapped-AET quarantine, because the hook is the only thing that writes either. Enable it." (include "edge.deidEngine" .)) }}
+    {{- end }}
+  {{- end }}
+
 
   {{- /* Both upload modes at once = every session uploaded to XNAT twice. */ -}}
   {{- if not (has .Values.upload.mode (list "s3" "direct")) }}
@@ -159,10 +217,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}
-  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
-    {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "deid.engine=orthanc requires orthanc.deid.policyReviewed=true — confirm the de-identification profile and AET map match this site's policy before installing." }}
+    {{- /* BOTH ENGINES, not just the Lua one. This gate used to fire only under
+           deid.engine=orthanc. That was survivable while orthanc was the default
+           and the ingest engine made the operator write a recipe by hand: writing
+           it WAS the deliberate act. Now that ingest is the default and the
+           shipped example carries a recipe, that act disappears, and a site could
+           scaffold, install and start sending studies under a de-identification
+           policy nobody had read. The confirmation belongs to shipping PHI to
+           XNAT, not to which component does the stripping. */ -}}
+    {{- if has (include "edge.deidEngine" .) (list "orthanc" "ingest") }}
+      {{- if not .Values.orthanc.deid.policyReviewed }}
+        {{- fail (printf "deid.engine=%s requires orthanc.deid.policyReviewed=true. Read the recipe this engine will apply (ingest.deidentify.specs for the ingest engine, orthanc.deid.profile for the Lua one) and the AET map, confirm they are this site's policy, then set it. Nothing downstream re-checks what was removed." (include "edge.deidEngine" .)) }}
+      {{- end }}
     {{- end }}
+
+  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
     {{- if not .Values.orthanc.deid.aetMap }}
       {{- fail "orthanc.deid.aetMap is empty: every modality would be quarantined as an unmapped AE title. Map at least one AET to an XNAT project." }}
     {{- end }}
@@ -200,20 +269,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- end }}
 
   {{- if .Values.orthanc.auth.enabled }}
-      {{- if not .Values.orthanc.auth.existingSecret }}
-        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy engine both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem, which stops it using the REST API." }}
-      {{- end }}
     {{- end }}
 
-  {{- if not .Values.orthanc.deid.existingSaltSecret }}
-      {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
-    {{- end }}
-    {{- /* The hook writes the original to the facility backup and only then
-           removes it from Orthanc. Without that volume there is no archive of
-           record and no landing place for unmapped-AET quarantine. */ -}}
-    {{- if not .Values.storage.facilityBackup.enabled }}
-      {{- fail "deid.engine=orthanc requires storage.facilityBackup.enabled=true — the de-identification hook writes originals there before modifying them, and quarantines unmapped-AET studies under it." }}
-    {{- end }}
   {{- end }}
 
 
@@ -230,7 +287,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
          configurations where the operator has asked for something the mechanism
          cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}
-  {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
+  {{- if eq (include "edge.assignedReclaim" .) "onDeidentified" }}
     {{- if not (eq (include "edge.deidEngine" .) "ingest") }}
       {{- fail "dataPolicy.derived.assigned.reclaim=onDeidentified but deid.engine is not ingest. That condition is satisfied by the deidentify STAGE unlinking its own input, and the stage does not render, so nothing would ever retire /data/assigned and it would grow without bound. Use onUploaded, which the data-policy engine can satisfy from the uploader's markers when the uploader reads this tree, or enable the stage." }}
     {{- end }}
@@ -254,14 +311,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            reclaimer now satisfies exactly that. Under deid.engine=ingest the
            assigned tree is NOT terminal, and the separate guard above already
            requires onDeidentified there. */ -}}
-    {{- if and (eq .Values.dataPolicy.derived.deidentified.reclaim "onUploaded") (ne $terminal "/data/deidentified") }}
+    {{- if and (eq (include "edge.deidentifiedReclaim" .) "onUploaded") (ne $terminal "/data/deidentified") }}
       {{- fail (printf "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct and deid.engine=%s. Under direct upload the only thing that can establish `uploaded` is the staged reclaimer CronJob, and it watches the tree the uploader drains, which under this engine is %s, not /data/deidentified. Nothing would ever satisfy the condition: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it, or deid.engine=ingest if it should be the tree that is uploaded." (include "edge.deidEngine" .) $terminal) }}
     {{- end }}
   {{- end }}
 
   {{- /* The reclaim word for /data/assigned depends on WHO reads that tree, and
          the engine decides that. */ -}}
-  {{- if and (eq $engine "ingest") (eq .Values.dataPolicy.derived.assigned.reclaim "onUploaded") }}
+  {{- if and (eq $engine "ingest") (eq (include "edge.assignedReclaim" .) "onUploaded") }}
     {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned - every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
   {{- end }}
 
@@ -514,6 +571,39 @@ mistaken for 0 (which would read as "expire immediately").
 {{- end }}
 
 {{/*
+THE RECLAIM WORD FOLLOWS THE ENGINE, so the operator does not have to keep two
+keys in step with a third.
+
+Which tree the uploader drains is decided by deid.engine, and the correct reclaim
+word for each tree follows from that. Making the operator restate it was a
+standing invitation to get it wrong: every combination of engine and these two
+keys has a guard below, and four of the six combinations are refusals. That is a
+lot of machinery to protect a value nobody has a reason to choose independently.
+
+`auto`, the default, resolves to the right word for the selected engine:
+
+    engine    assigned          deidentified
+    ingest    onDeidentified    onUploaded     (uploader reads /data/deidentified)
+    orthanc   onUploaded        never          (uploader reads /data/assigned)
+
+An explicit value is still honoured, and still guarded, for a site that wants to
+keep a tree it would otherwise retire.
+*/}}
+{{- define "edge.assignedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.assigned.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.deidEngine" .) "ingest" }}onDeidentified
+{{- else }}onUploaded{{ end }}
+{{- end }}
+
+{{- define "edge.deidentifiedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.deidentified.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.deidEngine" .) "ingest" }}onUploaded
+{{- else }}never{{ end }}
+{{- end }}
+
+{{/*
 The stage table: one line per declared stage, consumed by files/data-policy.sh.
 
   name <TAB> kind <TAB> location <TAB> minFreeDiskPercent <TAB> alertAfterSec <TAB> retain
@@ -552,9 +642,9 @@ originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}
 {{- end }}
 derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.location }}	-	-	{{ .Values.dataPolicy.derived.orthancStorage.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.orthancStorage.minAge }}	{{ .Values.dataPolicy.derived.orthancStorage.backend }}
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
-derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ .Values.dataPolicy.derived.assigned.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
+derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ .Values.dataPolicy.derived.deidentified.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
 {{- end }}
 {{- end }}
 
@@ -621,5 +711,5 @@ every site is configured, both branches resolve to the assigned key exactly as
 before.
 */}}
 {{- define "edge.uploadReclaim" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ .Values.dataPolicy.derived.deidentified.reclaim }}{{- else }}{{ .Values.dataPolicy.derived.assigned.reclaim }}{{- end }}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
 {{- end }}

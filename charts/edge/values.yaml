@@ -55,7 +55,22 @@ topology: onprem
 # mapping plus a reclaim word, all of which had to agree - but only at RUN time,
 # so a half-switched site came up clean and then failed silently.
 deid:
-  engine: orthanc            # orthanc | ingest | none
+  # DEFAULT: ingest. xnat-ingest's own deidentify stage, between assign and
+  # upload, driven by ingest.deidentify.specs (pydicom-deid recipes). It can do
+  # things the Lua profile cannot, JITTER on dates among them.
+  #
+  # ORTHANC IS STILL THE DICOM RECEIVER either way. This key chooses only which
+  # component de-identifies. Modalities still C-STORE to it on 4242, and the Lua
+  # script still writes the facility backup and quarantines unmapped AE titles;
+  # under `ingest` it simply stops modifying the instance.
+  #
+  # SWITCHING TO orthanc IS THREE EDITS: this key, DELETE the
+  # ingest.deidentify.specs block (recipes for a stage that no longer renders are
+  # refused, because silently ignoring them is how a reviewed policy stops being
+  # applied), and put ingest.assign.tagMapping back to the ClinicalTrial* tags the
+  # hook writes. The dataPolicy reclaim words follow automatically: they are
+  # `auto` and the chart resolves them per engine.
+  engine: ingest             # ingest | orthanc | none
 
 # =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
@@ -306,7 +321,7 @@ dataPolicy:
     # Output of assign; input to whichever upload mode is enabled.
     assigned:
       location: /data/assigned
-      reclaim: onUploaded        # never | onUploaded
+      reclaim: auto        # never | onUploaded
       # As above: a recovery window after upload, not a delay before it.
       minAge: 0
 
@@ -337,7 +352,7 @@ dataPolicy:
       # CAUTION: only meaningful under deid.engine=ingest. Under Orthanc-deid the
       # terminal tree is /data/assigned and the chart fails the render rather than
       # let this read as though something were watching this one.
-      reclaim: never             # never | onUploaded
+      reclaim: auto             # never | onUploaded
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -641,10 +656,18 @@ ingest:
   assign:
     interval: 60
     copyMode: hardlink_or_copy
+    # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
+    # modify instances, so nothing writes the ClinicalTrial* tags and assign must
+    # read tags the modality itself populates. The chart refuses to render if
+    # ClinicalTrial* is named while the engine is ingest.
+    #
+    # CAUTION: `subject` becomes the XNAT subject label, and assign runs BEFORE
+    # deidentify. PatientID here means the medical record number becomes that
+    # label in the clear. Point it at a pseudonym tag if your modality writes one.
     tagMapping:
-      project: ClinicalTrialProtocolID
-      subject: ClinicalTrialSubjectID
-      session: ClinicalTrialTimePointID
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
 
   # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
   #

@@ -357,7 +357,13 @@ dataPolicy:
 
     # /data/assigned, once the s3-uploader has shipped it.
     assigned:
-      reclaim: onUploaded         # never | onUploaded
+      # auto: the chart resolves this from deid.engine, because which tree the
+      # uploader drains is decided there and the right word follows from it.
+      #   ingest  (default) -> onDeidentified, since the uploader reads
+      #                        /data/deidentified and this tree is retired at handoff
+      #   orthanc            -> onUploaded, since the uploader reads THIS tree
+      # Set a literal word to override; it is still guarded either way.
+      reclaim: auto               # auto | never | onUploaded | onDeidentified
       minAge: 0                   # <duration>
 
     # The S3 staging prefix on the management node. This is the ONLY rule that

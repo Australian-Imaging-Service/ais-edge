@@ -884,6 +884,22 @@ storage:
     enabled: false
 EOF
 
+# The two Orthanc secrets under the DEFAULT engine. Both guards used to be gated
+# on deid.engine=orthanc while the values they protect are mounted on conditions
+# with no engine test, so neither was reachable from what a new site installs.
+cat >"$V/neg-edge-ingest-no-authsecret.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: ""
+EOF
+
+cat >"$V/neg-edge-ingest-no-salt.yaml" <<'EOF'
+orthanc:
+  deid:
+    existingSaltSecret: ""
+EOF
+
 # The routing tags only the Lua hook writes, with the Lua hook not selected:
 # every session lands in __invalid__ still carrying its PHI. The old
 # orphaned-toProcessLabel case is gone because the chart now derives that label
@@ -896,6 +912,16 @@ dataPolicy:
     assigned:
       reclaim: onDeidentified
 ingest:
+  # EXPLICIT NOW, and that is the point of this case. The chart default used to
+  # BE the ClinicalTrial* triple, so an ingest-engine fixture reached this guard
+  # by doing nothing. The default is now the modality tags, so a site only trips
+  # this guard by leaving the old values behind after switching engines, which is
+  # exactly the mistake it exists to catch. The fixture has to state them.
+  assign:
+    tagMapping:
+      project: ClinicalTrialProtocolID
+      subject: ClinicalTrialSubjectID
+      session: ClinicalTrialTimePointID
   deidentify:
     specs:
       "__default__/medimage/dicom-series": |
@@ -1173,7 +1199,9 @@ neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
-neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
+neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
+neg-edge-ingest-no-authsecret	charts/edge	edge-base.yaml neg-edge-ingest-no-authsecret.yaml	orthanc.auth.existingSecret is empty
+neg-edge-ingest-no-salt	charts/edge	edge-base.yaml neg-edge-ingest-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
