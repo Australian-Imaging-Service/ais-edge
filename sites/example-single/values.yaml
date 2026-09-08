@@ -274,3 +274,49 @@ dataPolicy:
     assigned:
       reclaim: onUploaded
       minAge: 0
+
+    # THE LAST TREE, and the one that used to have no knob here at all.
+    # Whatever the uploader reads is what it re-reads every loop. `upload` never
+    # deletes what it delivered, deliberately: you do not erase a study because an
+    # HTTP call returned OK. So if nothing retires this tree, the same session is
+    # re-sent every loop for ever and XNAT answers "already exists with different
+    # checksums" each time. That is not hypothetical: it is what this tier did
+    # until the terminal-stage reclaimer was ported to this branch.
+    #
+    # WHICH tree this is depends on the engine: /data/assigned under
+    # deid.engine=orthanc, /data/deidentified under ingest. The chart derives it.
+    #
+    # THE RIGHT VALUE DEPENDS ON THE ENGINE, and the chart refuses the wrong one
+    # rather than letting it read as a policy that is quietly never applied:
+    #
+    #   deid.engine: orthanc  (the default here)
+    #     the terminal tree is /data/assigned, so THIS key must stay `never` and
+    #     `assigned.reclaim: onUploaded` above is the one that does the work.
+    #
+    #   deid.engine: ingest
+    #     the uploader reads /data/deidentified instead, so set THIS to onUploaded
+    #     and set `assigned.reclaim: onDeidentified` above.
+    deidentified:
+      reclaim: never
+
+    # WHAT SATISFIES onUploaded ON THIS TIER. There is no bucket and no s3-uploader
+    # here, so the marker the data-policy engine looks for is written by nothing
+    # else: this CronJob writes it, after asking XNAT whether the session really
+    # landed. Without it `onUploaded` can never come true and the tree above is
+    # kept whatever you set.
+    stagedReclaimer:
+      # Hourly. The uploader deletes on its own success within seconds; this is the
+      # slower, sure path for whatever that missed.
+      schedule: "17 * * * *"
+      # OPTION: raise on a slow link. A session still uploading is protected by the
+      # XNAT check regardless, so this is about noise, not safety.
+      minAge: 1d
+      # Ask XNAT whether it holds the session, complete, before deleting the only
+      # remaining copy. Off means trusting local state alone.
+      # CAUTION: `false` removes the last independent check before deletion.
+      verifyAgainstXnat: true
+      # Ceiling per run. A bug that decides everything is reclaimable removes this
+      # many and stops, leaving the rest to inspect.
+      maxRemovals: 50
+      # Killed if a run hangs on an unreachable XNAT, before the next is due.
+      deadlineSeconds: 3000

@@ -286,6 +286,36 @@ On tier-1 this matters **more** than on tier-2, not less. This node holds the
 only copy of the facility backup, there is no management-side reclaimer to fall
 back on, and `EdgeDiskLow` is the only disk-exhaustion alert in the system.
 
+**Who actually deletes the last tree, and why it needs its own component.**
+`upload` never removes what it delivered. That is deliberate: an HTTP 200 is not
+proof a study is safely in XNAT, and the uploaded copy is the last one on the
+node. Retiring it is the data policy's job, and the condition it waits for is
+`onUploaded`.
+
+On tier-2 that condition is satisfied by the s3-uploader's marker. **This tier
+has no s3-uploader**, so nothing would ever write it, and for a long time nothing
+did: the condition could not come true, the tree was kept for ever, and the
+uploader re-sent the same session every loop while XNAT answered *"already exists
+with different checksums"*. A `staged-reclaimer` CronJob now closes that. It runs
+hourly, asks XNAT whether the session is really there and complete, and only then
+removes it.
+
+Two consequences worth knowing before you change anything here:
+
+- **Which tree it watches depends on the de-identification engine.**
+  `/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
+  `ingest`. The chart derives that, and refuses a combination where the reclaim
+  condition could never be satisfied rather than letting the policy read as
+  though it were cleaning something.
+- **`dataPolicy.enabled: false` leaves it inert.** The CronJob still renders, but
+  with `DRY_RUN` set: it reports what it would remove and removes nothing. A site
+  that never turns the data policy on will fill up, and the alert for it fires
+  long after the uploader has started looping.
+
+`dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
+minimum age, whether it verifies against XNAT, and how many sessions one run may
+remove.
+
 `minFreeDiskPercent: 10` and `quarantine.alertAfter: 24h` are read by the
 alerting rules as well as the policy engine, so changing them changes when you
 get paged. That wiring is checked by the test suite.
@@ -398,7 +428,7 @@ Three keys, all required, because two different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
-| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
+| `users.json` | Orthanc itself. It is mounted INTO the config directory at `/etc/orthanc/users.json` and must be a config fragment, `{"RegisteredUsers":{"admin":"<password>"}}` | Orthanc starts, registers NO users, and with authentication on refuses EVERY request including correct credentials. There is no `RegisteredUsersFile` option in Orthanc; the config used to name one and Orthanc ignored it in silence |
 | `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
 | `orthanc-password` | `group-orthanc` | as above |
 
@@ -606,9 +636,12 @@ matter. The exit code is the number of failures.
 4. **assign** reads `ClinicalTrialProtocolID`, `ClinicalTrialSubjectID` and
    `ClinicalTrialTimePointID` from the de-identified headers and works out the
    XNAT project, subject and session. Output goes to `assigned/`.
-   (If `ingest.deidentify.enabled` is on — it is not by default — a
-   **deidentify** stage sits here, reading `assigned/` and writing
-   `deidentified/`, and step 5 reads that instead.)
+   (Under `deid.engine: ingest` a **deidentify** stage sits here, reading
+   `assigned/` and writing `deidentified/`, and step 5 reads that instead.
+   The default is `deid.engine: orthanc`, where the Lua hook has already
+   de-identified at the front door and this stage does not render. The key that
+   used to switch this, `ingest.deidentify.enabled`, no longer exists: the chart
+   refuses it and tells you to use `deid.engine`.)
 5. **upload** waits for a quiet period (`waitPeriod: 60` — no new files for a
    minute, so it does not upload a study still being sent), then PUTs the
    session to XNAT over HTTPS using `xnat-credentials`. On success it logs
