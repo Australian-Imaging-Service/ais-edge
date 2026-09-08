@@ -229,6 +229,77 @@ PY' 2>/dev/null | tr -d '[:space:]')
 fi
 
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# The reclaimer runs as a CronJob, and it is the one component that DELETES.
+# -----------------------------------------------------------------------------
+# There was no check here at all until the terminal-stage reclaimer was ported to
+# this tier. Nothing else on this node removes a delivered session, so if this
+# CronJob is suspended or failing, the tree it drains grows without bound and the
+# uploader re-offers every session in it on every loop, which is how a healthy
+# site starts logging errors for ever.
+#
+# NEVER RUN IS NOT NEVER SUCCEEDED. A CronJob minutes old on an hourly schedule
+# has not failed, it has not been due, and reporting that red on a fresh install
+# is how an operator learns to ignore this whole script.
+section "the reclaimer"
+cj="$(kubectl get cronjob -n "$NS" -o json 2>/dev/null || echo '{}')"
+cj_line="$(printf '%s' "$cj" | python3 -c '
+import sys, json, datetime, re
+now = datetime.datetime.now(datetime.timezone.utc)
+d = json.load(sys.stdin)
+def period(s):
+    f = s.split()
+    if len(f) != 5: return 3600
+    h = f[1]
+    if h == "*": return 3600
+    m = re.match(r"^\*/(\d+)$", h)
+    if m: return int(m.group(1)) * 3600
+    return 86400 if h.isdigit() else 3600
+for c in d.get("items", []):
+    n = c["metadata"]["name"]
+    if "reclaim" not in n: continue
+    p = period(c.get("spec", {}).get("schedule", ""))
+    if c.get("spec", {}).get("suspend"): print(f"SUSPEND\t{n}\t0\t{p}"); continue
+    last = (c.get("status") or {}).get("lastSuccessfulTime")
+    if not last:
+        ct = c["metadata"].get("creationTimestamp")
+        age = 0
+        if ct:
+            t = datetime.datetime.strptime(ct, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            age = int((now - t).total_seconds())
+        print(f"NEVER\t{n}\t{age}\t{p}"); continue
+    t = datetime.datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+    print(f"AGE\t{n}\t{int((now-t).total_seconds())}\t{p}")
+' 2>/dev/null)"
+if [ -z "$cj_line" ]; then
+    if [ "$(cfg dataPolicy.enabled false)" = "true" ]; then
+        bad "no reclaimer CronJob, but dataPolicy.enabled=true" \
+            "nothing retires the tree the uploader drains, so it will re-offer every session for ever"
+    else
+        skip "no reclaimer CronJob (dataPolicy is off, so none is rendered)"
+    fi
+else
+    while IFS=$'\t' read -r kind name age period; do
+        [ -n "${kind:-}" ] || continue
+        case "$kind" in
+            SUSPEND) bad "reclaimer ${name} is SUSPENDED" "it will never run again until resumed" ;;
+            NEVER)   if [ "$age" -gt "$period" ]; then
+                         bad "reclaimer ${name} has never completed successfully" \
+                             "it is $((age/60))m old on a $((period/60))m schedule, so it has been due at least once"
+                     else
+                         ok "reclaimer ${name}: not due yet ($((age/60))m old, runs every $((period/60))m)"
+                     fi ;;
+            AGE)     if [ "$age" -gt $((period * 3)) ]; then
+                         bad "reclaimer ${name}: last success $((age/3600))h ago" \
+                             "more than 3 intervals ($((period/60))m each)"
+                     else
+                         ok "reclaimer ${name}: last success $((age/60))m ago (every $((period/60))m)"
+                     fi ;;
+        esac
+    done <<<"$cj_line"
+fi
+
+
 section "observability"
 # -----------------------------------------------------------------------------
 if [ "$STACK" != "true" ] && [ "$STACK" != "True" ]; then
