@@ -4,9 +4,11 @@ hostAliases:
   enabled: true
   mgmtNodeIP: "203.101.224.240"
   hostnames: ["seaweedfs.aisedge.local", "loki.aisedge.local"]
+deid:
+  policyReviewed: true
+
 orthanc:
   deid:
-    policyReviewed: true
     aetMap:
       AISEDGE: {project: TEST_PROJECT}
       SIEMENS_3T: {project: MYSITE_RESEARCH}

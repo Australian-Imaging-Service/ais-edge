@@ -186,7 +186,6 @@ orthanc:
   aet: AISEDGE
   deid:
     enabled: true
-    policyReviewed: false        # ← NO DEFAULT. You must set this to true.
     aetMap:
       AISEDGE: {project: my_project}
     profile:
@@ -198,9 +197,20 @@ orthanc:
 
 **File:** `sites/<edge>/values.yaml`
 
-`policyReviewed` has **no default and the chart refuses to render without it.**
-It is not a feature flag — it is an assertion that a human has read this profile
-and this AE-title map and accepts what they do and do not remove.
+`deid.policyReviewed` has **no default and the chart refuses to render without
+it.** It sits at the top level beside `deid.engine`, not under `orthanc:`,
+because it gates every engine rather than only the Lua hook:
+
+```yaml
+deid:
+  engine: orthanc              # ingest | orthanc | none
+  policyReviewed: false        # NO DEFAULT. You must set this to true.
+```
+
+It is not a feature flag. It is an assertion that a human has read the recipe the
+selected engine applies, `orthanc.deid.profile` here and
+`ingest.deidentify.specs` under the `ingest` engine, plus this AE-title map, and
+accepts what they do and do not remove.
 
 Three things worth understanding:
 

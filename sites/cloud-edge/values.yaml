@@ -4,6 +4,12 @@ clusterLabel: cloud-edge
 # the xnat-ingest stage, the group label and the reclaim condition from it.
 deid:
   engine: orthanc
+
+  # THE GATE. The chart refuses to render while this is false. Set it only once
+  # you have read the recipe the engine above selects and agree it is this
+  # site's policy. Not a formality: nothing downstream re-checks what was
+  # removed.
+  policyReviewed: true
 namespace: xnat-ingest
 topology: cloud
 storage:
@@ -22,7 +28,6 @@ orthanc:
   auth:
     enabled: false
   deid:
-    policyReviewed: true
     existingSaltSecret: orthanc-deid-salt
     aetMap:
       AISEDGE:

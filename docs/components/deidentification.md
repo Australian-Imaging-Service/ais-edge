@@ -269,10 +269,15 @@ with no error. The chart catches this and says so.
 ## Configuration — Orthanc Lua hook (`deid.engine: orthanc`)
 
 ```yaml
+deid:
+  engine: orthanc
+  policyReviewed: false          # no safe default; a human must confirm.
+                                 # Top level, NOT under orthanc: it gates
+                                 # every engine, so it is not the Lua hook's.
+
 orthanc:
   deid:
     enabled: true
-    policyReviewed: false        # no safe default; a human must confirm
     existingSaltSecret: orthanc-deid-salt
     aetMap:
       SIEMENS_3T_AET: {project: MYSITE_RESEARCH}

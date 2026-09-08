@@ -152,11 +152,25 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
        re-identification map records originals rather than pseudonyms, which is
        what running both would have broken - is now structural. */ -}}
 
+  {{- /* THE RENAME, and it hard-fails rather than being honoured quietly.
+         policyReviewed moved to deid.policyReviewed because it gates EVERY
+         engine, not just the Lua one: under deid.engine=ingest the old path
+         asked an operator to confirm orthanc.deid.profile while the recipe that
+         actually ran was ingest.deidentify.specs. A site hit that in the field.
+         Accepting the old key as an alias would leave the confusion in place at
+         exactly the sites that already have it, and a gate that moves without
+         the operator noticing is a policy nobody re-read. So name the new path
+         and stop. Checked before the engine enum so an un-migrated file gets
+         this message rather than one about a key it has never heard of. */ -}}
+  {{- if hasKey (default (dict) .Values.orthanc.deid) "policyReviewed" }}
+    {{- fail "orthanc.deid.policyReviewed has MOVED to deid.policyReviewed. It gates every deid.engine, ingest and none included, so it no longer sits under orthanc. Move the key to the top-level `deid:` block next to `engine:`, and delete it from orthanc.deid." }}
+  {{- end }}
+
   {{- /* THE ENGINE SWITCH MUST BE A KNOWN VALUE. An unrecognised word would
          select neither engine, and "neither" ships identifiable data to XNAT. */ -}}
   {{- $engine := include "edge.deidEngine" . }}
   {{- if not (has $engine (list "orthanc" "ingest" "none")) }}
-    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires orthanc.deid.policyReviewed=true." $engine) }}
+    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires deid.policyReviewed=true." $engine) }}
   {{- end }}
   {{- /* `eq $engine "none"`, NOT "neither of the two I know". The broad form
          meant a TYPO satisfied it: deid.engine=ingset failed with a message
@@ -165,8 +179,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          reached. Which one they got depended on policyReviewed, whose default
          is false, so the wrong message was the one most people would see. The
          enum check above runs first, so the value is known by this point. */ -}}
-  {{- if and (eq $engine "none") (not .Values.orthanc.deid.policyReviewed) }}
-    {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set orthanc.deid.policyReviewed=true to acknowledge it." }}
+  {{- if and (eq $engine "none") (not .Values.deid.policyReviewed) }}
+    {{- fail "deid.engine=none, so nothing in this pipeline de-identifies anything and identifiable data would reach XNAT unchanged. If the modalities de-identify upstream and this is deliberate, set deid.policyReviewed=true to acknowledge it." }}
   {{- end }}
 
   {{- /* The spec directory is what tells deidentify a format is handled. With no
@@ -226,8 +240,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            policy nobody had read. The confirmation belongs to shipping PHI to
            XNAT, not to which component does the stripping. */ -}}
     {{- if has (include "edge.deidEngine" .) (list "orthanc" "ingest") }}
-      {{- if not .Values.orthanc.deid.policyReviewed }}
-        {{- fail (printf "deid.engine=%s requires orthanc.deid.policyReviewed=true. Read the recipe this engine will apply (ingest.deidentify.specs for the ingest engine, orthanc.deid.profile for the Lua one) and the AET map, confirm they are this site's policy, then set it. Nothing downstream re-checks what was removed." (include "edge.deidEngine" .)) }}
+      {{- if not .Values.deid.policyReviewed }}
+        {{- fail (printf "deid.engine=%s requires deid.policyReviewed=true. Read the recipe this engine will apply (ingest.deidentify.specs for the ingest engine, orthanc.deid.profile for the Lua one) and the AET map, confirm they are this site's policy, then set it. Nothing downstream re-checks what was removed." (include "edge.deidEngine" .)) }}
       {{- end }}
     {{- end }}
 

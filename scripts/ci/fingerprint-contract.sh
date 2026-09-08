@@ -73,7 +73,7 @@ echo "== EXTERNAL_RECLAIM_STAGE names a defined stage =="
 HELM_BIN="${HELM:-helm}"
 out="$($HELM_BIN template t charts/edge \
     -f sites/example-mgmt/values.yaml -f sites/example-edge/values.yaml \
-    --set orthanc.deid.policyReviewed=true \
+    --set deid.policyReviewed=true \
     --set upload.mode=direct \
     --set dataPolicy.enabled=true --set dataPolicy.dryRun=false 2>/dev/null)" || out=""
 

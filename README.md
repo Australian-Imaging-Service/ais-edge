@@ -427,7 +427,6 @@ orthanc:
   aet: AISEDGE
   deid:
     enabled: true
-    policyReviewed: false        # NO SAFE DEFAULT — you must assert this
     existingSaltSecret: orthanc-deid-salt
     aetMap:
       AISEDGE: {project: my_project}
@@ -441,8 +440,10 @@ orthanc:
         PatientID: ${ProjectCode}-${SubjectHash}
 ```
 
-* **`policyReviewed` has no default.** The chart refuses to render until a human
-  asserts they have read the profile and the AE-title map for this site.
+* **`deid.policyReviewed` has no default.** The chart refuses to render until a
+  human asserts they have read the profile and the AE-title map for this site. It
+  lives at the top level next to `deid.engine`, not under `orthanc:`, because it
+  gates every engine and not just the Lua one.
 * **UIDs are retained** so a study stays internally consistent across series.
 * **An unmapped AE title is quarantined, not dropped** — see
   `dataPolicy.originals.quarantine`.

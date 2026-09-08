@@ -47,6 +47,12 @@ clusterLabel: edge-dev
 deid:
   engine: orthanc
 
+  # THE GATE. The chart refuses to render while this is false. Set it only once
+  # you have read the recipe the engine above selects and agree it is this
+  # site's policy. Not a formality: nothing downstream re-checks what was
+  # removed.
+  policyReviewed: true
+
 namespace: xnat-ingest
 
 # onprem  hostPath storage on this node, no cloud load balancer.
@@ -77,10 +83,6 @@ orthanc:
     # DICOM network is already isolated.
     enabled: false
   deid:
-    # No safe default: this asserts that a human has READ the profile below and
-    # accepts what it does and does not remove. The chart refuses to render
-    # while it is false and deid is enabled.
-    policyReviewed: true
     existingSaltSecret: orthanc-deid-salt
 
     # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
