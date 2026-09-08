@@ -133,7 +133,7 @@ spec:
                    writes the marker and an unsatisfied condition IS a stall. */}}
             - name: EXTERNAL_RECLAIM_STAGE
               {{- if and (eq .Values.upload.mode "direct") (ne (include "edge.uploadReclaim" .) "never") }}
-              value: {{ if eq (include "edge.deidEngine" .) "ingest" }}"deidentified"{{ else }}"assigned"{{ end }}
+              value: {{ if eq (include "edge.deidEngine" .) "ingest" }}"derived.deidentified"{{ else }}"derived.assigned"{{ end }}
               {{- else }}
               value: ""
               {{- end }}

@@ -45,4 +45,57 @@ for f in "${files[@]}"; do
         rc=1
     fi
 done
+# =============================================================================
+# EXTERNAL_RECLAIM_STAGE must name a stage the table actually defines
+# =============================================================================
+# THE SAME DRIFT, ONE LAYER OVER, and the reason this sits beside the fingerprint
+# check. The env var names the ONE stage the engine must not call stuck, because
+# the staged-reclaimer CronJob owns that tree's deletes under upload.mode=direct.
+# It is PRODUCED in templates/data-policy.yaml and CONSUMED in files/data-policy.sh,
+# which compares it against field 1 of the stages table. Two files, one value,
+# nothing checking them against each other.
+#
+# They silently disagreed. The template emitted "assigned"; the table row is
+# "derived.assigned". So
+#
+#     [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]
+#
+# was never true, the delegated branch never ran, and the terminal tree was
+# reported stage_stuck every pass: the exact page the mechanism exists to prevent.
+#
+# RENDERED WITH upload.mode=direct DELIBERATELY. This branch defaults to s3, where
+# the variable is empty by design and the bug is invisible. The topology that
+# exercises it is the one this branch does not default to, which is precisely how
+# it survived here.
+echo
+echo "== EXTERNAL_RECLAIM_STAGE names a defined stage =="
+
+HELM_BIN="${HELM:-helm}"
+out="$($HELM_BIN template t charts/edge \
+    -f sites/example-mgmt/values.yaml -f sites/example-edge/values.yaml \
+    --set orthanc.deid.policyReviewed=true \
+    --set upload.mode=direct \
+    --set dataPolicy.enabled=true --set dataPolicy.dryRun=false 2>/dev/null)" || out=""
+
+if [ -z "$out" ]; then
+    echo "  SKIP       chart did not render under upload.mode=direct"
+else
+    env_val="$(printf '%s' "$out" | grep -A2 'name: EXTERNAL_RECLAIM_STAGE' \
+               | grep 'value:' | head -1 | sed 's/.*value: *//; s/"//g')"
+    if [ -z "$env_val" ]; then
+        echo "  ok         no delegated stage declared under this configuration"
+    else
+        rows="$(printf '%s' "$out" | grep -oE '^ *(originals|derived)\.[A-Za-z]+' | tr -d ' ' | sort -u)"
+        if printf '%s\n' "$rows" | grep -qx "$env_val"; then
+            echo "  matches    $env_val is a row in stages.tsv"
+        else
+            echo "  DIFFERS    EXTERNAL_RECLAIM_STAGE=$env_val is NOT a row in stages.tsv." >&2
+            echo "             The delegated branch in data-policy.sh can never match, so that" >&2
+            echo "             tree is reported stage_stuck for ever." >&2
+            echo "             Defined: $(printf '%s' "$rows" | tr '\n' ' ')" >&2
+            rc=1
+        fi
+    fi
+fi
+
 exit $rc
