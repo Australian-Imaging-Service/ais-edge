@@ -109,12 +109,18 @@ promtool: $(RENDER_DEP)
 pvc-retention: $(RENDER_DEP)
 	@scripts/ci/pvc-retention.sh
 
-# The S3 reclaimer is a MANAGEMENT-side component: it clears the staging bucket
-# after XNAT confirms a session. Tier-1 uploads straight to XNAT, so there is no
-# staging bucket, no reclaimer, and nothing for this harness to exercise.
+# THE RECLAIMER RUNS ON THIS TIER. This stage used to skip with "no S3 reclaimer
+# on this tier (single node, direct upload)", which was true when written and
+# became false the moment the terminal-stage reclaimer was ported here: under
+# upload.mode=direct there is no bucket and no s3-uploader, so a CronJob owns the
+# deletes instead, running the same reclaim-staged.sh byte for byte.
+#
+# The skip was the worst possible shape. `make ci` reported a green, deliberate
+# looking SKIP for the ONE component on this tier that permanently removes
+# patient imaging, so a regression that kept everything, or deleted a session
+# XNAT had not confirmed, would have passed CI in silence.
 reclaimer:
-	@if [ -x tests/reclaimer/run-tests.sh ]; then tests/reclaimer/run-tests.sh; \
-	 else echo "  SKIP  reclaimer — no S3 reclaimer on this tier (single node, direct upload)"; fi
+	@tests/reclaimer/run-tests.sh
 
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,
