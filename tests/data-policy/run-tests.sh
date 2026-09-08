@@ -101,6 +101,8 @@ run_engine() {
         -e EDGE_NAME=test -e STAGES_FILE=/data/stages.tsv -e ONESHOT=true \
         -e RECLAIM_ENABLED="$en" -e DRY_RUN="$dry" -e MAX_REMOVALS="$maxrm" \
         -e SETTLE_MINUTES=5 \
+        -e STUCK_AFTER_S="${STUCK_AFTER_S_T:-0}" \
+        -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         -e UPLOAD_STATE_DIR=/data/LOGS/s3-uploader-state \
         -e ASSIGNED_DIR=/data/assigned \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
@@ -112,6 +114,15 @@ run_engine() {
 
 STAGES_ASSIGNED="derived.assigned${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem"
 STAGES_GROUPED="derived.grouped${TAB}derived${TAB}/data/grouped${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem"
+
+logged() {  # logged <name> <root> <event> <present|absent> <desc>
+    if grep -q "\"event\": *\"$3\"" "$2/out.jsonl" 2>/dev/null; then found=yes; else found=no; fi
+    if [ "$4" = "present" ]; then
+        [ "$found" = yes ] && pass "$1" "$5" || fail "$1" "$5 — $3 NOT logged"
+    else
+        [ "$found" = no ] && pass "$1" "$5" || fail "$1" "$5 — $3 WAS logged"
+    fi
+}
 
 check() {  # check <name> <root> <path-that-should-be> <exist|gone> <desc>
     if [ "$4" = "gone" ]; then
@@ -293,6 +304,29 @@ if docker image inspect "$ORTHANC_IMG" >/dev/null 2>&1 || docker pull -q "$ORTHA
         fail orthanc_401_not_idle "expected backend_unavailable; got: $(grep -o '"event":"[a-z_]*"' "$R2/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
     fi
     check orthanc_401_nodelete "$R2" assigned/s1 exist "and deleted nothing while unauthenticated"
+
+# --- the delegated terminal stage -------------------------------------------
+# WHY THESE TWO EXIST. EXTERNAL_RECLAIM_STAGE names the ONE stage the engine must
+# not call stuck, because the staged-reclaimer CronJob owns its deletes under
+# upload.mode=direct. The env value and the stage name are set in different files
+# and nothing compared them, so they silently disagreed: the template emitted
+# "assigned" while the stages table row is "derived.assigned". The branch was
+# therefore never taken and the tree was called stuck on every pass, which is the
+# 3am page the whole mechanism exists to prevent. Rendering looked correct, CI was
+# green, and no test touched the path.
+#
+# The SECOND case is what makes the first meaningful: without it, a change that
+# suppressed stage_stuck globally would satisfy the first and look correct.
+R="$WORK/cdel"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_S_T=1 EXTERNAL_STAGE_T=derived.assigned \
+    run_engine "$R" "$STAGES_ASSIGNED" true false
+logged delegated_not_stuck "$R" stage_stuck absent "delegated stage must not be called stuck"
+check  delegated_kept      "$R" assigned/s1 exist "and its data must survive: nothing satisfied onUploaded"
+
+R="$WORK/cundel"; build_case "$R"; mk_session "$R" assigned s1 60
+STUCK_AFTER_S_T=1 EXTERNAL_STAGE_T= \
+    run_engine "$R" "$STAGES_ASSIGNED" true false
+logged undelegated_stuck "$R" stage_stuck present "same tree, nothing delegated — stuck MUST still fire"
 
     R3="$WORK/authok"; build_case "$R3"; mk_session "$R3" assigned s1 60
     ORTHANC_URL_T="http://$OIP:8042" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
