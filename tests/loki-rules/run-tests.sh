@@ -247,6 +247,16 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-bad","level":"unknown"}	{"message":"REJECT: no project mapped for CalledAET ROGUESCANNER — quarantined to /data/facility-backup/__unmapped_aet__/1.2.3/4.5.6.dcm"}
 3	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-bad","level":"unknown"}	{"message":"REJECT: no project mapped for CalledAET ROGUESCANNER — quarantined to /data/facility-backup/__unmapped_aet__/1.2.3/4.5.7.dcm"}
 2	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-ok","level":"unknown"}	{"message":"Accepted instance for CalledAET AISEDGE, project test_project"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer","level":"ERROR"}	{"message":"'DICOM' resource in 'test_project:SUBJ:SESS:1-AXIAL' already exists on XNAT with different checksums. Please delete on XNAT to overwrite:"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer","level":"ERROR"}	{"message":"'DICOM' resource in 'test_project:SUBJ:SESS:1-AXIAL' already exists on XNAT with different checksums. Please delete on XNAT to overwrite:"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer","level":"ERROR"}	{"message":"'DICOM' resource in 'test_project:SUBJ:SESS:1-AXIAL' already exists on XNAT with different checksums. Please delete on XNAT to overwrite:"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"ERROR"}	{"message":"'DICOM' resource in 'p:s:x:1' already exists on XNAT with different checksums. Please delete on XNAT to overwrite:"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"ERROR"}	{"message":"'DICOM' resource in 'p:s:x:1' already exists on XNAT with different checksums. Please delete on XNAT to overwrite:"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat.invalid, port=443)"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+5	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat.invalid, port=443)"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
 EOF
 }
 
@@ -269,6 +279,8 @@ quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined
 retry_one_traceback	XNATUploadRetryStorm	retry-one	nofire	one failure is ~96 lines — must count as ONE, not fire
 retry_many_tracebacks	XNATUploadRetryStorm	retry-many	fire	3 separate failures, none at level=ERROR — the 24h live case
 retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures must still fire on their own
+retry_reoffer_only	XNATUploadRetryStorm	reoffer	nofire	3 "already exists with different checksums" lines are a delivered session being re-offered until the reclaimer retires it, not a retry
+retry_reoffer_plus_real	XNATUploadRetryStorm	reoffer-plus	fire	re-offers must not MASK a real storm happening alongside them
 upload_failing_all	XNATUploadFailingForAllSessions	fail-all	fire	3 failures and not one session landed
 upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, but sessions ARE still landing
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload

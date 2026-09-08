@@ -118,8 +118,24 @@ groups:
   # So: match the traceback HEADER, which appears exactly once per failure,
   # OR any ERROR-level line. Measured over the same 24h: 4 ten-minute
   # windows contained failures, 3 to 4 each, hence a threshold of 2.
+  # NOT EVERY ERROR IS A RETRY. A session that uploaded successfully stays in the
+  # terminal tree until the staged reclaimer retires it, which is minAge later, and
+  # `upload --loop` re-reads that tree every cycle. XNAT answers the re-offer with
+  #
+  #   'DICOM' resource in '<session>' already exists on XNAT with different
+  #   checksums. Please delete on XNAT to overwrite
+  #
+  # which xnat-ingest logs at ERROR. So a HEALTHY site produced >2 ERRORs every ten
+  # minutes for as long as minAge, and this alert fired continuously after every
+  # successful delivery. Measured on a live install: 15 identical lines, all for a
+  # session that had just been delivered correctly.
+  #
+  # That is worse than noise. A rule that fires constantly on a working site is a
+  # rule nobody reads, and it would have hidden a real retry storm underneath it.
+  # The line is excluded rather than the threshold raised: a genuine storm looks
+  # different (tracebacks, auth failures, connection errors) and those still count.
   - alert: XNATUploadRetryStorm
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  [10m])) > 2\n"
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  !~ \"already exists on XNAT with different checksums\"\n  [10m])) > 2\n"
     for: 10m
     labels:
       severity: warning

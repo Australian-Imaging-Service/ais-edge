@@ -35,6 +35,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/* Catching them at `helm template` time is the whole point.             */}}
 {{/* ===================================================================== */}}
 {{- define "edge.validate" -}}
+  {{- /* A GUARD MUST BE GATED ON WHAT CONSUMES THE VALUE, not on what the value
+         is named after. Both of these were gated on deid.engine=orthanc because
+         they sit under the `orthanc:` values key, and neither is consumed on that
+         condition. Both became reachable when ingest became the default.
+
+         ORTHANC_USER / ORTHANC_PASSWORD are mounted on `if .Values.orthanc.auth
+         .enabled` alone (ingest-pipeline.yaml:84), with no engine test: the group
+         stage and the data-policy engine both call the REST API whoever does the
+         de-identifying. Measured: 2 references under EVERY engine.
+
+         AIS_DEID_HMAC_SALT is mounted on `or (engine == "orthanc")
+         storage.facilityBackup.enabled` (orthanc-deployment.yaml:99), which is
+         the condition the Lua hook loads on, and the backup is enabled by
+         default.
+
+         With either secret name empty the manifest renders a secretKeyRef with
+         NO NAME. helm is happy, the objects are valid YAML, and the pod fails at
+         start with CreateContainerConfigError. For the salt that pod is Orthanc
+         itself, so nothing can be received at all. */ -}}
+  {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
+        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy store reclaim both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is silently never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem." }}
+  {{- end }}
+  {{- if and (or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled) (not .Values.orthanc.deid.existingSaltSecret) }}
+      {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
+  {{- end }}
+
   {{- /* THE FACILITY BACKUP IS REQUIRED UNDER BOTH ENGINES, and it used to be
          gated as though it were an orthanc-only concern. It became reachable
          when ingest became the default, which is how the gating was found.
@@ -244,18 +270,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
         {{- /* PREREQUISITES FOR orthanc.auth.enabled=true, ASSERTED AT RENDER.
 
-             There is NO "RegisteredUsersFile" option in Orthanc. The config used
-             to name one; Orthanc ignored it, registered zero users, and with
-             AuthenticationEnabled true refused EVERY request including correct
-             credentials. Users reach Orthanc by mounting users.json INTO
-             /etc/orthanc, which Orthanc scans and merges. */ -}}
-      {{- if and .Values.orthanc.auth.enabled (not .Values.orthanc.auth.existingSecret) }}
-        {{- fail "orthanc.auth.enabled=true but orthanc.auth.existingSecret is empty. That Secret must exist and carry THREE keys: users.json, which is mounted into /etc/orthanc and must be a config fragment of the form {\"RegisteredUsers\":{\"<user>\":\"<password>\"}}, plus orthanc-user and orthanc-password, which group-orthanc AND the data-policy store reclaim both authenticate with. If users.json disagrees with orthanc-password, Orthanc answers 401: group-orthanc crash-loops and the Orthanc store is silently never reclaimed. If you do not want the store reclaim authenticating at all, the other way out is dataPolicy.derived.orthancStorage.backend=filesystem." }}
-  {{- end }}
 
-  {{- if not .Values.orthanc.deid.existingSaltSecret }}
-      {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
-    {{- end }}
     {{- /* THE PROFILE IS A CONTRACT WITH THE ASSIGN STAGE, not just a privacy
            policy. assign reads project, subject and session from these three
            tags and has no other source for them. Drop one while tightening

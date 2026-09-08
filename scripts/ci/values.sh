@@ -868,6 +868,23 @@ ingest:
         REMOVE PatientName
 EOF
 
+# The same two secrets under the DEFAULT engine. Both guards used to be gated on
+# deid.engine=orthanc while the values they protect are mounted on conditions
+# that have nothing to do with the engine, so neither was reachable from the
+# configuration a new site actually installs.
+cat >"$V/neg-edge-ingest-no-authsecret.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: ""
+EOF
+
+cat >"$V/neg-edge-ingest-no-salt.yaml" <<'EOF'
+orthanc:
+  deid:
+    existingSaltSecret: ""
+EOF
+
 
 # Alerts that go nowhere. Empty emailTo renders Alertmanager with receiver
 # "null": every rule fires and nothing is delivered, which looks like health.
@@ -1092,6 +1109,8 @@ neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-reta
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
 neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
 neg-edge-ingest-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-ingest-no-facilitybackup.yaml	dropped at the front door
+neg-edge-ingest-no-authsecret	charts/edge	edge-base.yaml neg-edge-ingest-no-authsecret.yaml	orthanc.auth.existingSecret is empty
+neg-edge-ingest-no-salt	charts/edge	edge-base.yaml neg-edge-ingest-no-salt.yaml	existingSaltSecret is empty
 neg-edge-no-emailto	charts/edge	edge-base.yaml neg-edge-no-emailto.yaml	alerting.emailTo is empty
 neg-edge-no-smtphost	charts/edge	edge-base.yaml neg-edge-no-smtphost.yaml	smtpHost is empty
 neg-edge-specs-wrong-engine	charts/edge	edge-base.yaml neg-edge-specs-wrong-engine.yaml	is set, but deid.engine=
