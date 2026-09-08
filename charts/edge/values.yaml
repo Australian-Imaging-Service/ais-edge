@@ -687,6 +687,20 @@ ingest:
     # label in the clear. Point it at a pseudonym tag if your modality writes one.
     tagMapping:
       project: StudyID
+      # HOW THIS IS CHOSEN, because it is a site decision rather than a default
+      # anyone can guess. The radiographer enters these values at the console when
+      # they send the study, so which DICOM field carries the project and the
+      # subject is agreed per site. CAI uses ReferringPhysicianName for project and
+      # PatientID for subject; other sites use StudyComments or StudyDescription.
+      #
+      # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT
+      # LABEL verbatim. assign reads it and files the session BEFORE deidentify
+      # runs, so no recipe can rename it afterwards. De-identification still works
+      # on the file contents; it just cannot reach the label. Switching engines
+      # changes the shape of that label, so see the migration note in
+      # docs/components/deidentification.md before moving an existing site.
+      #
+      # Hashing at this step is a known second-pass item, not an oversight.
       subject: PatientID
       session: AccessionNumber
 

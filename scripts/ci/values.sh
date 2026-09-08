@@ -196,16 +196,19 @@ observability:
 EOF
 
 cat >"$V/edge-obsstack-on.yaml" <<'EOF'
-# TIER-1: the LOCAL observability stack. This is the only case that renders
-# the PrometheusRule / ruler-ConfigMap / Alertmanager-Secret objects, so it is
-# what the rendered-rules checks inspect on a single-node branch.
+# Alerting is required whenever the local stack is on: without it Alertmanager
+# renders with receiver "null" and every alert is discarded. The guard refuses
+# that, so a POSITIVE fixture exercising the stack has to supply it.
 observability:
   enabled: true
   stack:
     enabled: true
+    alerting:
+      emailTo: imaging-ops@example.org
+      smtpHost: smtp.example.org
   loki:
-    clientCertSecret: ""
-    caBundleSecret: ""
+    clientCertSecret: ''
+    caBundleSecret: ''
 EOF
 
 cat >"$V/edge-observability-on.yaml" <<'EOF'
@@ -841,6 +844,36 @@ EOF
 # setting that caused it.
 printf 'ingest:\n  orthancGroup:\n    copyMode: copy\n' >"$V/neg-edge-orthanc-copymode.yaml"
 
+# The same requirement under the OTHER engine. The Lua hook archives and
+# quarantines whatever the engine is, so disabling the volume drops instances
+# under ingest exactly as it does under orthanc. This case exists because the
+# guard used to be gated on engine==orthanc and was therefore unreachable from
+# the default configuration.
+cat >"$V/neg-edge-ingest-no-facilitybackup.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+storage:
+  facilityBackup:
+    enabled: false
+ingest:
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+        %header
+        REMOVE PatientName
+EOF
+
+
+# Alerts that go nowhere. Empty emailTo renders Alertmanager with receiver
+# "null": every rule fires and nothing is delivered, which looks like health.
+printf 'observability:\n  enabled: true\n  stack:\n    enabled: true\n    alerting:\n      emailTo: ""\n      smtpHost: smtp.example.org\n' >"$V/neg-edge-no-emailto.yaml"
+printf 'observability:\n  enabled: true\n  stack:\n    enabled: true\n    alerting:\n      emailTo: ops@example.org\n      smtpHost: ""\n' >"$V/neg-edge-no-smtphost.yaml"
+
 # Recipes for an engine that is not selected. deid.engine defaults to orthanc, so
 # this is what a site gets by pasting specs into values.yaml and changing nothing
 # else: the ConfigMap and the deidentify stage are both gated on the engine, so
@@ -895,9 +928,12 @@ EOF
 # -- Grafana is reachable ONLY by NodePort on tier-1 --------------------------
 cat >"$V/neg-edge-grafana-nodeport-range.yaml" <<'EOF'
 observability:
-  enabled: true
   stack:
     enabled: true
+    alerting:
+      emailTo: ops@example.org
+      smtpHost: smtp.example.org
+  enabled: true
 kube-prometheus-stack:
   grafana:
     service:
@@ -909,9 +945,12 @@ EOF
 # alert to a name that no longer resolves. Nothing looks unhealthy.
 cat >"$V/neg-edge-ruler-am-drift.yaml" <<'EOF'
 observability:
-  enabled: true
   stack:
     enabled: true
+    alerting:
+      emailTo: ops@example.org
+      smtpHost: smtp.example.org
+  enabled: true
 kube-prometheus-stack:
   fullnameOverride: obs
 EOF
@@ -1034,7 +1073,7 @@ neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
-neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
+neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
 neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
@@ -1052,6 +1091,9 @@ neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.y
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
 neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
+neg-edge-ingest-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-ingest-no-facilitybackup.yaml	dropped at the front door
+neg-edge-no-emailto	charts/edge	edge-base.yaml neg-edge-no-emailto.yaml	alerting.emailTo is empty
+neg-edge-no-smtphost	charts/edge	edge-base.yaml neg-edge-no-smtphost.yaml	smtpHost is empty
 neg-edge-specs-wrong-engine	charts/edge	edge-base.yaml neg-edge-specs-wrong-engine.yaml	is set, but deid.engine=
 EOF
 }

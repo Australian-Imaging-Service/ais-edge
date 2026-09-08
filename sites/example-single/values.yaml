@@ -399,6 +399,16 @@ observability:
     # smtpUsername is here rather than in the Secret because Alertmanager has
     # no smtp_auth_username_file; only the PASSWORD is read from a file.
     alerting:
+      # SET emailTo OR NO ALERT IS EVER DELIVERED, including the ones that tell
+      # you studies have stopped reaching XNAT. Left empty, Alertmanager renders
+      # with receiver "null": every rule still evaluates, every alert still
+      # fires, and all of them go nowhere. Nothing errors and nothing warns.
+      #
+      # THIS IS EASY TO MISS because the secrets file makes you fill in
+      # REPLACE_SMTP_USERNAME and REPLACE_SMTP_APP_PASSWORD, so it feels as
+      # though email is configured. Those are the credentials for TALKING to the
+      # relay; the four keys here are WHO gets the mail and WHICH relay. Both
+      # halves are required and they live in different files.
       emailTo: ""            # e.g. imaging-ops@example.org
       emailFrom: ""          # defaults to emailTo when left empty
       smtpHost: ""           # e.g. smtp.example.org

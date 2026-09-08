@@ -117,3 +117,27 @@ NOT REMOVED BY `helm uninstall`
   helm.sh/resource-policy: keep and Retain. Uninstalling this release leaves
   every received study, and the Secrets above, in place. Removing data is a
   separate deliberate act.
+
+{{- if and .Values.observability.enabled (not .Values.observability.stack.alerting.emailTo) }}
+
+  ⚠  NO ALERT CAN BE DELIVERED FROM THIS SITE
+    observability.stack.alerting.emailTo is empty, so Alertmanager renders with
+    receiver "null". Every rule still evaluates and every alert still fires;
+    none of them reach anyone. That includes the ones that tell you studies have
+    stopped arriving in XNAT.
+
+    Filling in the alertmanager-smtp Secret is NOT enough on its own. That is
+    the credential for talking to the relay. These four say who gets the mail
+    and which relay to use, and they live in the site values file:
+
+      observability:
+        stack:
+          alerting:
+            emailTo: imaging-ops@example.org
+            emailFrom: ""          # defaults to emailTo
+            smtpHost: smtp.example.org
+            smtpUsername: ""       # must match `username` in alertmanager-smtp
+
+    If this site is deliberately without email, ignore this: nothing else
+    depends on it.
+{{- end }}

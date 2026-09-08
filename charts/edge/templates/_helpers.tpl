@@ -35,6 +35,64 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/* Catching them at `helm template` time is the whole point.             */}}
 {{/* ===================================================================== */}}
 {{- define "edge.validate" -}}
+  {{- /* THE FACILITY BACKUP IS REQUIRED UNDER BOTH ENGINES, and it used to be
+         gated as though it were an orthanc-only concern. It became reachable
+         when ingest became the default, which is how the gating was found.
+
+         The hook loads on:  or (engine == "orthanc") (facilityBackup.enabled)
+
+         so the two ways to get here fail DIFFERENTLY, and the message says both:
+
+         orthanc + disabled -> the hook LOADS and writes the original at
+           deidentify-and-forward.lua:124, before it consults DeidEnabled at :148,
+           and returns if that write fails:
+               if not writeAtomic(backupPath, origBytes) then
+                 print("ABORT: facility backup write failed for " .. instanceId)
+                 return
+           Every instance is dropped at the front door while the modality is told
+           the transfer succeeded. Loud in its own way: the pipeline stops.
+
+         ingest + disabled -> the hook is NOT LOADED at all. Nothing drops.
+           Studies arrive, are grouped, de-identified by the ingest stage and
+           uploaded, and the site looks entirely healthy. What silently does not
+           exist is the archive of record and the unmapped-AET quarantine, because
+           the hook is the only thing that writes either. That is the worse of the
+           two: it looks like a working system until someone needs the original.
+
+         engine=none is exempt: the hook is not loaded and there is nothing to
+         archive from, since nothing de-identifies either. */ -}}
+  {{- if ne (include "edge.deidEngine" .) "none" }}
+    {{- if not .Values.storage.facilityBackup.enabled }}
+      {{- fail (printf "storage.facilityBackup.enabled=false is not supported under deid.engine=%s. Under deid.engine=orthanc the Lua hook loads, writes every original to that volume BEFORE anything else, and returns if the write fails, so every incoming instance is dropped at the front door while the sending modality is told the transfer succeeded. Under deid.engine=ingest the hook is not loaded at all, so nothing is dropped and nothing complains: what is silently missing is the archive of record and the unmapped-AET quarantine, because the hook is the only thing that writes either. Enable it." (include "edge.deidEngine" .)) }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* ALERTS THAT GO NOWHERE. Ported from charts/mgmt on main, where this has
+         been guarded for a while; it never reached this branch, which is the one
+         where it matters more. Tier-1 runs its OWN Alertmanager and there is no
+         management plane behind it, so this is the only delivery path there is.
+
+         Empty emailTo renders Alertmanager with receiver "null": every rule still
+         evaluates, every alert still fires, and none is delivered. Nothing errors.
+         That includes the alerts saying studies have stopped reaching XNAT.
+
+         It is easy to believe this is configured, because the secrets file makes
+         you fill in REPLACE_SMTP_USERNAME and REPLACE_SMTP_APP_PASSWORD. Those
+         are the credential for talking to the relay. These say who gets the mail.
+         Two halves, two files, and only one of them was ever enforced.
+
+         Gated on stack.enabled as well as observability.enabled: this branch can
+         run the pipeline with no local stack at all, and then there is no
+         Alertmanager to configure. */ -}}
+  {{- if and .Values.observability.enabled .Values.observability.stack.enabled }}
+    {{- if not .Values.observability.stack.alerting.emailTo }}
+      {{- fail "observability.stack.alerting.emailTo is empty: alerts would be evaluated and then discarded, which looks exactly like a healthy site. Alertmanager renders with receiver \"null\" and every alert goes nowhere, including the ones reporting that studies have stopped reaching XNAT. Filling in the alertmanager-smtp Secret is not enough on its own: that is the credential for the relay, this is who receives the mail." }}
+    {{- end }}
+    {{- if not .Values.observability.stack.alerting.smtpHost }}
+      {{- fail "observability.stack.alerting.smtpHost is empty — no alert could be delivered. Set it alongside observability.stack.alerting.emailTo." }}
+    {{- end }}
+  {{- end }}
+
 
   {{- /* Both upload modes at once = every session uploaded to XNAT twice. */ -}}
   {{- if not (has .Values.upload.mode (list "s3" "direct")) }}
@@ -228,12 +286,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9_-]*$" $project) }}
         {{- fail (printf "orthanc.deid.aetMap.%s.project is %q, which XNAT will not accept. Project IDs must start alphanumeric and contain only letters, digits, underscore and hyphen — no spaces, dots or slashes. XNAT rejects it per session at upload, after de-identification has already succeeded." $aet $project) }}
       {{- end }}
-    {{- end }}
-    {{- /* The hook writes the original to the facility backup and only then
-           removes it from Orthanc. Without that volume there is no archive of
-           record and no landing place for unmapped-AET quarantine. */ -}}
-    {{- if not .Values.storage.facilityBackup.enabled }}
-      {{- fail "deid.engine=orthanc requires storage.facilityBackup.enabled=true — the de-identification hook writes originals there before modifying them, and quarantines unmapped-AET studies under it." }}
     {{- end }}
   {{- end }}
 

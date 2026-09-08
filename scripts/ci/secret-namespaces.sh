@@ -81,6 +81,11 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 #   the chart.
 #   orthanc.deid.policyReviewed    the example deliberately ships false — it
 #                                  must not assert that a human reviewed a
+#   observability.stack.alerting.emailTo / .smtpHost
+#                                  same shape: the local stack has no alert
+#                                  delivery until a site names a recipient, and
+#                                  the chart refuses rather than discarding every
+#                                  alert into receiver "null".
 #                                  de-identification profile they have never
 #                                  seen. That gate is covered by ci-negative;
 #                                  overriding it here keeps THIS stage about
@@ -119,7 +124,9 @@ fi
 # hostAliases are all DERIVED from the management file's domain and hostnames,
 # so on its own the edge chart has nothing to derive them from.
 render edge charts/edge xnat-ingest "$VALUES_MGMT" "$VALUES_EDGE" \
-    --set orthanc.deid.policyReviewed=true > "$WORK/edge.yaml"
+    --set orthanc.deid.policyReviewed=true \
+    --set observability.stack.alerting.emailTo=ci@example.org \
+    --set observability.stack.alerting.smtpHost=smtp.example.org > "$WORK/edge.yaml"
 if [ ! -s "$WORK/edge.yaml" ]; then
     bad "edge chart failed to render with sites/example-mgmt + sites/example-edge"
     sed 's/^/        /' "$WORK/edge.err" | head -20

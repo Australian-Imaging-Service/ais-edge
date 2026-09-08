@@ -100,6 +100,14 @@ $EDITOR sites/my-hospital/secrets.enc.yaml           # still PLAINTEXT at this p
 #   only uncomment if you turn Orthanc auth on) — leave those alone.
 scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 
+#   ALERTING IS TWO HALVES, IN TWO FILES. The secrets file makes you fill in
+#   REPLACE_SMTP_USERNAME and REPLACE_SMTP_APP_PASSWORD, which is only the
+#   credential for talking to the relay. Who receives the mail and which relay
+#   to use are in the VALUES file, under observability.stack.alerting, and they
+#   ship empty. Left that way, Alertmanager renders with receiver "null": every
+#   alert still fires and none is delivered, including the ones that tell you
+#   studies have stopped reaching XNAT. Set emailTo and smtpHost.
+
 # 5. Confirm the de-id policy, deliberately: set
 #      orthanc.deid.policyReviewed: true
 #    in sites/my-hospital/values.yaml. The chart REFUSES to render while it is
