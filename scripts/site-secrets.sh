@@ -461,8 +461,35 @@ apply)
         fi
     done
 
-    # Straight into a pipe. Plaintext never touches the disk.
-    sops --config "$SOPS_CONFIG" -d "$F" | kubectl apply -f -
+    # Straight into a pipe. Plaintext never touches the disk. The filter in the
+    # middle keeps that property: it reads stdin and writes stdout, nothing else.
+    #
+    # WHY THE FILTER EXISTS. The shipped scaffold ends with a `---` followed only
+    # by the commented-out orthanc-credentials block, which is correct: the
+    # separator has to be there for the block to become its own document when an
+    # operator uncomments it. In PLAINTEXT that trailing separator yields a None
+    # document and kubectl skips it. SOPS does not round-trip it as None:
+    #
+    #     before encryption:  5 docs, last is None   -> kubectl skips it
+    #     after  encryption:  5 docs, last is {}     -> kubectl VALIDATES it
+    #
+    # and an empty mapping fails validation:
+    #
+    #     error: error validating "STDIN": error validating data:
+    #     [apiVersion not set, kind not set]
+    #
+    # kubectl applies documents in order and stops at the first invalid one, so
+    # this aborted the install AFTER creating the earlier Secrets, leaving the
+    # site half-provisioned. Every new site hit it, because it is the scaffold's
+    # own separator rather than anything the operator did.
+    #
+    # Dropping empty documents is safe: a document with no keys cannot describe
+    # an object. Anything with content is passed through untouched, so a genuine
+    # malformed document still fails, as it should.
+    _drop_empty_docs='import sys, yaml; yaml.safe_dump_all([d for d in yaml.safe_load_all(sys.stdin) if d], sys.stdout, sort_keys=False)'
+    sops --config "$SOPS_CONFIG" -d "$F" \
+        | python3 -c "$_drop_empty_docs" \
+        | kubectl apply -f -
     info "secrets applied. Now: helm upgrade --install ... -f sites/$2/values.yaml"
     ;;
 

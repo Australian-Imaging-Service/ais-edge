@@ -71,8 +71,16 @@ reasoning behind them; your site file holds the facts that are true of your site
 ### Steps
 
 ```bash
-# 1. Clone this repo on the node
-git clone <repo-url> && cd k0s-k0smotron-mvp
+# 0. Install the two tools the secrets step needs. Nothing else installs them,
+#    and step 2 is the first command that fails without them.
+sudo apt-get install -y age
+curl -fsSLO https://github.com/getsops/sops/releases/download/v3.13.3/sops_3.13.3_amd64.deb
+sudo apt-get install -y ./sops_3.13.3_amd64.deb
+
+# 1. Clone this repo on the node. NAME THE BRANCH: the default branch is `main`,
+#    which is TIER 2 (a management cluster plus edges). This tier is on
+#    `tier-1-solution`, and the two are not interchangeable.
+git clone --branch tier-1-solution <repo-url> && cd ais-edge
 
 # 2. One age key per operator, then make it a recipient in .sops.yaml
 scripts/site-secrets.sh init-key
@@ -85,6 +93,11 @@ scripts/site-secrets.sh new my-hospital single
 $EDITOR sites/my-hospital/values.yaml                # nodeIP, aetMap, deid profile
 openssl rand -hex 32                                 # -> AIS_DEID_HMAC_SALT
 $EDITOR sites/my-hospital/secrets.enc.yaml           # still PLAINTEXT at this point
+#   fill in every REPLACE_ on an UNCOMMENTED line, and set `server:` to your
+#   XNAT. The server ships as https://xnat.example.org and is NOT a REPLACE_
+#   token, so filling in only the REPLACE_ ones leaves it pointing at nothing.
+#   REPLACE_ also appears in comments (the orthanc-credentials block, which you
+#   only uncomment if you turn Orthanc auth on) — leave those alone.
 scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 
 # 5. Confirm the de-id policy, deliberately: set
