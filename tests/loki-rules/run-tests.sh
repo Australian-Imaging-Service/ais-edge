@@ -43,8 +43,22 @@ fi
 TIER_NS="$(grep -m1 '^namespace:' "${REPO_ROOT}/${OBS_CHART}/values.yaml" | awk '{print $2}')"
 TIER_NS="${TIER_NS:-xnat-upload}"
 RULES="${REPO_ROOT}/${OBS_CHART}/files/loki-ruler-rules.yaml"
-PORT="${LOKI_TEST_PORT:-33100}"
-NAME="loki-rule-test"
+# PER-RUN, NOT FIXED. Both used to be constants: NAME="loki-rule-test" and port
+# 33100. Two concurrent runs then fought over one container, and the loser was
+# not told. The second run's `docker rm -f` DESTROYED the first run's Loki, the
+# first run carried on querying the second run's replacement, and its fixture
+# check reported a count that was the sum of both:
+#
+#     FAIL  fixture_ingestion: pushed 81 lines, only 162 are queryable
+#
+# 162 = 2 x 81. Neither run's results were trustworthy and neither said so: one
+# reported a mismatch it could not explain, the other could pass on doubled data.
+# Observed on this machine, where several sessions share one checkout.
+#
+# $$ is unique per process, so runs coexist instead of clobbering. LOKI_TEST_PORT
+# still overrides for a run that needs a predictable port.
+PORT="${LOKI_TEST_PORT:-$((33100 + ($$ % 500)))}"
+NAME="loki-rule-test-$$"
 WORK="$(mktemp -d)"
 
 _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
@@ -120,7 +134,13 @@ ingester:
   max_chunk_age: 720h
 EOF
 
-docker rm -f "$NAME" >/dev/null 2>&1
+# NO BLANKET `docker rm -f` HERE. It used to remove "$NAME" unconditionally,
+# which under the fixed name above meant removing SOMEONE ELSE'S run. The name
+# is unique per process now, so there is nothing of ours to clear first, and a
+# collision means a genuine leftover worth failing on rather than deleting.
+if docker inspect "$NAME" >/dev/null 2>&1; then
+    echo "container $NAME already exists; refusing to clobber it" >&2; exit 2
+fi
 docker run -d --name "$NAME" -p "${PORT}:3100" \
     -v "$WORK/loki.yaml:/etc/loki/local-config.yaml:ro" \
     "$IMAGE" -config.file=/etc/loki/local-config.yaml >/dev/null 2>&1 || {
