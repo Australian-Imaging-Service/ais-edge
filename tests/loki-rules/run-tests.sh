@@ -224,6 +224,9 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
+2	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-bad","level":"unknown"}	{"message":"REJECT: no project mapped for CalledAET ROGUESCANNER — quarantined to /data/facility-backup/__unmapped_aet__/1.2.3/4.5.6.dcm"}
+3	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-bad","level":"unknown"}	{"message":"REJECT: no project mapped for CalledAET ROGUESCANNER — quarantined to /data/facility-backup/__unmapped_aet__/1.2.3/4.5.7.dcm"}
+2	{"namespace":"xnat-ingest","component":"dicom-receiver","app":"orthanc","cluster":"aet-ok","level":"unknown"}	{"message":"Accepted instance for CalledAET AISEDGE, project test_project"}
 EOF
 }
 
@@ -249,6 +252,8 @@ retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures mus
 upload_failing_all	XNATUploadFailingForAllSessions	fail-all	fire	3 failures and not one session landed
 upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, but sessions ARE still landing
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
+rejected_unmapped_aet	DICOMRejectedUnmappedAET	aet-bad	fire	scanner sent an AE title not in aetMap — studies quarantined, never reached XNAT
+rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title must never raise a rejection
 EOF
 }
 

@@ -803,6 +803,13 @@ upload:
     existingSecret: xnat-credentials    # keys: server, username, password
     loop: 300
     waitPeriod: 60
+    # CAUTION: this also feeds an alert. The SessionUploadStalled rule detects a
+    # started-but-never-finished upload by matching the uploader's log line
+    #   "Including <alwaysInclude> scans/files in upload from '<session>'"
+    # and upload_api.py only emits it `if always_include`. Setting this to "" is a
+    # legitimate choice, but it removes that signal and the stall alert then never
+    # fires. Nothing else notices: no render error, no runtime error, just an alert
+    # that has quietly stopped watching the delivery path.
     alwaysInclude: "all"
     verifySsl: true
     requireManifest: false

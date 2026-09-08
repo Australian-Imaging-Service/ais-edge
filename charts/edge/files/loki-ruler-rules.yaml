@@ -127,12 +127,54 @@ groups:
     annotations:
       summary: '>5 XNAT upload errors in 10 minutes on {{ $labels.cluster }}'
       description: xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n xnat-ingest -l component=upload` for the actual error.
+  # THE UPLOADER THIS TIER ACTUALLY RENDERS. This rule used to select
+  # component="s3-uploader" and match event="upload_started" / "upload_completed".
+  # Neither exists on this branch:
+  #   * upload.mode is always direct here, so no s3-uploader is ever rendered.
+  #     Measured on a live install: 0 pods carry that label; the uploader carries
+  #     component="upload".
+  #   * those event= fields come from our own files/s3-uploader.sh. The direct
+  #     uploader is the xnat-ingest binary, which emits `message` strings and no
+  #     event field at all. Measured on the same install: 0 lines carry "event":.
+  # So the ONE alert covering a stalled delivery could never fire, on the branch
+  # whose only delivery path is the one it was written to watch.
+  #
+  # The completion string below is the same one XNATUploadSuccess matches, which
+  # is known to work: it is what raises the upload-complete notifications.
+  #
+  # IT KEYS ON PROSE, NOT ON A STRUCTURED EVENT, so record what it depends on.
+  # The "started" side matches upload_api.py:263-266 in the PINNED image
+  # (ghcr.io/australian-imaging-service/xnat-ingest:0.15.0):
+  #
+  #     if always_include:
+  #         logger.info(f"Including {always_include} scans/files in upload from '{session.name}' to ...")
+  #
+  # Two ways that stops being true, neither of which fails loudly:
+  #   * upstream rewords the line. Nothing breaks; the alert just stops firing.
+  #   * A SITE SETS upload.direct.alwaysInclude TO "". That log line is guarded by
+  #     `if always_include`, so emptying the key removes the started signal, the
+  #     left side of the `unless` is always empty, and this alert silently never
+  #     fires again. See the note on alwaysInclude in charts/edge/values.yaml.
+  #
+  # The unconditional alternative, :400 "Uploaded '<resource>' in '<session>'",
+  # was considered and rejected: it fires only after a resource has moved, so a
+  # session that stalls at auth, project lookup or connection would emit nothing
+  # and the earliest failures - the ones most worth paging on - would go unseen.
+  #
+  # THE INTENDED ENDPOINT IS STRUCTURE, NOT PROSE. xnat-ingest already emits
+  # structured events: 9 `extra=` sites in the pinned image, carrying event,
+  # session and count keys (deid_failed, deid_incomplete, session_metadata_missing
+  # and five more). There is simply no upload_started / upload_completed among
+  # them yet. Adding those two upstream is a small change and would let this rule
+  # key on `| json | event="upload_started"` instead of on a sentence, which is
+  # both stabler and immune to the alwaysInclude coupling above. Until then the
+  # prose match is the only thing available, so it is written down rather than
+  # left as an accident.
   - alert: SessionUploadStalled
     annotations:
-      description: "The upload started but did not complete within the expected window. Could be a slow network, a large session, or a stuck retry. Deliberately does not name the transfer tool: this text named a binary that had been replaced two migrations earlier, and an alert description is read by someone under pressure who will go looking for it."
+      description: "The uploader logged that it began this session and has not logged a successful completion for it within the window. Could be a slow network, a large session, or XNAT refusing it. Inspect:\n  kubectl -n xnat-ingest logs -l component=upload --tail=50\n"
       summary: Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes
-    expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_started\" [15m])) > 0)\nunless on (cluster, session)\n(sum by\
-      \ (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"s3-uploader\"}\n  | json | event=\"upload_completed\" [15m])) > 0)\n"
+    expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Including .* scans/files in upload from '\"\n  | regexp \"in upload from '(?P<session>[^']+)'\"\n  [15m])) > 0)\nunless on (cluster, session)\n(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files in\"\n  | regexp \"Successfully uploaded all files in '(?P<session>[^']+)'\"\n  [15m])) > 0)\n"
     for: 5m
     labels:
       severity: warning
@@ -306,6 +348,46 @@ groups:
     annotations:
       summary: A session on {{ $labels.cluster }} is stuck at {{ $labels.stage }}
       description: "A session has been failing its reclaim condition for longer than\ndataPolicy.reporter.stuckAfter.\n\nIT IS NOT LOST AND NOTHING HAS BEEN DELETED OR MOVED. The engine is\nkeeping a copy it cannot prove is reconstructible, which is correct.\nWhat this alert says is that the condition is never going to come\ntrue on its own, and that the steady reclaim_kept line for this\nsession is not routine.\n\nUsual causes: the stage downstream never produced what the condition\nlooks for, or a reclaim word that cannot be satisfied in this\nconfiguration.\n\n  kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_stuck\n\nThe event carries the session, the reclaim word and the age.\n"
+  # THE REJECTION ITSELF, as opposed to the quarantine directory ageing.
+  #
+  # This rule was missing on this branch entirely, while everything around it
+  # assumed it existed: QuarantinedDataUnresolved's own description below tells
+  # the operator the AE title "is in the DICOMRejectedUnmappedAET mail", and
+  # files/deidentify-and-forward.lua:188 carries
+  #
+  #     -- Keep the "REJECT: no project mapped for CalledAET <AET>" wording:
+  #     -- the DICOMRejectedUnmappedAET alert rule matches on it.
+  #
+  # So the Lua was preserving a log string for a consumer that did not exist,
+  # and the surviving alert pointed at a mail nobody could have received.
+  #
+  # THE GAP WAS A DETECTION GAP, not bookkeeping. QuarantinedDataUnresolved
+  # fires on the quarantine directory's OLDEST ENTRY via data-policy's
+  # stage_report, which is hours later and keyed on directory age. An unmapped
+  # AE title arriving now produced a REJECT line nothing watched, and then
+  # silence until the directory aged past alertAfter. The scanner meanwhile
+  # believes it delivered: the studies are neither in XNAT nor reported.
+  #
+  # Selector matches main's, and both labels it needs are forwarded by
+  # files/vector-local.yaml: app comes from the pod's `app: orthanc` label.
+  - alert: DICOMRejectedUnmappedAET
+    expr: |
+      sum by (cluster, aet) (
+        count_over_time(
+          {namespace="xnat-ingest", app="orthanc"}
+          |~ "REJECT: no project mapped for CalledAET"
+          | regexp "CalledAET (?P<aet>[A-Za-z0-9._-]+)"
+          [5m]
+        )
+      ) > 0
+    for: 0s
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: dicom-routing
+    annotations:
+      summary: DICOM REJECTED — unmapped scanner AE title '{{ $labels.aet }}' on {{ $labels.cluster }}
+      description: "Orthanc rejected one or more studies sent with AE title '{{ $labels.aet }}', which is not in this site's orthanc.deid.aetMap. The studies did NOT reach XNAT and the sending modality was told the transfer succeeded.\nThey are quarantined, not discarded. Add the AE title to orthanc.deid.aetMap in sites/{{ $labels.cluster }}/values.yaml, upgrade the release, then re-send from the quarantine directory.\n"
   - alert: QuarantinedDataUnresolved
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__\
       \ [15m])) > 0\n"
