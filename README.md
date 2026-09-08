@@ -168,8 +168,13 @@ C-STORE to Orthanc on the node's own IP (port 4242 on the local LAN). Orthanc
 de-identifies in-process, keeps the deid'd instance, and backs up the original to
 a node-local directory that never leaves the machine.
 
-De-identification in Orthanc is the default and the only engine that carries data
-end to end today. xnat-ingest also ships a `deidentify` stage, off by default,
+De-identification by xnat-ingest's own `deidentify` stage is the default.
+Orthanc remains the DICOM receiver either way: modalities C-STORE to it on 4242,
+and its Lua script still writes the facility backup and quarantines unmapped AE
+titles. `deid.engine` chooses only which component strips the headers.
+
+The Lua hook is the alternative, selected with `deid.engine: orthanc`. It strips
+at the front door, before `group` or `assign` sees anything,
 which suits a different pipeline — one where studies arrive already carrying
 their project/subject/session identifiers. See
 [docs/choosing-a-deid-engine.md](docs/choosing-a-deid-engine.md) for what each

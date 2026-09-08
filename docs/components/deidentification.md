@@ -11,12 +11,14 @@ stack, so it receives every study regardless of which engine de-identifies. What
 this page configures is *where de-identification happens*.
 
 Two engines exist, built for pipelines that differ in where the routing
-identifiers — the XNAT project, subject and session — come from:
+identifiers — the XNAT project, subject and session — come from. **The default
+is `deid.engine: ingest`**, xnat-ingest's own stage; the Lua hook is the
+alternative, for sites whose studies arrive identified only by AE title:
 
 | | Orthanc Lua hook | xnat-ingest deidentify |
 |---|---|---|
 | values key | `deid.engine: orthanc` | `deid.engine: ingest` |
-| chart default | on | off |
+| chart default | alternative | **DEFAULT** |
 | runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
 | source of routing identifiers | derives them from the calling AE title | expects them in the incoming data |
 | needs an AE-title map | yes | no |
@@ -264,7 +266,7 @@ removes both, so `ingest.orthancGroup.toProcessLabel` has to be cleared at the
 same time or `group-orthanc` filters out every study and the pipeline stalls
 with no error. The chart catches this and says so.
 
-## Configuration — Orthanc Lua hook (default)
+## Configuration — Orthanc Lua hook (`deid.engine: orthanc`)
 
 ```yaml
 orthanc:
@@ -439,7 +441,7 @@ de-identify" above.
 
 ```yaml
 deid:
-  engine: ingest        # orthanc (default) | ingest
+  engine: ingest        # ingest (default) | orthanc | none
 ```
 
 That is the whole switch. Everything that used to be set by hand is derived

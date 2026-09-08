@@ -182,14 +182,34 @@ This is the section where a mistake sends identifiable data to a research
 archive. Nothing downstream re-checks what was removed: the uploader trusts that
 whatever reaches it is already de-identified.
 
-Everything below describes the Orthanc Lua hook, which is the default and the
-engine this deployment is built around. There is a second one — the xnat-ingest
-`deidentify` stage, off by default — but it suits a different pipeline: it needs
-studies to arrive already carrying their project/subject/session identifiers,
-whereas here they arrive identified only by AE title and the hook is what
-manufactures them. If you are wondering which applies to your site,
-[choosing-a-deid-engine.md](choosing-a-deid-engine.md) has the check. For a
-first install, read on: this is the one you want.
+TWO ENGINES, ONE RUNS. `deid.engine` picks it, and **Orthanc is the DICOM
+receiver either way**: modalities always C-STORE to it on 4242, and its Lua
+script always writes the facility backup and quarantines unmapped AE titles.
+The key chooses only which component strips the headers.
+
+**`ingest` is the default.** xnat-ingest's own `deidentify` stage runs between
+`assign` and `upload`, driven by pydicom-deid recipes in
+`ingest.deidentify.specs`. It can do things the Lua profile cannot, `JITTER` on
+dates among them, and its recipes are the same format the wider DICOM community
+writes.
+
+**It has one requirement, and it is about your modalities, not the software.**
+`assign` runs BEFORE `deidentify`, so it has to resolve project, subject and
+session from tags that arrive already populated: `StudyID`, `PatientID`,
+`AccessionNumber` by default. If your modalities do not populate routable values
+there, `assign` cannot file the study and the default engine is the wrong choice
+for your site.
+
+**`orthanc` is the alternative,** and the one to use when studies arrive
+identified only by AE title. The Lua hook strips at the front door and
+MANUFACTURES the identifiers, writing `ClinicalTrialProtocolID`,
+`ClinicalTrialSubjectID` and `ClinicalTrialTimePointID` from the AET map for
+`assign` to read. Everything in this section describes that engine.
+
+[choosing-a-deid-engine.md](choosing-a-deid-engine.md) has the check if you are
+unsure. Switching is five edits, not one, and the site file lists them next to
+`deid.engine`; the chart refuses each wrong combination rather than installing
+something that quietly does nothing.
 
 ```yaml
 orthanc:

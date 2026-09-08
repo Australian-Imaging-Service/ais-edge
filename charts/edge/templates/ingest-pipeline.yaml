@@ -326,7 +326,7 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
-            {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
+            {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #
             # Drop each assigned session once this stage has produced a

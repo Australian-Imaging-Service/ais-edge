@@ -748,6 +748,16 @@ dataPolicy:
     assigned:
       reclaim: onDeidentified
 ingest:
+  # EXPLICIT NOW, and that is the point of this case. The chart default used to
+  # BE the ClinicalTrial* triple, so an ingest-engine fixture reached this guard
+  # by doing nothing. The default is now the modality tags, so a site only trips
+  # this guard by leaving the old values behind after switching engines, which is
+  # exactly the mistake it exists to catch. The fixture has to state them.
+  assign:
+    tagMapping:
+      project: ClinicalTrialProtocolID
+      subject: ClinicalTrialSubjectID
+      session: ClinicalTrialTimePointID
   deidentify:
     specs:
       "__default__/medimage/dicom-series": |

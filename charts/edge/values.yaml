@@ -63,7 +63,37 @@ topology: onprem
 # assigned/__invalid__ with PHI intact and the stage reporting "Found 0
 # sessions" for ever, because one of the five was still on its old value.
 deid:
-  engine: orthanc            # orthanc | ingest | none
+  # DEFAULT: ingest. xnat-ingest's own deidentify stage, between assign and
+  # upload, driven by ingest.deidentify.specs (pydicom-deid recipes). It can do
+  # things the Lua profile cannot, JITTER on dates among them.
+  #
+  # ORTHANC IS STILL THE DICOM RECEIVER either way. This key chooses only which
+  # component de-identifies. Modalities still C-STORE to Orthanc on 4242, and the
+  # Lua script still writes the facility backup and quarantines unmapped AE
+  # titles; under `ingest` it simply stops modifying the instance.
+  #
+  # Setting this to `orthanc` moves stripping to the front door, before group or
+  # assign sees anything, and tagMapping below must then go back to the
+  # ClinicalTrial* tags the hook writes.
+  # SWITCHING TO deid.engine: orthanc IS FIVE EDITS, NOT ONE. The chart refuses
+  # each wrong combination rather than installing something that quietly does
+  # nothing, so you will be told, one at a time. Doing them together is quicker:
+  #
+  #   1. deid.engine: orthanc
+  #   2. DELETE the ingest.deidentify.specs block below. Recipes belong to the
+  #      stage that no longer renders; left in place the chart refuses, because
+  #      silently ignoring them is how a reviewed policy stops being applied.
+  #   3. ingest.assign.tagMapping back to the ClinicalTrial* tags: the Lua hook
+  #      writes those from the AET map, and they are the pseudonymised ids.
+  #   4. dataPolicy.derived.assigned.reclaim: onUploaded
+  #      (under orthanc the uploader reads /data/assigned, so that tree is the
+  #      terminal one)
+  #   5. dataPolicy.derived.deidentified.reclaim: never
+  #      (nothing writes that tree, so any other value can never be satisfied)
+  #
+  # And orthanc.deid.profile becomes the recipe that matters. It is already
+  # filled in below, so it needs reading, not writing.
+  engine: ingest             # ingest | orthanc | none
 
 # =============================================================================
 # THE MANAGEMENT SITE FILE SUPPLIES THESE — you do not normally set them here
@@ -344,7 +374,7 @@ dataPolicy:
       # session accumulates. onDeidentified is the handoff condition for that
       # case: this tree's consumer is the deidentify stage, so the stage is what
       # retires it.
-      reclaim: onUploaded
+      reclaim: auto
       # As above: a recovery window after upload, not a delay before it.
       # Ignored under onDeidentified — the stage deletes at handoff, so there is
       # no window to measure. The chart refuses the combination rather than
@@ -388,7 +418,7 @@ dataPolicy:
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
-      reclaim: never             # never | onUploaded
+      reclaim: auto             # never | onUploaded
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -643,10 +673,22 @@ ingest:
   assign:
     interval: 60
     copyMode: hardlink_or_copy
+    # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
+    # modify instances, so nothing writes the ClinicalTrial* tags and assign must
+    # read tags the modality itself populates. The chart refuses to render if
+    # ClinicalTrial* is named while the engine is ingest.
+    #
+    # Under deid.engine: orthanc set these back to ClinicalTrialProtocolID /
+    # ClinicalTrialSubjectID / ClinicalTrialTimePointID: the hook writes them from
+    # the AET map and they are the pseudonymised ids.
+    #
+    # CAUTION: `subject` becomes the XNAT subject label, and assign runs BEFORE
+    # deidentify. PatientID here means the medical record number becomes that
+    # label in the clear. Point it at a pseudonym tag if your modality writes one.
     tagMapping:
-      project: ClinicalTrialProtocolID
-      subject: ClinicalTrialSubjectID
-      session: ClinicalTrialTimePointID
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
 
   # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
   #

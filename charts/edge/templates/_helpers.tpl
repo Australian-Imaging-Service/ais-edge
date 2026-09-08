@@ -141,10 +141,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- /* De-identification is the control that stops identifiable data
          leaving the facility. A wrong-but-present profile looks identical to
          a right one from the outside, so a human has to say they read it. */ -}}
-  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
-    {{- if not .Values.orthanc.deid.policyReviewed }}
-      {{- fail "deid.engine=orthanc requires orthanc.deid.policyReviewed=true — confirm the de-identification profile and AET map match this site's policy before installing." }}
+    {{- /* BOTH ENGINES, not just the Lua one. This gate used to fire only under
+           deid.engine=orthanc. That was survivable while orthanc was the default
+           and the ingest engine made the operator write a recipe by hand: writing
+           it WAS the deliberate act. Now that ingest is the default and the
+           shipped example carries a recipe, that act disappears, and a site could
+           scaffold, install and start sending studies under a de-identification
+           policy nobody had read. The confirmation belongs to shipping PHI to
+           XNAT, not to which component does the stripping. */ -}}
+    {{- if has (include "edge.deidEngine" .) (list "orthanc" "ingest") }}
+      {{- if not .Values.orthanc.deid.policyReviewed }}
+        {{- fail (printf "deid.engine=%s requires orthanc.deid.policyReviewed=true. Read the recipe this engine will apply (ingest.deidentify.specs for the ingest engine, orthanc.deid.profile for the Lua one) and the AET map, confirm they are this site's policy, then set it. Nothing downstream re-checks what was removed." (include "edge.deidEngine" .)) }}
+      {{- end }}
     {{- end }}
+
+  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
     {{- if not .Values.orthanc.deid.aetMap }}
       {{- fail "orthanc.deid.aetMap is empty: every modality would be quarantined as an unmapped AE title. Map at least one AET to an XNAT project." }}
     {{- end }}
@@ -315,7 +326,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            reclaimer now satisfies exactly that. Under deid.engine=ingest the
            assigned tree is NOT terminal, and the separate guard above already
            requires onDeidentified there. */ -}}
-    {{- if and (eq .Values.dataPolicy.derived.deidentified.reclaim "onUploaded") (ne $terminal "/data/deidentified") }}
+    {{- if and (eq (include "edge.deidentifiedReclaim" .) "onUploaded") (ne $terminal "/data/deidentified") }}
       {{- fail (printf "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct and deid.engine=%s. Under direct upload the only thing that can establish `uploaded` is the staged reclaimer CronJob, and it watches the tree the uploader drains, which under this engine is %s, not /data/deidentified. Nothing would ever satisfy the condition: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it, or deid.engine=ingest if it should be the tree that is uploaded." (include "edge.deidEngine" .) $terminal) }}
     {{- end }}
   {{- end }}
@@ -325,14 +336,14 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          reads /data/deidentified, so its markers describe that tree and nothing
          ever satisfies onUploaded for this one: the assigned copy of every
          session would accumulate while the policy looked correct. */ -}}
-  {{- if and (eq (include "edge.deidEngine" .) "ingest") (eq .Values.dataPolicy.derived.assigned.reclaim "onUploaded") }}
+  {{- if and (eq (include "edge.deidEngine" .) "ingest") (eq (include "edge.assignedReclaim" .) "onUploaded") }}
     {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned — every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
   {{- end }}
 
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
          configurations where the operator has asked for something the mechanism
          cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}
-  {{- if eq .Values.dataPolicy.derived.assigned.reclaim "onDeidentified" }}
+  {{- if eq (include "edge.assignedReclaim" .) "onDeidentified" }}
     {{- if not (eq (include "edge.deidEngine" .) "ingest") }}
       {{- fail "dataPolicy.derived.assigned.reclaim=onDeidentified but deid.engine is not ingest. That condition is satisfied by the deidentify STAGE unlinking its own input, and the stage does not render, so nothing would ever retire /data/assigned and it would grow without bound. Use onUploaded, which the data-policy engine can satisfy from the uploader's markers when the uploader reads this tree, or enable the stage." }}
     {{- end }}
@@ -579,6 +590,39 @@ mistaken for 0 (which would read as "expire immediately").
 {{- end }}
 
 {{/*
+THE RECLAIM WORD FOLLOWS THE ENGINE, so the operator does not have to keep two
+keys in step with a third.
+
+Which tree the uploader drains is decided by deid.engine, and the correct reclaim
+word for each tree follows from that. Making the operator restate it was a
+standing invitation to get it wrong: every combination of engine and these two
+keys has a guard below, and four of the six combinations are refusals. That is a
+lot of machinery to protect a value nobody has a reason to choose independently.
+
+`auto`, the default, resolves to the right word for the selected engine:
+
+    engine    assigned          deidentified
+    ingest    onDeidentified    onUploaded     (uploader reads /data/deidentified)
+    orthanc   onUploaded        never          (uploader reads /data/assigned)
+
+An explicit value is still honoured, and still guarded, for a site that wants to
+keep a tree it would otherwise retire.
+*/}}
+{{- define "edge.assignedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.assigned.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.deidEngine" .) "ingest" }}onDeidentified
+{{- else }}onUploaded{{ end }}
+{{- end }}
+
+{{- define "edge.deidentifiedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.deidentified.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.deidEngine" .) "ingest" }}onUploaded
+{{- else }}never{{ end }}
+{{- end }}
+
+{{/*
 The stage table: one line per declared stage, consumed by files/data-policy.sh.
 
   name <TAB> kind <TAB> location <TAB> minFreeDiskPercent <TAB> alertAfterSec <TAB> retain
@@ -617,9 +661,9 @@ originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}
 {{- end }}
 derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.location }}	-	-	{{ .Values.dataPolicy.derived.orthancStorage.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.orthancStorage.minAge }}	{{ .Values.dataPolicy.derived.orthancStorage.backend }}
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
-derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ .Values.dataPolicy.derived.assigned.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
+derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ .Values.dataPolicy.derived.deidentified.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
 {{- end }}
 {{- end }}
 
@@ -695,5 +739,5 @@ every site is configured, both branches resolve to the assigned key exactly as
 before.
 */}}
 {{- define "edge.uploadReclaim" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ .Values.dataPolicy.derived.deidentified.reclaim }}{{- else }}{{ .Values.dataPolicy.derived.assigned.reclaim }}{{- end }}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
 {{- end }}

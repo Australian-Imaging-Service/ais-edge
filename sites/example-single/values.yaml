@@ -33,7 +33,38 @@ clusterLabel: tier1-example
 # The de-identification engine. One key; the chart derives the Lua hook,
 # the xnat-ingest stage, the group label and the reclaim condition from it.
 deid:
-  engine: orthanc
+  # THE DE-IDENTIFICATION ENGINE. Two exist and exactly one runs.
+  #
+  #   ingest   (this, the default) xnat-ingest's own `deidentify` stage, between
+  #            assign and upload. Recipes are pydicom-deid, written below in
+  #            ingest.deidentify.specs, and they can do things the Orthanc
+  #            profile cannot, JITTER on dates among them.
+  #
+  #   orthanc  a Lua hook inside Orthanc, stripping each instance as it arrives,
+  #            driven by orthanc.deid.profile further down.
+  #
+  # ORTHANC IS STILL THE DICOM RECEIVER either way. This key only chooses which
+  # component de-identifies; the modality still C-STOREs to Orthanc on 4242, and
+  # the Lua script still writes the facility backup and quarantines unmapped AE
+  # titles. Under `ingest` the hook simply stops modifying the instance.
+  # SWITCHING TO deid.engine: orthanc IS THREE EDITS, NOT ONE. The chart refuses
+  # each wrong combination rather than installing something that quietly does
+  # nothing, so you will be told, one at a time. Doing them together is quicker:
+  #
+  #   1. deid.engine: orthanc
+  #   2. DELETE the ingest.deidentify.specs block below. Recipes belong to the
+  #      stage that no longer renders; left in place the chart refuses, because
+  #      silently ignoring them is how a reviewed policy stops being applied.
+  #   3. ingest.assign.tagMapping back to the ClinicalTrial* tags: the Lua hook
+  #      writes those from the AET map, and they are the pseudonymised ids.
+  #
+  # The two dataPolicy.derived reclaim words follow automatically: they are set
+  # to `auto` below and the chart resolves them for whichever engine is selected,
+  # so they are not part of this list.
+  #
+  # And orthanc.deid.profile becomes the recipe that matters. It is already
+  # filled in below, so it needs reading, not writing.
+  engine: ingest
 
 # All pipeline workloads live here. Tier-2 splits ingest (edge cluster) from
 # upload (management cluster) because they are different machines; on one node
@@ -147,7 +178,162 @@ ingest:
     interval: 60
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-ingest-processed
+  deidentify:
+    # THE RECIPE. The chart turns this map into a ConfigMap and mounts it at
+    # SPEC_DIR; the KEY is the path under SPEC_DIR, so it must be the one
+    # xnat-ingest looks for: __default__/<category>/<format>.
+    #
+    # THIS IS THE POLICY. Nothing downstream re-checks what was removed, so read
+    # it before you install, the same way orthanc.deid.policyReviewed makes you
+    # confirm the other engine's profile. Copied from
+    # charts/edge/files/deid-specs.example/.
+    #
+    # OPTION: dates. This recipe REMOVEs PatientBirthDate outright. If you need
+    # age-at-scan preserved, pydicom-deid also supports JITTER, which shifts a
+    # date by a fixed number of days:
+    #     JITTER PatientBirthDate 47
+    #     JITTER StudyDate 47
+    # CAUTION: the offset is the same for every patient, so jitter the study
+    # dates by the same number or every computed age silently shifts.
+    specs:
+      __default__/medimage/dicom-series: |
+        # Example de-identification recipe for medimage/dicom-series.
+        #
+        # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
+        # xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+        # is the category and the FILE is the format: medimage/dicom-series. It skips
+        # anything at the top level that is not a directory, so a flat file named
+        # `medimage@dicom-series.json` is never read and every session fails with
+        # "No deidentification specs found".
+        #
+        # Copy this directory, rename __default__ to your project ID for a
+        # project-specific policy, and edit to match your site's approved profile.
+        # __default__ is the fallback for any project without its own directory.
+        #
+        # ONLY THE TAGS NAMED HERE ARE REMOVED. Anything not listed passes through
+        # untouched, so this list IS the policy — review it as such.
+        #
+        # Compare with files/deidentification-profile.example.json, which is the
+        # equivalent for the Orthanc Lua engine and has a different syntax.
+
+        FORMAT dicom
+
+        %header
+
+        # Direct identifiers.
+        REMOVE PatientName
+        REMOVE PatientBirthDate
+        REMOVE PatientAddress
+        REMOVE PatientTelephoneNumbers
+        REMOVE OtherPatientIDs
+        REMOVE OtherPatientNames
+
+        # Care-team and institution.
+        REMOVE ReferringPhysicianName
+        REMOVE PerformingPhysicianName
+        REMOVE OperatorsName
+        REMOVE InstitutionName
+        REMOVE InstitutionAddress
+
+        # Local accession/order numbers, which are re-identifying within a site.
+        REMOVE AccessionNumber
+
+        # MARK THE RESULT AS DE-IDENTIFIED. Without these two tags an instance that has
+        # been through this stage is indistinguishable, by its own metadata, from one
+        # that was never processed, and some downstream tooling keys on them. The
+        # Orthanc engine already sets PatientIdentityRemoved in its profile; this is the
+        # same assertion for this engine, so the two are not asymmetric.
+        #
+        # ADD, not REPLACE: the source instance does not carry these, and REPLACE only
+        # rewrites a tag that is already present.
+        ADD PatientIdentityRemoved YES
+        ADD DeidentificationMethod AIS-Edge xnat-ingest recipe
+
+        # THE PATIENT IDENTIFIER. Removed, and the reason matters because an earlier
+        # version of this file kept it on a premise that is false.
+        #
+        # It claimed assign had already rewritten PatientID to the routed subject.
+        # assign does no such thing: it READS tag values to resolve the project,
+        # subject and session ids and then copies or hardlinks the files unchanged. It
+        # never opens a dataset for writing. Verified by grepping the package for any
+        # write to PatientID; there is none.
+        #
+        # It also claimed upload needs the tag to place the session. It does not.
+        # Placement is explicit: upload builds the XNAT path from the session object's
+        # ids, which came from ingest.assign.tagMapping, not from this header. So
+        # removing PatientID cannot detach the data from its subject.
+        #
+        # What DOES happen if it is left: upload finishes by calling
+        # /data/experiments/<id>?pullDataFromHeaders=true, which asks XNAT to populate
+        # its own metadata FROM THESE HEADERS. So a real medical record number left
+        # here is not merely present in the pixel archive, it is pulled into XNAT's
+        # fields, while PatientName, birth date and institution are all correctly
+        # stripped and the result looks de-identified to a spot check.
+        #
+        # Measured before this change: an instance de-identified by this recipe and
+        # uploaded still carried PatientID verbatim, with PatientIdentityRemoved absent.
+        REMOVE PatientID
+
+        # THE SCANNER, not the patient, and still identifying. StationName names one
+        # machine in one room; DeviceSerialNumber is globally unique to a device. With
+        # InstitutionName already removed these are what put a study back in a building.
+        #
+        # MEASURED, and the reason they are here: a synthetic study carrying
+        # StationName "CT-SCANNER-03" and DeviceSerialNumber "SN-CT-778812" was run
+        # through this recipe and reached the de-identified output with BOTH verbatim,
+        # because neither this recipe nor the Orthanc profile named them. Both are Basic
+        # Application Level Confidentiality tags in DICOM PS3.15.
+        REMOVE StationName
+        REMOVE DeviceSerialNumber
+        # THE REFERRAL, which the earlier pass missed by naming only two of the three
+        # person-name fields. ReferringPhysicianName and PerformingPhysicianName were
+        # removed; RequestingPhysician was not, and it carries the same name.
+        # AdmittingDiagnosesDescription is free text stating why the patient was
+        # admitted, so it is clinical information about that patient rather than about
+        # the acquisition.
+        #
+        # MEASURED on a live tier-1 install with the Orthanc engine: a study whose
+        # RequestingPhysician was "NGUYEN^THI^LAN" and whose
+        # AdmittingDiagnosesDescription was "Suspected pulmonary embolism" reached the
+        # staged output with both verbatim. OtherPatientIDs ("URN-99887766") survived
+        # the Orthanc profile too, though this recipe already removed it, which is
+        # exactly the kind of drift between the two engines worth closing. All three
+        # are Basic Application Level Confidentiality tags in DICOM PS3.15.
+        REMOVE RequestingPhysician
+        REMOVE AdmittingDiagnosesDescription
+
+        # PRIVATE TAGS PASS THROUGH, and that is a decision, not an oversight. The
+        # Orthanc engine states it explicitly as "RemovePrivateTags": false; this recipe
+        # said nothing, which made the same choice invisible on this side. Vendors put
+        # reconstruction parameters research needs in private blocks, and they also put
+        # scheduling references and operator notes there. MEASURED: a private block
+        # carrying "local-scheduling-ref-8842" survives this recipe intact.
+        #
+        # If your site cannot accept that, remove them per-block by tag number; there is
+        # no blanket switch here. Decide, do not inherit this by default.
+
+
+
+        # QUASI-IDENTIFIERS, left in deliberately but LISTED so the choice is visible.
+        # Age and sex are research-relevant and are not direct identifiers, but in a
+        # small cohort they narrow it sharply. Decide per site; they are named here
+        # rather than omitted so that deciding is not the same as forgetting.
+        #   PatientSex
+        #   PatientAge
   assign:
+    # THE LUA HOOK IS OFF under deid.engine: ingest, so nothing writes the
+    # ClinicalTrial* tags the chart would otherwise read. These must be tags your
+    # modalities actually populate, and the chart refuses to render if they are
+    # left pointing at ClinicalTrial*.
+    #
+    # CAUTION: whatever you name for `subject` becomes the XNAT subject label.
+    # PatientID means the medical record number becomes that label, in the clear,
+    # because assign runs BEFORE deidentify. Point it at a pseudonym tag your
+    # modality writes if you have one.
+    tagMapping:
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
     interval: 60
 
 # -----------------------------------------------------------------------------
@@ -272,7 +458,7 @@ dataPolicy:
     grouped:
       reclaim: onAssigned
     assigned:
-      reclaim: onUploaded
+      reclaim: auto
       minAge: 0
 
     # THE LAST TREE, and the one that used to have no knob here at all.
@@ -297,7 +483,7 @@ dataPolicy:
     #     the uploader reads /data/deidentified instead, so set THIS to onUploaded
     #     and set `assigned.reclaim: onDeidentified` above.
     deidentified:
-      reclaim: never
+      reclaim: auto
 
     # WHAT SATISFIES onUploaded ON THIS TIER. There is no bucket and no s3-uploader
     # here, so the marker the data-policy engine looks for is written by nothing
