@@ -404,6 +404,37 @@ else
     # point: XNAT has answered 200 with file_count=1 and an EMPTY file list,
     # which breaks every delivery confirmation while all pods stay green and no
     # alert fires. Nothing else in this repo notices that.
+    # THE PROJECTS THIS FLEET ROUTES INTO, from each edge site's AE-title map.
+    # Without this the sample below is whatever XNAT happens to list first, which
+    # on a shared server is the oldest session anyone ever created.
+    # THE PROJECTS THIS DEPLOYMENT ROUTES INTO. Taken from the edges THIS
+    # management site declares, and each of those edge site files' AE-title map.
+    # Not every site file in the repo: example-edge, cloud-edge and the rest are
+    # shipped samples that are not installed here, and scoping to them would put
+    # projects in the list that this fleet never writes to.
+    AIS_PROJECTS="$(python3 - "$VALUES" <<'PYEOF'
+import yaml, sys, os
+v = sys.argv[1]
+sites = os.path.dirname(os.path.dirname(v))
+try: mgmt = yaml.safe_load(open(v)) or {}
+except Exception: mgmt = {}
+projs = set()
+for e in (mgmt.get("edges") or []):
+    name = e.get("name")
+    if not name: continue
+    f = os.path.join(sites, name, "values.yaml")
+    if not os.path.exists(f): continue
+    try: d = yaml.safe_load(open(f)) or {}
+    except Exception: continue
+    for a in (((d.get("orthanc") or {}).get("deid") or {}).get("aetMap") or {}).values():
+        if isinstance(a, dict) and a.get("project"):
+            projs.add(a["project"])
+print(",".join(sorted(projs)))
+PYEOF
+    )"
+    if [ -z "$AIS_PROJECTS" ]; then
+        skip "XNAT delivery sample" "no aetMap project found in any site file — nothing to scope the check to"
+    else
     res=$($KUBECTL -n "$NS_UPLOAD" exec "$UP" -- python3 -c '
 import os, json, base64, ssl, urllib.request
 h=os.environ["XINGEST_HOST"].rstrip("/"); u=os.environ["XINGEST_USER"]; p=os.environ["XINGEST_PASS"]
@@ -419,9 +450,16 @@ try:
 except Exception as e:
     print("UNREACHABLE",str(e)[:120]); raise SystemExit
 try:
-    s,b=get("/data/experiments?format=json")
-    ex=json.loads(b)["ResultSet"]["Result"]
+    projects=[q for q in "'"$AIS_PROJECTS"'".split(",") if q]
+    ex=[]
+    for proj in projects:
+        s,b=get(f"/data/experiments?project={proj}&format=json&columns=ID,insert_date")
+        if s==200:
+            try: ex.extend(json.loads(b)["ResultSet"]["Result"])
+            except Exception: pass
     if not ex: print("NO_EXPERIMENTS"); raise SystemExit
+    # newest first: the study that just proved the path is the one to sample
+    ex.sort(key=lambda r: r.get("insert_date") or "", reverse=True)
     eid=ex[0]["ID"]
     s,b=get(f"/data/experiments/{eid}/scans/ALL/resources?format=json")
     claimed=sum(int(r.get("file_count") or 0) for r in json.loads(b)["ResultSet"]["Result"])
@@ -429,6 +467,7 @@ try:
     print("FILES",eid,claimed,len(json.loads(b)["ResultSet"]["Result"]))
 except Exception as e:
     print("FILES_ERR",str(e)[:120])' 2>/dev/null)
+    fi
 
     case "$res" in
         AUTH_OK*)     ok "XNAT reachable and credentials accepted" ;;
