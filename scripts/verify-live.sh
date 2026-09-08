@@ -357,7 +357,16 @@ for c in d.get("items", []):
     if c.get("spec", {}).get("suspend"): print(f"SUSPEND\t{ns}/{n}\t0\t0"); continue
     p = period(c.get("spec", {}).get("schedule", ""))
     last = (c.get("status") or {}).get("lastSuccessfulTime")
-    if not last: print(f"NEVER\t{ns}/{n}\t0\t{p}"); continue
+    if not last:
+        # NEVER RUN is not NEVER SUCCEEDED. A CronJob created five minutes ago
+        # on a "17 * * * *" schedule has not failed; it has not been due. Send
+        # its age so the caller can tell those apart.
+        created = c["metadata"].get("creationTimestamp")
+        age = 0
+        if created:
+            ct = datetime.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+            age = int((now - ct).total_seconds())
+        print(f"NEVER\t{ns}/{n}\t{age}\t{p}"); continue
     t = datetime.datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
     print(f"AGE\t{ns}/{n}\t{int((now-t).total_seconds())}\t{p}")')
 if [ -z "$cjs" ]; then
@@ -367,7 +376,15 @@ else
         [ -n "${kind:-}" ] || continue
         case "$kind" in
             SUSPEND) bad "CronJob ${name} is SUSPENDED" "it will never run again until resumed" ;;
-            NEVER)   bad "CronJob ${name} has never completed successfully" ;;
+            # Only a fault once it has had time to run. Before that it is simply
+            # new, and a red line on a fresh install teaches operators to discount
+            # the whole verification.
+            NEVER)   if [ "$age" -gt "$period" ]; then
+                         bad "CronJob ${name} has never completed successfully" \
+                             "it is $((age/60))m old on a $((period/60))m schedule, so it has been due at least once"
+                     else
+                         ok "CronJob ${name}: not due yet ($((age/60))m old, runs every $((period/60))m)"
+                     fi ;;
             AGE)     if [ "$age" -gt $((period * 3)) ]; then
                          bad "CronJob ${name}: last success $((age/3600))h $(((age%3600)/60))m ago" \
                              "more than 3 intervals ($((period/60))m each) — not a blip"

@@ -178,31 +178,54 @@ reproduce from that file alone is not reproducible.
 ### First-time setup
 
 ```bash
-# 1. Create your age key and register it as a SOPS recipient
+# 0. On the MANAGEMENT node: the two tools the secrets step needs. Nothing else
+#    installs them, and step 2 is the first command that fails without them.
+sudo apt-get install -y age
+curl -fsSLO https://github.com/getsops/sops/releases/download/v3.13.3/sops_3.13.3_amd64.deb
+sudo apt-get install -y ./sops_3.13.3_amd64.deb
+
+# 1. Get the repo. `main` is this tier; tier-1 (a single node, no management
+#    cluster) lives on the `tier-1-solution` branch and is not interchangeable.
+git clone <repo-url> && cd ais-edge
+
+# 2. Create your age key and register it as a SOPS recipient
 scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient <your age1... public key>
 
-# 2. Scaffold the MANAGEMENT site (copies sites/example-mgmt/)
+# 3. Scaffold the MANAGEMENT site (copies sites/example-mgmt/)
 scripts/site-secrets.sh new my-site mgmt
 
-# 3. Scaffold each EDGE (copies sites/example-edge/) — one per facility node
-scripts/site-secrets.sh new my-edge edge
+# 4. Add each EDGE. PREFER add-edge OVER `new <name> edge`: it does this step and
+#    the S3 wiring in one go, GENERATING the key pair rather than making you type
+#    the same one into two files.
+scripts/site-secrets.sh add-edge my-site my-edge
 
-# 4. Edit them. The management file carries everything shared — domain,
+#    `new my-edge edge` also works, and then the edge's name has to be made to
+#    agree in FIVE places by hand. Renaming an edge means editing all of them:
+#      sites/my-site/values.yaml       edges[].name
+#      sites/my-site/values.yaml       edges[].s3SecretRef
+#      sites/my-site/secrets.enc.yaml  that Secret's metadata.name
+#      sites/my-edge/values.yaml       clusterLabel
+#      the site directory name itself
+#    Getting one wrong RENDERS CLEANLY: the management chart provisions a control
+#    plane for an edge that never checks in, and the edge asks for one that was
+#    never provisioned.
+
+# 5. Edit them. The management file carries everything shared — domain,
 #    hostnames, node IPs, the edges list, the fleet-wide data policy. Each edge
 #    file carries only what is local to that site: its AE-title to XNAT-project
 #    map, its de-identification profile, its disk paths.
 $EDITOR sites/my-site/values.yaml        $EDITOR sites/my-site/secrets.enc.yaml
 $EDITOR sites/my-edge/values.yaml        $EDITOR sites/my-edge/secrets.enc.yaml
 
-# 5. Encrypt — do this before committing anything
+# 6. Encrypt — do this before committing anything
 scripts/site-secrets.sh encrypt my-site
 scripts/site-secrets.sh encrypt my-edge
 
-# 6. Install
+# 7. Install
 ./install.sh my-site
 
-# 7. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
+# 8. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
 #    objects were accepted, not that the fleet is actually working.
 make verify-live SITE=my-site
 ```
