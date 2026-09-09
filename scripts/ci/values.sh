@@ -813,6 +813,10 @@ printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-no
 # The pre-rename path. Accepting it as an alias would leave the very confusion
 # the move exists to end, so it must fail and name the new key.
 printf 'orthanc:\n  deid:\n    policyReviewed: true\n' >"$V/neg-edge-deid-moved-key.yaml"
+# The management uploader with no settle period reads a session while the edge
+# is still writing it into the bucket, uploads the fraction that has landed,
+# and then skips the short resource for ever as 'already uploaded'.
+printf 'xnatUpload:\n  waitPeriod: 0\n' >"$V/neg-mgmt-upload-no-wait.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
 
@@ -1189,6 +1193,7 @@ neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every 
 neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
 neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
+neg-mgmt-upload-no-wait	charts/mgmt	mgmt-base.yaml neg-mgmt-upload-no-wait.yaml	xnatUpload.waitPeriod is 0
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
 neg-edge-deid-bad-engine	charts/edge	edge-base.yaml neg-edge-deid-bad-engine.yaml	must be one of orthanc, ingest or none
 neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	no recipes are configured

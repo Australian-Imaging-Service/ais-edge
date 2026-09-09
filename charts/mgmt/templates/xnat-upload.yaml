@@ -125,6 +125,10 @@ spec:
             - {{ $root.Values.xnatUpload.alwaysInclude | quote }}
             - "--loop"
             - {{ $root.Values.xnatUpload.loop | quote }}
+            # Without this the CLI default is 0, and the session is read while
+            # the edge is still writing it into the bucket. See values.yaml.
+            - "--wait-period"
+            - {{ $root.Values.xnatUpload.waitPeriod | quote }}
             {{- if not $root.Values.xnatUpload.requireManifest }}
             # Edge-staged sessions carry no manifest: the s3-uploader syncs the
             # assigned directory as-is. Requiring one skips every session.

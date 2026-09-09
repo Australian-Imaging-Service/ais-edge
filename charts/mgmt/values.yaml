@@ -383,6 +383,26 @@ xnatUpload:
   region: us-east-1
 
   loop: 60
+
+  # SECONDS OF QUIET IN THE BUCKET before a session is considered complete.
+  #
+  # NOT OPTIONAL, AND THE UPSTREAM DEFAULT IS 0. The edge's s3-uploader waits
+  # for its own local tree to settle, then spends however long it takes to push
+  # the session into the bucket: a 1.2 GB, 399-object session measured ~90s.
+  # With wait_period=0 the settle check is `(now - last_modified) >= 0`, which
+  # is always true, so this uploader starts reading a session while rclone is
+  # still writing it.
+  #
+  # MEASURED, and the reason this key exists: on 2026-09-09 a 383-instance
+  # study was picked up when 19 of 399 objects had landed. 16 files went into
+  # one scan, XNAT recorded that resource as present, and every later pass
+  # skipped it as "already uploaded". 170 of 383 instances arrived and the
+  # uploader logged "Successfully uploaded all files". It does not self-heal.
+  #
+  # Must exceed the time to write your largest session into the bucket. 300 is
+  # ~3x the measured 1.2 GB push; raise it for slower links or larger studies.
+  waitPeriod: 300
+
   alwaysInclude: "all"
   requireManifest: false
   verifySsl: false
