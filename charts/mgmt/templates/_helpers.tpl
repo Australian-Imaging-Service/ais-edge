@@ -277,6 +277,11 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
            returns None whenever the resource exists. The short scan is never
            repaired.
 
+           The value tracks the edge's RETRY interval, not the push duration:
+           the check uses the newest object, so the clock resets on every write
+           and never expires mid-push. A push interrupted partway does not
+           resume for one edge cycle, and that is the gap to cover.
+
            MEASURED 2026-09-09: a 383-instance study was picked up at 19 of 399
            objects; 170 of 383 reached XNAT and the uploader logged success.
            Nothing downstream notices, and the s3Staged reclaim condition is
@@ -284,7 +289,7 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
            copy of a session that never fully arrived. */ -}}
     {{- $wp := .Values.xnatUpload.waitPeriod }}
     {{- if or (not $wp) (le (int $wp) 0) }}
-      {{- fail (printf "xnatUpload.waitPeriod is %v. It must be a positive number of seconds. The edge writes a session into the staging bucket over many seconds (a 1.2 GB session measured ~90s), and with no settle period this uploader reads it mid-write, uploads the fraction that has landed, and then skips the incomplete resource for ever as 'already uploaded'. Set it above the time to write your largest session; 300 is the shipped default." $wp) }}
+      {{- fail (printf "xnatUpload.waitPeriod is %v. It must be a positive number of seconds. With 0 the settle check is `(now - last_modified) >= 0`, always true, so this uploader reads a session while the edge is still writing it into the bucket, uploads the fraction that has landed, and then skips the incomplete resource for ever as 'already uploaded'. The value has to exceed the largest GAP between object writes, which is set by the edge s3-uploader's retry interval (upload.s3.interval, default 60), not by how long the push takes. 180 is the shipped default." $wp) }}
     {{- end }}
     {{- if not .Values.xnatUpload.xnatSecretRef }}
       {{- fail "xnatUpload.xnatSecretRef must name a Secret with server/username/password." }}
