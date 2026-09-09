@@ -200,6 +200,30 @@ route:
       # newer builds, and hours are unambiguous across all of them.
       repeat_interval: 720h
       continue: false
+    - matchers:
+        - alertname = "XNATResourceIncompleteAndStuck"
+      receiver: email-primary
+      # ONE MAIL PER SESSION PER DAY, not one per uploader pass.
+      #
+      # This condition re-asserts on every --loop pass, roughly 4.8 log lines a
+      # minute per stuck resource, and it persists until a human deletes the
+      # resource on XNAT and restarts the uploader. At the default 12h it would
+      # mail twice a day for as long as nobody acts; at group_interval it would
+      # mail every five minutes.
+      #
+      # It DOES repeat, unlike email-upload-success above, and the distinction is
+      # deliberate: this is an unfinished operator TASK, not a notification about
+      # something that already succeeded. A daily reminder that imaging is sitting
+      # incomplete in XNAT is the point. Silencing it entirely would recreate the
+      # failure it exists to surface.
+      #
+      # group_by carries `session`, inherited from the root route, so two stuck
+      # sessions notify independently rather than one masking the other.
+      group_by: ["alertname", "cluster", "session"]
+      group_wait: 60s
+      group_interval: 30m
+      repeat_interval: 24h
+      continue: false
     # slack-only when a webhook Secret is configured, info-email when not.
     # Substituted by templates/observability.yaml; see the header.
     - matchers:
