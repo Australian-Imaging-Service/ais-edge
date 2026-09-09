@@ -186,6 +186,57 @@ groups:
   # both stabler and immune to the alwaysInclude coupling above. Until then the
   # prose match is the only thing available, so it is written down rather than
   # left as an accident.
+  - alert: XNATResourceIncompleteAndStuck
+    # A resource EXISTS on XNAT but is SHORT, and the uploader will never repair
+    # it: get_xnat_resource returns None whenever the resource exists, so the
+    # caller logs "already uploaded" and skips it, and the session still reports
+    # success. Only an operator deleting the resource on XNAT unblocks it.
+    #
+    # TIER-1 APPLIES TOO, and this is not a copy of the tier-2 rule. The upload
+    # code path is SHARED: `xnat-ingest upload` resolves resources identically
+    # whether the input is a local tree or s3://. What differs is only the
+    # selector -- namespace is xnat-ingest here (one release, one namespace),
+    # not xnat-upload, and the workload is edge-upload rather than
+    # mgmt-upload-<edge>. Copying the tier-2 selector would load cleanly and
+    # match no stream.
+    #
+    # Tier-1 cannot hit the cause that produced it on tier-2 (there is no bucket
+    # to read mid-write) but ANY interrupted upload reaches the same state: a
+    # pod evicted mid-transfer, a dropped connection, an XNAT restart.
+    #
+    # WHY NOT FIRST-OBSERVATION. The same message appears transiently while XNAT
+    # is still cataloguing an accepted upload: the checksum comparison runs
+    # BEFORE the catalog refresh, and that refresh only fires when the count is
+    # exactly zero. MEASURED: a genuinely stuck resource emits ~4.8/min;
+    # catalogue lag emits ~10-15 once. 30 sits between them.
+    #
+    # WHY [60m]. Measured gaps between occurrences: median 95s, but one of 39
+    # MINUTES while the uploader was busy with a large session. A short window
+    # goes false across that gap, resets the `for:` timer, and the alert never
+    # fires.
+    annotations:
+      description: |
+        The uploader keeps finding a resource that exists on XNAT but is missing files
+        it still holds locally, and skips it as "already uploaded" on every pass. The
+        session is reported as uploaded while incomplete.
+
+        NO DATA IS LOST: the de-identified copy is retained until delivery is confirmed.
+
+        1. list them
+             kubectl -n xnat-ingest logs deploy/edge-upload --since=60m \
+               | grep "already exists on XNAT with different checksums"
+        2. delete those resources on XNAT so the uploader can recreate them
+        3. ON xnat-ingest 0.15.0 AND EARLIER, restart the uploader as well: it holds
+           one XNAT connection for its lifetime and never invalidates the cached
+           listings, so the deletion stays invisible to it.
+             kubectl -n xnat-ingest rollout restart deploy/edge-upload
+      summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
+    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \".*already exists on XNAT with different checksums.*\"\n  | message =~ \".*Missing paths.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\"\n  [60m])) > 30\n"
+    for: 15m
+    labels:
+      category: xnat-delivery
+      severity: warning
+      source: loki-ruler
   - alert: SessionUploadStalled
     annotations:
       description: "The uploader logged that it began this session and has not logged a successful completion for it within the window. Could be a slow network, a large session, or XNAT refusing it. Inspect:\n  kubectl -n xnat-ingest logs -l component=upload --tail=50\n"
