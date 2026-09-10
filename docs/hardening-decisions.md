@@ -86,6 +86,49 @@ issues a delete: it uses a content-fingerprint state file instead.
 **Migration.** Existing `ingest-bucket` keeps working; add per-site buckets,
 move sites one at a time, retire the shared bucket last. No flag day.
 
+### And a second factor on the upload path — **SHIPPED, OFF BY DEFAULT**
+
+Bucket scoping answers *what a key can touch*. It says nothing about *who is
+holding the key*: a SigV4 key pair is a bearer secret, so a copy taken off an
+edge node works from anywhere the endpoint is reachable, and nothing on the
+management side can tell the difference. §1 below solved exactly this problem
+for the Loki push path, with machinery — the CA, cert-manager, cert-sync,
+`auth-tls-*` on an Ingress — that is now all in place and proven. Applying it
+to the S3 path is reuse, not new design.
+
+`seaweedfs.ingress.clientCerts` mints one `<edge>-s3-client` certificate per
+site from the fleet CA, cert-sync delivers it as `s3-client-tls`, and the
+SeaweedFS Ingress verifies it with the same four annotations the Loki push
+Ingress carries. It works there for the same reason it works on Loki: that
+Ingress **terminates** TLS (deliberately — SeaweedFS has no TLS listener on
+8333), so nginx does the handshake and can ask for a certificate. On cloud the
+load balancer is layer 4, so this is unchanged.
+
+**Two decisions worth recording.**
+
+*A separate anchor from Loki's.* Reusing `mgmt-loki-client-ca` was the obvious
+shortcut. The anchor is the revocation boundary — the only way to stop trusting
+certificates beneath it is to re-issue it, which invalidates all of them — so a
+shared anchor would make "stop this site uploading" and "stop this site
+reporting" the same action, and take a site's telemetry down at the moment it
+is most needed to explain the revocation. Two anchors, one CA.
+
+*Two switches, not one.* `clientCerts.issue` mints and distributes;
+`clientCerts.require` enforces. They are separate because a rejected client
+certificate produces an error that names nothing. Measured against nginx
+`ssl_verify_client on` and rclone 1.75.0: the handshake **succeeds** (TLS 1.3
+sends the client certificate after the server's `Finished`, so nginx refuses
+the first request rather than the connection), nginx answers `400 No required
+SSL certificate was sent` with an HTML body, and rclone reports that as
+`error while deserializing xml error response`. Wrong CA is the same 400; a CN
+outside `auth-tls-match-cn` is a 403 with the same noise. Enabling both at once would put
+cert-sync's six-hour period between "verification is on" and "the certificates
+have arrived", with every upload in the fleet failing for a reason that names
+neither certificates nor auth. With two switches the operator can issue, wait,
+**confirm the Secret exists on each edge**, and only then enforce. Render guards
+hold the pair together in both directions; no template can check the last step,
+so `endpoint_failed`'s message reports the client-certificate state instead.
+
 ---
 
 ## 1. Loki push authentication 🔴 — **SHIPPED**

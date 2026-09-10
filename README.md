@@ -101,6 +101,7 @@ chart is not needed.
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
 | **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**. The only component that deletes patient data. |
+| **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory. Renders **only under `upload.mode: direct`**, where there is no bucket and no s3-uploader to write an `uploaded` marker, so `onUploaded` would otherwise be unsatisfiable and the tree would grow unbounded. Also deletes patient data, under the same XNAT confirmation. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
 | **cert-manager** | mgmt | Issues the internal CA and every server certificate. |
@@ -177,31 +178,54 @@ reproduce from that file alone is not reproducible.
 ### First-time setup
 
 ```bash
-# 1. Create your age key and register it as a SOPS recipient
+# 0. On the MANAGEMENT node: the two tools the secrets step needs. Nothing else
+#    installs them, and step 2 is the first command that fails without them.
+sudo apt-get install -y age
+curl -fsSLO https://github.com/getsops/sops/releases/download/v3.13.3/sops_3.13.3_amd64.deb
+sudo apt-get install -y ./sops_3.13.3_amd64.deb
+
+# 1. Get the repo. `main` is this tier; tier-1 (a single node, no management
+#    cluster) lives on the `tier-1-solution` branch and is not interchangeable.
+git clone <repo-url> && cd ais-edge
+
+# 2. Create your age key and register it as a SOPS recipient
 scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient <your age1... public key>
 
-# 2. Scaffold the MANAGEMENT site (copies sites/example-mgmt/)
+# 3. Scaffold the MANAGEMENT site (copies sites/example-mgmt/)
 scripts/site-secrets.sh new my-site mgmt
 
-# 3. Scaffold each EDGE (copies sites/example-edge/) — one per facility node
-scripts/site-secrets.sh new my-edge edge
+# 4. Add each EDGE. PREFER add-edge OVER `new <name> edge`: it does this step and
+#    the S3 wiring in one go, GENERATING the key pair rather than making you type
+#    the same one into two files.
+scripts/site-secrets.sh add-edge my-site my-edge
 
-# 4. Edit them. The management file carries everything shared — domain,
+#    `new my-edge edge` also works, and then the edge's name has to be made to
+#    agree in FIVE places by hand. Renaming an edge means editing all of them:
+#      sites/my-site/values.yaml       edges[].name
+#      sites/my-site/values.yaml       edges[].s3SecretRef
+#      sites/my-site/secrets.enc.yaml  that Secret's metadata.name
+#      sites/my-edge/values.yaml       clusterLabel
+#      the site directory name itself
+#    Getting one wrong RENDERS CLEANLY: the management chart provisions a control
+#    plane for an edge that never checks in, and the edge asks for one that was
+#    never provisioned.
+
+# 5. Edit them. The management file carries everything shared — domain,
 #    hostnames, node IPs, the edges list, the fleet-wide data policy. Each edge
 #    file carries only what is local to that site: its AE-title to XNAT-project
 #    map, its de-identification profile, its disk paths.
 $EDITOR sites/my-site/values.yaml        $EDITOR sites/my-site/secrets.enc.yaml
 $EDITOR sites/my-edge/values.yaml        $EDITOR sites/my-edge/secrets.enc.yaml
 
-# 5. Encrypt — do this before committing anything
+# 6. Encrypt — do this before committing anything
 scripts/site-secrets.sh encrypt my-site
 scripts/site-secrets.sh encrypt my-edge
 
-# 6. Install
+# 7. Install
 ./install.sh my-site
 
-# 7. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
+# 8. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
 #    objects were accepted, not that the fleet is actually working.
 make verify-live SITE=my-site
 ```
@@ -403,7 +427,6 @@ orthanc:
   aet: AISEDGE
   deid:
     enabled: true
-    policyReviewed: false        # NO SAFE DEFAULT — you must assert this
     existingSaltSecret: orthanc-deid-salt
     aetMap:
       AISEDGE: {project: my_project}
@@ -417,8 +440,10 @@ orthanc:
         PatientID: ${ProjectCode}-${SubjectHash}
 ```
 
-* **`policyReviewed` has no default.** The chart refuses to render until a human
-  asserts they have read the profile and the AE-title map for this site.
+* **`deid.policyReviewed` has no default.** The chart refuses to render until a
+  human asserts they have read the profile and the AE-title map for this site. It
+  lives at the top level next to `deid.engine`, not under `orthanc:`, because it
+  gates every engine and not just the Lua one.
 * **UIDs are retained** so a study stays internally consistent across series.
 * **An unmapped AE title is quarantined, not dropped** — see
   `dataPolicy.originals.quarantine`.
@@ -504,6 +529,14 @@ dataPolicy:
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d,
                      verifyAgainstXnat: true, maxRemovals: 50,
                      schedule: "17 * * * *"}
+    # upload.mode: direct only. NOT a stage of its own: it is the delete
+    # authority for whichever tree above is TERMINAL under the chosen deid
+    # engine (/data/assigned under Orthanc-deid, /data/deidentified under
+    # ais-deid). Under upload.mode: s3 it does not render at all, because the
+    # s3-uploader's marker already answers the same question there.
+    stagedReclaimer: {minAge: 1d, verifyAgainstXnat: true,
+                      maxRemovals: 50, schedule: "17 * * * *",
+                      deadlineSeconds: 3000}
 
   telemetry:
     # the kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi
@@ -564,6 +597,7 @@ Full truth table: `docs/TOUR.md` §5c.
 | Hospital → management | Outbound TLS only. No inbound route to the edge. |
 | Between edge sites | **One S3 bucket per site.** SeaweedFS matches identity actions as `<action>:<bucket>` with **no prefix scoping**, so a shared bucket would let any edge key read and delete every other site's staged imaging. The bucket is the only boundary there is. |
 | Edge → XNAT | The edge has **no XNAT credential**. Only the management uploader does. This is the main operational advantage of `upload.mode: s3`. |
+| S3 ingestion | Per-edge **SigV4 key pair**, scoped to that site's bucket (the row above). Optionally a second factor: `seaweedfs.ingress.clientCerts` adds a per-edge **client certificate**, verified at the SeaweedFS Ingress with the same `auth-tls-*` annotations the Loki path uses — the key pair is a bearer secret usable from anywhere, the certificate is a private key that never leaves the site and rotates every 90 days. **Ships off**, and turning it on is a four-step rollout (`issue` → confirm `s3-client-tls` landed → edge `requireClientCert` → `require`): flipping verification on before the certificates arrive breaks every upload with an error that names nothing — measured, the handshake succeeds, nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure, so it reads as a dead endpoint. See `docs/components/seaweedfs.md`. |
 | Loki ingestion | Per-edge **client certificate (mTLS)**, verified at the Ingress (`auth-tls-verify-client: on`, with `auth-tls-match-cn` pinned to the names in `edges`). cert-manager issues one `<edge>-loki-client` certificate per site and cert-sync delivers it as `loki-push-client-tls`. Loki itself runs `auth_enabled: false`, so the Ingress is the only place it is checked. The CN pin admits every site on the one push hostname, so it bounds *which* certificates are accepted, not one edge writing under another's name. |
 | TLS | Internal CA via cert-manager. An https S3 endpoint with no CA bundle is **refused at render time** — an empty `AWS_CA_BUNDLE` silently disables verification rather than falling back to the system store. |
 | Credentials at rest | SOPS + age. Never in a values file, never in a ConfigMap, never in git. |
@@ -655,7 +689,7 @@ scripts/
   ci/                          CI stages (render, negative, promtool, …), one
                                script per stage, invoked by the Makefile
 tests/
-  reclaimer/                   28 cases asserting on what was DELETED
+  reclaimer/                   45 cases asserting on what was DELETED, both backends
   loki-rules/                  the real Loki rule expressions, against fixture
                                logs, evaluated by the pinned Loki
   data-policy/                 the real engine under the real image, asserting
@@ -688,7 +722,7 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | `pvc-retention` | nothing holding data can be auto-deleted |
 | `runtime-templates` | scripts survive Helm rendering |
 | `duplicate-names` | no two objects collide |
-| `reclaimer` | 28 cases, asserting on **what was deleted**, not on log text |
+| `reclaimer` | 45 cases, asserting on **what was deleted**, not on log text. 34 drive the S3 backend through stub `aws`/`curl` binaries; 11 drive the filesystem backend against a real directory tree, where the assertion is that the session directory is gone |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
 | `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |
@@ -966,7 +1000,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| xnat-ingest | `0.12.3` |
+| xnat-ingest | `0.15.0` |
 
 Every one is what is **verified working**, read out of a live deployment rather
 than chosen from a changelog. The previous installer used `/latest/` and

@@ -16,6 +16,11 @@ clusterLabel: tbpet
 namespace: ais-edge
 topology: onprem
 
+# TBPET intentionally preserves original identifiers; neither de-id engine runs.
+deid:
+  engine: none
+  policyReviewed: true
+
 hostAliases:
   enabled: false
 
@@ -31,8 +36,8 @@ proxy:
   no_proxy: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local,10.1.0.0/16,10.152.183.0/24,192.168.0.0/24"
 
 dataPolicy:
-  enabled: false
-  dryRun: true
+  enabled: true
+  dryRun: false
   reporter:
     enabled: true
   originals:
@@ -44,7 +49,7 @@ dataPolicy:
   derived:
     orthancStorage:
       reclaim: onGrouped         # deletes only studies carrying processedLabel
-      minAge: 7d
+      minAge: 3d                 # age since Orthanc LastUpdate, NOT labelling
     assigned:
       reclaim: onUploaded        # s3 uploader reclaims after verified sync
       minAge: 0
@@ -72,18 +77,20 @@ orthanc:
       http: 30842
   auth:
     enabled: false
-  deid:
-    enabled: false
   extraMainDicomTags:
     Study:
       - PatientComments
 
 ingest:
+  image:
+    tag: "0.15.2"
   orthancGroup:
     enabled: true
     interval: 300
     toProcessLabel: xnat-ingest-ready
-    processedLabel: xnat-sorted
+    # Existing xnat-sorted studies need verified migration/reprocessing BEFORE
+    # deployment; changing this value alone does not migrate Orthanc labels.
+    processedLabel: xnat-ingest-grouped
     waitPeriod: 86400
     copyMode: hardlink_or_copy
   # Pipeline B: Windows RAW-DATA-EXPORT (NFS) -> /data/grouped-fs -> /data/assigned
@@ -96,6 +103,8 @@ ingest:
     perStudyWalk: true
     waitPeriod: 86400
     copyMode: symlink_or_copy
+    groupSessionField: StudyInstanceUID
+    groupScanField: SeriesNumber
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
   assign:
     interval: 300
@@ -111,6 +120,7 @@ ingest:
 upload:
   mode: s3
   s3:
+    provider: AWS
     endpoint: https://s3.ap-southeast-2.amazonaws.com
     bucket: ais-s3-tbp-s3bucket-1afz0bzdw5jd6
     prefix: STAGING-202607

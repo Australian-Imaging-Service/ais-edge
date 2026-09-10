@@ -17,8 +17,25 @@ fi
 echo "=== 01: Installing k0s management cluster ==="
 
 # Install binary
+#
+# PINNED to the same version the charts build hosted control planes from
+# (k0smotron.k0sVersion). Unpinned, two installs a fortnight apart land on
+# different k0s minors while the operator is told they are identical — which is
+# exactly the support problem a hospital appliance cannot afford. It is also the
+# shape of the edge-worker bug: a version that came from "whatever upstream
+# published today" rather than from anything this repo controls.
+#
+# K0S_VERSION MUST BE PASSED THROUGH sudo EXPLICITLY. get.k0s.sh honours the
+# variable, but sudo runs with `Defaults env_reset`, which strips it before the
+# script ever sees it. Measured:
+#
+#   K0S_VERSION=v1.2.3 bash -c 'export K0S_VERSION; sudo -n sh -c "echo [\$K0S_VERSION]"'
+#   []
+#
+# So `export K0S_VERSION` in the caller pins nothing. Unset, get.k0s.sh still
+# takes latest, so this stays safe for callers that do not set it.
 if ! command -v k0s &>/dev/null; then
-    curl -sSLf https://get.k0s.sh | sudo sh
+    curl -sSLf https://get.k0s.sh | sudo ${K0S_VERSION:+K0S_VERSION="$K0S_VERSION"} sh
 fi
 echo "k0s: $(k0s version)"
 

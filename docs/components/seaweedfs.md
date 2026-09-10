@@ -48,6 +48,51 @@ of failure.
     only. Deliberately cannot see any ingest bucket; the log store has
     no business holding a key that reads imaging data
 
+### Optional second factor: mTLS on the upload path
+
+The SigV4 key pair above is a **bearer** secret — anything holding a copy
+can use it from anywhere the endpoint is reachable. Set
+`seaweedfs.ingress.clientCerts.*` and each edge additionally presents a
+cert-manager client certificate (`CN=<edge name>`, signed by the fleet CA,
+rotated every 90 days by cert-sync) which the Ingress verifies before the
+request ever reaches SeaweedFS. The two are independent and neither
+replaces the other: the key pair is still what scopes a site to **its own
+bucket** — the certificate CN pin admits every site on the one upload
+hostname, exactly as it does on the Loki push endpoint, so it bounds
+*which* certificates are accepted at the door rather than which bucket a
+site can touch.
+
+**It ships off, and it is turned on in four steps, not one.**
+
+| Step | Where | What |
+|---|---|---|
+| 1 | mgmt | `seaweedfs.ingress.clientCerts.issue: true` **and** the `<edge>-s3-client` entry in `certSync.secrets` — the chart refuses either half alone |
+| 2 | edge | `kubectl -n <edge ns> get secret s3-client-tls` answers, on **every** site |
+| 3 | edge | `upload.s3.requireClientCert: true` in each edge site file |
+| 4 | mgmt | `seaweedfs.ingress.clientCerts.require: true` |
+
+Doing step 4 before step 2 has answered breaks every upload with an error
+that names nothing. Measured against nginx `ssl_verify_client on` and rclone
+1.75.0:
+
+| Client presents | nginx answers | What rclone logs |
+|---|---|---|
+| nothing | `400 No required SSL certificate was sent` (HTML body) | `error while deserializing xml error response : XML syntax error … element <hr>` |
+| a cert from the wrong CA | the same `400` | the same XML parse failure |
+| a valid cert, CN outside `auth-tls-match-cn` | `403` (HTML body) | the same XML parse failure |
+| a cert whose **file** is missing | — | `CRITICAL: Failed to load --client-cert/--client-key pair` (the one loud case) |
+
+Note that the handshake **succeeds** in the first three: under TLS 1.3 the
+client certificate is sent after the server's `Finished`, so nginx cannot
+refuse the connection and refuses the first request instead. The check is
+real; the error is an HTTP one, and it mentions neither certificates nor
+authentication. All of it lands on the uploader's pre-flight probe as
+`endpoint_failed`, which reads as a dead endpoint — which is why that event's
+message now names the client-certificate state explicitly, why the ordering is
+enforced by render guards as far as a template can see it, and why
+`scripts/verify-live.sh` checks the one step no template can (that
+`s3-client-tls` actually reached the edge).
+
 **There is no `s3-config` ConfigMap.** A Helm template cannot read a
 Secret's contents, so this chart cannot render `s3.json` at all — which
 is the point. The identity document is assembled **inside the pod** by
@@ -90,7 +135,15 @@ init-container failure, naming the identity in the log.
 - External: nginx-ingress route `https://seaweedfs.aisedge.local:443`
   (TLS-terminated, signed by ais-edge-ca). This is the address **edges**
   use; in-cluster traffic stays on plain http so the custom CA never has
-  to reach pods that have no other reason to trust one
+  to reach pods that have no other reason to trust one. That the Ingress
+  **terminates** TLS rather than passing it through is what makes mTLS
+  possible on this host — nginx performs the handshake, so it is the party
+  that can ask the edge for a client certificate. It coexists with
+  `ingressNginx.sslPassthrough=true` (which k0smotron needs) because the
+  controller SNI-routes non-passthrough hosts to its own HTTPS listener,
+  where the `auth-tls-*` annotations still apply. On cloud the load
+  balancer in front is layer 4 and does not terminate TLS either, so this
+  behaves identically there
 - Metrics Service: `mgmt-seaweedfs-metrics.ais-mgmt.svc:9324` — a
   separate metrics-only Service so the ServiceMonitor can select it
   without also matching the S3 Service above
@@ -99,7 +152,7 @@ init-container failure, naming the identity in the log.
 
 | File | Purpose |
 |---|---|
-| `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook |
+| `charts/mgmt/templates/seaweedfs.yaml` | Deployment, Service, Certificate, Ingress, bucket-creation hook, and the S3 client-CA anchor + per-edge client Certificates when `ingress.clientCerts.issue` is set |
 | `charts/mgmt/values.yaml` (`seaweedfs:`) | storage path, `perSiteBuckets` + `bucketPrefix`, image tag, resource limits |
 | `sites/<site>/values.yaml` | `hostnames.seaweedfs`, `seaweedfs.buckets.logs`, and `edges[].bucket` to pin one site's bucket name. `seaweedfs.buckets.ingest` only takes effect with `perSiteBuckets: false` — otherwise the name is `<bucketPrefix>-<edge name>`, computed by the `mgmt.edgeBucket` helper |
 | `sites/<site>/secrets.enc.yaml` | the `seaweedfs-admin` and `loki-s3-credentials` Secrets — named by `seaweedfs.adminSecretRef` and `observability.loki.s3SecretRef` |
@@ -176,6 +229,7 @@ never shells out to `aws s3 rm`.
 | `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` at 80% of `SeaweedFS_volumeServer_resource`, plus the staged-data reclaimer described below — one CronJob per edge, no longer a TODO |
 | Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
 | An S3 key is rotated inside its Secret | Nothing rolls; the pod keeps serving the old key until it restarts, and the edge gets 403 on every PUT with nothing wrong on the management side | `kubectl rollout restart deploy/mgmt-seaweedfs -n ais-mgmt` after the rotation. Adding or removing an `edges[]` entry *does* roll the pod by itself — only in-place key edits are invisible to Helm. A missing or empty credential is caught earlier: the init container fails hard, naming the identity |
+| An edge's S3 key pair leaks | The holder can read, write and delete that site's staged imaging from anywhere the endpoint is reachable | The key is per-site and scoped to one bucket, so the blast radius is one site's staging area. `seaweedfs.ingress.clientCerts` closes the "from anywhere" half: with it on, a request also needs a private key that never leaves the site and that cert-manager replaces every 90 days. Off by default — see the four-step rollout above, and note that enabling `require` before the certificates land rejects **every** upload with an error that names neither certificates nor auth |
 | Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
 | ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | — | Was only ever measured against 3.99. Re-measured live against 4.34's real S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
 

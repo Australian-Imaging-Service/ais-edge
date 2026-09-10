@@ -69,6 +69,23 @@ data:
 
       "RemoteAccessAllowed": true,
       "AuthenticationEnabled": {{ .Values.orthanc.auth.enabled }},
+        {{- /* NO "RegisteredUsersFile" KEY HERE, AND THERE NEVER SHOULD HAVE BEEN.
+               Orthanc has no such option. It ignored the key silently, ended up
+               with ZERO registered users, and with AuthenticationEnabled=true
+               refused EVERY request including correct credentials. MEASURED
+               against jodogne/orthanc-plugins:1.12.11, two containers identical
+               but for the mechanism:
+
+                 RegisteredUsersFile:          authenticated=401 anonymous=401
+                 users.json in the config dir: authenticated=200 anonymous=401
+
+               Users are supplied instead by mounting the Secret's users.json
+               INTO /etc/orthanc, which Orthanc scans. Its own startup line is
+               `Scanning folder "/etc/orthanc" for configuration files`, and the
+               Book documents that every .json in that folder is loaded and
+               merged. The Secret's users.json is already shaped as a config
+               fragment, {"RegisteredUsers":{...}}, so it merges as written.
+               The mount is in orthanc-deployment.yaml. */}}
 
       {{- with .Values.orthanc.ingestTranscoding }}
       {{- /* Rewrites pixel data at RECEIVE time, before the Lua hook runs, so
@@ -85,7 +102,18 @@ data:
       "Plugins": {{ toJson . }},
       {{- end }}
 
-      {{- if .Values.orthanc.deid.enabled }}
+      {{- /* THE HOOK DOES MORE THAN DE-IDENTIFY. It also writes the facility
+             backup (the archive of record, with original identifiers) and
+             quarantines instances from unmapped AE titles. Loading it only when
+             it is the de-identification engine meant that choosing
+             deid.engine=ingest silently gave up BOTH: the archive stopped having
+             a writer, which produces no error and no log line, because an absent
+             writer is indistinguishable from a quiet site.
+
+             It now loads whenever it has any job left to do, and the
+             de-identification half is switched off from inside the script by
+             Defaults.DeidEnabled. */}}
+      {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else if .Values.orthanc.applyStableLabel }}
       "LuaScripts": ["/etc/orthanc/scripts/stable-label.lua"]
@@ -120,7 +148,11 @@ data:
         label = readyLabel
       }, false))
     end
-{{- if .Values.orthanc.deid.enabled }}
+{{- /* Rendered whenever the script is loaded, which is now also the case with
+       another engine selected, because the script still archives originals and
+       quarantines unmapped AE titles. Loading a script whose configuration file
+       does not exist would abort every instance at the first read. */}}
+{{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -137,7 +169,9 @@ data:
       "AETMap": {{ toJson .Values.orthanc.deid.aetMap }},
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
-        "FacilityBackupDir": "/facility-backup"
+        "FacilityBackupDir": "/facility-backup",
+        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script still archives the original and quarantines unmapped AE titles; it just does not modify the instance, because another stage does that instead.",
+        "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }}
       }
     }
   deidentification-profile.json: |

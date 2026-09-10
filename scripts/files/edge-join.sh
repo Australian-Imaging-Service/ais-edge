@@ -50,6 +50,9 @@ TOPOLOGY="${INSTALL_TOPOLOGY:-onprem}"
 step() { printf '  [%s/6] %-34s ' "$1" "$2"; }
 ok()   { printf 'ok%s\n' "${1:+ ($1)}"; }
 die()  { printf '\n  FAILED: %s\n' "$*" >&2; exit 1; }
+# Leading newline because step() leaves the cursor mid-line: without it a
+# warning is appended to "[6/6] k0s worker" and reads as part of the status.
+warn() { printf '\n  WARNING: %s\n' "$*" >&2; }
 
 # -----------------------------------------------------------------------------
 # 1. Preconditions
@@ -171,7 +174,44 @@ ok "/etc/haproxy/certs"
 # -----------------------------------------------------------------------------
 step 6 "k0s worker"
 if [ "$JOINED" != "true" ]; then
-    command -v k0s >/dev/null 2>&1 || { curl -sSLf https://get.k0s.sh | $SUDO sh >/dev/null; }
+    # THE WORKER MUST MATCH ITS CONTROL PLANE. K0S_VERSION is set by
+    # scripts/06b from the Cluster CR, so it is whatever k0smotron actually
+    # built the hosted control plane from.
+    #
+    # This used to be a bare `curl get.k0s.sh | sh`, taking whatever upstream
+    # published that day, guarded only by `command -v k0s`. Two ways that broke:
+    #
+    #   1. Fresh host, upstream has moved on -> a newer worker than the pinned
+    #      control plane. It bootstraps, its CSR is APPROVED, then it asks for
+    #      `worker-config-default-<its own minor>`, which the older control
+    #      plane never created and whose RBAC does not cover. The Node
+    #      authorizer denies it, k0s exits 1, systemd restarts it forever and
+    #      the node never appears. The installer just waits. Hit on cai-lfs3
+    #      with a 1.36.1 worker against a 1.35.2 control plane.
+    #   2. Re-join of a host that already has the WRONG k0s -> `command -v k0s`
+    #      is satisfied, nothing is installed, and the mismatch is preserved.
+    #
+    # So: install when absent, and REPLACE when present but wrong.
+    if [ -n "${K0S_VERSION:-}" ]; then
+        have=$(k0s version 2>/dev/null || echo none)
+        if [ "$have" != "$K0S_VERSION" ]; then
+            [ "$have" = none ] || warn "k0s ${have} is installed but the control plane runs ${K0S_VERSION} — replacing"
+            curl -sSLf https://get.k0s.sh | $SUDO K0S_VERSION="$K0S_VERSION" sh >/dev/null \
+                || die "could not install k0s ${K0S_VERSION}"
+            got=$(k0s version 2>/dev/null || echo none)
+            [ "$got" = "$K0S_VERSION" ] || die "installed k0s reports ${got}, expected ${K0S_VERSION}"
+        fi
+    else
+        # No pin available. Say so rather than silently reintroducing the bug.
+        warn "K0S_VERSION not set by the bundle — installing UNPINNED k0s."
+        warn "  If this worker's minor version differs from its control plane it"
+        warn "  will crash-loop on a missing worker-config ConfigMap."
+        # UNPINNED-OK: the last-resort branch, reached only when the bundle or
+        # the ssh join failed to supply a version. Both paths now do, so this
+        # should be unreachable; it warns loudly above rather than failing,
+        # because refusing to join is worse than joining with a caveat.
+        command -v k0s >/dev/null 2>&1 || { curl -sSLf https://get.k0s.sh | $SUDO sh >/dev/null; }
+    fi
     $SUDO mkdir -p /etc/k0s
     $SUDO install -m 0600 "${STAGE}/join-token" /etc/k0s/join-token
     # Clear stale worker state before re-joining, or the cached kubelet identity

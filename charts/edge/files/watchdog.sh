@@ -141,7 +141,7 @@ session_events() {
     # End-to-end success: consume durable events written once per successful
     # upload attempt. Unlike session-name markers, this intentionally reports
     # a reprocessed session again when another source adds content.
-    upload_event_files=$(find "$UPLOAD_EVENT_DIR" -maxdepth 1 -type f 2>/dev/null | sort)
+    upload_event_files=$(find "$UPLOAD_EVENT_DIR" -maxdepth 1 -type f ! -name '*.tmp' 2>/dev/null | sort)
     new_synced=$(printf '%s\n' "$upload_event_files" | grep -v '^$' \
         | while IFS= read -r f; do cat "$f"; done)
 

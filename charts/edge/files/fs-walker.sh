@@ -24,6 +24,12 @@ done
 scan_args=()
 [[ -n "${SCAN_FIELD:-}" ]] && scan_args=(--scan "$SCAN_FIELD")
 
+group_id_args=()
+[[ -n "${GROUP_SESSION_FIELD:-}" ]] &&
+  group_id_args+=(--session "$GROUP_SESSION_FIELD" generic/file-set)
+[[ -n "${GROUP_SCAN_FIELD:-}" ]] &&
+  group_id_args+=(--scan "$GROUP_SCAN_FIELD" generic/file-set)
+
 SOURCE_BASE="${INPUT_GLOB%/\*\*/\*}"
 
 while true; do
@@ -35,12 +41,18 @@ while true; do
     grep -Fxq "$study" "$DONE_LIST" && continue
 
     log "Grouping study: $study"
-    xnat-ingest group \
+    if ! xnat-ingest group \
         "${study_dir}**/*" \
         "$GROUPED_DIR" \
         "${datatype_args[@]}" \
+        "${group_id_args[@]}" \
+        --on-resource-clash avoid all \
         --wait-period "${WAIT_PERIOD:?}" \
-        --copy-mode "${COPY_MODE:?}"
+        --copy-mode "${COPY_MODE:?}"; then
+      log "group failed for $study — clearing staged data, will retry next cycle"
+      rm -rf "$GROUPED_DIR"/*
+      continue
+    fi
 
     # `group` can create an empty study skeleton when every file is younger
     # than WAIT_PERIOD. A top-level glob then matches even though assign sees

@@ -68,6 +68,7 @@ here that no longer ships reads as coverage that does not exist.
 | `XNATUploadSuccess` | Loki ruler | `info`-severity receipt: `Successfully uploaded all files in '<session>'`, grouped by session. Range `[10m]`, deliberately wider than the uploader's ~62s loop — see the duplicate-mail section. |
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log — the de-identification script failing open is a PHI risk, not a cosmetic one. |
+| `DeidentifyStageError` | Loki ruler | error or traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine the site runs |
 | `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` — the uploader's own pre-flight refusals, which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |

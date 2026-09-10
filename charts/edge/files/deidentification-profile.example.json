@@ -8,11 +8,9 @@
     "SOPInstanceUID",
     "FrameOfReferenceUID"
   ],
-
   "Replace": {
     "PatientIdentityRemoved": "YES",
     "DeidentificationMethod": "AIS-Edge research-default v1; Retain UIDs Option",
-
     "PatientName": "ANONYMOUS",
     "PatientID": "${ProjectCode}-${SubjectHash}",
     "PatientBirthDate": "${BirthYearOnly}0101",
@@ -22,12 +20,16 @@
     "ClinicalTrialSubjectID": "${SubjectHash}",
     "ClinicalTrialTimePointID": "${SessionHash}",
     "InstitutionName": "AIS",
-
     "InstitutionAddress": "",
     "ReferringPhysicianName": "",
     "PerformingPhysicianName": "",
     "OperatorsName": "",
     "PatientBirthName": "",
+    "StationName": "",
+    "DeviceSerialNumber": "",
+    "OtherPatientIDs": "",
+    "RequestingPhysician": "",
+    "AdmittingDiagnosesDescription": "",
     "PatientAddress": "",
     "PatientTelephoneNumbers": "",
     "PatientComments": "",

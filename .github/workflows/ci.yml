@@ -96,6 +96,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: make negative
 
+      - name: TBPET site, raw-file CLI and durable notification regression
+        if: ${{ !cancelled() }}
+        run: make tbpet RENDER_DEP=
+
       - name: promtool check rules + test rules
         if: ${{ !cancelled() }}
         run: make promtool RENDER_DEP=
@@ -128,6 +132,21 @@ jobs:
       - name: Values consumers (no key declares a behaviour nothing implements)
         if: ${{ !cancelled() }}
         run: make values-consumers
+
+      # Listed in the Makefile's FAST_STAGES but never invoked here, so it had
+      # never run on a push. Catches two objects rendering to the same
+      # (kind, namespace, name).
+      - name: Duplicate rendered object names
+        if: ${{ !cancelled() }}
+        run: make duplicate-names
+
+      # The reclaimer is the only component that DELETES data, and its suite is
+      # the only thing standing between a logic change and staged studies being
+      # removed without XNAT holding them. It was listed in the Makefile's
+      # FAST_STAGES but never invoked here, so it had never run on a push.
+      - name: Reclaimer tests (the delete path)
+        if: ${{ !cancelled() }}
+        run: make reclaimer
 
       # promtool unit-tests the Prometheus rules only. These run the pinned Loki
       # version in docker and evaluate the REAL rule expressions against fixture

@@ -119,6 +119,24 @@ spec:
               value: {{ .Values.dataPolicy.reporter.maxRemovals | quote }}
             - name: SETTLE_MINUTES
               value: {{ .Values.dataPolicy.reporter.settleMinutes | quote }}
+            # Report-only: past this age a session failing its reclaim condition is
+            # reported as stage_stuck rather than as another routine reclaim_kept.
+            - name: STUCK_AFTER_S
+              value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
+            {{- /* Names the ONE stage this engine must not call stuck, and only
+                   in the mode where that is true. Under upload.mode=direct the
+                   staged-reclaimer CronJob owns the terminal tree's deletes, so
+                   onUploaded sitting unsatisfied there is the design, not a
+                   stall. Derived from the same helpers the CronJob and the
+                   uploader use, so the three cannot disagree about which tree
+                   that is. Empty under upload.mode=s3, where the s3-uploader
+                   writes the marker and an unsatisfied condition IS a stall. */}}
+            - name: EXTERNAL_RECLAIM_STAGE
+              {{- if and (eq .Values.upload.mode "direct") (ne (include "edge.uploadReclaim" .) "never") }}
+              value: {{ if eq (include "edge.deidEngine" .) "ingest" }}"derived.deidentified"{{ else }}"derived.assigned"{{ end }}
+              {{- else }}
+              value: ""
+              {{- end }}
             {{- /* The two condition inputs. Both are DERIVED from other values
                    rather than restated, so they cannot drift from where the
                    uploader and assign actually write. */}}
@@ -138,6 +156,31 @@ spec:
               value: "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
             - name: ORTHANC_PROCESSED_LABEL
               value: {{ .Values.ingest.orthancGroup.processedLabel | quote }}
+            {{- if .Values.orthanc.auth.enabled }}
+            {{- /* THE SECOND CONSUMER OF THE REST API, and it was never wired.
+            
+                   orthancStorage.backend defaults to orthanc-rest, so this engine
+                   reclaims the Orthanc store over the same API group-orthanc uses.
+                   Without credentials it fell through to an unauthenticated curl and
+                   every call returned 401. The failure was SILENT, not loud: a 401
+                   body is empty, /tools/find returns an empty id list, and the engine
+                   logged backend_idle "nothing to reclaim" -- byte-identical to a
+                   genuinely empty store. The Orthanc store would grow until the disk
+                   did, with nothing distinguishing it from healthy.
+            
+                   Same Secret and same keys as group-orthanc, so the two cannot
+                   present different credentials to the same Orthanc. */}}
+            - name: ORTHANC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-user
+            - name: ORTHANC_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-password
+            {{- end }}
           {{- /* THE MOUNT IS THE REAL ENFORCEMENT, not the script's own checks.
                  The pipeline volume is writable ONLY when dataPolicy.enabled
                  AND dryRun is false — so in report-only and dry-run modes the

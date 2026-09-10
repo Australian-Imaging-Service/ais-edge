@@ -459,6 +459,50 @@ spec:
   ports:
     - { port: 9324, targetPort: metrics, name: metrics }
 {{- if .Values.seaweedfs.ingress.enabled }}
+{{- $s3ClientCerts := .Values.seaweedfs.ingress.clientCerts }}
+{{- $s3ClientCASecret := printf "%s-s3-client-ca" (include "mgmt.fullname" .) }}
+{{- /*
+mTLS ON THE S3 UPLOAD PATH — TWO SWITCHES, IN THIS ORDER, ON PURPOSE.
+
+  clientCerts.issue    mint the anchor and one client certificate per edge,
+                       and let cert-sync carry them to the sites.
+  clientCerts.require  put auth-tls-verify-client: on across this Ingress.
+
+They are separate because turning verification on BEFORE the certificates have
+landed breaks every upload with an error that names nothing useful. MEASURED
+against nginx `ssl_verify_client on` and rclone 1.75.0: under TLS 1.3 the
+handshake SUCCEEDS (the client certificate is sent after the server's Finished,
+so nginx cannot refuse the connection) and nginx refuses the REQUEST instead —
+HTTP 400 "No required SSL certificate was sent" with an HTML body, which rclone
+tries to parse as an S3 error and reports as `error while deserializing xml
+error response`. A certificate from the wrong CA gives the same 400; a CN
+outside auth-tls-match-cn gives a 403 with the same XML noise. None of the
+three mentions certificates or authentication, and all three land on the
+uploader's pre-flight probe as `endpoint_failed` — which reads as a dead
+endpoint.
+
+So the correct rollout is: issue -> wait for cert-sync -> CONFIRM the Secret
+exists on each edge -> flip require. A single flag would make steps 1 and 3 the
+same instant, with cert-sync's six-hour period sitting in the middle of it.
+
+The guards below are the render-time half of that; they cannot check the Secret
+landed (no template can), only that something is set up to deliver it.
+`scripts/verify-live.sh` checks the other half against a live cluster.
+*/}}
+{{- if $s3ClientCerts.require }}
+  {{- if not $s3ClientCerts.issue }}
+    {{- fail "seaweedfs.ingress.clientCerts.require=true with clientCerts.issue=false. The Ingress would demand a client certificate while nothing mints one and nothing puts the CA anchor Secret in this namespace, so nginx has no trust anchor to verify against and every edge upload fails. Measured, that failure is an HTTP 400 with an HTML body that rclone reports as an S3 XML parse error — it names neither certificates nor auth, and reaches the uploader as endpoint_failed. Set clientCerts.issue=true FIRST, wait for cert-sync to deliver s3-client-tls to every edge, confirm it is there (scripts/verify-live.sh checks exactly this), and only then set require=true." }}
+  {{- end }}
+{{- end }}
+{{- if $s3ClientCerts.issue }}
+  {{- /* Same shape as the Loki push guard in templates/observability.yaml: the
+         second half of mTLS lives in another chart and is only reachable
+         through cert-sync. The per-edge version of this check is in
+         cert-sync.yaml, where the entries being judged are read. */ -}}
+  {{- if not .Values.certSync.enabled }}
+    {{- fail "seaweedfs.ingress.clientCerts.issue=true mints one S3 client certificate per edge, but certSync.enabled=false, so nothing ever delivers one. The certificates would sit on this cluster unused, no site could ever present one, and the moment clientCerts.require is flipped every upload would fail — measured, as an HTTP 400 whose HTML body rclone reports as an S3 XML parse error, naming neither certificates nor auth. Enable certSync, or set clientCerts.issue=false and rely on the SigV4 key pair alone." }}
+  {{- end }}
+{{- end }}
 ---
 {{- /*
 S3 published on :443.
@@ -503,6 +547,67 @@ metadata:
     # multipart part to its own disk first — doubling the write and filling
     # the controller pod's ephemeral storage on large sessions.
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    {{- if $s3ClientCerts.require }}
+    {{- /*
+    THESE ANNOTATIONS WORK HERE BECAUSE THIS INGRESS TERMINATES TLS. nginx
+    performs the handshake with the edge (see the note above: no
+    ssl-passthrough on this host), so it is the party that can ask for a
+    client certificate. Note what "verify" does and does not mean under TLS
+    1.3: the handshake still completes when the client sends nothing, and
+    nginx answers the first REQUEST with 400 instead. The check is real; the
+    error is just an HTTP one. With ingressNginx.sslPassthrough=true the controller
+    still routes this hostname to its own HTTPS listener, where ssl_verify_*
+    applies as normal. On cloud the load balancer in front is LAYER 4 and does
+    not terminate TLS either, so nginx sees the client handshake there too and
+    this behaves identically — nothing here is topology-specific.
+
+    ssl_verify_client is a SERVER-block directive, so it applies to the
+    SeaweedFS hostname and nothing else. Grafana and the Loki push endpoint are
+    separate server blocks on the same listener and are unaffected.
+
+    WHAT THIS ADDS OVER THE SigV4 KEY PAIR, which already scopes each site to
+    its own bucket: the key pair is a bearer secret — anything holding a copy
+    can use it from anywhere. The certificate binds the upload to a private key
+    that never leaves the site and that cert-manager rotates every 90 days, and
+    it moves the first line of defence off the S3 gateway and onto the ingress,
+    where an unauthenticated request never reaches SeaweedFS at all. The two are
+    independent: neither replaces the other, and losing one still leaves the
+    other in force.
+    */}}
+    # The CA half of the S3 client PKI, in this namespace. See the anchor
+    # Certificate below for why this is not the CA Secret itself.
+    nginx.ingress.kubernetes.io/auth-tls-secret: "{{ .Release.Namespace }}/{{ $s3ClientCASecret }}"
+    nginx.ingress.kubernetes.io/auth-tls-verify-client: "on"
+    # 2, not the ingress-nginx default of 1 — same reasoning as the Loki push
+    # Ingress: selfSigned mode signs leaves straight off the root (depth 1),
+    # intermediate mode (certManager.ca.mode) puts one CA in between (depth 2),
+    # both modes ship, and a depth of 1 in intermediate mode fails the
+    # handshake for every edge at once.
+    nginx.ingress.kubernetes.io/auth-tls-verify-depth: "2"
+    {{- if .Values.edges }}
+    {{- /*
+    Pin the accepted subjects to the sites we issued certificates for. Without
+    it, ANY certificate the fleet CA has ever signed is accepted here — the
+    Loki push client certificates and the SeaweedFS server certificate
+    included, which would make the whole check decorative.
+
+    STATED HONESTLY: this does not stop one edge presenting another edge's
+    certificate. All sites upload to one hostname through one Ingress, so the
+    regex has to admit every site. What stops cross-site access is the S3
+    identity: SeaweedFS scopes each key pair to that site's own bucket
+    (seaweedfs.perSiteBuckets). This bounds WHICH certificates are accepted at
+    the door, and makes removing a site from `edges` and upgrading a
+    revocation.
+
+    Same regex construction as the Loki push Ingress, from the same list.
+    nginx matches it against the whole subject DN, unanchored; our
+    Certificates set commonName and nothing else, so the DN is exactly
+    "CN=<edge>", and mgmt.validate has already refused any edge name that
+    could act as a regex metacharacter.
+    */}}
+    nginx.ingress.kubernetes.io/auth-tls-match-cn: "CN=({{ range $i, $e := .Values.edges }}{{ if $i }}|{{ end }}{{ $e.name }}{{ end }})"
+    {{- end }}
+    {{- end }}
 spec:
   ingressClassName: nginx
   tls:
@@ -551,6 +656,109 @@ spec:
     name: {{ .Values.certManager.issuer }}
     kind: ClusterIssuer
     group: cert-manager.io
+{{- if $s3ClientCerts.issue }}
+---
+{{- /*
+THE TRUST ANCHOR THE S3 INGRESS VERIFIES AGAINST.
+
+Everything the Loki anchor's note says applies verbatim, so only the part that
+differs is repeated here: this is a SECOND anchor, deliberately, not a reuse of
+mgmt-loki-client-ca.
+
+WHY NOT ONE ANCHOR FOR BOTH PATHS. auth-tls-secret is what nginx checks the
+chain against, so the anchor IS the revocation boundary. With one anchor, the
+only way to stop trusting a client certificate is to re-issue the anchor — and
+that invalidates every certificate under it, on BOTH paths at once. Revoking a
+site's ability to upload imaging would take its log shipping down with it,
+which is precisely the moment the fleet most needs to hear from that site. Two
+anchors keep those two actions separate. They cost one extra Certificate object
+each and are both signed by the same fleet CA, so there is still one PKI to
+reason about.
+
+REUSING THE SEAWEEDFS SERVER CERTIFICATE'S SECRET IS THE SAME TRAP IT IS ON THE
+LOKI PATH: its ca.crt is whatever signed the SERVER cert, which is
+certManager.issuer — an ACME chain in the Let's Encrypt configuration, which has
+never signed an edge client certificate. This one is pinned to the internal CA
+in both modes.
+*/}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $s3ClientCASecret }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" . | nindent 4 }}
+    app: seaweedfs
+spec:
+  secretName: {{ $s3ClientCASecret }}
+  # Not a hostname and not a client identity — it must not collide with an edge
+  # name, or auth-tls-match-cn above would accept this certificate as a site.
+  # Nothing presents it; only its ca.crt is read.
+  commonName: s3-upload-client-ca-anchor
+  duration: 8760h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  issuerRef:
+    name: {{ include "mgmt.caIssuerName" . }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- /*
+ONE S3 CLIENT IDENTITY PER EDGE, from the same CA. cert-sync copies tls.crt +
+tls.key into the site as `s3-client-tls` (certSync.secrets in the site values;
+templates/cert-sync.yaml refuses to render if that entry is missing while these
+certificates are being issued).
+
+GATED ON clientCerts.issue, unlike the Loki per-edge certificates beside them,
+and the difference is not an inconsistency. charts/edge mounts
+loki-push-client-tls UNCONDITIONALLY, so gating that issuance would leave
+cert-sync with no source and Vector unable to start at any site. The S3 mount is
+gated on upload.s3.requireClientCert and the whole feature ships OFF, so here
+the same gate costs nothing and keeps a fleet that has not opted in free of
+per-edge objects nothing consumes.
+*/ -}}
+{{- range $edge := .Values.edges }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "mgmt.s3ClientCertSecret" $edge.name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $ | nindent 4 }}
+    app: seaweedfs
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  secretName: {{ include "mgmt.s3ClientCertSecret" $edge.name }}
+  # The edge name and nothing else, so the subject DN is exactly "CN=<edge>",
+  # which is what auth-tls-match-cn matches on.
+  commonName: {{ $edge.name | quote }}
+  # 90 days, renewed at 30 — the same cadence as the Loki client certificate,
+  # for the same reason: this is a certificate whose renewal is exercised end to
+  # end by cert-sync, and a yearly cadence proves the distribution path once a
+  # year, which is the same as not proving it. CertSyncStale covers the gap.
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    # Renewal must produce a NEW key, or a leaked key stays valid for the life
+    # of the fleet.
+    rotationPolicy: Always
+  usages:
+    - digital signature
+    - key encipherment
+    # client auth only. This certificate authenticates a site to the upload
+    # endpoint; it is never a server, and leaving server auth on would let a
+    # copy of it terminate TLS for any name it happens to carry.
+    - client auth
+  issuerRef:
+    name: {{ include "mgmt.caIssuerName" $ }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if .Values.seaweedfs.buckets }}
 ---

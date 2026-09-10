@@ -68,10 +68,11 @@ upload:
     endpoint: "https://seaweedfs.ci.198-51-100-10.nip.io"
     bucket: ingest-edge-alpha
     caBundleSecret: ca-bundle
+deid:
+  engine: orthanc
+  policyReviewed: true
 orthanc:
   deid:
-    enabled: true
-    policyReviewed: true
     aetMap:
       SIEMENS_3T: {project: CI_RESEARCH}
     profile:
@@ -86,6 +87,9 @@ EOF
 # =============================================================================
 # POSITIVE overlays — combinations that must RENDER.
 # =============================================================================
+
+# Test the actual site file, not a transcription that can drift independently.
+cp "$REPO_ROOT/sites/tbpet/values.yaml" "$V/edge-tbpet.yaml"
 
 # -- mgmt ---------------------------------------------------------------------
 
@@ -162,6 +166,56 @@ EOF
 
 # Let's Encrypt staging with a DNS-01 solver. Exercises the ACME ClusterIssuer
 # branch, which is otherwise never rendered.
+# THE SHIPPED CLOUD SITE ITSELF. Not a hand-written fixture: sites/example-cloud
+# is what an operator copies, so if it stops rendering CI is what should notice.
+cp "$REPO_ROOT/sites/example-cloud/values.yaml" "$V/mgmt-cloud.yaml"
+
+# mTLS on the S3 upload path, FULLY ROLLED OUT — both switches on and the
+# certSync entry that carries the certificate in. This is the only case that
+# renders the auth-tls-* annotations on the SeaweedFS Ingress, the S3 client CA
+# anchor and the per-edge <edge>-s3-client Certificates; without it that whole
+# path ships never having been rendered once.
+#
+# certSync.secrets is restated in FULL because Helm replaces lists rather than
+# merging them: naming only the new entry would drop the Loki client cert entry
+# and trip that guard first.
+cat >"$V/mgmt-s3-mtls.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+      require: true
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-loki-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: loki-push-client-tls, type: kubernetes.io/tls}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: s3-client-tls, type: kubernetes.io/tls}
+EOF
+
+# Step 1 of the rollout, layered ON TOP of the case above: certificates issued
+# and delivered, nothing verifying them yet. That is the state a fleet sits in
+# between `issue` and `require` — the window in which the operator confirms the
+# Secret landed on every site — so it has to render too. The Ingress must come
+# out with NO auth-tls-* annotations here while the Certificates are present.
+cat >"$V/mgmt-s3-mtls-issue-only.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      require: false
+EOF
+
 cat >"$V/mgmt-letsencrypt.yaml" <<'EOF'
 certManager:
   issuer: letsencrypt-staging
@@ -194,6 +248,34 @@ observability:
     caBundleSecret: ca-bundle
 EOF
 
+# The edge half of S3 mTLS: mount the client certificate and present it. The
+# only case that renders RCLONE_CLIENT_CERT / RCLONE_CLIENT_KEY and the
+# s3-client volume, and the one that proves they are NOT coupled to
+# caBundleSecret — both are set here, and edge-cloud-s3-mtls below sets only
+# this one.
+cat >"$V/edge-s3-mtls.yaml" <<'EOF'
+upload:
+  s3:
+    requireClientCert: true
+    clientCertSecret: s3-client-tls
+EOF
+
+# CLOUD NUANCE, and the reason the two keys are independent: on cloud the
+# SeaweedFS server certificate can come from a public CA that is already in the
+# image's trust store, so caBundleSecret is legitimately EMPTY — while our own
+# client identity still comes from the fleet CA via cert-sync. This case would
+# not render if the client cert were nested inside the CA-bundle branch.
+# The endpoint is http:// because the https guard requires a CA bundle; what is
+# under test is that the client-certificate mount survives an empty
+# caBundleSecret, not the endpoint scheme.
+cat >"$V/edge-s3-mtls-no-cabundle.yaml" <<'EOF'
+upload:
+  s3:
+    endpoint: "http://mgmt-seaweedfs.ais-mgmt.svc.cluster.local:8333"
+    caBundleSecret: ""
+    requireClientCert: true
+EOF
+
 cat >"$V/edge-samba-on.yaml" <<'EOF'
 samba:
   enabled: true
@@ -214,15 +296,13 @@ dataPolicy:
   dryRun: false
 EOF
 
-# De-identification off. Requires clearing toProcessLabel, because nothing
-# applies that label with the hook disabled.
+# De-identification off. Facility backup remains enabled in this fixture, so
+# its Lua hook still applies the stable-study label.
+# policyReviewed is what acknowledges that identifiable data would reach XNAT.
 cat >"$V/edge-deid-off.yaml" <<'EOF'
-orthanc:
-  deid:
-    enabled: false
-ingest:
-  orthancGroup:
-    toProcessLabel: ""
+deid:
+  engine: none
+  policyReviewed: true
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -610,6 +690,81 @@ certSync:
       destination: {namespace: logging, name: ca-bundle, type: Opaque}
 EOF
 
+# ---- S3 mTLS ordering --------------------------------------------------------
+# The hazard these four guard: turning verification on before the client
+# certificates are on the edges rejects every upload at the TLS handshake, and
+# that rejection reaches the uploader as a generic connection error — no 403,
+# no S3 error code — so it reads as a dead endpoint rather than as an auth
+# problem. Each case injects one step of the rollout done out of order.
+
+# require without issue: the Ingress demands a certificate while nothing mints
+# one and the CA anchor Secret it names does not exist.
+cat >"$V/neg-mgmt-s3-mtls-require-no-issue.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: false
+      require: true
+EOF
+
+# Certificates issued with no distribution mechanism at all. requireAuth is
+# turned off so the LOKI certSync guard — which fires on the same values and is
+# rendered from an earlier file — cannot satisfy this case for the wrong reason.
+cat >"$V/neg-mgmt-s3-mtls-no-certsync.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+certSync:
+  enabled: false
+observability:
+  loki:
+    push:
+      requireAuth: false
+EOF
+
+# certSync is on and well-formed but carries no S3 client certificate: the
+# identities are minted on the management cluster and never reach a site.
+cat >"$V/neg-mgmt-s3-mtls-no-client-cert.yaml" <<'EOF'
+seaweedfs:
+  ingress:
+    clientCerts:
+      issue: true
+observability:
+  loki:
+    push:
+      requireAuth: false
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+EOF
+
+# The reverse: the certSync entry uncommented without the flag. Nothing creates
+# the source Secret, so that one entry logs sync_failed every six hours while
+# every other Secret in the same run syncs fine.
+cat >"$V/neg-mgmt-s3-certsync-entry-no-issue.yaml" <<'EOF'
+observability:
+  loki:
+    push:
+      requireAuth: false
+certSync:
+  secrets:
+    - source:
+        namespace: cert-manager
+        name: ais-edge-ca-secret
+        keys: {ca.crt: ca.crt}
+      destination: {namespace: xnat-ingest, name: ca-bundle, type: Opaque}
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys: {tls.crt: tls.crt, tls.key: tls.key}
+      destination: {namespace: xnat-ingest, name: s3-client-tls, type: kubernetes.io/tls}
+EOF
+
 # | , = are the delimiters of the spec file cert-sync.sh parses, so a name
 # containing one is read as a different instruction rather than rejected.
 cat >"$V/neg-mgmt-certsync-delimiter-in-name.yaml" <<'EOF'
@@ -653,10 +808,83 @@ printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-en
 # one bucket can read and delete every other site's staged imaging.
 printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
 printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
-printf 'orthanc:\n  deid:\n    policyReviewed: false\n'   >"$V/neg-edge-deid-not-reviewed.yaml"
+# requireClientCert with nothing to mount. The volume renders with an empty
+# secretName, which is valid YAML — so every parsing stage passes and the
+# uploader sits in CreateContainerConfigError on the edge instead.
+printf 'upload:\n  s3:\n    requireClientCert: true\n    clientCertSecret: ""\n' >"$V/neg-edge-s3-no-client-secret.yaml"
+printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-not-reviewed.yaml"
+# The pre-rename path. Accepting it as an alias would leave the very confusion
+# the move exists to end, so it must fail and name the new key.
+printf 'orthanc:\n  deid:\n    policyReviewed: true\n' >"$V/neg-edge-deid-moved-key.yaml"
+# The management uploader with no settle period reads a session while the edge
+# is still writing it into the bucket, uploads the fraction that has landed,
+# and then skips the short resource for ever as 'already uploaded'.
+printf 'xnatUpload:\n  waitPeriod: 0\n' >"$V/neg-mgmt-upload-no-wait.yaml"
 printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-empty-aetmap.yaml"
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
+
+printf 'deid:\n  engine: ingset\n' >"$V/neg-edge-deid-bad-engine.yaml"
+printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: ""\n' >"$V/neg-edge-deid-no-specs.yaml"
+printf 'deid:\n  engine: none\n  policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
+printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
+
+# The migration guards, which are the upgrade path for every existing site and
+# execute exactly once each, in anger. Nothing had ever run them.
+printf 'orthanc:\n  deid:\n    enabled: true\n'      >"$V/neg-edge-deid-legacy-orthanc-key.yaml"
+printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-ingest-key.yaml"
+
+# onDeidentified is satisfied by the deidentify stage unlinking its own input,
+# so it is meaningless when that stage does not render.
+printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
+
+# onUploaded needs a marker that only the s3-uploader writes, and upload.mode
+# =direct renders no s3-uploader. The condition could never come true, so the
+# tree would be kept for ever while the policy read as if it were being cleaned.
+printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
+
+# A recovery window on a tree the stage deletes at handoff can never elapse.
+# Also the only live exercise of the durationSeconds/int64 path in that guard.
+cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+      minAge: 1d
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
+
+# A COMPLETE ais-deid site that reclaims its terminal tree. Under direct upload
+# that tree is /data/deidentified and nothing used to be able to retire it: the
+# chart failed the render because onUploaded had no writer. The stagedReclaimer
+# CronJob is that writer's replacement, so this combination must now RENDER.
+# Paired with the neg-edge-reclaim-deid-onuploaded case, which keeps the same
+# declaration failing under Orthanc-deid, where the tree really is unwatched.
+cat >"$V/edge-deid-ingest.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+    deidentified:
+      reclaim: onUploaded
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
 
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
 storage:
@@ -664,22 +892,74 @@ storage:
     enabled: false
 EOF
 
-# group-orthanc filtering on a label nothing applies: the pipeline stalls with
-# no error anywhere.
-cat >"$V/neg-edge-orphan-toprocesslabel.yaml" <<'EOF'
+# The two Orthanc secrets under the DEFAULT engine. Both guards used to be gated
+# on deid.engine=orthanc while the values they protect are mounted on conditions
+# with no engine test, so neither was reachable from what a new site installs.
+cat >"$V/neg-edge-ingest-no-authsecret.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: ""
+EOF
+
+cat >"$V/neg-edge-ingest-no-salt.yaml" <<'EOF'
 orthanc:
   deid:
-    enabled: false
+    existingSaltSecret: ""
+EOF
+
+# The routing tags only the Lua hook writes, with the Lua hook not selected:
+# every session lands in __invalid__ still carrying its PHI. The old
+# orphaned-toProcessLabel case is gone because the chart now derives that label
+# from the engine, so it cannot be left dangling.
+cat >"$V/neg-edge-deid-lua-tags.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+ingest:
+  # EXPLICIT NOW, and that is the point of this case. The chart default used to
+  # BE the ClinicalTrial* triple, so an ingest-engine fixture reached this guard
+  # by doing nothing. The default is now the modality tags, so a site only trips
+  # this guard by leaving the old values behind after switching engines, which is
+  # exactly the mistake it exists to catch. The fixture has to state them.
+  assign:
+    tagMapping:
+      project: ClinicalTrialProtocolID
+      subject: ClinicalTrialSubjectID
+      session: ClinicalTrialTimePointID
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
 EOF
 
 cat >"$V/neg-edge-stable-label-no-filter.yaml" <<'EOF'
-orthanc:
-  deid:
+deid:
+  engine: none
+storage:
+  facilityBackup:
     enabled: false
+orthanc:
   applyStableLabel: true
 ingest:
   orthancGroup:
     toProcessLabel: ""
+EOF
+
+cat >"$V/neg-edge-orphan-toprocesslabel.yaml" <<'EOF'
+deid:
+  engine: none
+storage:
+  facilityBackup:
+    enabled: false
+orthanc:
+  applyStableLabel: false
+ingest:
+  orthancGroup:
+    toProcessLabel: xnat-ingest-ready
 EOF
 
 cat >"$V/neg-edge-two-stable-hooks.yaml" <<'EOF'
@@ -763,14 +1043,94 @@ EOF
 printf 'hostAliases:\n  mgmtNodeIP: ""\n'                 >"$V/neg-edge-hostaliases-no-ip.yaml"
 printf 'clusterLabel: ""\n'                               >"$V/neg-edge-no-clusterlabel.yaml"
 
+# -- cloud ingress shape ------------------------------------------------------
+# The on-prem default left in place on cloud: binds the host's :443, never asks
+# for a load balancer, and the controller still reports 1/1 Running.
+cat >"$V/neg-mgmt-cloud-hostnetwork.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: true
+EOF
+
+# Reachable from nowhere outside the cluster.
+cat >"$V/neg-mgmt-cloud-clusterip.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: ClusterIP
+EOF
+
+# ClusterFirstWithHostNet without hostNetwork: the pod gets the HOST's
+# resolv.conf and loses its in-cluster upstreams.
+# nodePort is the CHART DEFAULT, so an edge that omits `exposure` lands on the
+# mode that reaches nothing on cloud. This fixture states it explicitly.
+cat >"$V/neg-mgmt-cloud-nodeport.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirst
+    service:
+      type: LoadBalancer
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+EOF
+
+cat >"$V/neg-mgmt-cloud-dnspolicy.yaml" <<'EOF'
+topology: cloud
+ingress-nginx:
+  controller:
+    hostNetwork: false
+    dnsPolicy: ClusterFirstWithHostNet
+    service:
+      type: LoadBalancer
+EOF
+
 # Orthanc auth on with nothing to authenticate against. The deployment mounts
 # existingSecret non-optionally, so an empty name fails as a volume error
 # rather than as an auth error.
+# Orthanc auth ON with a populated Secret: the shape a site that turns auth on
+# actually runs. Renders both consumers, so the values-consumers and render
+# stages see the credential wiring rather than only the negative case.
+cat >"$V/edge-auth-on.yaml" <<'EOF'
+orthanc:
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+EOF
+
 cat >"$V/neg-edge-auth-no-secret.yaml" <<'EOF'
 orthanc:
   auth:
     enabled: true
     existingSecret: ""
+EOF
+
+# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# NotImplementedError at RUN TIME for anything else, so without this guard the
+# pod renders, starts and then CrashLoops with a message that never names the
+# setting that caused it.
+printf 'ingest:\n  orthancGroup:\n    copyMode: copy\n' >"$V/neg-edge-orthanc-copymode.yaml"
+
+# Recipes for an engine that is not selected. deid.engine defaults to orthanc, so
+# this is what a site gets by pasting specs into values.yaml and changing nothing
+# else: the ConfigMap and the deidentify stage are both gated on the engine, so
+# helm succeeds and the recipe is silently never mounted.
+cat >"$V/neg-edge-specs-wrong-engine.yaml" <<'EOF'
+ingest:
+  deidentify:
+    specs:
+      __default__/medimage/dicom-series: |
+        REMOVE PatientBirthDate
 EOF
 
 
@@ -796,9 +1156,14 @@ mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
 mgmt-no-seaweedfs	charts/mgmt	mgmt-base.yaml mgmt-no-seaweedfs.yaml
 mgmt-shared-bucket	charts/mgmt	mgmt-base.yaml mgmt-shared-bucket.yaml
 mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
+mgmt-cloud	charts/mgmt	mgmt-cloud.yaml
 mgmt-slack	charts/mgmt	mgmt-base.yaml mgmt-slack.yaml
 mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-datapolicy-on.yaml
+mgmt-s3-mtls	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml
+mgmt-s3-mtls-issue-only	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml mgmt-s3-mtls-issue-only.yaml
+mgmt-s3-mtls-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-s3-mtls.yaml
 edge-defaults	charts/edge	edge-base.yaml
+edge-tbpet	charts/edge	edge-tbpet.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
@@ -807,7 +1172,13 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
-edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
+edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-s3-mtls	charts/edge	edge-base.yaml edge-s3-mtls.yaml
+edge-s3-mtls-no-cabundle	charts/edge	edge-base.yaml edge-s3-mtls-no-cabundle.yaml
+edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
+edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
+edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml edge-s3-mtls.yaml
 EOF
 }
 
@@ -861,23 +1232,46 @@ neg-mgmt-certsync-delimiter-in-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-
 neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-cronjob-name-too-long.yaml	the API server rejects CronJob names over 52
 neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
 neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
+neg-mgmt-s3-mtls-require-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-require-no-issue.yaml	clientCerts.require=true with clientCerts.issue=false
+neg-mgmt-s3-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-no-certsync.yaml	mints one S3 client certificate per edge, but certSync.enabled=false
+neg-mgmt-s3-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-no-client-cert.yaml	but seaweedfs.ingress.clientCerts.issue mints that certificate
+neg-mgmt-s3-certsync-entry-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-certsync-entry-no-issue.yaml	but seaweedfs.ingress.clientCerts.issue=false
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
-neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
-neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires orthanc.deid.policyReviewed=true
+neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every upload would fail the TLS handshake
+neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty
+neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
+neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
+neg-mgmt-upload-no-wait	charts/mgmt	mgmt-base.yaml neg-mgmt-upload-no-wait.yaml	xnatUpload.waitPeriod is 0
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
+neg-edge-deid-bad-engine	charts/edge	edge-base.yaml neg-edge-deid-bad-engine.yaml	must be one of orthanc, ingest or none
+neg-edge-deid-no-specs	charts/edge	edge-base.yaml neg-edge-deid-no-specs.yaml	no recipes are configured
+neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	deid.engine=none, so nothing in this pipeline de-identifies
+neg-edge-deid-no-specfiles	charts/edge	edge-base.yaml neg-edge-deid-no-specfiles.yaml	specFiles is empty
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
-neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	requires storage.facilityBackup.enabled=true
 neg-edge-orphan-toprocesslabel	charts/edge	edge-base.yaml neg-edge-orphan-toprocesslabel.yaml	Nothing applies that label
 neg-edge-stable-label-no-filter	charts/edge	edge-base.yaml neg-edge-stable-label-no-filter.yaml	requires ingest.orthancGroup.toProcessLabel
 neg-edge-two-stable-hooks	charts/edge	edge-base.yaml neg-edge-two-stable-hooks.yaml	cannot both be true
 neg-edge-export-glob-outside-mount	charts/edge	edge-base.yaml neg-edge-export-glob-outside-mount.yaml	must point under exportMountPath
 neg-edge-watchdog-no-secret	charts/edge	edge-base.yaml neg-edge-watchdog-no-secret.yaml	requires watchdog.existingSecret
+neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
+neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
+neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
+neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
+neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
+neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
+neg-edge-ingest-no-authsecret	charts/edge	edge-base.yaml neg-edge-ingest-no-authsecret.yaml	orthanc.auth.existingSecret is empty
+neg-edge-ingest-no-salt	charts/edge	edge-base.yaml neg-edge-ingest-no-salt.yaml	existingSaltSecret is empty
+neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy
 neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip.yaml	hostAliases.mgmtNodeIP is empty
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
+neg-mgmt-cloud-hostnetwork	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-hostnetwork.yaml	hostNetwork=true
+neg-mgmt-cloud-clusterip	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-clusterip.yaml	service.type=ClusterIP
+neg-mgmt-cloud-dnspolicy	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-dnspolicy.yaml	dnsPolicy=ClusterFirstWithHostNet without hostNetwork
+neg-mgmt-cloud-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-nodeport.yaml	exposure=nodePort with topology=cloud
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
@@ -885,6 +1279,8 @@ neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
 neg-mgmt-quarantine-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-quarantine-retain.yaml	the only supported value is
+neg-edge-orthanc-copymode	charts/edge	edge-base.yaml neg-edge-orthanc-copymode.yaml	is not supported
+neg-edge-specs-wrong-engine	charts/edge	edge-base.yaml neg-edge-specs-wrong-engine.yaml	is set, but deid.engine=
 EOF
 }
 

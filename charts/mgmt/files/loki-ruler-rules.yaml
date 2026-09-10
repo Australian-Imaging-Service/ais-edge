@@ -112,7 +112,7 @@ groups:
           source: loki-ruler
         annotations:
           summary: "Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes"
-          description: "mc mirror started but did not complete within the expected window. Could be a slow network, large session, or stuck retry."
+          description: "The upload started but did not complete within the expected window. Could be a slow network, a large session, or a stuck retry. Deliberately does not name the transfer tool: this text named a binary that had been replaced two migrations earlier, and an alert description is read by someone under pressure who will go looking for it."
 
       - alert: SessionStagedNotConfirmedInXNAT
         # THE ONLY ABSENCE ALERT IN THIS FILE, AND THE MOST IMPORTANT ONE.
@@ -196,13 +196,18 @@ groups:
         # is the same failure caught within the hour; both are wanted, because
         # a pre-flight that recovers on its own leaves this one to notice the
         # sessions that went unconfirmed while it was down.
+        # BOTH NAMESPACES ON PURPOSE. The same reclaimer runs in two places: on
+        # mgmt (xnat-upload) against the S3 staging prefix for tier-2, and on an
+        # edge (xnat-ingest) against the terminal stage directory for tier-1.
+        # Same script, same events, same component label, so one rule covers
+        # both and the cluster label says which site fired.
         expr: |
           (sum by (cluster, session) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event=~"reclaim_.*" | session != "" [24h] offset 48h)) > 0)
           unless on (cluster, session)
           (sum by (cluster, session) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_confirmed" [72h])) > 0)
         for: 30m
         labels:
@@ -225,6 +230,94 @@ groups:
               4. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
                  means a partial upload. reclaim_unavailable means the reclaimer
                  could not decide at all — see ReclaimerRunUnavailable.
+
+      - alert: XNATResourceIncompleteAndStuck
+        # A resource EXISTS on XNAT but is SHORT, and the uploader will never
+        # repair it. get_xnat_resource returns None whenever the resource
+        # exists, so the caller logs "already uploaded" and skips it, and the
+        # session still reports success. Only an operator deleting the resource
+        # on XNAT unblocks it.
+        #
+        # MEASURED 2026-09-09: a session read from the bucket mid-write landed
+        # 16 of 95 files in one scan. Every later pass skipped it. 170 of 383
+        # instances reached XNAT and each run logged "Successfully uploaded all
+        # files". The cause of the mid-write read is fixed
+        # (xnatUpload.waitPeriod), but ANY partial upload reaches this state:
+        # an interrupted pod, a dropped connection, an XNAT hiccup.
+        #
+        # WHY THIS IS NOT A FIRST-OBSERVATION ALERT, and the threshold is not
+        # arbitrary. The same message appears TRANSIENTLY when XNAT has accepted
+        # files but not finished cataloguing them: get_xnat_checksums runs
+        # BEFORE the catalog refresh, and that refresh only fires when the count
+        # is exactly zero, so a partially-catalogued resource reads as short.
+        # MEASURED on the real incident: a genuinely stuck resource emits this
+        # ~4.8 times a minute. Catalogue lag emits at most one line per resource
+        # per pass and stops within a pass or two, so ~10-15 lines. 30 sits above
+        # that ceiling and far below the stuck floor.
+        #
+        # THE WINDOW IS 60m BECAUSE OF THE GAPS, NOT THE RATE. Measured gaps
+        # between occurrences: median 95s, 90th percentile 98s -- and one of
+        # 2341s (39 MINUTES), because the uploader was busy pushing a 1.2GB
+        # session elsewhere and did not reach the stuck one. A short window would
+        # go false across that gap, reset the `for:` timer, and the alert would
+        # never fire. Any window here must exceed the longest plausible gap,
+        # which is set by how long one large upload occupies the loop.
+        #
+        # The cost is that it resolves ~60m after the fix rather than promptly.
+        # That is the right trade for a warning-level reminder: a false silence
+        # is far worse than a late all-clear. A LOW threshold with this long a
+        # window would be the worst combination -- transient lag would sit above
+        # it for a full hour and fire.
+        #
+        # IT CANNOT FIRE MID-UPLOAD. Every get_xnat_resource call completes
+        # before the first upload starts (upload_api.py resolves sequentially,
+        # then fans out), passes never overlap (time.sleep is after the work),
+        # and xnatUpload is pinned to replicas: 1 with strategy: Recreate.
+        #
+        # THE SESSION LABEL IS WHAT MAKES THIS ONE ALERT PER SESSION rather than
+        # one per cluster. alertmanager-config.yaml groups on
+        # ["alertname", "cluster", "session"], so two stuck sessions notify
+        # separately and a third does not re-notify for the first two.
+        expr: |
+          sum by (cluster, session) (count_over_time(
+            {namespace="xnat-upload", component="upload"}
+            | json | message =~ ".*already exists on XNAT with different checksums.*"
+            | message =~ ".*Missing paths.*"
+            | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`
+            | label_format session="{{.resource}}" [60m])) > 30
+        for: 15m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: xnat-delivery
+        annotations:
+          summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
+          description: |
+            The uploader keeps finding a resource that exists on XNAT but is missing
+            files it still holds in staging, and skips it as "already uploaded" on
+            every pass. The session is reported as uploaded while incomplete.
+
+            NO DATA IS LOST. The staged copy is intact and dataPolicy will not reclaim
+            it while XNAT cannot confirm delivery.
+
+            1. list the affected resources
+                 kubectl -n xnat-upload logs deploy/mgmt-upload-cai-lfs3 --since=30m \
+                   | grep "already exists on XNAT with different checksums"
+
+            2. delete those resources on XNAT so the uploader can recreate them
+
+            3. ON xnat-ingest 0.15.0 AND EARLIER, RESTART THE UPLOADER TOO.
+               Deleting on XNAT alone does nothing on those versions: the pod holds
+               ONE XNAT connection for its lifetime and never invalidates the cached
+               project/experiment listings, so the deletion stays invisible and the
+               resource is skipped for ever. MEASURED: delete alone changed nothing;
+               delete plus restart uploaded all 383 files.
+                 kubectl -n xnat-upload rollout restart deploy/mgmt-upload-cai-lfs3
+
+               Once the uploader invalidates that cache per pass, step 3 is no longer
+               needed and the deletion is picked up within one --loop interval.
+               MEASURED on a patched build: deleted at 07:17, re-uploaded at 07:18:26
+               with the pod never restarting.
 
       - alert: ReclaimerRunUnavailable
         # THE RECLAIMER FAILING IS NOT A DATA-LOSS EVENT. IT IS A BLINDNESS
@@ -300,11 +393,11 @@ groups:
         # is the 48h backstop for that case.
         expr: |
           (sum by (cluster, reason) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_unavailable" | session = "" [3h])) > 0)
           unless on (cluster)
           (sum by (cluster) (count_over_time(
-            {namespace="xnat-upload", component="s3-reclaimer"}
+            {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_finished" [70m])) > 0)
         for: 75m
         labels:
@@ -454,6 +547,76 @@ groups:
             Free space by growing the volume, or by enabling reclaim for the
             derived stages once you are satisfied with the dry-run decisions.
 
+      - alert: StageBacklogAgeing
+        # dataPolicy.reporter.stageAgeAlertAfter MADE REAL.
+        #
+        # PipelineSessionStuck is per session and fires only on one whose reclaim
+        # condition keeps failing. A stage whose reclaim is `never` returns before
+        # that check runs, so it can never raise stage_stuck -- and `never` is the
+        # default for the deidentified tree. This is the question that needs no
+        # reclaim condition at all: has the oldest thing here been here too long.
+        expr: |
+          sum by (cluster, stage) (count_over_time(
+            {namespace="xnat-ingest", component="data-policy"}
+            | json | event="stage_report"
+            | oldest_age_s > __DP_STAGE_AGE_ALERT_AFTER_S__ [15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-storage
+        annotations:
+          summary: '{{ $labels.stage }} on {{ $labels.cluster }} has entries older than the configured limit'
+          description: |
+            The oldest entry in this stage has been there longer than
+            dataPolicy.reporter.stageAgeAlertAfter.
+        
+            NOTHING IS DELETED BECAUSE OF THIS. It says the stage is not draining
+            at the rate it should, which is either a downstream stage that has
+            stopped consuming, or a retention policy of `never` on a tree that
+            does in fact keep growing.
+        
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\
+                -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_report
+        
+            Check EdgeDiskLow too: a stage that never drains eventually fills the
+            volume, and that alert is the one with the deadline.
+      - alert: PipelineSessionStuck
+        # dataPolicy.reporter.stuckAfter MADE REAL. A session whose reclaim
+        # condition never comes true is kept for ever, correctly, and every pass
+        # logs the same reclaim_kept line. That drip is indistinguishable from
+        # normal operation, so a permanently stuck session looks exactly like a
+        # healthy one uploaded a minute ago. This is the event that separates
+        # them.
+        expr: |
+          sum by (cluster, stage) (count_over_time(
+            {namespace="xnat-ingest", component="data-policy"}
+            | json | event="stage_stuck" [15m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-pipeline
+        annotations:
+          summary: A session on {{ $labels.cluster }} is stuck at {{ $labels.stage }}
+          description: |
+            A session has been failing its reclaim condition for longer than
+            dataPolicy.reporter.stuckAfter.
+
+            IT IS NOT LOST AND NOTHING HAS BEEN DELETED OR MOVED. The engine is
+            keeping a copy it cannot prove is reconstructible, which is correct.
+            What this alert says is that the condition is never going to come
+            true on its own, and that the steady reclaim_kept line for this
+            session is not routine.
+
+            Usual causes: the stage downstream never produced what the condition
+            looks for, or a reclaim word that cannot be satisfied in this
+            configuration.
+
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \
+                -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_stuck
+
+            The event carries the session, the reclaim word and the age.
       - alert: QuarantinedDataUnresolved
         # dataPolicy.originals.quarantine.alertAfter MADE REAL — the second key
         # that had no reader before the engine existed.
@@ -659,6 +822,33 @@ groups:
             the last 10 minutes. Inspect the Orthanc pod logs and check
             the deidentification-profile.json for syntax issues.
 
+      - alert: DeidentifyStageError
+        # Counterpart to OrthancDeidLuaError for the xnat-ingest engine. Whichever
+        # engine a site runs, a failure to de-identify has to be visible; without
+        # this, switching to ingest.deidentify silences OrthancDeidLuaError and puts
+        # nothing in its place, leaving the one thing you cannot afford to miss
+        # unwatched.
+        #
+        # Matches error text rather than a structured event: the stage logs
+        # tracebacks as plain text. tqdm writes progress bars to the same stream
+        # ("Processing staged sessions ... 100%|####|"), so the pattern is anchored
+        # on error words and never on a bare percentage.
+        expr: |
+          sum by (cluster) (count_over_time(
+            {namespace="xnat-ingest", component="deidentify"}
+            |~ "(?i)traceback|error:|exception|no applicable spec" [10m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: deid
+        annotations:
+          summary: xnat-ingest deidentify errored on {{ $labels.cluster }}
+          description: >
+            The deidentify stage logged an error in the last 10 minutes. Sessions
+            that fail to de-identify are NOT uploaded, so this is a stall rather
+            than a leak. Check the pod logs and confirm the recipes under
+            ingest.deidentify.specConfigMap cover the formats being received.
       - alert: S3UploaderRestartedRecently
         # The s3-uploader exits non-zero (and crashloops) when its
         # pre-flight bucket probe fails. A restart within 5m means the

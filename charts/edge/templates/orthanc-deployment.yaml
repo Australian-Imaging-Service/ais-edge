@@ -96,7 +96,7 @@ spec:
             - name: http
               containerPort: {{ .Values.orthanc.httpPort }}
           env:
-            {{- if .Values.orthanc.deid.enabled }}
+            {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
             - name: AIS_ROUTING_FILE
               value: /etc/ais-edge/routing.json
             - name: AIS_DEID_HMAC_SALT
@@ -125,7 +125,7 @@ spec:
             - name: scripts
               mountPath: /etc/orthanc/scripts
               readOnly: true
-            {{- if .Values.orthanc.deid.enabled }}
+            {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
             # Deliberately NOT under /etc/orthanc: Orthanc would read these as
             # server configuration.
             - name: routing
@@ -134,7 +134,15 @@ spec:
             {{- end }}
             {{- if .Values.orthanc.auth.enabled }}
             - name: credentials
-              # Orthanc merges JSON fragments from its config directory.
+              # INTO THE CONFIG DIRECTORY, not a directory of its own. Orthanc scans
+              # /etc/orthanc and merges every .json it finds there; it has no option
+              # that reads a users file from anywhere else. Mounted at a path rather
+              # than over the directory, so the ConfigMap's orthanc.json survives.
+              #
+              # subPath is deliberate and has a cost: the file does NOT refresh when
+              # the Secret changes. That is acceptable here because Orthanc reads its
+              # configuration once at startup, so a credential change needs a restart
+              # either way.
               mountPath: /etc/orthanc/users.json
               subPath: users.json
               readOnly: true
@@ -152,7 +160,7 @@ spec:
           configMap:
             name: {{ include "edge.fullname" . }}-orthanc-scripts
             defaultMode: 0755
-        {{- if .Values.orthanc.deid.enabled }}
+        {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
         - name: routing
           configMap:
             name: {{ include "edge.fullname" . }}-orthanc-routing

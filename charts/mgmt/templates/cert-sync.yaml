@@ -204,6 +204,58 @@ mostly theatre and it should not read as more than it is:
   {{- end }}
 {{- end }}
 
+{{- /* THE SAME CHECK FOR THE S3 UPLOAD PATH, IN BOTH DIRECTIONS.
+
+       templates/seaweedfs.yaml issues one <edge>-s3-client certificate per
+       edge when seaweedfs.ingress.clientCerts.issue is on, and puts
+       auth-tls-verify-client across the SeaweedFS Ingress when
+       clientCerts.require is on. Those are two separate switches precisely so
+       the certificates can be DELIVERED and CONFIRMED before anything verifies
+       them, and this pair of guards is what keeps the two halves of that
+       sequence attached to each other.
+
+       Why it is worth failing the render rather than letting it be discovered:
+       a client certificate the Ingress rejects — missing, expired, signed by
+       the wrong CA — produces an error that names nothing. MEASURED against
+       nginx ssl_verify_client on and rclone 1.75.0: no certificate and wrong
+       CA both give HTTP 400 with an HTML body, a CN outside auth-tls-match-cn
+       gives 403 with the same, and rclone reports all three as
+       `error while deserializing xml error response`. The uploader's own logs
+       then show endpoint_failed / upload_skipped, and an operator reading them
+       has nothing pointing at certificates at all.
+
+       Deliberately AFTER the per-entry hygiene checks above, for the same
+       reason the Loki one is: those name a specific defect in a specific
+       entry, and these would otherwise mask them for any malformed list. */ -}}
+{{- if .Values.seaweedfs.enabled }}
+{{- $s3Issue := .Values.seaweedfs.ingress.clientCerts.issue }}
+{{- range $edge := .Values.edges }}
+  {{- $want := include "mgmt.s3ClientCertSecret" $edge.name }}
+  {{- $found := false }}
+  {{- range $item := $cs.secrets }}
+    {{- if eq ($item.source.name | replace "<edge>" $edge.name) $want }}
+      {{- $srcKeys := keys ($item.source.keys | default dict) }}
+      {{- if and (has "tls.crt" $srcKeys) (has "tls.key" $srcKeys) }}
+        {{- $found = true }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
+  {{- if and $s3Issue (not $found) }}
+    {{- fail (printf "no certSync.secrets entry copies %q (both tls.crt and tls.key) into edge %q, but seaweedfs.ingress.clientCerts.issue mints that certificate for it. cert-manager would issue an S3 upload identity on this cluster and nothing would carry it to the site, so the site could never present one — and the moment clientCerts.require is flipped, every upload from every edge fails. That failure appears in the uploader's own logs as endpoint_failed / upload_skipped rather than as an auth error: measured, the endpoint answers HTTP 400 with an HTML body and rclone reports it as an S3 XML parse failure, so nothing in the message mentions certificates. Add:\n  - source: {name: \"<edge>-s3-client\", keys: {tls.crt: tls.crt, tls.key: tls.key}}\n    destination: {namespace: <the edge namespace>, name: s3-client-tls, type: kubernetes.io/tls}" $want $edge.name) }}
+  {{- end }}
+  {{- /* The reverse: an entry pointing at a certificate nothing mints. This is
+         the shape a staged rollout produces when the certSync entry is
+         uncommented and the flag is forgotten, and it is silent in the worst
+         way — cert-sync logs sync_failed for that one Secret every six hours
+         while every OTHER Secret in the same run syncs fine, so the CronJob is
+         simply failing and the site never notices it is missing an identity it
+         is not yet using. */ -}}
+  {{- if and $found (not $s3Issue) }}
+    {{- fail (printf "certSync.secrets copies %q into edge %q, but seaweedfs.ingress.clientCerts.issue=false, so nothing on this cluster ever creates that Secret. Every cert-sync run would log sync_failed for it and exit non-zero, taking CertSyncStale down with it while the certificates that ARE current keep syncing. Set seaweedfs.ingress.clientCerts.issue=true, or remove the entry." $want $edge.name) }}
+  {{- end }}
+{{- end }}
+{{- end }}
+
 {{- /* Which source Secrets live in which namespace, across the whole fleet,
        so each source namespace gets ONE Role naming exactly the Secrets that
        are actually copied out of it. */ -}}

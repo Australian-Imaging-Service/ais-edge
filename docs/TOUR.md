@@ -186,7 +186,6 @@ orthanc:
   aet: AISEDGE
   deid:
     enabled: true
-    policyReviewed: false        # ← NO DEFAULT. You must set this to true.
     aetMap:
       AISEDGE: {project: my_project}
     profile:
@@ -198,9 +197,20 @@ orthanc:
 
 **File:** `sites/<edge>/values.yaml`
 
-`policyReviewed` has **no default and the chart refuses to render without it.**
-It is not a feature flag — it is an assertion that a human has read this profile
-and this AE-title map and accepts what they do and do not remove.
+`deid.policyReviewed` has **no default and the chart refuses to render without
+it.** It sits at the top level beside `deid.engine`, not under `orthanc:`,
+because it gates every engine rather than only the Lua hook:
+
+```yaml
+deid:
+  engine: orthanc              # ingest | orthanc | none
+  policyReviewed: false        # NO DEFAULT. You must set this to true.
+```
+
+It is not a feature flag. It is an assertion that a human has read the recipe the
+selected engine applies, `orthanc.deid.profile` here and
+`ingest.deidentify.specs` under the `ingest` engine, plus this AE-title map, and
+accepts what they do and do not remove.
 
 Three things worth understanding:
 
@@ -209,7 +219,7 @@ Three things worth understanding:
   dropped** — it goes to `__unmapped_aet__` and raises an alert after 24h.
 * **UIDs are retained** so a study stays internally consistent across series.
   That is a deliberate research-data choice, not an oversight.
-* **The HMAC salt must survive reinstalls.** The same patient hashed with a
+* **The pseudonym salt must survive reinstalls.** The same patient hashed with a
   different salt becomes a different pseudonym, so rotating it splits one person
   into two subjects in XNAT. It lives in `secrets.enc.yaml` and
   `uninstall.sh` deliberately never deletes it.
@@ -336,7 +346,7 @@ must NOT create by hand" below).
 
 | Secret                | Keys                                  | What it is                                                                                                                              |
 | --------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the HMAC salt that turns a patient identifier into`${SubjectHash}`. **Effectively permanent** — see the rotation warning below |
+| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the salt that turns a patient identifier into `${SubjectHash}`. Despite the variable's name this is a salted djb2, NOT an HMAC — see components/deidentification.md, *Pseudonym strength*. **Effectively permanent** — see the rotation warning below |
 
 Everything else in the edge template is commented out and optional (Orthanc
 auth, Samba). `s3-edge-credentials` is deliberately absent — see "Three secrets
@@ -506,7 +516,7 @@ Secret changes no pod spec, so Helm does not roll the pod and the old key keeps
 working until something restarts it — see the note in
 `charts/mgmt/templates/seaweedfs.yaml`.
 
-> **`orthanc-deid-salt` is not rotatable in practice.** It is the HMAC salt
+> **`orthanc-deid-salt` is not rotatable in practice.** It is the pseudonym salt
 > behind `${SubjectHash}` and `${SessionHash}`, so changing it gives every
 > future study a *different* pseudonymous PatientID for the same real patient.
 > Sessions already in XNAT keep the old hash, and the two can never be linked

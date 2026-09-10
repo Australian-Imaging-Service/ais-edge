@@ -103,8 +103,8 @@ There is no cloud-provider, credentials or LB key in the site file to set.
 OpenStack credentials reach OCCM the way OCCM is already configured on the
 cluster (its own Secret / `openrc` on the control plane), not through this
 repo, and the LB is expressed purely as the `Service` override above. Note also
-that the top-level `ingressNginx.loadBalancerIP` key at
-`charts/mgmt/values.yaml:555` is **dead** — no template reads it.
+that there is no top-level `ingressNginx.loadBalancerIP` key: it existed,
+was read by nothing, and has been removed. The address goes on the subchart.
 
 **DNS-01 on OpenStack.** cert-manager has no built-in solver for OpenStack
 Designate; the built-ins are the big public providers. Either run a

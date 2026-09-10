@@ -65,9 +65,26 @@ local function writeAtomic(path, bytes)
 end
 
 local function applyPlaceholders(profile, tags, project)
+  -- NOT an HMAC despite the name; see the comment on hmacShort above. Salted
+  -- djb2 truncated to 48 bits: collision-safe at any realistic cohort size, but
+  -- NOT one-way. Anyone holding the salt can enumerate a medical-record-number
+  -- space in minutes. The salt never leaves the edge, so this is not reversible
+  -- from XNAT, which is the property the pipeline actually relies on.
   local subjectHash = hmacShort(tags.PatientID or "")
   local sessionHash = hmacShort((tags.PatientID or "") .. "|" .. (tags.StudyInstanceUID or ""))
-  local birthYear   = string.sub(tags.PatientBirthDate or "19000101", 1, 4)
+  -- ZERO-LENGTH IS NOT ABSENT. Lua treats only nil and false as falsy, so a
+  -- present-but-empty PatientBirthDate -- a legal and common DA value -- passes
+  -- straight through `or`, string.sub("" ,1,4) returns "", and the profile
+  -- resolves "${BirthYearOnly}0101" to the 4-character string "0101". That is
+  -- not a valid DICOM date, and it is written into every instance of the study.
+  -- Length is checked instead of truthiness.
+  --
+  -- MEASURED with lua5.3:
+  --   "19551103" -> 19550101      ""  -> 0101          nil -> 19000101
+  local rawBirth    = tags.PatientBirthDate
+  local birthYear   = (rawBirth and #rawBirth >= 4)
+                        and string.sub(rawBirth, 1, 4)
+                        or "1900"
 
   local subs = {
     ["${ProjectCode}"]   = project,
@@ -95,6 +112,51 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
 
   local routing  = loadJsonFile(ROUTING_FILE)
   local calledAet = origin.CalledAet or "UNKNOWN"
+  local backupDir = routing.Defaults.FacilityBackupDir
+
+  -- Facility backup with original identifiers.
+  local origBytes  = RestApiGet("/instances/" .. instanceId .. "/file")
+  local backupPath = backupDir .. "/" ..
+                     (tags.PatientID or "UNKNOWN") .. "/" ..
+                     (tags.StudyInstanceUID or "UNKNOWN") .. "/" ..
+                     (tags.SeriesInstanceUID or "UNKNOWN") .. "/" ..
+                     (tags.SOPInstanceUID or instanceId) .. ".dcm"
+  if not writeAtomic(backupPath, origBytes) then
+    print("ABORT: facility backup write failed for " .. instanceId)
+    return
+  end
+
+  -- THE ARCHIVE IS WRITTEN. Everything above is this script's job under EVERY
+  -- engine, and it needs no AE map: the backup path is built from the DICOM
+  -- tags alone. Everything BELOW is de-identification, including the AE-title
+  -- lookup, which exists only to choose a project to de-identify into.
+  --
+  -- THAT ORDER IS LOAD-BEARING. Under another engine aetMap is legitimately
+  -- empty, because the routing identifiers come from the data rather than from
+  -- the AE title. With the lookup first, every study would miss it, be
+  -- quarantined as unmapped AND DELETED FROM ORTHANC, and group would find
+  -- nothing: the archive would fill up and the pipeline would deliver nothing.
+  --
+  -- Returning here leaves the instance in Orthanc for group to collect, and
+  -- leaves it unmodified. De-identifying it here as well would make the
+  -- re-identification map the other stage writes record pseudonyms rather than
+  -- originals, so it would reverse to nothing while appearing to work.
+  --
+  -- The profile is loaded BELOW this point on purpose: under another engine
+  -- there may be no profile file configured at all, and loading it here would
+  -- fail the hook on every instance.
+  if routing.Defaults.DeidEnabled == false then
+    print(DumpJson({
+      ts         = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      component  = "orthanc-deid",
+      event      = "instance_archived",
+      calledAet  = calledAet,
+      instanceId = instanceId,
+      backupPath = backupPath
+    }, false))
+    return
+  end
+
   local mapping   = routing.AETMap[calledAet]
   if mapping == nil then
     -- QUARANTINE, don't destroy. The sending modality has already been given
@@ -137,20 +199,7 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
   end
 
   local profile   = loadJsonFile(routing.Defaults.DeidentificationProfileFile)
-  local backupDir = routing.Defaults.FacilityBackupDir
   local mode      = profile.DeidMode or "modify"
-
-  -- Facility backup with original identifiers.
-  local origBytes  = RestApiGet("/instances/" .. instanceId .. "/file")
-  local backupPath = backupDir .. "/" ..
-                     (tags.PatientID or "UNKNOWN") .. "/" ..
-                     (tags.StudyInstanceUID or "UNKNOWN") .. "/" ..
-                     (tags.SeriesInstanceUID or "UNKNOWN") .. "/" ..
-                     (tags.SOPInstanceUID or instanceId) .. ".dcm"
-  if not writeAtomic(backupPath, origBytes) then
-    print("ABORT: facility backup write failed for " .. instanceId)
-    return
-  end
 
   local subjectHash, sessionHash
   profile, subjectHash, sessionHash = applyPlaceholders(profile, tags, mapping.project)

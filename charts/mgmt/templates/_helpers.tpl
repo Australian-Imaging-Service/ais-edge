@@ -106,11 +106,72 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
 {{- printf "%s-loki-client" . -}}
 {{- end }}
 
+{{/* The management-side Secret holding ONE edge's S3 push client certificate.
+
+     Argument is the edge NAME, not the context. Same not-release-prefixed
+     reasoning as mgmt.lokiClientCertSecret above: the site file writes this
+     name a second time, by hand, as the literal "<edge>-s3-client".
+
+     A SEPARATE IDENTITY FROM THE LOKI ONE, and separate from `<edge>-s3`:
+
+       <edge>-loki-client  authenticates the site to the LOKI push endpoint
+       <edge>-s3-client    authenticates the site to the SEAWEEDFS endpoint
+       <edge>-s3           the SigV4 access/secret key pair (not a certificate)
+
+     Two client certificates rather than one shared identity, because the two
+     endpoints are revoked for different reasons: a site whose S3 access is
+     withdrawn must keep shipping logs, or the fleet loses the telemetry that
+     would explain why. One certificate would make "stop this site uploading"
+     and "stop this site reporting" the same action. */}}
+{{- define "mgmt.s3ClientCertSecret" -}}
+{{- printf "%s-s3-client" . -}}
+{{- end }}
+
 
 {{/* ===================================================================== */}}
 {{/* Validation — all of these fail silently at runtime if wrong           */}}
 {{/* ===================================================================== */}}
 {{- define "mgmt.validate" -}}
+
+  {{- /* =====================================================================
+         CLOUD TOPOLOGY: THE INGRESS MUST ASK FOR A LOAD BALANCER
+         =====================================================================
+         The shipped defaults are the ON-PREM shape: hostNetwork binds the
+         management host's own :443 and the Service stays ClusterIP, because
+         there is no cloud controller to satisfy a LoadBalancer and the host's
+         port IS the entry point.
+
+         On cloud that shape produces a deployment that looks entirely healthy
+         and answers nothing: the controller pod reports 1/1 Running, no
+         LoadBalancer is ever requested, no external address exists, and every
+         fleet hostname — each edge's k0s API and konnectivity, SeaweedFS, the
+         Loki push endpoint — is simply unreachable. The first symptom is an
+         edge that will not join, at the far end of the link.
+
+         Helm cannot template a subchart's values from this chart, so these
+         cannot be set for the operator: they have to be written in the site
+         file, under the `ingress-nginx:` key. Failing here is how the operator
+         finds that out at install time rather than after the first join
+         attempt. */ -}}
+  {{- if and (eq .Values.topology "cloud") .Values.ingressNginx.enabled }}
+    {{- $c := (index .Values "ingress-nginx").controller | default dict }}
+    {{- if $c.hostNetwork }}
+      {{- fail "topology=cloud with ingress-nginx.controller.hostNetwork=true. That is the on-prem shape: it binds the management host's own :443 and never asks the cloud for a load balancer, so the controller reports 1/1 Running while no external address exists and every fleet hostname is unreachable. Set the following in your SITE file (a parent chart cannot push values into a subchart, so it has to be written there):\n\ningress-nginx:\n  controller:\n    hostNetwork: false\n    dnsPolicy: ClusterFirst\n    service:\n      type: NodePort" }}
+    {{- end }}
+    {{- $svcType := (($c.service) | default dict).type | default "" }}
+    {{- if eq $svcType "ClusterIP" }}
+      {{- fail "topology=cloud with ingress-nginx.controller.service.type=ClusterIP. Nothing outside the cluster can reach a ClusterIP, so no edge can join and no site can stage imaging. Set service.type: NodePort in your SITE file under the `ingress-nginx:` key, and point your load balancer at that node port -- provisioning the load balancer is the operator's job, and this deployment does not run a cloud controller. service.type: LoadBalancer is also accepted, but ONLY if you have installed a cloud controller manager out of band; without one the Service sits at <pending> for ever." }}
+    {{- end }}
+    {{- /* dnsPolicy is not independently fatal, but ClusterFirstWithHostNet
+           without hostNetwork gives the pod the HOST's resolv.conf and loses
+           every in-cluster upstream name — which surfaces as SeaweedFS and
+           Loki being unresolvable from inside the controller. */ -}}
+    {{- if eq ($c.dnsPolicy | default "") "ClusterFirstWithHostNet" }}
+      {{- if not $c.hostNetwork }}
+        {{- fail "ingress-nginx.controller.dnsPolicy=ClusterFirstWithHostNet without hostNetwork. That pairing hands the controller the HOST's resolv.conf and loses its in-cluster upstream names, so SeaweedFS and Loki stop resolving from inside it. On cloud use dnsPolicy: ClusterFirst." }}
+      {{- end }}
+    {{- end }}
+  {{- end }}
   {{- /* Removed keys must FAIL, not be ignored. These two read exactly like
          policy and did nothing: Helm cannot template a subchart's values from
          here, so retention only ever came from the subchart blocks. Someone
@@ -207,6 +268,29 @@ http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cl
   {{- end }}
 
   {{- if .Values.xnatUpload.enabled }}
+    {{- /* THE SETTLE PERIOD, and it must be non-zero. The upstream CLI default
+           is 0, which makes the check `(now - last_modified) >= 0` -- always
+           true -- so this uploader reads a session while the edge's s3-uploader
+           is still writing it into the bucket. It then uploads the fraction
+           that has landed, XNAT records the resource as present, and every
+           later pass skips it as "already uploaded" because get_xnat_resource
+           returns None whenever the resource exists. The short scan is never
+           repaired.
+
+           The value tracks the edge's RETRY interval, not the push duration:
+           the check uses the newest object, so the clock resets on every write
+           and never expires mid-push. A push interrupted partway does not
+           resume for one edge cycle, and that is the gap to cover.
+
+           MEASURED 2026-09-09: a 383-instance study was picked up at 19 of 399
+           objects; 170 of 383 reached XNAT and the uploader logged success.
+           Nothing downstream notices, and the s3Staged reclaim condition is
+           `onXnatConfirmed`, so with dryRun off this would delete the staged
+           copy of a session that never fully arrived. */ -}}
+    {{- $wp := .Values.xnatUpload.waitPeriod }}
+    {{- if or (not $wp) (le (int $wp) 0) }}
+      {{- fail (printf "xnatUpload.waitPeriod is %v. It must be a positive number of seconds. With 0 the settle check is `(now - last_modified) >= 0`, always true, so this uploader reads a session while the edge is still writing it into the bucket, uploads the fraction that has landed, and then skips the incomplete resource for ever as 'already uploaded'. The value has to exceed the largest GAP between object writes, which is set by the edge s3-uploader's retry interval (upload.s3.interval, default 60), not by how long the push takes. 180 is the shipped default." $wp) }}
+    {{- end }}
     {{- if not .Values.xnatUpload.xnatSecretRef }}
       {{- fail "xnatUpload.xnatSecretRef must name a Secret with server/username/password." }}
     {{- end }}

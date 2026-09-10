@@ -60,7 +60,7 @@ bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=$((FAIL+1)); }
 #   this stage went green while a real `helm install` against the example values
 #   failed outright. A check that turns off part of the chart is not checking
 #   the chart.
-#   orthanc.deid.policyReviewed    the example deliberately ships false — it
+#   deid.policyReviewed            the example deliberately ships false — it
 #                                  must not assert that a human reviewed a
 #                                  de-identification profile they have never
 #                                  seen. That gate is covered by ci-negative;
@@ -88,7 +88,7 @@ fi
 # hostAliases are all DERIVED from the management file's domain and hostnames,
 # so on its own the edge chart has nothing to derive them from.
 render edge charts/edge xnat-ingest "$VALUES_MGMT" "$VALUES_EDGE" \
-    --set orthanc.deid.policyReviewed=true > "$WORK/edge.yaml"
+    --set deid.policyReviewed=true > "$WORK/edge.yaml"
 if [ ! -s "$WORK/edge.yaml" ]; then
     bad "edge chart failed to render with sites/example-mgmt + sites/example-edge"
     sed 's/^/        /' "$WORK/edge.err" | head -20

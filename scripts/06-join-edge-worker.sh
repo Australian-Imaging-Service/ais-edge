@@ -39,6 +39,29 @@ SSH_KEY_OPT=""
 [ -n "${SSH_KEY:-}" ] && SSH_KEY_OPT="-i ${SSH_KEY}"
 EDGE_KC="${REPO_DIR}/kubeconfig-${CLUSTER_NAME}"
 
+# THE WORKER MUST RUN THE SAME k0s AS ITS CONTROL PLANE — on THIS path too.
+#
+# The bundle path (06b) reads this from the Cluster CR and exports it. This
+# path did not, so edge-join.sh fell through to its unpinned branch and the
+# DEFAULT join mode kept the bug the bundle path had just been fixed for: a
+# worker one minor ahead of its control plane bootstraps, gets its CSR
+# approved, then asks for a `worker-config-default-<its minor>` ConfigMap the
+# control plane never created. The Node authorizer denies it, k0s exits 1, and
+# systemd restarts it forever while the node never appears.
+#
+# Same source as 06b: the Cluster CR is what k0smotron actually built the
+# control plane from, so it cannot drift from what is running.
+K0S_VERSION="$(kubectl get cluster.k0smotron.io -n "$CLUSTER_NAME" "$CLUSTER_NAME" \
+    -o jsonpath='{.spec.version}' 2>/dev/null || true)"
+if [ -z "$K0S_VERSION" ]; then
+    echo "ERROR: cannot read .spec.version from cluster.k0smotron.io/${CLUSTER_NAME}" >&2
+    echo "       Refusing to join a worker without pinning it to the control" >&2
+    echo "       plane's version — an unpinned worker crash-loops on a missing" >&2
+    echo "       worker-config ConfigMap when upstream has moved on." >&2
+    exit 1
+fi
+echo "  k0s version (from the Cluster CR): ${K0S_VERSION}"
+
 echo "=== 06: Installing k0s worker on ${NODE_IP} for ${CLUSTER_NAME} ==="
 
 ssh ${SSH_KEY_OPT} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "${EDGE_SSH}" "hostname" || {
@@ -92,6 +115,7 @@ ssh ${SSH_KEY_OPT} "${EDGE_SSH}" \
      INSTALL_TOPOLOGY=$(printf '%q' "${INSTALL_TOPOLOGY:-onprem}") \
      NODE_JOINED=$(printf '%q' "$NODE_JOINED") \
      AIS_STAGE_DIR=$(printf '%q' "$REMOTE_DIR") \
+     K0S_VERSION=$(printf '%q' "$K0S_VERSION") \
      bash ${REMOTE_DIR}/edge-join.sh"
 
 # The token is shredded by edge-join.sh; remove what is left of the directory.
