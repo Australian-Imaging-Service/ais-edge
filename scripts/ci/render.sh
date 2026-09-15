@@ -249,4 +249,62 @@ else
   fi
 fi
 
+# XNATResourceIncompleteAndStuck counts one error per stuck resource per upload
+# poll, so its threshold is only meaningful against the poll interval. The two
+# live in different files (the rule in charts/*/files/loki-ruler-rules.yaml, the
+# interval in values), and nothing connected them: a latency change to the loop
+# silently halved the sample rate feeding the threshold and the alert stopped
+# being able to fire. Checked on the RENDERED output so the derivation in
+# observability.yaml is exercised, not re-implemented here.
+ci_heading "alert thresholds vs poll interval"
+verdict="$(python3 - "$REPO_ROOT" <<'PY'
+import sys, yaml, pathlib
+
+# Checked against VALUES, not a rendered workload. The alert and the uploader do
+# not have to appear in the same render case (the observability case deploys no
+# uploader), so comparing them per rendered file silently checks nothing.
+root = pathlib.Path(sys.argv[1])
+
+def loop_of(values):
+    try:
+        return int(values["upload"]["direct"]["loop"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+defaults = yaml.safe_load((root / "charts/edge/values.yaml").read_text()) or {}
+cases = [("charts/edge/values.yaml (chart default)", loop_of(defaults))]
+for site in sorted((root / "sites").glob("*/values.yaml")):
+    site_vals = yaml.safe_load(site.read_text()) or {}
+    cases.append((str(site.relative_to(root)), loop_of(site_vals) or loop_of(defaults)))
+
+# A pass costs loop PLUS the work: the uploader sleeps the whole interval rather
+# than the remainder, so the cycle is loop+elapsed and the error rate is
+# 3600/(loop+elapsed). Modelling it as 3600/loop is optimistic, and optimism here
+# is not a rounding error: it moves the bound this check enforces from loop=145
+# to loop=172, so every loop in between would pass CI while the alert could never
+# fire. ELAPSED is the measured median gap of 95s at loop=60, recorded at the
+# rule in charts/edge/files/loki-ruler-rules.yaml, minus that loop.
+ELAPSED = 35
+
+for name, loop in cases:
+    if not loop or loop < 1:
+        continue
+    threshold = max(20, 1800 // loop)          # must match observability.yaml
+    hourly = 3600 // (loop + ELAPSED)          # errors/hour from ONE stuck resource
+    if hourly > threshold:
+        print("OK\t%s: loop=%ds gives %d errors/hr vs threshold %d" % (name, loop, hourly, threshold))
+    else:
+        print("FAIL\t%s: loop=%ds gives only %d errors/hr (cycle is loop+%ds) but "
+              "XNATResourceIncompleteAndStuck needs more than %d, so one stuck resource "
+              "can never reach it" % (name, loop, hourly, ELAPSED, threshold))
+PY
+)"
+while IFS=$'\t' read -r status detail; do
+  [ -n "$status" ] || continue
+  case "$status" in
+    OK)   ci_pass "$detail" ;;
+    FAIL) ci_fail "$detail" ;;
+  esac
+done <<<"$verdict"
+
 ci_summary "render"

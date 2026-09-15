@@ -677,6 +677,10 @@ printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-en
 # one bucket can read and delete every other site's staged imaging.
 printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
 printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
+# XNATResourceIncompleteAndStuck's threshold is derived from this value, so a
+# non-positive loop is a division by zero at render time rather than a slow
+# poll. Needs the observability stack on, since the guard lives beside the rules.
+printf 'upload:\n  direct:\n    loop: 0\n'                 >"$V/neg-edge-upload-loop-zero.yaml"
 printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-not-reviewed.yaml"
 # The pre-0.6.0 path. Accepting it as an alias would leave the very confusion
 # the move exists to end, so it must fail and name the new key.
@@ -1078,6 +1082,7 @@ neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode 
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
+neg-edge-upload-loop-zero	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-upload-loop-zero.yaml	upload.direct.loop must be a positive number of seconds
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
 neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
