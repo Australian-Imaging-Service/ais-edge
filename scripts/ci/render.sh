@@ -254,8 +254,7 @@ fi
 # live in different files (the rule in charts/*/files/loki-ruler-rules.yaml, the
 # interval in values), and nothing connected them: a latency change to the loop
 # silently halved the sample rate feeding the threshold and the alert stopped
-# being able to fire. Checked on the RENDERED output so the derivation in
-# observability.yaml is exercised, not re-implemented here.
+# being able to fire.
 ci_heading "alert thresholds vs poll interval"
 verdict="$(python3 - "$REPO_ROOT" <<'PY'
 import sys, yaml, pathlib
@@ -289,8 +288,9 @@ ELAPSED = 35
 for name, loop in cases:
     if not loop or loop < 1:
         continue
-    threshold = max(20, 1800 // loop)          # must match observability.yaml
-    hourly = 3600 // (loop + ELAPSED)          # errors/hour from ONE stuck resource
+    cycle = loop + ELAPSED
+    threshold = max(20, 1800 // cycle)         # same expression as observability.yaml
+    hourly = 3600 // cycle                     # errors/hour from ONE stuck resource
     if hourly > threshold:
         print("OK\t%s: loop=%ds gives %d errors/hr vs threshold %d" % (name, loop, hourly, threshold))
     else:
