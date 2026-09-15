@@ -192,6 +192,31 @@ groups:
     # caller logs "already uploaded" and skips it, and the session still reports
     # success. Only an operator deleting the resource on XNAT unblocks it.
     #
+    # THERE IS A KNOWN COVERAGE HOLE HERE AND IT IS DELIBERATELY STILL OPEN.
+    # Requiring "Missing paths" as well as the phrase means only the
+    # missing-or-extra branch matches. The differing-only branch carries the
+    # phrase without it, XNATUploadRetryStorm EXCLUDES the phrase on the
+    # assumption that this rule covers it, and XNATUploadFailingForAllSessions
+    # is suppressed whenever uploads are otherwise succeeding. So a
+    # checksum-mismatch ERROR reaches NO rule at all on a site that is otherwise
+    # uploading fine. Measured on the test cluster: 1214 occurrences of the
+    # phrase in 7 days, 0 of "Missing paths", so this alert has never fired.
+    #
+    # THE FIX IS TO DROP THE "Missing paths" MATCHER, AND IT MUST NOT LAND
+    # BEFORE THE IMAGE BUMP. Against the pinned 0.15.0 the phrase is emitted
+    # continuously for a HEALTHY resource: XNAT reports an empty digest until a
+    # catalog refresh populates it, and 0.15.0 compares the two checksum dicts
+    # whole, so it calls a complete resource mismatched. That is what the 1214
+    # were. Matching the phrase alone would fire this alert on them, and its
+    # annotation tells the operator to delete the resource on XNAT, which on
+    # those is an instruction to delete good data.
+    #
+    # xnat-ingest PR #170 stops the spurious error at source by comparing per
+    # file and trusting names when no digest is available. Drop the matcher in
+    # the same commit that moves ingest.image.tag to a release carrying it, and
+    # rewrite the "will never repair it" note above at the same time, since that
+    # also stops being true then.
+    #
     # TIER-1 APPLIES TOO, and this is not a copy of the tier-2 rule. The upload
     # code path is SHARED: `xnat-ingest upload` resolves resources identically
     # whether the input is a local tree or s3://. What differs is only the
@@ -204,11 +229,49 @@ groups:
     # to read mid-write) but ANY interrupted upload reaches the same state: a
     # pod evicted mid-transfer, a dropped connection, an XNAT restart.
     #
-    # WHY NOT FIRST-OBSERVATION. The same message appears transiently while XNAT
-    # is still cataloguing an accepted upload: the checksum comparison runs
-    # BEFORE the catalog refresh, and that refresh only fires when the count is
-    # exactly zero. MEASURED: a genuinely stuck resource emits ~4.8/min;
-    # catalogue lag emits ~10-15 once. 30 sits between them.
+    # WHY NOT FIRST-OBSERVATION. The same message appears while XNAT is still
+    # cataloguing an accepted upload: the checksum comparison runs BEFORE the
+    # catalog refresh, and that refresh only fires when the file count is
+    # exactly zero.
+    #
+    # TWO DIFFERENT LAG BEHAVIOURS HAVE BEEN MEASURED AND BOTH ARE REAL.
+    # Where the refresh does fire, the window is bounded and lag emits ~10-15
+    # occurrences once. Where it does not, because the count was never zero, the
+    # digests stay empty and the SAME message repeats every pass indefinitely:
+    # 1214 occurrences in 22 hours on the test cluster, for a resource that was
+    # completely healthy. No threshold separates the second case from a genuinely
+    # stuck resource, because they are the same rate.
+    #
+    # THE MATCHER IS WHAT SEPARATES THEM, NOT THE THRESHOLD. Neither lag case
+    # carries "Missing paths", so neither reaches this rule while both matchers
+    # are required. The floor below is sized against the bounded burst, which is
+    # all it can be sized against, and the second case is handled at source by
+    # xnat-ingest PR #170. That is the other reason dropping the matcher has to
+    # wait for the image bump.
+    #
+    # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because one
+    # error is emitted per stuck resource per upload poll. A hardcoded 30
+    # silently assumed a 60s poll: at the 120s chart default a session with ONE
+    # stuck resource produces about 23 errors an hour and could never reach it.
+    #
+    # A CYCLE IS loop PLUS THE WORK, not loop, because the uploader sleeps the
+    # whole interval rather than the remainder. At the measured elapsed of ~35s
+    # the substituted threshold is
+    #     max(20, 1800 / (loop + 35))
+    # the count expected over HALF the 60m window, which makes the real rate
+    # exactly twice the threshold by construction. It is 20 at both shipped
+    # configurations, crossing in about 32 minutes at loop=60 and 52 at
+    # loop=120, plus the 15m `for:`.
+    #
+    # DERIVING FROM loop ALONE WOULD BREAK THE FAST END. The threshold would
+    # grow as 1/loop while the real rate grows as 1/(loop+35), so any loop below
+    # 37 would put the threshold above the achievable rate and the alert could
+    # never fire. scripts/ci/render.sh uses this same model, so the two files
+    # measure the same quantity.
+    #
+    # THE FLOOR SETS AN UPPER LIMIT ON loop. Below the floor of 20 a single
+    # stuck resource cannot reach the threshold, which happens at loop=145.
+    # Integer division makes the enforced bound 137, erring on the safe side.
     #
     # WHY [60m]. Measured gaps between occurrences: median 95s, but one of 39
     # MINUTES while the uploader was busy with a large session. A short window
@@ -231,7 +294,12 @@ groups:
            listings, so the deletion stays invisible to it.
              kubectl -n xnat-ingest rollout restart deploy/edge-upload
       summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
-    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \".*already exists on XNAT with different checksums.*\"\n  | message =~ \".*Missing paths.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\"\n  [60m])) > 30\n"
+    # Line breaks match the tier-2 rule character for character. The cross-tier
+    # check in scripts/ci/promtool.sh compares the rendered rule as a string, so
+    # a purely cosmetic difference in where `| json` sits reads as drift and
+    # would have to be exempted, which would blunt the check for the one field
+    # that genuinely does differ.
+    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  | json | message =~ \".*already exists on XNAT with different checksums.*\"\n  | message =~ \".*Missing paths.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\" [60m])) > __UPLOAD_STUCK_ERRORS__\n"
     for: 15m
     labels:
       category: xnat-delivery
