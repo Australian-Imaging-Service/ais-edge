@@ -278,13 +278,44 @@ groups:
         # one per cluster. alertmanager-config.yaml groups on
         # ["alertname", "cluster", "session"], so two stuck sessions notify
         # separately and a third does not re-notify for the first two.
+        # THERE IS A KNOWN COVERAGE HOLE HERE AND IT IS DELIBERATELY STILL OPEN.
+        # Requiring "Missing paths" as well as the phrase means only the
+        # missing-or-extra branch matches. The differing-only branch carries the
+        # phrase without it, XNATUploadRetryStorm EXCLUDES the phrase on the
+        # assumption that this rule covers it, and XNATUploadFailingForAllSessions
+        # is suppressed whenever uploads are otherwise succeeding. So a
+        # checksum-mismatch ERROR reaches NO rule at all on a site that is
+        # otherwise uploading fine. Measured on the test cluster: 1214
+        # occurrences of the phrase in 7 days, 0 of "Missing paths".
+        #
+        # THE FIX IS TO DROP THE "Missing paths" MATCHER, AND IT MUST NOT LAND
+        # BEFORE THE IMAGE BUMP. Against the pinned 0.15.0 the phrase is emitted
+        # continuously for a HEALTHY resource: XNAT reports an empty digest
+        # until a catalog refresh populates it, and 0.15.0 compares the two
+        # checksum dicts whole, so it calls a complete resource mismatched.
+        # That is what the 1214 were. Matching the phrase alone would fire this
+        # alert on them, and the annotation tells the operator to delete the
+        # resource on XNAT, which on those is an instruction to delete good data.
+        #
+        # xnat-ingest PR #170 stops the spurious error at source. Drop the
+        # matcher in the same commit that moves the image tag to a release
+        # carrying it, and rewrite the "will never repair it" note at the same
+        # time, since that also stops being true then.
+        #
+        # THE THRESHOLD IS DERIVED FROM xnatUpload.loop, NOT FIXED, because one
+        # error is emitted per stuck resource per poll, so the rate is set by an
+        # interval configured in values.yaml. __UPLOAD_STUCK_ERRORS__ is
+        # substituted in templates/observability.yaml as max(20, 1800/loop): the
+        # count expected over half the window, floored above the catalogue-lag
+        # burst so the two stay distinguishable. It is 30 at the shipped loop of
+        # 60, unchanged from what this rule has always used.
         expr: |
           sum by (cluster, session) (count_over_time(
             {namespace="xnat-upload", component="upload"}
             | json | message =~ ".*already exists on XNAT with different checksums.*"
             | message =~ ".*Missing paths.*"
             | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`
-            | label_format session="{{.resource}}" [60m])) > 30
+            | label_format session="{{.resource}}" [60m])) > __UPLOAD_STUCK_ERRORS__
         for: 15m
         labels:
           severity: warning

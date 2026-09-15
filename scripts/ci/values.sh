@@ -479,6 +479,9 @@ observability:
     storage: s3
 EOF
 
+# XNATResourceIncompleteAndStuck's threshold is derived from this value, so a
+# non-positive loop is a division by zero at render time, not just a slow poll.
+printf 'xnatUpload:\n  loop: 0\n'                          >"$V/neg-mgmt-upload-loop-zero.yaml"
 printf 'observability:\n  alerting:\n    emailTo: ""\n'   >"$V/neg-mgmt-no-emailto.yaml"
 printf 'observability:\n  alerting:\n    smtpHost: ""\n'  >"$V/neg-mgmt-no-smtphost.yaml"
 printf 'xnatUpload:\n  xnatSecretRef: ""\n'               >"$V/neg-mgmt-no-xnatsecret.yaml"
@@ -1150,6 +1153,7 @@ neg-mgmt-fleetwide-hostnames	charts/mgmt	mgmt-base.yaml neg-mgmt-fleetwide-hostn
 neg-mgmt-vector-loki-wrong-ns	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wrong-ns.yaml	but this release installs Loki into
 neg-mgmt-vector-loki-wrong-svc	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wrong-svc.yaml	but this release's Loki Service is
 neg-mgmt-loki-s3-no-seaweedfs	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-s3-no-seaweedfs.yaml	requires seaweedfs.enabled=true
+neg-mgmt-upload-loop-zero	charts/mgmt	mgmt-base.yaml neg-mgmt-upload-loop-zero.yaml	xnatUpload.loop must be a positive number of seconds
 neg-mgmt-no-emailto	charts/mgmt	mgmt-base.yaml neg-mgmt-no-emailto.yaml	emailTo is empty
 neg-mgmt-no-smtphost	charts/mgmt	mgmt-base.yaml neg-mgmt-no-smtphost.yaml	smtpHost is empty
 neg-mgmt-no-xnatsecret	charts/mgmt	mgmt-base.yaml neg-mgmt-no-xnatsecret.yaml	xnatSecretRef must name a Secret

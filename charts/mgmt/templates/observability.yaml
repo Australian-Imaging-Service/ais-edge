@@ -666,12 +666,24 @@ data:
   {{- $lokiRules = $lokiRules | replace "__DP_MIN_FREE_DISK_PCT__" (printf "%v" $dpOrig.facilityBackup.minFreeDiskPercent) }}
   {{- $lokiRules = $lokiRules | replace "__DP_QUARANTINE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" $dpOrig.quarantine.alertAfter) }}
   {{- $lokiRules = $lokiRules | replace "__DP_STAGE_AGE_ALERT_AFTER_S__" (include "mgmt.durationSeconds" .Values.dataPolicy.stageAgeAlertAfter) }}
+  {{- /* XNATResourceIncompleteAndStuck counts one error per stuck resource per
+         upload poll, so its threshold is a function of xnatUpload.loop and
+         cannot be a literal: a latency change to the poll silently changes the
+         sample rate feeding the threshold, and the two live in different files.
+         max(20, 1800/loop) is the count expected over half the rule's window,
+         floored above the catalogue-lag burst so a lag burst and a genuinely
+         stuck resource stay distinguishable. 30 at the shipped loop of 60. */}}
+  {{- $uploadLoop := int .Values.xnatUpload.loop }}
+  {{- if lt $uploadLoop 1 }}
+    {{- fail (printf "xnatUpload.loop must be a positive number of seconds, got %v" .Values.xnatUpload.loop) }}
+  {{- end }}
+  {{- $lokiRules = $lokiRules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadLoop))) }}
   {{- /* A surviving sentinel is a silent break: the rule would ship with a
          literal __DP_..._ in place of a number, Loki would reject the group at
          load time, and every OTHER rule in the same file would stop evaluating
          with it. Fail the render instead. */}}
-  {{- if regexMatch "__DP_[A-Z_]+__" $lokiRules }}
-    {{- fail "a __DP_*__ sentinel survived substitution in files/loki-ruler-rules.yaml — Loki would reject the whole rule group and every alert in this file would stop evaluating. Add the matching replace above." }}
+  {{- if regexMatch "__(DP|UPLOAD)_[A-Z_]+__" $lokiRules }}
+    {{- fail "a __DP_*__ or __UPLOAD_*__ sentinel survived substitution in files/loki-ruler-rules.yaml — Loki would reject the whole rule group and every alert in this file would stop evaluating. Add the matching replace above." }}
   {{- end }}
   ais-edge-pipeline.yaml: |
     {{- $lokiRules | nindent 4 }}
