@@ -344,18 +344,49 @@ import sys, json, datetime, re
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
 now = datetime.datetime.now(datetime.timezone.utc)
+def _field(spec, lo, hi):
+    if spec == "*": return list(range(lo, hi + 1))
+    m = re.match(r"^\*/(\d+)$|^\d+/(\d+)$", spec)
+    if m:
+        n = int(m.group(1) or m.group(2))
+        return list(range(lo, hi + 1, n)) if n > 0 else None
+    if re.match(r"^\d+(,\d+)*$", spec):
+        vals = sorted({int(v) for v in spec.split(",")})
+        return vals if all(lo <= v <= hi for v in vals) else None
+    return None
 def period(s):
+    # Seconds between runs, or None when the schedule cannot be read. RETURNING
+    # None MATTERS: this used to read only the HOURS field and fall back to a
+    # bare 3600, which invents a verdict out of a schedule it did not
+    # understand. "*/15 * * * *" became 3600 and under-detected a stale CronJob
+    # by 4x, while "17 2,14 * * *" and any weekly schedule produced a threshold
+    # SHORTER than the real interval and reported a healthy CronJob as stale on
+    # every run. The chart defaults parse correctly, so none of that was visible
+    # until a site changed a schedule.
+    #
+    # Run times are enumerated and the smallest gap taken, rather than a field
+    # being interpreted in isolation, because the gap is what staleness needs.
     f = s.split()
-    if len(f) != 5: return 3600
-    h = f[1]
-    if h == "*": return 3600
-    m = re.match(r"^\*/(\d+)$|^\d+/(\d+)$", h)
-    if m: return int(m.group(1) or m.group(2)) * 3600
-    return 86400 if h.isdigit() else 3600
+    if len(f) != 5: return None
+    minute, hour, dom, mon, dow = f
+    # Restricted by day: the gap cannot be derived from minute and hour alone.
+    if dom != "*" or mon != "*" or dow != "*": return None
+    mins, hours = _field(minute, 0, 59), _field(hour, 0, 23)
+    if mins is None or hours is None: return None
+    times = sorted(h * 3600 + m * 60 for h in hours for m in mins)
+    if not times: return None
+    if len(times) == 1: return 86400
+    gaps = [times[i+1] - times[i] for i in range(len(times) - 1)]
+    gaps.append(86400 - times[-1] + times[0])
+    return min(gaps)
 for c in d.get("items", []):
     ns, n = c["metadata"]["namespace"], c["metadata"]["name"]
     if c.get("spec", {}).get("suspend"): print(f"SUSPEND\t{ns}/{n}\t0\t0"); continue
-    p = period(c.get("spec", {}).get("schedule", ""))
+    sched = c.get("spec", {}).get("schedule", "")
+    p = period(sched)
+    # A schedule we cannot read is reported as unknown, not judged. A wrong
+    # verdict here trains the operator to ignore the whole script.
+    if p is None: print(f"UNKNOWN\t{ns}/{n}\t0\t{sched}"); continue
     last = (c.get("status") or {}).get("lastSuccessfulTime")
     if not last:
         # NEVER RUN is not NEVER SUCCEEDED. A CronJob created five minutes ago
@@ -376,6 +407,7 @@ else
         [ -n "${kind:-}" ] || continue
         case "$kind" in
             SUSPEND) bad "CronJob ${name} is SUSPENDED" "it will never run again until resumed" ;;
+            UNKNOWN) skip "CronJob ${name}: cannot check freshness, unrecognised schedule '${period}'" ;;
             # Only a fault once it has had time to run. Before that it is simply
             # new, and a red line on a fresh install teaches operators to discount
             # the whole verification.
