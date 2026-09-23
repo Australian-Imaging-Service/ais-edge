@@ -999,6 +999,50 @@ orthanc:
     existingSecret: orthanc-credentials
 EOF
 
+# THE COMBINATION EVERY SHIPPED SITE ACTUALLY RUNS, which until now no fixture
+# did. edge-base's profile rewrites only PatientName and the three
+# ClinicalTrial* tags, so StudyID survives de-identification there and reading
+# it resolves what the modality wrote. Every sites/*/values.yaml under
+# deid.engine=orthanc ALSO rewrites StudyID, AccessionNumber and PatientID to
+# strip identity, and that is the shape that misroutes.
+#
+# MEASURED on a fresh tier-1 install of sites/stream-2-ab-dev before the guard
+# existed: 531 instances staged as
+#   assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
+# and the uploader then failed every pass with "Project 'A9BB5B6D36EE' does not
+# exist on XNAT". Nothing in the suite rendered that combination, so nothing
+# could report it.
+cat >"$V/edge-deid-site-profile.yaml" <<'EOF'
+orthanc:
+  deid:
+    profile:
+      Replace:
+        StudyID: "${SessionHash}"
+        AccessionNumber: "${SessionHash}"
+        PatientID: "${ProjectCode}-${SubjectHash}"
+EOF
+
+# The same profile with the mapping named EXPLICITLY the way every affected site
+# inherited it. It has to be explicit now: the derived default is correct under
+# this engine, so the mistake is no longer reachable by omission, which is the
+# point of deriving it. project resolves to the SessionHash rather than failing,
+# so only a render-time guard catches it.
+cat >"$V/neg-edge-assign-tag-crossed.yaml" <<'EOF'
+orthanc:
+  deid:
+    profile:
+      Replace:
+        StudyID: "${SessionHash}"
+        AccessionNumber: "${SessionHash}"
+        PatientID: "${ProjectCode}-${SubjectHash}"
+ingest:
+  assign:
+    tagMapping:
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1013,6 +1057,7 @@ mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
 mgmt-slack	charts/mgmt	mgmt-base.yaml mgmt-slack.yaml
 mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-datapolicy-on.yaml
 edge-defaults	charts/edge	edge-base.yaml
+edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
@@ -1030,6 +1075,7 @@ EOF
 
 ci_negative_cases() {
   cat <<'EOF'
+neg-edge-assign-tag-crossed	charts/edge	edge-base.yaml neg-edge-assign-tag-crossed.yaml	crosses the de-identification
 neg-mgmt-no-domain	charts/mgmt	mgmt-base.yaml neg-mgmt-no-domain.yaml	domain.internal must be set
 neg-mgmt-no-nodeip	charts/mgmt	mgmt-base.yaml neg-mgmt-no-nodeip.yaml	domain.mgmtNodeIP must be set
 neg-mgmt-duplicate-edges	charts/mgmt	mgmt-base.yaml neg-mgmt-duplicate-edges.yaml	duplicate edge name
