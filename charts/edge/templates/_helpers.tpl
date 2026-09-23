@@ -358,7 +358,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          project, subject and session is a site decision, and guessing one
          would route studies into the wrong XNAT project. */ -}}
   {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-    {{- $mapping := .Values.ingest.assign.tagMapping }}
+    {{- $mapping := include "edge.assignTagMapping" . | fromYaml }}
     {{- $luaOnly := list }}
     {{- range $key, $tag := $mapping }}
       {{- if hasPrefix "ClinicalTrial" $tag }}
@@ -404,7 +404,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          this reads the profile the site actually ships rather than assuming
          one. */ -}}
   {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
-    {{- $mapping := .Values.ingest.assign.tagMapping }}
+    {{- $mapping := include "edge.assignTagMapping" . | fromYaml }}
     {{- $replace := dig "deid" "profile" "Replace" dict .Values.orthanc }}
     {{- $roleOf := dict "project" "${ProjectCode}" "subject" "${SubjectHash}" "session" "${SessionHash}" }}
     {{- $wantTag := dict "project" "ClinicalTrialProtocolID" "subject" "ClinicalTrialSubjectID" "session" "ClinicalTrialTimePointID" }}
@@ -754,6 +754,30 @@ with a message rather than silently selecting neither engine.
 */}}
 {{- define "edge.deidEngine" -}}
 {{- .Values.deid.engine | default "orthanc" -}}
+{{- end }}
+
+{{- /* THE ASSIGN TAG TRIPLE, DERIVED FROM THE ENGINE RATHER THAN FIXED.
+
+       A fixed default is wrong for one engine whichever one it names, and both
+       mistakes have now been made. It was the ClinicalTrial* triple, which sent
+       every ingest-engine site's studies to __invalid__ still carrying PHI. It
+       was then changed to the modality tags, which sent every orthanc-engine
+       site's sessions into a project named after the session hash.
+
+       Under orthanc these are not a site decision at all: the Lua hook always
+       writes the triple from the AET map, and the chart already refuses to
+       render if the profile does not. Under ingest the hook is off, so nothing
+       writes them and assign has to read what the modality sent.
+
+       An explicit ingest.assign.tagMapping still wins, and is then checked
+       against the engine in both directions by the guards in edge.validate. */ -}}
+{{- define "edge.assignTagMapping" -}}
+{{- $derived := dict "project" "StudyID" "subject" "PatientID" "session" "AccessionNumber" -}}
+{{- if eq (include "edge.deidEngine" .) "orthanc" -}}
+{{- $derived = dict "project" "ClinicalTrialProtocolID" "subject" "ClinicalTrialSubjectID" "session" "ClinicalTrialTimePointID" -}}
+{{- end -}}
+{{- $explicit := default (dict) .Values.ingest.assign.tagMapping -}}
+{{- toYaml (merge (deepCopy $explicit) $derived) -}}
 {{- end }}
 
 {{- define "edge.uploadSourceDir" -}}
