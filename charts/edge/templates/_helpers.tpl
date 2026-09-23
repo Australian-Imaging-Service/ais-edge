@@ -266,7 +266,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
            reclaimed nothing. Everything below is a thing that has to be true for
            auth to work, checked here rather than discovered on a live box. */ -}}
       {{- /* group-orthanc IGNORES nothing and IMPLEMENTS nothing here: xnat-ingest
-         raises outright. api/group_api.py:252 refuses any copy_mode other than
+         raises outright. api/group_api.py:261 refuses any copy_mode other than
          hardlink_or_copy for the Orthanc path:
 
            NotImplementedError: 'unlink_source', copy_mode' and 'raise_errors'
@@ -274,8 +274,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
          It is a RUNTIME raise, so the pod renders, schedules, starts and then
          CrashLoops, and the message says nothing about which value caused it.
-         MEASURED against 0.15.0; the same raise is in 0.13.1, so this is not a
-         version regression, it is a long-standing footgun with no guard.
+         RE-VERIFIED against the pinned 0.15.6; the same raise is in 0.13.1,
+         so this is not a version regression, it is a long-standing footgun
+         with no guard.
          The other stages accept the full set, which is why this key looks safe
          to change and is not. */ -}}
   {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
