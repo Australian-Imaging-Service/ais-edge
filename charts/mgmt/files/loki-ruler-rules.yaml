@@ -278,13 +278,63 @@ groups:
         # one per cluster. alertmanager-config.yaml groups on
         # ["alertname", "cluster", "session"], so two stuck sessions notify
         # separately and a third does not re-notify for the first two.
+        # THERE IS A KNOWN COVERAGE HOLE HERE AND IT IS DELIBERATELY STILL OPEN.
+        # Requiring "Missing paths" as well as the phrase means only the
+        # missing-or-extra branch matches. The differing-only branch carries the
+        # phrase without it, XNATUploadRetryStorm EXCLUDES the phrase on the
+        # assumption that this rule covers it, and XNATUploadFailingForAllSessions
+        # is suppressed whenever uploads are otherwise succeeding. So a
+        # checksum-mismatch ERROR reaches NO rule at all on a site that is
+        # otherwise uploading fine. Measured on the test cluster: 1214
+        # occurrences of the phrase in 7 days, 0 of "Missing paths".
+        #
+        # THE FIX IS TO DROP THE "Missing paths" MATCHER, AND IT MUST NOT LAND
+        # BEFORE THE IMAGE BUMP. Against the pinned 0.15.0 the phrase is emitted
+        # continuously for a HEALTHY resource: XNAT reports an empty digest
+        # until a catalog refresh populates it, and 0.15.0 compares the two
+        # checksum dicts whole, so it calls a complete resource mismatched.
+        # That is what the 1214 were. Matching the phrase alone would fire this
+        # alert on them, and the annotation tells the operator to delete the
+        # resource on XNAT, which on those is an instruction to delete good data.
+        #
+        # Note that lag has TWO measured behaviours and both are real. Where the
+        # catalog refresh fires the window is bounded, ~10-15 occurrences once.
+        # Where it does not, because the file count was never zero, the digests
+        # stay empty and the message repeats every pass: 1214 in 22 hours. No
+        # threshold separates the second case from a genuinely stuck resource,
+        # since they are the same rate. The MATCHER separates them, which is why
+        # the floor below is sized only against the bounded burst.
+        #
+        # xnat-ingest PR #170 stops the spurious error at source. Drop the
+        # matcher in the same commit that moves the image tag to a release
+        # carrying it, and rewrite the "will never repair it" note at the same
+        # time, since that also stops being true then.
+        #
+        # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because
+        # one error is emitted per stuck resource per poll, so the rate is set
+        # by an interval configured in values.yaml.
+        #
+        # A CYCLE IS loop PLUS THE WORK, not loop, because the uploader sleeps
+        # the whole interval rather than the remainder. At the measured elapsed
+        # of ~35s the substituted threshold is
+        #     max(20, 1800 / (loop + 35))
+        # the count expected over HALF the 60m window, which makes the real rate
+        # exactly twice the threshold by construction. It is 20 at the shipped
+        # loop of 60, crossing in about 32 minutes plus the 15m `for:`.
+        #
+        # DERIVING FROM loop ALONE WOULD BREAK THE FAST END: the threshold would
+        # grow as 1/loop while the real rate grows as 1/(loop+35), so any loop
+        # below 37 would put the threshold above the achievable rate and the
+        # alert could never fire. scripts/ci/render.sh uses this same model, so
+        # the two files measure the same quantity, and it enforces the upper
+        # bound at loop=137 where a single stuck resource drops below the floor.
         expr: |
           sum by (cluster, session) (count_over_time(
             {namespace="xnat-upload", component="upload"}
             | json | message =~ ".*already exists on XNAT with different checksums.*"
             | message =~ ".*Missing paths.*"
             | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`
-            | label_format session="{{.resource}}" [60m])) > 30
+            | label_format session="{{.resource}}" [60m])) > __UPLOAD_STUCK_ERRORS__
         for: 15m
         labels:
           severity: warning
