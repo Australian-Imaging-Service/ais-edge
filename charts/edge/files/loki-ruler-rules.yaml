@@ -237,10 +237,18 @@ groups:
     # 0.15.3 fixes both ends at source. A file whose digest is empty is compared
     # by NAME only (compare_resource_with_xnat, and api/check_upload_api.py
     # guards the same way), so catalogue lag no longer reads as a mismatch; and
-    # the "please delete on XNAT" emitter is gone. Every surviving emitter puts
-    # "Missing paths:" in its format string UNCONDITIONALLY, so the matcher had
-    # stopped filtering anything while still reading like a filter. VERIFIED
-    # against the v0.15.6 source rather than assumed.
+    # CORRECTION: an earlier version of this note said the "please delete on
+    # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
+    # become a no-op. BOTH WERE WRONG. It is still at helpers/remotes.py:861-866
+    # and carries no "Missing paths" line; the grep that produced the claim
+    # missed it because the phrase is split across two adjacent string literals.
+    # Dropping the matcher is therefore NOT cosmetic -- it genuinely widens the
+    # rule, which is what closes the hole. It also DOUBLES the rate for a
+    # differing-only resource, because both emitters sit under the same
+    # `if not comparison.complete:` and only the second is guarded by
+    # `if comparison.differing`, so such a resource emits two matching lines per
+    # pass and crosses the threshold in about half the time. That errs toward
+    # alerting sooner on a real fault, so it is left as is.
     #
     # So dropping it changes no match on this pin, and it closes the hole
     # against the next image that reintroduces a phrase-only emitter. It lands
