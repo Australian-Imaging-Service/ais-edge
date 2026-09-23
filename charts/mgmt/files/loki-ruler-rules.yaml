@@ -225,18 +225,30 @@ groups:
               2. What does the uploader say?
                  kubectl -n xnat-upload logs deploy/mgmt-upload-{{ $labels.cluster }} | grep {{ $labels.session }}
                  "Skipping ... all the resources already exist on XNAT" against an
-                 empty XNAT means the upstream all_uploaded() bug.
+                 empty XNAT meant the upstream all_uploaded() bug, which compared
+                 resource LABELS and so called an empty resource uploaded. Fixed in
+                 0.15.3; on the pinned 0.15.6 that line means the file sets really
+                 did match, so check XNAT itself before believing it.
               3. Does XNAT actually hold it?
               4. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
                  means a partial upload. reclaim_unavailable means the reclaimer
                  could not decide at all — see ReclaimerRunUnavailable.
 
       - alert: XNATResourceIncompleteAndStuck
-        # A resource EXISTS on XNAT but is SHORT, and the uploader will never
-        # repair it. get_xnat_resource returns None whenever the resource
-        # exists, so the caller logs "already uploaded" and skips it, and the
-        # session still reports success. Only an operator deleting the resource
-        # on XNAT unblocks it.
+        # A resource EXISTS on XNAT and DISAGREES with staging in a way that
+        # uploading cannot fix: XNAT holds files the staged session does not,
+        # or holds a file whose content differs. An upload only ever adds, so
+        # neither is repairable. Only an operator deleting the resource on XNAT
+        # unblocks it.
+        #
+        # THIS IS NARROWER THAN IT WAS, AND THE PIN IS WHY. Up to xnat-ingest
+        # 0.15.0 the uploader also skipped a merely SHORT resource:
+        # get_xnat_resource returned None whenever the resource existed, so the
+        # caller logged "already uploaded" and the session reported success
+        # while incomplete. From 0.15.3 (PR #170) a short resource is repaired
+        # by uploading the shortfall and logs a warning, so it no longer
+        # reaches this rule. What is left is the genuinely unrepairable case,
+        # which is what the summary claims. KEEP THIS RULE AND THE PIN IN STEP.
         #
         # MEASURED 2026-09-09: a session read from the bucket mid-write landed
         # 16 of 95 files in one scan. Every later pass skipped it. 170 of 383
@@ -246,14 +258,22 @@ groups:
         # an interrupted pod, a dropped connection, an XNAT hiccup.
         #
         # WHY THIS IS NOT A FIRST-OBSERVATION ALERT, and the threshold is not
-        # arbitrary. The same message appears TRANSIENTLY when XNAT has accepted
-        # files but not finished cataloguing them: get_xnat_checksums runs
-        # BEFORE the catalog refresh, and that refresh only fires when the count
-        # is exactly zero, so a partially-catalogued resource reads as short.
-        # MEASURED on the real incident: a genuinely stuck resource emits this
-        # ~4.8 times a minute. Catalogue lag emits at most one line per resource
-        # per pass and stops within a pass or two, so ~10-15 lines. 30 sits above
-        # that ceiling and far below the stuck floor.
+        # arbitrary. The same message appeared TRANSIENTLY when XNAT had
+        # accepted files but not finished cataloguing them: get_xnat_checksums
+        # runs BEFORE the catalog refresh, and that refresh only fires when the
+        # count is exactly zero, so a partially-catalogued resource read as
+        # short. MEASURED on the real incident: a genuinely stuck resource
+        # emits this ~4.8 times a minute. Catalogue lag emits at most one line
+        # per resource per pass and stops within a pass or two, so ~10-15
+        # lines, which the floor of 20 still clears.
+        #
+        # From 0.15.3 a partially-catalogued resource presents as MISSING
+        # files, which is now repaired rather than reported here, so that
+        # transient should no longer reach this rule at all. The first-
+        # observation guard is kept regardless. It is sized against a burst
+        # whose cause we no longer believe is present, and that is the right
+        # way round: the cost is a later alert, the cost of removing it is
+        # paging on good data the next time an XNAT-side behaviour surprises us.
         #
         # THE WINDOW IS 60m BECAUSE OF THE GAPS, NOT THE RATE. Measured gaps
         # between occurrences: median 95s, 90th percentile 98s -- and one of
@@ -278,37 +298,42 @@ groups:
         # one per cluster. alertmanager-config.yaml groups on
         # ["alertname", "cluster", "session"], so two stuck sessions notify
         # separately and a third does not re-notify for the first two.
-        # THERE IS A KNOWN COVERAGE HOLE HERE AND IT IS DELIBERATELY STILL OPEN.
-        # Requiring "Missing paths" as well as the phrase means only the
-        # missing-or-extra branch matches. The differing-only branch carries the
-        # phrase without it, XNATUploadRetryStorm EXCLUDES the phrase on the
-        # assumption that this rule covers it, and XNATUploadFailingForAllSessions
-        # is suppressed whenever uploads are otherwise succeeding. So a
-        # checksum-mismatch ERROR reaches NO rule at all on a site that is
-        # otherwise uploading fine. Measured on the test cluster: 1214
-        # occurrences of the phrase in 7 days, 0 of "Missing paths".
+        # THE COVERAGE HOLE RECORDED HERE IS NOW CLOSED, and the matcher that
+        # caused it has been dropped. Kept as a note because the shape can come
+        # back the next time someone tightens this rule.
         #
-        # THE FIX IS TO DROP THE "Missing paths" MATCHER, AND IT MUST NOT LAND
-        # BEFORE THE IMAGE BUMP. Against the pinned 0.15.0 the phrase is emitted
-        # continuously for a HEALTHY resource: XNAT reports an empty digest
-        # until a catalog refresh populates it, and 0.15.0 compares the two
-        # checksum dicts whole, so it calls a complete resource mismatched.
-        # That is what the 1214 were. Matching the phrase alone would fire this
-        # alert on them, and the annotation tells the operator to delete the
+        # This rule used to require "Missing paths" as well as the phrase, so
+        # only the missing-or-extra branch matched. 0.15.0 had a SECOND emitter
+        # of the phrase -- "...different checksums. Please delete on XNAT to
+        # overwrite" -- carrying no such line, so a differing-only ERROR reached
+        # NO rule at all: XNATUploadRetryStorm EXCLUDES the phrase on the
+        # assumption that this rule covers it, and XNATUploadFailingForAllSessions
+        # is suppressed whenever uploads are otherwise succeeding.
+        #
+        # The matcher could not just be deleted, because on 0.15.0 the phrase
+        # was ALSO emitted continuously for a HEALTHY resource: XNAT reports an
+        # empty digest until a catalog refresh populates it, and 0.15.0 compared
+        # the two checksum dicts whole, so it called a complete resource
+        # mismatched. MEASURED on the test cluster: 1214 occurrences of the
+        # phrase in 7 days, 0 of "Missing paths" -- every one of them that false
+        # positive. Matching the phrase alone would have fired this alert on all
+        # 1214, and the description below tells the operator to delete the
         # resource on XNAT, which on those is an instruction to delete good data.
         #
-        # Note that lag has TWO measured behaviours and both are real. Where the
-        # catalog refresh fires the window is bounded, ~10-15 occurrences once.
-        # Where it does not, because the file count was never zero, the digests
-        # stay empty and the message repeats every pass: 1214 in 22 hours. No
-        # threshold separates the second case from a genuinely stuck resource,
-        # since they are the same rate. The MATCHER separates them, which is why
-        # the floor below is sized only against the bounded burst.
+        # 0.15.3 fixes both ends at source. A file whose digest is empty is now
+        # compared by NAME only (compare_resource_with_xnat, and
+        # api/check_upload_api.py guards the same way), so catalogue lag no
+        # longer reads as a mismatch; and the "please delete on XNAT" emitter is
+        # gone. Every surviving emitter puts "Missing paths:" in its format
+        # string UNCONDITIONALLY, so the matcher had stopped filtering anything
+        # while still reading like a filter. VERIFIED against the v0.15.6 source
+        # rather than assumed.
         #
-        # xnat-ingest PR #170 stops the spurious error at source. Drop the
-        # matcher in the same commit that moves the image tag to a release
-        # carrying it, and rewrite the "will never repair it" note at the same
-        # time, since that also stops being true then.
+        # So dropping it changes no match on this pin, and it closes the hole
+        # against the next image that reintroduces a phrase-only emitter. It
+        # lands in the same commit as the pin because the ordering is unsafe in
+        # both directions: this matcher without the pin pages on good data, and
+        # the pin without this note leaves prose that is no longer true.
         #
         # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because
         # one error is emitted per stuck resource per poll, so the rate is set
@@ -332,7 +357,6 @@ groups:
           sum by (cluster, session) (count_over_time(
             {namespace="xnat-upload", component="upload"}
             | json | message =~ ".*already exists on XNAT with different checksums.*"
-            | message =~ ".*Missing paths.*"
             | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`
             | label_format session="{{.resource}}" [60m])) > __UPLOAD_STUCK_ERRORS__
         for: 15m
@@ -343,9 +367,14 @@ groups:
         annotations:
           summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
           description: |
-            The uploader keeps finding a resource that exists on XNAT but is missing
-            files it still holds in staging, and skips it as "already uploaded" on
-            every pass. The session is reported as uploaded while incomplete.
+            The uploader keeps finding a resource on XNAT that disagrees with what
+            it holds in staging in a way it cannot fix by uploading: XNAT holds
+            files staging does not, or holds a file whose content differs. It
+            retries every pass and gets the same answer.
+
+            A resource that is merely SHORT is not this. The uploader repairs that
+            itself by uploading the shortfall, and logs a warning rather than the
+            error this rule counts.
 
             NO DATA IS LOST. The staged copy is intact and dataPolicy will not reclaim
             it while XNAT cannot confirm delivery.
@@ -356,18 +385,17 @@ groups:
 
             2. delete those resources on XNAT so the uploader can recreate them
 
-            3. ON xnat-ingest 0.15.0 AND EARLIER, RESTART THE UPLOADER TOO.
-               Deleting on XNAT alone does nothing on those versions: the pod holds
-               ONE XNAT connection for its lifetime and never invalidates the cached
-               project/experiment listings, so the deletion stays invisible and the
-               resource is skipped for ever. MEASURED: delete alone changed nothing;
-               delete plus restart uploaded all 383 files.
-                 kubectl -n xnat-upload rollout restart deploy/mgmt-upload-cai-lfs3
+            3. NO RESTART IS NEEDED ON THE PINNED 0.15.6. The deletion is picked
+               up within one --loop interval. MEASURED: deleted at 07:17,
+               re-uploaded at 07:18:26 with the pod never restarting.
 
-               Once the uploader invalidates that cache per pass, step 3 is no longer
-               needed and the deletion is picked up within one --loop interval.
-               MEASURED on a patched build: deleted at 07:17, re-uploaded at 07:18:26
-               with the pod never restarting.
+               ON 0.15.0 AND EARLIER IT WAS, and if a site is still on one of those
+               do step 3. Those versions hold ONE XNAT connection for the pod
+               lifetime and never invalidate the cached project/experiment listings,
+               so the deletion stays invisible and the resource is skipped for ever.
+               MEASURED: delete alone changed nothing; delete plus restart uploaded
+               all 383 files. Fixed by PR #171, released in 0.15.3.
+                 kubectl -n xnat-upload rollout restart deploy/mgmt-upload-cai-lfs3
 
       - alert: ReclaimerRunUnavailable
         # THE RECLAIMER FAILING IS NOT A DATA-LOSS EVENT. IT IS A BLINDNESS
