@@ -681,10 +681,47 @@ ingest:
     # CAUTION: `subject` becomes the XNAT subject label, and assign runs BEFORE
     # deidentify. PatientID here means the medical record number becomes that
     # label in the clear. Point it at a pseudonym tag if your modality writes one.
-    tagMapping:
-      project: StudyID
-      subject: PatientID
-      session: AccessionNumber
+    # DERIVED FROM deid.engine. Leave it empty and the chart names the triple
+    # that engine actually populates:
+    #
+    #   orthanc  ClinicalTrialProtocolID / ClinicalTrialSubjectID /
+    #            ClinicalTrialTimePointID, written by the Lua hook from the AET
+    #            map. NOT a site decision under this engine: the hook always
+    #            writes them, and the chart already refuses to render if the
+    #            profile does not.
+    #   ingest   StudyID / PatientID / AccessionNumber, tags a modality
+    #            populates itself, because with the hook off nothing writes the
+    #            ClinicalTrial* triple.
+    #
+    # WHY IT IS DERIVED RATHER THAN FIXED. A fixed default is wrong for one
+    # engine whichever one it names, and both mistakes have been made here. It
+    # was the ClinicalTrial* triple, which filed every ingest-engine study under
+    # __invalid__ still carrying its PHI. It was then changed to the modality
+    # tags, which is where this ended up: MEASURED on a fresh tier-1 install,
+    # 531 instances staged as
+    #   assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
+    # because the orthanc profile rewrites StudyID to ${SessionHash}, and the
+    # uploader then failed every pass with "Project 'A9BB5B6D36EE' does not
+    # exist on XNAT".
+    #
+    # SET IT ONLY IF YOUR MODALITIES CARRY THE IDS SOMEWHERE ELSE, which is a
+    # real case under deid.engine=ingest: the radiographer enters these at the
+    # console, so CAI uses ReferringPhysicianName for project and PatientID for
+    # subject, and other sites use StudyComments or StudyDescription. Whatever
+    # is named is checked against the engine at render time, in both directions.
+    #
+    # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT
+    # LABEL verbatim. assign reads it and files the session BEFORE deidentify
+    # runs, so no recipe can rename it afterwards. De-identification still works
+    # on the file contents; it just cannot reach the label. Switching engines
+    # changes the shape of that label, so see the migration note in
+    # docs/components/deidentification.md before moving an existing site.
+    #
+    # CAUTION: under deid.engine=ingest, subject: PatientID means the medical
+    # record number becomes that label in the clear. Point it at a pseudonym tag
+    # if your modality writes one. Hashing at this step is a known second-pass
+    # item, not an oversight.
+    tagMapping: {}
 
   # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
   #
@@ -697,11 +734,12 @@ ingest:
   # never sees the AE title, so with the hook off there is no way to derive the
   # project from which machine sent the study. Your modalities must populate
   # project/subject/session in tags they actually send, and ingest.assign
-  # .tagMapping must point at those tags — it defaults to the ClinicalTrial*
-  # tags that only the Lua hook writes. The chart refuses THAT DEFAULT at render
-  # time; it cannot detect a mapping that names real tags this site's modalities
-  # do not populate, which looks correct and ends the same way, with every study
-  # in __invalid__ still carrying its PHI.
+  # .tagMapping must point at those tags. The chart derives them from the engine,
+  # so under this one it names StudyID / PatientID / AccessionNumber rather than
+  # the ClinicalTrial* triple only the Lua hook writes, and it refuses an
+  # explicit mapping that names the triple. What it cannot detect is a mapping
+  # that names real tags this site's modalities do not populate, which looks
+  # correct and ends with every study in __invalid__ still carrying its PHI.
   #
   # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
   # values out before this stage runs, and ImagingSession.new_empty copies them

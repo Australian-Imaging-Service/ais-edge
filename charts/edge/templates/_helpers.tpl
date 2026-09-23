@@ -358,7 +358,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          project, subject and session is a site decision, and guessing one
          would route studies into the wrong XNAT project. */ -}}
   {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-    {{- $mapping := .Values.ingest.assign.tagMapping }}
+    {{- $mapping := include "edge.assignTagMapping" . | fromYaml }}
     {{- $luaOnly := list }}
     {{- range $key, $tag := $mapping }}
       {{- if hasPrefix "ClinicalTrial" $tag }}
@@ -367,6 +367,59 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
     {{- if $luaOnly }}
       {{- fail (printf "deid.engine=ingest, but ingest.assign.tagMapping still reads %s. Those tags are written by the Orthanc Lua hook, which is off in this configuration, so no study will carry them: assign resolves no ids and files every session under __invalid__, where no later stage looks. With the hook off nothing has de-identified the data at that point either, so it sits there identifiable. Set ingest.assign.tagMapping to tags this site's modalities actually populate (for example project: StudyID, subject: PatientID, session: AccessionNumber)." (join ", " $luaOnly)) }}
+    {{- end }}
+  {{- end }}
+
+  {{- /* THE MIRROR IMAGE OF THE GUARD ABOVE, and the direction that hurts more.
+
+         Under deid.engine=orthanc the Lua hook does not only ADD the
+         ClinicalTrial* tags. It also OVERWRITES the modality's own tags to
+         strip identity, and every shipped site profile does exactly that:
+
+           StudyID         = ${SessionHash}
+           AccessionNumber = ${SessionHash}
+           PatientID       = ${ProjectCode}-${SubjectHash}
+
+         So a tagMapping left at the ingest-engine default reads a tag that
+         still exists and still has a value, just not the one it names. assign
+         resolves an id, nothing looks wrong, and every session is filed under a
+         PROJECT NAMED AFTER THE SESSION HASH.
+
+         MEASURED on a fresh tier-1 install of sites/stream-2-ab-dev, 531
+         instances: the session was staged as
+           /data/assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
+         (project=SessionHash, subject=ProjectCode-SubjectHash) and the upload
+         then failed every pass with
+           "Project 'A9BB5B6D36EE' does not exist on XNAT".
+         The real project was sitting in the SUBJECT field as a prefix.
+
+         The ingest-direction guard above fails LOUDLY and early, into
+         __invalid__. This one cannot be caught that way, because the failure is
+         a plausible-looking id. It has to be refused at render.
+
+         CHECKED BY ROLE, NOT BY TAG PREFIX. A site may legitimately name a tag
+         the profile does not rewrite, and that tag then still carries what the
+         modality wrote. What is never correct is naming a tag the profile
+         REWRITES with a different role's value, which is the case above. So
+         this reads the profile the site actually ships rather than assuming
+         one. */ -}}
+  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
+    {{- $mapping := include "edge.assignTagMapping" . | fromYaml }}
+    {{- $replace := dig "deid" "profile" "Replace" dict .Values.orthanc }}
+    {{- $roleOf := dict "project" "${ProjectCode}" "subject" "${SubjectHash}" "session" "${SessionHash}" }}
+    {{- $wantTag := dict "project" "ClinicalTrialProtocolID" "subject" "ClinicalTrialSubjectID" "session" "ClinicalTrialTimePointID" }}
+    {{- $crossed := list }}
+    {{- range $role, $want := $roleOf }}
+      {{- $tag := index $mapping $role }}
+      {{- if $tag }}
+        {{- $writes := index $replace $tag }}
+        {{- if and $writes (ne $writes $want) }}
+          {{- $crossed = append $crossed (printf "%s reads %s, which this profile rewrites to %s" $role $tag $writes) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if $crossed }}
+      {{- fail (printf "deid.engine=orthanc, but ingest.assign.tagMapping crosses the de-identification: %s. Under this engine the Lua hook overwrites the modality's tags to strip identity and writes the real ids into ClinicalTrialProtocolID, ClinicalTrialSubjectID and ClinicalTrialTimePointID. Reading a rewritten tag does NOT fail: assign resolves the other role's value and files every session under it, so a project named after the session hash is created in the staging path and the upload then fails for ever with \"Project '<hash>' does not exist on XNAT\" while the real project sits unused in another field. Set ingest.assign.tagMapping to project: %s, subject: %s, session: %s." (join "; " $crossed) (index $wantTag "project") (index $wantTag "subject") (index $wantTag "session")) }}
     {{- end }}
   {{- end }}
 
@@ -701,6 +754,30 @@ with a message rather than silently selecting neither engine.
 */}}
 {{- define "edge.deidEngine" -}}
 {{- .Values.deid.engine | default "orthanc" -}}
+{{- end }}
+
+{{- /* THE ASSIGN TAG TRIPLE, DERIVED FROM THE ENGINE RATHER THAN FIXED.
+
+       A fixed default is wrong for one engine whichever one it names, and both
+       mistakes have now been made. It was the ClinicalTrial* triple, which sent
+       every ingest-engine site's studies to __invalid__ still carrying PHI. It
+       was then changed to the modality tags, which sent every orthanc-engine
+       site's sessions into a project named after the session hash.
+
+       Under orthanc these are not a site decision at all: the Lua hook always
+       writes the triple from the AET map, and the chart already refuses to
+       render if the profile does not. Under ingest the hook is off, so nothing
+       writes them and assign has to read what the modality sent.
+
+       An explicit ingest.assign.tagMapping still wins, and is then checked
+       against the engine in both directions by the guards in edge.validate. */ -}}
+{{- define "edge.assignTagMapping" -}}
+{{- $derived := dict "project" "StudyID" "subject" "PatientID" "session" "AccessionNumber" -}}
+{{- if eq (include "edge.deidEngine" .) "orthanc" -}}
+{{- $derived = dict "project" "ClinicalTrialProtocolID" "subject" "ClinicalTrialSubjectID" "session" "ClinicalTrialTimePointID" -}}
+{{- end -}}
+{{- $explicit := default (dict) .Values.ingest.assign.tagMapping -}}
+{{- toYaml (merge (deepCopy $explicit) $derived) -}}
 {{- end }}
 
 {{- define "edge.uploadSourceDir" -}}

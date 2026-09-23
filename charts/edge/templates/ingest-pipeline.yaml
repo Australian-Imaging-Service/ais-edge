@@ -223,11 +223,11 @@ spec:
             # writes. routing.json's AETMap is the single source of truth for
             # project — there is no hardcoded project ID anywhere.
             - "--project"
-            - {{ .Values.ingest.assign.tagMapping.project | quote }}
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "project" | quote }}
             - "--subject"
-            - {{ .Values.ingest.assign.tagMapping.subject | quote }}
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
             - "--session"
-            - {{ .Values.ingest.assign.tagMapping.session | quote }}
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
             - "--copy-mode"
             - {{ .Values.ingest.assign.copyMode | quote }}
             {{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
