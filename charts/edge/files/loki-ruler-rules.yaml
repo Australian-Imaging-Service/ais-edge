@@ -134,6 +134,17 @@ groups:
   # rule nobody reads, and it would have hidden a real retry storm underneath it.
   # The line is excluded rather than the threshold raised: a genuine storm looks
   # different (tracebacks, auth failures, connection errors) and those still count.
+  #
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. On the pinned 0.15.6
+  # the re-offer is answered from a file-set comparison rather than a label one,
+  # so a session that really was delivered is skipped silently and the emitter
+  # quoted above is gone. What the exclusion now buys is separation of concerns:
+  # this phrase means one specific, actionable thing, and
+  # XNATResourceIncompleteAndStuck below counts it per session with a threshold
+  # and a runbook. Counting it here as well would page twice for one fault, and
+  # under a rule whose description sends the operator to look for the wrong
+  # thing. Removing the exclusion would be safe on this pin and wrong on any
+  # older one, so it stays.
   - alert: XNATUploadRetryStorm
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  !~ \"already exists on XNAT with different checksums\"\n  [10m])) > 2\n"
     for: 10m
@@ -187,35 +198,55 @@ groups:
   # prose match is the only thing available, so it is written down rather than
   # left as an accident.
   - alert: XNATResourceIncompleteAndStuck
-    # A resource EXISTS on XNAT but is SHORT, and the uploader will never repair
-    # it: get_xnat_resource returns None whenever the resource exists, so the
-    # caller logs "already uploaded" and skips it, and the session still reports
-    # success. Only an operator deleting the resource on XNAT unblocks it.
+    # A resource EXISTS on XNAT and DISAGREES with the staged copy in a way that
+    # uploading cannot fix: XNAT holds files staging does not, or holds a file
+    # whose content differs. An upload only ever adds, so neither is repairable.
+    # Only an operator deleting the resource on XNAT unblocks it.
     #
-    # THERE IS A KNOWN COVERAGE HOLE HERE AND IT IS DELIBERATELY STILL OPEN.
-    # Requiring "Missing paths" as well as the phrase means only the
-    # missing-or-extra branch matches. The differing-only branch carries the
-    # phrase without it, XNATUploadRetryStorm EXCLUDES the phrase on the
-    # assumption that this rule covers it, and XNATUploadFailingForAllSessions
-    # is suppressed whenever uploads are otherwise succeeding. So a
-    # checksum-mismatch ERROR reaches NO rule at all on a site that is otherwise
-    # uploading fine. Measured on the test cluster: 1214 occurrences of the
-    # phrase in 7 days, 0 of "Missing paths", so this alert has never fired.
+    # THIS IS NARROWER THAN IT WAS, AND THE PIN IS WHY. Up to xnat-ingest 0.15.0
+    # the uploader also skipped a merely SHORT resource: get_xnat_resource
+    # returned None whenever the resource existed, so the caller logged "already
+    # uploaded" and the session reported success while incomplete. From 0.15.3
+    # (PR #170) a short resource is repaired by uploading the shortfall and logs
+    # a warning, so it no longer reaches this rule. What is left is the
+    # genuinely unrepairable case, which is what the summary claims.
+    # KEEP THIS RULE AND ingest.image.tag IN STEP.
     #
-    # THE FIX IS TO DROP THE "Missing paths" MATCHER, AND IT MUST NOT LAND
-    # BEFORE THE IMAGE BUMP. Against the pinned 0.15.0 the phrase is emitted
-    # continuously for a HEALTHY resource: XNAT reports an empty digest until a
-    # catalog refresh populates it, and 0.15.0 compares the two checksum dicts
-    # whole, so it calls a complete resource mismatched. That is what the 1214
-    # were. Matching the phrase alone would fire this alert on them, and its
-    # annotation tells the operator to delete the resource on XNAT, which on
-    # those is an instruction to delete good data.
+    # THE COVERAGE HOLE RECORDED HERE IS NOW CLOSED, and the matcher that caused
+    # it has been dropped. Kept as a note because the shape can come back the
+    # next time someone tightens this rule.
     #
-    # xnat-ingest PR #170 stops the spurious error at source by comparing per
-    # file and trusting names when no digest is available. Drop the matcher in
-    # the same commit that moves ingest.image.tag to a release carrying it, and
-    # rewrite the "will never repair it" note above at the same time, since that
-    # also stops being true then.
+    # This rule used to require "Missing paths" as well as the phrase, so only
+    # the missing-or-extra branch matched. 0.15.0 had a SECOND emitter of the
+    # phrase -- "...different checksums. Please delete on XNAT to overwrite" --
+    # carrying no such line, so a differing-only ERROR reached NO rule at all:
+    # XNATUploadRetryStorm EXCLUDES the phrase on the assumption that this rule
+    # covers it, and XNATUploadFailingForAllSessions is suppressed whenever
+    # uploads are otherwise succeeding. Measured on the test cluster: 1214
+    # occurrences of the phrase in 7 days, 0 of "Missing paths", so this alert
+    # had never fired.
+    #
+    # The matcher could not just be deleted, because on 0.15.0 the phrase was
+    # ALSO emitted continuously for a HEALTHY resource: XNAT reports an empty
+    # digest until a catalog refresh populates it, and 0.15.0 compared the two
+    # checksum dicts whole, so it called a complete resource mismatched. That is
+    # what the 1214 were. Matching the phrase alone would have fired this alert
+    # on all of them, and the annotation tells the operator to delete the
+    # resource on XNAT, which on those is an instruction to delete good data.
+    #
+    # 0.15.3 fixes both ends at source. A file whose digest is empty is compared
+    # by NAME only (compare_resource_with_xnat, and api/check_upload_api.py
+    # guards the same way), so catalogue lag no longer reads as a mismatch; and
+    # the "please delete on XNAT" emitter is gone. Every surviving emitter puts
+    # "Missing paths:" in its format string UNCONDITIONALLY, so the matcher had
+    # stopped filtering anything while still reading like a filter. VERIFIED
+    # against the v0.15.6 source rather than assumed.
+    #
+    # So dropping it changes no match on this pin, and it closes the hole
+    # against the next image that reintroduces a phrase-only emitter. It lands
+    # in the same commit as the pin because the ordering is unsafe in both
+    # directions: this matcher without the pin pages on good data, and the pin
+    # without this note leaves prose that is no longer true.
     #
     # TIER-1 APPLIES TOO, and this is not a copy of the tier-2 rule. The upload
     # code path is SHARED: `xnat-ingest upload` resolves resources identically
@@ -229,25 +260,26 @@ groups:
     # to read mid-write) but ANY interrupted upload reaches the same state: a
     # pod evicted mid-transfer, a dropped connection, an XNAT restart.
     #
-    # WHY NOT FIRST-OBSERVATION. The same message appears while XNAT is still
+    # WHY NOT FIRST-OBSERVATION. The same message appeared while XNAT was still
     # cataloguing an accepted upload: the checksum comparison runs BEFORE the
     # catalog refresh, and that refresh only fires when the file count is
     # exactly zero.
     #
-    # TWO DIFFERENT LAG BEHAVIOURS HAVE BEEN MEASURED AND BOTH ARE REAL.
+    # TWO DIFFERENT LAG BEHAVIOURS HAVE BEEN MEASURED AND BOTH WERE REAL.
     # Where the refresh does fire, the window is bounded and lag emits ~10-15
-    # occurrences once. Where it does not, because the count was never zero, the
-    # digests stay empty and the SAME message repeats every pass indefinitely:
-    # 1214 occurrences in 22 hours on the test cluster, for a resource that was
-    # completely healthy. No threshold separates the second case from a genuinely
-    # stuck resource, because they are the same rate.
+    # occurrences once. Where it did not, because the count was never zero, the
+    # digests stayed empty and the SAME message repeated every pass
+    # indefinitely: 1214 occurrences in 22 hours on the test cluster, for a
+    # resource that was completely healthy. No threshold separates that second
+    # case from a genuinely stuck resource, because they are the same rate; the
+    # matcher separated them.
     #
-    # THE MATCHER IS WHAT SEPARATES THEM, NOT THE THRESHOLD. Neither lag case
-    # carries "Missing paths", so neither reaches this rule while both matchers
-    # are required. The floor below is sized against the bounded burst, which is
-    # all it can be sized against, and the second case is handled at source by
-    # xnat-ingest PR #170. That is the other reason dropping the matcher has to
-    # wait for the image bump.
+    # ON THE PINNED 0.15.6 NEITHER SHOULD REACH THIS RULE. The name-only
+    # comparison removes the second case at source, and the first now presents
+    # as MISSING files, which the uploader repairs rather than reporting here.
+    # The floor below is kept sized against the bounded burst anyway: it costs
+    # nothing, and it is the one number here that does not depend on the pin
+    # being what we think it is.
     #
     # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because one
     # error is emitted per stuck resource per upload poll. A hardcoded 30
@@ -279,9 +311,14 @@ groups:
     # fires.
     annotations:
       description: |
-        The uploader keeps finding a resource that exists on XNAT but is missing files
-        it still holds locally, and skips it as "already uploaded" on every pass. The
-        session is reported as uploaded while incomplete.
+        The uploader keeps finding a resource on XNAT that disagrees with what it
+        holds locally in a way it cannot fix by uploading: XNAT holds files the
+        staged copy does not, or holds a file whose content differs. It retries
+        every pass and gets the same answer.
+
+        A resource that is merely SHORT is not this. The uploader repairs that
+        itself by uploading the shortfall, and logs a warning rather than the
+        error this rule counts.
 
         NO DATA IS LOST: the de-identified copy is retained until delivery is confirmed.
 
@@ -289,9 +326,12 @@ groups:
              kubectl -n xnat-ingest logs deploy/edge-upload --since=60m \
                | grep "already exists on XNAT with different checksums"
         2. delete those resources on XNAT so the uploader can recreate them
-        3. ON xnat-ingest 0.15.0 AND EARLIER, restart the uploader as well: it holds
-           one XNAT connection for its lifetime and never invalidates the cached
-           listings, so the deletion stays invisible to it.
+        3. NO RESTART IS NEEDED ON THE PINNED 0.15.6: the deletion is picked up
+           within one --loop interval. ON 0.15.0 AND EARLIER IT WAS, so do this
+           step if a site is still on one of those. Those versions hold one XNAT
+           connection for the pod lifetime and never invalidate the cached
+           listings, so the deletion stays invisible to them. Fixed by PR #171,
+           released in 0.15.3.
              kubectl -n xnat-ingest rollout restart deploy/edge-upload
       summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
     # Line breaks match the tier-2 rule character for character. The cross-tier
@@ -299,7 +339,7 @@ groups:
     # a purely cosmetic difference in where `| json` sits reads as drift and
     # would have to be exempted, which would blunt the check for the one field
     # that genuinely does differ.
-    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  | json | message =~ \".*already exists on XNAT with different checksums.*\"\n  | message =~ \".*Missing paths.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\" [60m])) > __UPLOAD_STUCK_ERRORS__\n"
+    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  | json | message =~ \".*already exists on XNAT with different checksums.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\" [60m])) > __UPLOAD_STUCK_ERRORS__\n"
     for: 15m
     labels:
       category: xnat-delivery
