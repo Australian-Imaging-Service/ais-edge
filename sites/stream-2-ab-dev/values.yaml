@@ -158,15 +158,6 @@ ingest:
     processedLabel: xnat-ingest-processed
   assign:
     interval: 60
-    # deid.engine is orthanc here, so the Lua hook writes the ids into these
-    # three tags and OVERWRITES StudyID / PatientID / AccessionNumber to strip
-    # identity. Leaving this at the chart default reads a rewritten tag, which
-    # resolves to the wrong role rather than failing, and files every session
-    # under a project named after the session hash.
-    tagMapping:
-      project: ClinicalTrialProtocolID
-      subject: ClinicalTrialSubjectID
-      session: ClinicalTrialTimePointID
 
 # -----------------------------------------------------------------------------
 # Upload — STRAIGHT TO XNAT

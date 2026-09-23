@@ -1020,17 +1020,13 @@ orthanc:
         StudyID: "${SessionHash}"
         AccessionNumber: "${SessionHash}"
         PatientID: "${ProjectCode}-${SubjectHash}"
-ingest:
-  assign:
-    tagMapping:
-      project: ClinicalTrialProtocolID
-      subject: ClinicalTrialSubjectID
-      session: ClinicalTrialTimePointID
 EOF
 
-# The same profile with the tagMapping left at the chart default, which is what
-# every affected site had. project resolves to the SessionHash rather than
-# failing, so only a render-time guard can catch it.
+# The same profile with the mapping named EXPLICITLY the way every affected site
+# inherited it. It has to be explicit now: the derived default is correct under
+# this engine, so the mistake is no longer reachable by omission, which is the
+# point of deriving it. project resolves to the SessionHash rather than failing,
+# so only a render-time guard catches it.
 cat >"$V/neg-edge-assign-tag-crossed.yaml" <<'EOF'
 orthanc:
   deid:
@@ -1039,6 +1035,12 @@ orthanc:
         StudyID: "${SessionHash}"
         AccessionNumber: "${SessionHash}"
         PatientID: "${ProjectCode}-${SubjectHash}"
+ingest:
+  assign:
+    tagMapping:
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
 EOF
 
 ci_positive_cases() {
