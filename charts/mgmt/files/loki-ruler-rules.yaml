@@ -320,20 +320,34 @@ groups:
         # 1214, and the description below tells the operator to delete the
         # resource on XNAT, which on those is an instruction to delete good data.
         #
-        # 0.15.3 fixes both ends at source. A file whose digest is empty is now
-        # compared by NAME only (compare_resource_with_xnat, and
+        # 0.15.3 fixes the FALSE POSITIVE at source: a file whose digest is
+        # empty is compared by NAME only (compare_resource_with_xnat, and
         # api/check_upload_api.py guards the same way), so catalogue lag no
-        # longer reads as a mismatch; and the "please delete on XNAT" emitter is
-        # gone. Every surviving emitter puts "Missing paths:" in its format
-        # string UNCONDITIONALLY, so the matcher had stopped filtering anything
-        # while still reading like a filter. VERIFIED against the v0.15.6 source
-        # rather than assumed.
+        # longer reads as a mismatch. That is what made dropping the matcher
+        # safe, and it is the only part of the original claim that held.
         #
-        # So dropping it changes no match on this pin, and it closes the hole
-        # against the next image that reintroduces a phrase-only emitter. It
-        # lands in the same commit as the pin because the ordering is unsafe in
-        # both directions: this matcher without the pin pages on good data, and
-        # the pin without this note leaves prose that is no longer true.
+        # CORRECTION. An earlier version of this note said the "please delete on
+        # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
+        # therefore become a no-op. BOTH WERE WRONG. The emitter is still there,
+        # at helpers/remotes.py:861-866, and it carries no "Missing paths" line.
+        # The grep that produced the claim missed it because the phrase is split
+        # across two adjacent string literals, which is the documented trap with
+        # this codebase; join them before matching.
+        #
+        # So dropping the matcher is NOT cosmetic. It genuinely widens the rule,
+        # which is what closes the hole: a differing-only error used to reach no
+        # rule at all.
+        #
+        # AND IT CHANGES THE RATE. Both emitters sit under the same
+        # `if not comparison.complete:`, so a DIFFERING-ONLY resource emits TWO
+        # matching lines per pass -- one carrying "Missing paths: []" and one
+        # not -- where before only the first matched. A missing-or-extra
+        # resource still emits one, because the second is guarded by
+        # `if comparison.differing`. Read the "twice the threshold by
+        # construction" note below as the floor: for the differing-only case the
+        # real rate is four times the threshold and it crosses in about half the
+        # time. That errs toward alerting sooner on a real fault, so it is left
+        # as is rather than retuned.
         #
         # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because
         # one error is emitted per stuck resource per poll, so the rate is set
