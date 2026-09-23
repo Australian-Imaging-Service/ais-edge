@@ -1099,6 +1099,48 @@ EOF
 # `helm template`. It is a distinctive fragment of the guard's own message —
 # long enough that a different guard firing cannot satisfy it by accident.
 
+# THE COMBINATION EVERY SHIPPED SITE ACTUALLY RUNS, which until now no fixture
+# did. edge-base's profile rewrites only PatientName and the three
+# ClinicalTrial* tags, so StudyID survives de-identification there and reading
+# it resolves what the modality wrote. Every sites/*/values.yaml under
+# deid.engine=orthanc ALSO rewrites StudyID, AccessionNumber and PatientID to
+# strip identity, and that is the shape that misroutes.
+#
+# MEASURED on a fresh tier-1 install of sites/stream-2-ab-dev before the guard
+# existed: 531 instances staged as
+#   assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
+# and the uploader then failed every pass with "Project 'A9BB5B6D36EE' does not
+# exist on XNAT". Nothing in the suite rendered that combination, so nothing
+# could report it.
+cat >"$V/edge-deid-site-profile.yaml" <<'EOF'
+orthanc:
+  deid:
+    profile:
+      Replace:
+        StudyID: "${SessionHash}"
+        AccessionNumber: "${SessionHash}"
+        PatientID: "${ProjectCode}-${SubjectHash}"
+ingest:
+  assign:
+    tagMapping:
+      project: ClinicalTrialProtocolID
+      subject: ClinicalTrialSubjectID
+      session: ClinicalTrialTimePointID
+EOF
+
+# The same profile with the tagMapping left at the chart default, which is what
+# every affected site had. project resolves to the SessionHash rather than
+# failing, so only a render-time guard can catch it.
+cat >"$V/neg-edge-assign-tag-crossed.yaml" <<'EOF'
+orthanc:
+  deid:
+    profile:
+      Replace:
+        StudyID: "${SessionHash}"
+        AccessionNumber: "${SessionHash}"
+        PatientID: "${ProjectCode}-${SubjectHash}"
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1117,6 +1159,7 @@ mgmt-s3-mtls	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml
 mgmt-s3-mtls-issue-only	charts/mgmt	mgmt-base.yaml mgmt-s3-mtls.yaml mgmt-s3-mtls-issue-only.yaml
 mgmt-s3-mtls-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-s3-mtls.yaml
 edge-defaults	charts/edge	edge-base.yaml
+edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
@@ -1137,6 +1180,7 @@ EOF
 
 ci_negative_cases() {
   cat <<'EOF'
+neg-edge-assign-tag-crossed	charts/edge	edge-base.yaml neg-edge-assign-tag-crossed.yaml	crosses the de-identification
 neg-mgmt-no-domain	charts/mgmt	mgmt-base.yaml neg-mgmt-no-domain.yaml	domain.internal must be set
 neg-mgmt-no-nodeip	charts/mgmt	mgmt-base.yaml neg-mgmt-no-nodeip.yaml	domain.mgmtNodeIP must be set
 neg-mgmt-duplicate-edges	charts/mgmt	mgmt-base.yaml neg-mgmt-duplicate-edges.yaml	duplicate edge name
