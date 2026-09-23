@@ -363,6 +363,59 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- /* THE MIRROR IMAGE OF THE GUARD ABOVE, and the direction that hurts more.
+
+         Under deid.engine=orthanc the Lua hook does not only ADD the
+         ClinicalTrial* tags. It also OVERWRITES the modality's own tags to
+         strip identity, and every shipped site profile does exactly that:
+
+           StudyID         = ${SessionHash}
+           AccessionNumber = ${SessionHash}
+           PatientID       = ${ProjectCode}-${SubjectHash}
+
+         So a tagMapping left at the ingest-engine default reads a tag that
+         still exists and still has a value, just not the one it names. assign
+         resolves an id, nothing looks wrong, and every session is filed under a
+         PROJECT NAMED AFTER THE SESSION HASH.
+
+         MEASURED on a fresh tier-1 install of sites/stream-2-ab-dev, 531
+         instances: the session was staged as
+           /data/assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
+         (project=SessionHash, subject=ProjectCode-SubjectHash) and the upload
+         then failed every pass with
+           "Project 'A9BB5B6D36EE' does not exist on XNAT".
+         The real project was sitting in the SUBJECT field as a prefix.
+
+         The ingest-direction guard above fails LOUDLY and early, into
+         __invalid__. This one cannot be caught that way, because the failure is
+         a plausible-looking id. It has to be refused at render.
+
+         CHECKED BY ROLE, NOT BY TAG PREFIX. A site may legitimately name a tag
+         the profile does not rewrite, and that tag then still carries what the
+         modality wrote. What is never correct is naming a tag the profile
+         REWRITES with a different role's value, which is the case above. So
+         this reads the profile the site actually ships rather than assuming
+         one. */ -}}
+  {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
+    {{- $mapping := .Values.ingest.assign.tagMapping }}
+    {{- $replace := dig "deid" "profile" "Replace" dict .Values.orthanc }}
+    {{- $roleOf := dict "project" "${ProjectCode}" "subject" "${SubjectHash}" "session" "${SessionHash}" }}
+    {{- $wantTag := dict "project" "ClinicalTrialProtocolID" "subject" "ClinicalTrialSubjectID" "session" "ClinicalTrialTimePointID" }}
+    {{- $crossed := list }}
+    {{- range $role, $want := $roleOf }}
+      {{- $tag := index $mapping $role }}
+      {{- if $tag }}
+        {{- $writes := index $replace $tag }}
+        {{- if and $writes (ne $writes $want) }}
+          {{- $crossed = append $crossed (printf "%s reads %s, which this profile rewrites to %s" $role $tag $writes) }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if $crossed }}
+      {{- fail (printf "deid.engine=orthanc, but ingest.assign.tagMapping crosses the de-identification: %s. Under this engine the Lua hook overwrites the modality's tags to strip identity and writes the real ids into ClinicalTrialProtocolID, ClinicalTrialSubjectID and ClinicalTrialTimePointID. Reading a rewritten tag does NOT fail: assign resolves the other role's value and files every session under it, so a project named after the session hash is created in the staging path and the upload then fails for ever with \"Project '<hash>' does not exist on XNAT\" while the real project sits unused in another field. Set ingest.assign.tagMapping to project: %s, subject: %s, session: %s." (join "; " $crossed) (index $wantTag "project") (index $wantTag "subject") (index $wantTag "session")) }}
+    {{- end }}
+  {{- end }}
+
   {{- /* Reclaiming the operator's only copy. */ -}}
   {{- if and .Values.ingest.fileDrop.enabled (ne .Values.dataPolicy.originals.fileDrop.reclaim "never") }}
     {{- if not .Values.dataPolicy.enabled }}
