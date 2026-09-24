@@ -130,9 +130,6 @@ spec:
               value: {{ include "edge.uploaderStateDir" . | quote }}
             - name: ASSIGNED_DIR
               value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
-            {{- /* The third switch. Rendered even when false so `helm get values`
-                   shows what the running engine was told. */}}
-              value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
             {{- /* Names the ONE stage this engine must not call stuck, and only
                    in the mode where that is true. Under upload.mode=direct the
                    staged-reclaimer CronJob owns the terminal tree's deletes, so
@@ -147,6 +144,8 @@ spec:
               {{- else }}
               value: ""
               {{- end }}
+            {{- /* The third switch. Rendered even when false so `helm get values`
+                   shows what the running engine was told. */}}
             - name: ALLOW_ORIGINAL_EXPIRY
               value: {{ .Values.dataPolicy.originals.allowExpiry | quote }}
             {{- /* Only read by a stage that declares backend: orthanc-rest.
