@@ -249,6 +249,30 @@ deid:
   policyReviewed: true
 EOF
 
+# THE SHIPPED ENGINE, RENDERED. deid.engine defaults to ingest, but edge-base
+# pins orthanc, so without this no positive case renders the ingest layout
+# (uploader and policy engine on /data/deidentified, assign still on
+# /data/assigned) and the wiring check in runtime-templates.sh has nothing to
+# compare. edge-direct-ingest-reclaim also renders the staged-reclaimer CronJob
+# that owns the terminal tree under direct upload; neg-edge-reclaim-deid-onuploaded
+# keeps the same declaration failing under Orthanc-deid, where nothing owns it.
+cat >"$V/edge-deid-ingest.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+    deidentified:
+      reclaim: onUploaded
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
 topology: cloud
@@ -1070,6 +1094,8 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
+edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
