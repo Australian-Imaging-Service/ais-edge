@@ -1,0 +1,97 @@
+# CIMA-X is a standalone Tier-1 deployment. Values not listed here use the
+# current chart defaults, including the supported xnat-ingest image version.
+namespace: ais-edge
+clusterLabel: cima-x
+topology: onprem
+
+hostAliases:
+  enabled: false
+
+# CIMA-X receives data already de-identified upstream.
+deid:
+  engine: none
+  policyReviewed: true
+
+storage:
+  pipeline:
+    capacity: 1500Gi
+    hostPath: /data/ais-edge
+  facilityBackup:
+    enabled: false
+
+orthanc:
+  aet: ORTHANC
+  expose:
+    dicom: nodePort
+    nodePorts:
+      dicom: 30042
+      http: 30842
+    http: nodePort
+  auth:
+    enabled: true
+    existingSecret: orthanc-credentials
+  # CIMA-X transcodes incoming instances to Explicit VR Little Endian.
+  ingestTranscoding: "1.2.840.10008.1.2.1"
+
+ingest:
+  orthancGroup:
+    enabled: true
+    interval: 30
+    toProcessLabel: ""
+    processedLabel: xnat-sorted
+    waitPeriod: 1800
+  fileDrop:
+    enabled: true
+    interval: 30
+    inputGlob: "/data/cima-export/**/*"
+    waitPeriod: 1800
+  assign:
+    interval: 30
+    tagMapping:
+      # CIMA-X-specific DICOM-to-XNAT mapping.
+      project: AccessionNumber
+      subject: PatientName
+      session: PatientID
+
+upload:
+  mode: direct
+  direct:
+    # Deliberately paused while CIMA-X upload is tested manually.
+    replicas: 0
+    existingSecret: xnat-credentials
+    loop: 30
+    waitPeriod: 15
+  reports:
+    # CIMA-X-only report source. Disabled because the current S3 layout does
+    # not contain enough assignment information to route reports to sessions.
+    enabled: false
+    source: s3://pro-reports-sydunimri/
+    existingSecret: xnat-credentials
+    s3ExistingSecret: report-aws-credentials
+    proxyConfigMap: proxy-config
+
+samba:
+  enabled: true
+  shareName: cima-x
+  # CIMA-X exports the whole pipeline PVC, including cima-export.
+  subPath: "."
+  existingSecret: samba-credentials
+  hostPort: 445
+
+observability:
+  enabled: false
+  stack:
+    enabled: false
+
+dataPolicy:
+  enabled: false
+  dryRun: true
+  originals:
+    fileDrop:
+      location: /data/cima-export
+      reclaim: never
+  derived:
+    assigned:
+      reclaim: never
+    deidentified:
+      reclaim: never

@@ -1043,6 +1043,47 @@ ingest:
       session: AccessionNumber
 EOF
 
+cat >"$V/edge-report-upload.yaml" <<'EOF'
+upload:
+  reports:
+    enabled: true
+    source: s3://cima-x-reports/incoming
+    existingSecret: xnat-credentials
+    s3ExistingSecret: s3-credentials
+    proxyConfigMap: proxy-config
+EOF
+
+cat >"$V/neg-edge-report-no-source.yaml" <<'EOF'
+upload:
+  reports:
+    enabled: true
+    source: ""
+EOF
+
+cat >"$V/neg-edge-report-no-xnat-secret.yaml" <<'EOF'
+upload:
+  reports:
+    enabled: true
+    source: s3://cima-x-reports/incoming
+    existingSecret: ""
+EOF
+
+cat >"$V/neg-edge-report-no-s3-secret.yaml" <<'EOF'
+upload:
+  reports:
+    enabled: true
+    source: s3://cima-x-reports/incoming
+    s3ExistingSecret: ""
+EOF
+
+cat >"$V/neg-edge-report-bad-loop.yaml" <<'EOF'
+upload:
+  reports:
+    enabled: true
+    source: s3://cima-x-reports/incoming
+    loop: 0
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1070,6 +1111,7 @@ edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
+edge-report-upload	charts/edge	edge-base.yaml edge-report-upload.yaml
 EOF
 }
 
@@ -1167,6 +1209,10 @@ neg-edge-ingest-no-salt	charts/edge	edge-base.yaml neg-edge-ingest-no-salt.yaml	
 neg-edge-no-emailto	charts/edge	edge-base.yaml neg-edge-no-emailto.yaml	alerting.emailTo is empty
 neg-edge-no-smtphost	charts/edge	edge-base.yaml neg-edge-no-smtphost.yaml	smtpHost is empty
 neg-edge-specs-wrong-engine	charts/edge	edge-base.yaml neg-edge-specs-wrong-engine.yaml	is set, but deid.engine=
+neg-edge-report-no-source	charts/edge	edge-base.yaml neg-edge-report-no-source.yaml	upload.reports.source must be an s3:// URI
+neg-edge-report-no-xnat-secret	charts/edge	edge-base.yaml neg-edge-report-no-xnat-secret.yaml	upload.reports.existingSecret must name
+neg-edge-report-no-s3-secret	charts/edge	edge-base.yaml neg-edge-report-no-s3-secret.yaml	upload.reports.s3ExistingSecret must name
+neg-edge-report-bad-loop	charts/edge	edge-base.yaml neg-edge-report-bad-loop.yaml	upload.reports.loop must be positive
 EOF
 }
 

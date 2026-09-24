@@ -125,6 +125,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail (printf "upload.mode must be 's3' or 'direct', got %q" .Values.upload.mode) }}
   {{- end }}
 
+  {{- if .Values.upload.reports.enabled }}
+    {{- if not (hasPrefix "s3://" .Values.upload.reports.source) }}
+      {{- fail "upload.reports.source must be an s3:// URI when upload.reports.enabled=true." }}
+    {{- end }}
+    {{- if not .Values.upload.reports.existingSecret }}
+      {{- fail "upload.reports.existingSecret must name the XNAT credentials Secret when upload.reports.enabled=true." }}
+    {{- end }}
+    {{- if not .Values.upload.reports.s3ExistingSecret }}
+      {{- fail "upload.reports.s3ExistingSecret must name the AWS credentials Secret when upload.reports.enabled=true." }}
+    {{- end }}
+    {{- if or (le (int .Values.upload.reports.loop) 0) (lt (int .Values.upload.reports.waitPeriod) 0) }}
+      {{- fail "upload.reports.loop must be positive and upload.reports.waitPeriod must be non-negative." }}
+    {{- end }}
+  {{- end }}
+
   {{- if eq .Values.upload.mode "s3" }}
     {{- if not (include "edge.s3Endpoint" .) }}
       {{- fail "upload.mode=s3 needs an S3 endpoint, and none could be derived. Either pass the management site values file too (it carries hostnames.seaweedfs / domain.internal), or set upload.s3.endpoint explicitly." }}

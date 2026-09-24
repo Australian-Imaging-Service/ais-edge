@@ -921,6 +921,23 @@ upload:
       requests: {memory: 256Mi, cpu: 100m}
       limits:   {memory: 1Gi,   cpu: "1"}
 
+  # Optional direct uploader for radiology reports stored in S3. This is
+  # currently a CIMA-X-only workflow and remains off until its S3 layout can
+  # identify the target XNAT session without relying on DICOM assignment.
+  reports:
+    enabled: false
+    source: ""                         # s3://bucket/prefix
+    existingSecret: xnat-credentials   # keys: server, username, password
+    s3ExistingSecret: s3-credentials   # AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+    proxyConfigMap: ""                 # optional HTTP(S)_PROXY/NO_PROXY values
+    loop: 120
+    waitPeriod: 60
+    verifySsl: true
+    tempDir: /tmp/xnat-ingest
+    resources:
+      requests: {memory: 256Mi, cpu: 100m}
+      limits:   {memory: 1Gi,   cpu: "1"}
+
 
 # =============================================================================
 # 6. samba — optional SMB drop-box
