@@ -84,6 +84,12 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
+# The tree the UPLOADER read, so the tree its markers fingerprint. Rendered from
+# edge.uploadSourceDir, the helper that also tells the s3-uploader where to read,
+# so the two cannot disagree. NOT the same as ASSIGNED_DIR under the ingest
+# engine: there the uploader reads /data/deidentified. Empty means unknown, and
+# `onUploaded` then refuses rather than guessing.
+UPLOAD_SOURCE_DIR="${UPLOAD_SOURCE_DIR:-}"
 
 # THE STAGE WHOSE DELETES BELONG TO SOMEONE ELSE. Empty everywhere except
 # upload.mode=direct, where the staged-reclaimer CronJob holds the delete
@@ -223,11 +229,12 @@ fingerprint() {
         | sort | md5sum | cut -d' ' -f1 )
 }
 
-condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
+condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <candidate-dir>
     case "$1" in
         onUploaded)
             # THE MARKER'S CONTENT, NOT ITS EXISTENCE. The uploader writes a
-            # fingerprint of exactly the bytes it uploaded; this recomputes it
+            # fingerprint of the tree it uploaded (file names, sizes and mtimes,
+            # not a content checksum); this recomputes it
             # and compares.
             #
             # Existence alone was safe only while the marker was swept in the
@@ -238,13 +245,39 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
             # authorised for removal on the strength of a marker describing an
             # upload of different bytes.
             [ -f "${UPLOAD_STATE_DIR}/$2" ] || return 1
-            [ -d "${ASSIGNED_DIR}/$2" ] || return 0   # already gone; nothing to protect
-            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${ASSIGNED_DIR}/$2")" ] ;;
+            # COMPARE THE TREE THE UPLOADER READ, not assign's output. Under
+            # deid.engine=ingest they differ: the uploader reads
+            # /data/deidentified, and assign's copy is already unlinked by the
+            # deidentify stage. Checking ASSIGNED_DIR here found it gone, skipped
+            # the comparison, and removed a re-staged deidentified session on a
+            # marker describing different bytes.
+            [ -n "${UPLOAD_SOURCE_DIR}" ] || return 1
+            # ONLY THE COPY THAT WAS VERIFIED MAY BE REMOVED. The marker describes
+            # the uploader's copy. A candidate anywhere else, even a directory
+            # with the same session name, has had nothing checked, so a match on
+            # the uploader's copy must not authorise removing it. -ef compares
+            # device and inode: trailing or doubled slashes and symlinks do not
+            # defeat it, and a missing path is never equal, which also keeps the
+            # rule that nothing to compare is not proof. (This returned 0,
+            # "already gone; nothing to protect", authorising unverified deletes.)
+            [ -n "${4:-}" ] && [ "$4" -ef "${UPLOAD_SOURCE_DIR}/$2" ] || return 1
+            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "$4")" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already
             # travelled further and assign's copy is gone. The second half
             # matters: without it, a session whose assigned copy was already
             # reclaimed would pin its grouped copy forever.
+            #
+            # THE GROUPED STAGE'S WORD, AND ONLY ITS WORD. It asks whether assign
+            # has produced its output, which says nothing about whether the
+            # assigned or deidentified copies are safe to remove. On the assigned
+            # stage its first test is the session itself, so it was always true
+            # and removed every settled session before upload.
+            if [ "$3" != "derived.grouped" ]; then
+                jlog reclaim_unknown_condition "$3" "reclaim word 'onAssigned' belongs to derived.grouped only and proves nothing about this stage, so no session in it is reclaimed" \
+                     ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"onAssigned\""
+                return 1
+            fi
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
         onDeidentified)
             # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
@@ -307,7 +340,19 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             continue
         fi
 
-        if ! condition_met "$r_word" "$s" "$r_name"; then
+        # EXTERNAL OWNERSHIP GATES THE DELETE, NOT ONLY THE REPORT. Checked
+        # before the condition, so no marker can carry a session of a tree the
+        # staged-reclaimer CronJob owns to rm. It used to be consulted only when
+        # the condition failed: a site moved from upload.mode=s3 to direct, still
+        # holding matching S3 markers, had this engine delete the terminal tree
+        # itself, without the CronJob's confirmation against XNAT.
+        if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
+            jlog reclaim_kept "$r_name" "the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
+                 ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
+            continue
+        fi
+
+        if ! condition_met "$r_word" "$s" "$r_name" "$d"; then
             # A SESSION WHOSE CONDITION NEVER COMES TRUE IS STUCK, AND UNTIL NOW
             # NOTHING SAID SO. Keeping it is the right call every single time --
             # the copy is not provably reconstructible, so it stays -- but a
@@ -346,11 +391,6 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             # is also read-only unless retention is armed, so a move would work in
             # one mode and silently not in the other, but the two-operations
             # argument holds whatever the mount says.)
-            if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
-                jlog reclaim_kept "$r_name" "condition ${r_word} is not satisfiable in this upload mode and is not meant to be — the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
-                     ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
-                continue
-            fi
             if [ "${STUCK_AFTER_S:--}" != "-" ] && [ "${STUCK_AFTER_S:-0}" -gt 0 ]; then
                 s_age=$(newest_age_s "$d") || s_age=-1
                 if [ "$s_age" -ge "$STUCK_AFTER_S" ]; then

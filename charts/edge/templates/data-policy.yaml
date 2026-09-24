@@ -123,16 +123,17 @@ spec:
             # reported as stage_stuck rather than as another routine reclaim_kept.
             - name: STUCK_AFTER_S
               value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
-            {{- /* The two condition inputs. Both are DERIVED from other values
+            {{- /* The three condition inputs. All are DERIVED from other values
                    rather than restated, so they cannot drift from where the
-                   uploader and assign actually write. */}}
+                   uploader and assign actually read and write. */}}
             - name: UPLOAD_STATE_DIR
               value: {{ include "edge.uploaderStateDir" . | quote }}
             - name: ASSIGNED_DIR
               value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
-            {{- /* The third switch. Rendered even when false so `helm get values`
-                   shows what the running engine was told. */}}
-              value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
+            # The same helper upload.yaml gives the s3-uploader, so onUploaded
+            # fingerprints exactly the tree the uploader fingerprinted.
+            - name: UPLOAD_SOURCE_DIR
+              value: {{ include "edge.uploadSourceDir" . | quote }}
             {{- /* Names the ONE stage this engine must not call stuck, and only
                    in the mode where that is true. Under upload.mode=direct the
                    staged-reclaimer CronJob owns the terminal tree's deletes, so
@@ -147,6 +148,8 @@ spec:
               {{- else }}
               value: ""
               {{- end }}
+            {{- /* The third switch. Rendered even when false so `helm get values`
+                   shows what the running engine was told. */}}
             - name: ALLOW_ORIGINAL_EXPIRY
               value: {{ .Values.dataPolicy.originals.allowExpiry | quote }}
             {{- /* Only read by a stage that declares backend: orthanc-rest.

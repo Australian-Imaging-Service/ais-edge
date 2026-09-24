@@ -475,6 +475,27 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned — every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
   {{- end }}
 
+  {{- /* EACH STAGE HAS ITS OWN RECLAIM WORDS, AND ANOTHER STAGE'S WORD IS NOT
+         HARMLESS. onAssigned asks whether assign produced its output, which is
+         true of every assigned session, so on the assigned stage it removed
+         every settled session before upload. onUploaded is only provable on the
+         tree the uploader reads. The engine now keeps in both cases, which
+         would leave the stage growing while the policy read as if it were
+         being cleaned; refusing here makes the mistake an install error. */ -}}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- range $stage, $allowed := $reclaimWords }}
+    {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
+    {{- if not (has $w $allowed) }}
+      {{- fail (printf "dataPolicy.derived.%s.reclaim=%s is not a word this stage accepts. Allowed: %s. Another stage's word is not harmless here: onAssigned on assigned or deidentified is true of every settled session and would remove it before upload, and onUploaded is only provable on the tree the uploader reads." $stage $w (join ", " $allowed)) }}
+    {{- end }}
+  {{- end }}
+  {{- /* onUploaded REMOVES ONLY THE COPY THE UPLOADER FINGERPRINTED. assign
+         always writes /data/assigned, so moving this stage's location points it
+         at a tree whose sessions can never be verified. */ -}}
+  {{- if and (eq (include "edge.assignedReclaim" .) "onUploaded") (ne (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .)) }}
+    {{- fail (printf "dataPolicy.derived.assigned.reclaim resolves to onUploaded, but the stage is at %s while the uploader reads %s. onUploaded removes only the copy the uploader fingerprinted, so nothing at %s could ever be verified and it would be kept for ever. assign writes /data/assigned: leave dataPolicy.derived.assigned.location at its default." (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .) (clean .Values.dataPolicy.derived.assigned.location)) }}
+  {{- end }}
+
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
          configurations where the operator has asked for something the mechanism
          cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}

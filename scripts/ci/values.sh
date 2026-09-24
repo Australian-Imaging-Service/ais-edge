@@ -249,6 +249,31 @@ deid:
   policyReviewed: true
 EOF
 
+# THE SHIPPED ENGINE, RENDERED. deid.engine defaults to ingest, but edge-base
+# pins orthanc, so without this no positive case renders the ingest layout
+# (uploader and policy engine on /data/deidentified, assign still on
+# /data/assigned) and the wiring check in runtime-templates.sh has nothing to
+# compare. edge-direct-ingest-reclaim also renders the staged-reclaimer CronJob
+# that owns the terminal tree under direct upload; neg-edge-reclaim-deid-onuploaded
+# keeps the same declaration failing under Orthanc-deid, where nothing owns it.
+cat >"$V/edge-deid-ingest.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+    deidentified:
+      reclaim: onUploaded
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
+EOF
+
 cat >"$V/edge-cloud.yaml" <<'EOF'
 topology: cloud
 hostAliases:
@@ -713,6 +738,9 @@ printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-i
 # onDeidentified is satisfied by the deidentify stage unlinking its own input,
 # so it is meaningless when that stage does not render.
 printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      reclaim: onAssigned\n' >"$V/neg-edge-reclaim-onassigned-on-assigned.yaml"
+printf 'dataPolicy:\n  derived:\n    grouped:\n      reclaim: onUploaded\n      location: /data/custom\n' >"$V/neg-edge-reclaim-onuploaded-on-grouped.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x\n' >"$V/neg-edge-reclaim-onuploaded-moved-assigned.yaml"
 
 # onUploaded needs a marker that only the s3-uploader writes, and upload.mode
 # =direct renders no s3-uploader. The condition could never come true, so the
@@ -1066,6 +1094,8 @@ edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
+edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
@@ -1141,6 +1171,9 @@ neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	exis
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
+neg-edge-reclaim-onassigned-on-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onassigned-on-assigned.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-on-grouped.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-moved-assigned.yaml	while the uploader reads
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
