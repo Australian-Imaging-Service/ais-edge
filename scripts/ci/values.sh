@@ -249,6 +249,7 @@ deid:
   policyReviewed: true
 EOF
 
+
 cat >"$V/edge-cloud.yaml" <<'EOF'
 topology: cloud
 hostAliases:
@@ -713,6 +714,9 @@ printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-i
 # onDeidentified is satisfied by the deidentify stage unlinking its own input,
 # so it is meaningless when that stage does not render.
 printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      reclaim: onAssigned\n' >"$V/neg-edge-reclaim-onassigned-on-assigned.yaml"
+printf 'dataPolicy:\n  derived:\n    grouped:\n      reclaim: onUploaded\n      location: /data/custom\n' >"$V/neg-edge-reclaim-onuploaded-on-grouped.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x\n' >"$V/neg-edge-reclaim-onuploaded-moved-assigned.yaml"
 
 # onUploaded needs a marker that only the s3-uploader writes, and upload.mode
 # =direct renders no s3-uploader. The condition could never come true, so the
@@ -1141,6 +1145,9 @@ neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	exis
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
+neg-edge-reclaim-onassigned-on-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onassigned-on-assigned.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-on-grouped.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-moved-assigned.yaml	while the uploader reads
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door

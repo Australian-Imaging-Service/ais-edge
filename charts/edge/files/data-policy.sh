@@ -267,6 +267,17 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # travelled further and assign's copy is gone. The second half
             # matters: without it, a session whose assigned copy was already
             # reclaimed would pin its grouped copy forever.
+            #
+            # THE GROUPED STAGE'S WORD, AND ONLY ITS WORD. It asks whether assign
+            # has produced its output, which says nothing about whether the
+            # assigned or deidentified copies are safe to remove. On the assigned
+            # stage its first test is the session itself, so it was always true
+            # and removed every settled session before upload.
+            if [ "$3" != "derived.grouped" ]; then
+                jlog reclaim_unknown_condition "$3" "reclaim word 'onAssigned' belongs to derived.grouped only and proves nothing about this stage, so no session in it is reclaimed" \
+                     ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"onAssigned\""
+                return 1
+            fi
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
         onDeidentified)
             # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
