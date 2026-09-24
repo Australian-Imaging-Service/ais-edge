@@ -84,6 +84,12 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
+# The tree the UPLOADER read, so the tree its markers fingerprint. Rendered from
+# edge.uploadSourceDir, the helper that also tells the s3-uploader where to read,
+# so the two cannot disagree. NOT the same as ASSIGNED_DIR under the ingest
+# engine: there the uploader reads /data/deidentified. Empty means unknown, and
+# `onUploaded` then refuses rather than guessing.
+UPLOAD_SOURCE_DIR="${UPLOAD_SOURCE_DIR:-}"
 
 # THE STAGE WHOSE DELETES BELONG TO SOMEONE ELSE. Empty everywhere except
 # upload.mode=direct, where the staged-reclaimer CronJob holds the delete
@@ -238,8 +244,17 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
             # authorised for removal on the strength of a marker describing an
             # upload of different bytes.
             [ -f "${UPLOAD_STATE_DIR}/$2" ] || return 1
-            [ -d "${ASSIGNED_DIR}/$2" ] || return 0   # already gone; nothing to protect
-            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${ASSIGNED_DIR}/$2")" ] ;;
+            # COMPARE THE TREE THE UPLOADER READ, not assign's output. Under
+            # deid.engine=ingest they differ: the uploader reads
+            # /data/deidentified, and assign's copy is already unlinked by the
+            # deidentify stage. Checking ASSIGNED_DIR here found it gone, skipped
+            # the comparison, and removed a re-staged deidentified session on a
+            # marker describing different bytes.
+            [ -n "${UPLOAD_SOURCE_DIR}" ] || return 1
+            # NOTHING TO COMPARE IS NOT PROOF, so keep. This returned 0 ("already
+            # gone; nothing to protect"), authorising a delete it never verified.
+            [ -d "${UPLOAD_SOURCE_DIR}/$2" ] || return 1
+            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${UPLOAD_SOURCE_DIR}/$2")" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already
             # travelled further and assign's copy is gone. The second half

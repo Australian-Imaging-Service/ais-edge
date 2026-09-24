@@ -52,13 +52,13 @@ TAB="$(printf '\t')"
 # `old` is backdated well past any settle window or minAge under test.
 build_case() {
     root="$1"
-    rm -rf "$root"; mkdir -p "$root/assigned" "$root/grouped" "$root/LOGS/s3-uploader-state" "$root/fb"
+    rm -rf "$root"; mkdir -p "$root/assigned" "$root/deidentified" "$root/grouped" "$root/LOGS/s3-uploader-state" "$root/fb"
 }
 mk_session() {  # mk_session <root> <stage-dir> <name> <age-minutes>
     d="$1/$2/$3"; mkdir -p "$d"; echo data > "$d/img.dcm"
     touch -d "$4 minutes ago" "$d/img.dcm" "$d"
 }
-mk_uploaded() {  # mk_uploaded <root> <name>
+mk_uploaded() {  # mk_uploaded <root> <name> [tree the uploader read, default assigned]
     # THE MARKER CARRIES A FINGERPRINT, NOT MERELY EXISTENCE. The uploader
     # writes a fingerprint of exactly the bytes it uploaded, and condition_met
     # recomputes it and compares. Existence alone was safe only while the marker
@@ -72,13 +72,17 @@ mk_uploaded() {  # mk_uploaded <root> <name>
     # step with each other; this is the third copy and it is deliberate,
     # because a test that computed it a different way would pass while the
     # engine failed.
-    if [ -d "$1/assigned/$2" ]; then
-        ( cd "$1/assigned/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
+    # Under deid.engine=ingest the uploader reads /data/deidentified, so the
+    # marker fingerprints THAT tree. Pass it as the third argument.
+    t="${3:-assigned}"
+    if [ -d "$1/$t/$2" ]; then
+        ( cd "$1/$t/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
             | sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
     else
-        # The session has already moved past the assigned stage. The engine
-        # returns "satisfied" before it compares anything, so the content here
-        # is irrelevant -- but the marker must still exist.
+        # The session has already moved past that stage. Only onAssigned reads
+        # a marker without comparing it (it asks whether the session got further),
+        # so the content is irrelevant there. onUploaded now REFUSES when the
+        # uploaded tree does not hold the session: see cases 2e and 2f.
         echo "moved-on" > "$1/LOGS/s3-uploader-state/$2"
     fi
 }
@@ -105,6 +109,7 @@ run_engine() {
         -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         -e UPLOAD_STATE_DIR=/data/LOGS/s3-uploader-state \
         -e ASSIGNED_DIR=/data/assigned \
+        -e UPLOAD_SOURCE_DIR="${UPLOAD_SOURCE_T-/data/assigned}" \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
         -e ORTHANC_USER="${ORTHANC_USER_T:-}" \
@@ -155,6 +160,36 @@ echo "a supplementary study, different bytes" > "$R/assigned/s1/img.dcm"
 touch -d "60 minutes ago" "$R/assigned/s1/img.dcm" "$R/assigned/s1"
 run_engine "$R" "$STAGES_ASSIGNED" true false
 check kept_stale_fingerprint "$R" assigned/s1 exist "marker describes an earlier upload of different bytes"
+
+# 2c - THE SAME CASE UNDER deid.engine=ingest, and the one that was missing.
+# The uploader reads /data/deidentified and fingerprints THAT tree; the deidentify
+# stage has already unlinked assign's copy. The engine used to test ASSIGNED_DIR,
+# find it gone, call the condition met without comparing anything, and remove a
+# re-staged deidentified session on a marker describing different bytes.
+STAGES_DEID="derived.deidentified${TAB}derived${TAB}/data/deidentified${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem"
+R="$WORK/c2c"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+echo "a re-sent study, different bytes" > "$R/deidentified/s1/img.dcm"
+touch -d "60 minutes ago" "$R/deidentified/s1/img.dcm" "$R/deidentified/s1"
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_DEID" true false
+check ingest_kept_stale_fp "$R" deidentified/s1 exist "ingest: marker describes an earlier upload of different bytes"
+
+# 2d - the positive half. Without it, 2c could pass because the stage is simply
+# never reclaimed under ingest.
+R="$WORK/c2d"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_DEID" true false
+check ingest_removed_eligible "$R" deidentified/s1 gone "ingest: uploaded bytes verified, past minAge, armed"
+
+# 2e - nothing to compare is not proof. The stage holds the session but the tree
+# the uploader read does not, e.g. a stage location moved away from where the
+# uploader reads. This used to be "already gone, nothing to protect" and deleted.
+R="$WORK/c2e"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/elsewhere run_engine "$R" "$STAGES_DEID" true false
+check unverifiable_kept "$R" deidentified/s1 exist "the uploaded tree does not hold this session"
+
+# 2f - an unset upload source refuses rather than guessing.
+R="$WORK/c2f"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T="" run_engine "$R" "$STAGES_DEID" true false
+check no_upload_source_kept "$R" deidentified/s1 exist "UPLOAD_SOURCE_DIR unset"
 
 # 3 — never uploaded -> kept regardless of age
 R="$WORK/c3"; build_case "$R"; mk_session "$R" assigned s1 600
