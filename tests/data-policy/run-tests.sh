@@ -72,12 +72,14 @@ mk_uploaded() {  # mk_uploaded <root> <name> [tree the uploader read, default as
     # step with each other; this is the third copy and it is deliberate,
     # because a test that computed it a different way would pass while the
     # engine failed.
+    # LC_ALL=C: busybox sort in the engine image orders bytes, and a host locale
+    # would order a multi-file tree differently and fail on a correct engine.
     # Under deid.engine=ingest the uploader reads /data/deidentified, so the
     # marker fingerprints THAT tree. Pass it as the third argument.
     t="${3:-assigned}"
     if [ -d "$1/$t/$2" ]; then
         ( cd "$1/$t/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
-            | sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
+            | LC_ALL=C sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
     else
         # The session has already moved past that stage. Only onAssigned reads
         # a marker without comparing it (it asks whether the session got further),
@@ -179,6 +181,10 @@ check unverifiable_kept "$R" deidentified/s1 exist "the uploaded tree does not h
 
 # 2f - an unset upload source refuses rather than guessing.
 R="$WORK/c2f"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+# An identical copy in the assigned tree, so an engine that fell back to
+# ASSIGNED_DIR would find a match and delete. Without it this case passes on
+# a fallback too, because there is nothing there to compare.
+cp -a "$R/deidentified/s1" "$R/assigned/s1"
 UPLOAD_SOURCE_T="" run_engine "$R" "$STAGES_DEID" true false
 check no_upload_source_kept "$R" deidentified/s1 exist "UPLOAD_SOURCE_DIR unset"
 
@@ -205,6 +211,59 @@ if grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
     pass external_owner_logged "kept line says the deletes are delegated"
 else
     fail external_owner_logged "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 2i - onAssigned BELONGS TO derived.grouped. It asks whether assign produced
+# its output, and on the assigned stage the first thing it tests is the session
+# itself, so it was always true: every settled session was removed before it
+# was uploaded. The chart now refuses the word there; this is the engine's half.
+R="$WORK/c2i"; build_case "$R"; mk_session "$R" assigned s1 60
+run_engine "$R" "derived.assigned${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem" true false
+check onassigned_on_assigned_kept "$R" assigned/s1 exist "onAssigned proves nothing about the assigned stage"
+if grep -q '"event":"reclaim_unknown_condition"' "$R/out.jsonl" 2>/dev/null; then
+    pass onassigned_on_assigned_logged "the refusal is logged, not silent"
+else
+    fail onassigned_on_assigned_logged "expected reclaim_unknown_condition; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 2j - the same under ingest, on the deidentified stage. A marker exists (any
+# uploaded session has one), which alone used to satisfy onAssigned.
+R="$WORK/c2j"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "derived.deidentified${TAB}derived${TAB}/data/deidentified${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem" true false
+check onassigned_on_deid_kept "$R" deidentified/s1 exist "ingest: onAssigned proves nothing about the deidentified stage"
+
+# 2k - onAssigned READS ASSIGNED_DIR, NOT THE UPLOAD SOURCE. Under ingest the two
+# differ. assign's output is here and nothing has been de-identified or
+# uploaded yet, so grouped may go; an engine reading UPLOAD_SOURCE_DIR would
+# keep it for ever.
+R="$WORK/c2k"; build_case "$R"; mk_session "$R" grouped s1 60; mk_session "$R" assigned s1 60
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_GROUPED" true false
+check ingest_grouped_after_assign "$R" grouped/s1 gone "ingest layout: assign's output in ASSIGNED_DIR is the proof"
+
+# 2l - A DELEGATED INGEST STAGE IS NOT STUCK. Under ingest the CronJob owns
+# /data/deidentified; a session with no marker, old enough to be stuck, must
+# log the delegated kept line and not stage_stuck, and must survive.
+R="$WORK/c2l"; build_case "$R"; mk_session "$R" deidentified s1 60
+STUCK_AFTER_T=1 STUCK_AFTER_S_T=1 UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T=derived.deidentified \
+    run_engine "$R" "$STAGES_DEID" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    fail ingest_delegated_not_stuck "stage_stuck fired for a stage whose deletes belong to the reclaimer"
+elif grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass ingest_delegated_not_stuck "no stage_stuck, and the kept line says the deletes are delegated"
+else
+    fail ingest_delegated_not_stuck "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+check ingest_delegated_kept "$R" deidentified/s1 exist "and this engine deleted nothing from that tree"
+
+# 2m - the control for 2l: the same tree, nothing delegated. stage_stuck MUST
+# fire, or 2l passes because STUCK_AFTER never took effect.
+R="$WORK/c2m"; build_case "$R"; mk_session "$R" deidentified s1 60
+STUCK_AFTER_T=1 STUCK_AFTER_S_T=1 UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T= \
+    run_engine "$R" "$STAGES_DEID" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    pass ingest_undelegated_stuck "same tree, nothing delegated: stuck fires"
+else
+    fail ingest_undelegated_stuck "expected stage_stuck; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
 fi
 
 # 3 — never uploaded -> kept regardless of age
