@@ -198,6 +198,106 @@ PY
 fi
 
 # -----------------------------------------------------------------------------
+# The policy engine reads the trees the uploader and assign actually write
+# -----------------------------------------------------------------------------
+# data-policy decides what to delete from three env values: the tree assign
+# writes (ASSIGNED_DIR), the tree the uploader fingerprinted (UPLOAD_SOURCE_DIR)
+# and where the markers live. Each is set in a different template from a
+# different helper, and a wrong one fails silently in the dangerous direction:
+# the engine compares a marker against the wrong tree. The shell tests cannot
+# see this, because they set the env themselves.
+#
+# STRICT LOAD. PyYAML keeps the LAST of two duplicate keys without a word, and
+# so does the API server. tier-1-solution shipped an env entry with two
+# `value:` keys, and ASSIGNED_DIR reached the pod as "86400". Every edge render
+# is loaded with duplicate keys refused, not only the data-policy object.
+#
+# Both layouts must be present, or one engine's wiring is checked vacuously:
+# the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
+# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
+ci_heading "data-policy reads the trees the uploader and assign write"
+
+# 2>&1: SystemExit writes to stderr (see above).
+wire_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, re, sys, yaml
+
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+def no_duplicate_keys(loader, node, deep=False):
+    seen = {}
+    for k, _ in node.value:
+        key = loader.construct_object(k, deep=deep)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, "duplicate key %r (lines %d and %d)" % (key, seen[key] + 1, k.start_mark.line + 1), k.start_mark)
+        seen[key] = k.start_mark.line
+    return loader.construct_mapping(node, deep=deep)
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, no_duplicate_keys)
+
+def containers(doc):
+    spec = doc.get("spec") or {}
+    tpl = spec.get("template") or {}
+    return (tpl.get("spec") or {}).get("containers") or []
+
+def env(c):
+    return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
+
+problems, checked, layouts = [], 0, set()
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
+    case = os.path.basename(path)[:-len(".yaml")]
+    try:
+        docs = [d for d in yaml.load_all(open(path), Loader=StrictLoader) if d]
+    except yaml.YAMLError as e:
+        problems.append("%s: %s" % (case, " ".join(str(e).split())))
+        continue
+    dp = up = None
+    rows = {}
+    for d in docs:
+        for c in containers(d):
+            if d.get("kind") == "DaemonSet" and c.get("name") == "data-policy":
+                dp = env(c)
+            if d.get("kind") == "Deployment" and c.get("name") == "uploader":
+                up = env(c)
+        if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+            rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+    if dp is None:
+        continue
+    checked += 1
+    src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
+    layouts.add("ingest" if src != adir else "orthanc")
+    if not src.startswith("/"):
+        problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
+    if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
+        problems.append("%s: ASSIGNED_DIR=%r but the assigned stage is at %r" % (case, adir, rows["derived.assigned"][2]))
+    if up is not None:
+        if src != up.get("ASSIGNED_DIR"):
+            problems.append("%s: UPLOAD_SOURCE_DIR=%r but the s3-uploader reads %r" % (case, src, up.get("ASSIGNED_DIR")))
+        if dp.get("UPLOAD_STATE_DIR") != up.get("STATE_DIR"):
+            problems.append("%s: UPLOAD_STATE_DIR=%r but the s3-uploader writes %r" % (case, dp.get("UPLOAD_STATE_DIR"), up.get("STATE_DIR")))
+    for name, r in rows.items():
+        word = r[5] if len(r) > 5 else ""
+        if word == "onUploaded" and r[2] != src:
+            problems.append("%s: %s is onUploaded at %r but the uploader reads %r" % (case, name, r[2], src))
+        if word == "onAssigned" and name != "derived.grouped":
+            problems.append("%s: %s uses onAssigned, which only derived.grouped may" % (case, name))
+    if not re.fullmatch(r"[0-9]+", dp.get("STUCK_AFTER_S") or ""):
+        problems.append("%s: STUCK_AFTER_S=%r is not a number of seconds" % (case, dp.get("STUCK_AFTER_S")))
+
+if checked == 0:
+    problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
+for want in ("orthanc", "ingest"):
+    if checked and want not in layouts:
+        problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if problems:
+    raise SystemExit("; ".join(problems))
+print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s)"
+      % (checked, ", ".join(sorted(layouts))))
+PY
+)" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control
