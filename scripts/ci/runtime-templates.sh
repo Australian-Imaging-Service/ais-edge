@@ -215,6 +215,13 @@ fi
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
 # (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
+#
+# EXTERNAL_RECLAIM_STAGE must name a row of stages.tsv, and at least one render
+# must set it. The engine compares it against field 1 of that table, and it is
+# checked before any reclaim condition, so it is what keeps this engine off a
+# tree the staged-reclaimer CronJob owns. fingerprint-contract.sh checks the
+# same thing from a site file of its own; on tier-1-solution that render stopped
+# rendering and the check has been skipping, so this one runs on CI's renders.
 ci_heading "data-policy reads the trees the uploader and assign write"
 
 # 2>&1: SystemExit writes to stderr (see above).
@@ -244,7 +251,7 @@ def containers(doc):
 def env(c):
     return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
 
-problems, checked, layouts = [], 0, set()
+problems, checked, delegated, layouts = [], 0, 0, set()
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     case = os.path.basename(path)[:-len(".yaml")]
     try:
@@ -282,6 +289,11 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
             problems.append("%s: %s is onUploaded at %r but the uploader reads %r" % (case, name, r[2], src))
         if word == "onAssigned" and name != "derived.grouped":
             problems.append("%s: %s uses onAssigned, which only derived.grouped may" % (case, name))
+    ext = dp.get("EXTERNAL_RECLAIM_STAGE") or ""
+    if ext:
+        delegated += 1
+        if ext not in rows:
+            problems.append("%s: EXTERNAL_RECLAIM_STAGE=%r is not a row in stages.tsv, so the engine never recognises the CronJob's tree" % (case, ext))
     if not re.fullmatch(r"[0-9]+", dp.get("STUCK_AFTER_S") or ""):
         problems.append("%s: STUCK_AFTER_S=%r is not a number of seconds" % (case, dp.get("STUCK_AFTER_S")))
 
@@ -290,10 +302,12 @@ if checked == 0:
 for want in ("orthanc", "ingest"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if checked and not delegated:
+    problems.append("no render sets EXTERNAL_RECLAIM_STAGE, so the delegation wiring goes unchecked")
 if problems:
     raise SystemExit("; ".join(problems))
-print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s)"
-      % (checked, ", ".join(sorted(layouts))))
+print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s; %d delegate a stage)"
+      % (checked, ", ".join(sorted(layouts)), delegated))
 PY
 )" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
 
