@@ -182,6 +182,31 @@ R="$WORK/c2f"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded 
 UPLOAD_SOURCE_T="" run_engine "$R" "$STAGES_DEID" true false
 check no_upload_source_kept "$R" deidentified/s1 exist "UPLOAD_SOURCE_DIR unset"
 
+# 2g - A MATCH ON THE UPLOADER'S COPY MUST NOT AUTHORISE REMOVING ANOTHER ONE.
+# A stage whose location is not the uploaded tree, holding a session of the same
+# name with different, never-uploaded bytes. The marker matches the uploader's
+# copy. The engine used to verify that copy and then delete this one.
+R="$WORK/c2g"; build_case "$R"
+mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+mk_session "$R" grouped s1 60
+echo "never uploaded, different bytes" > "$R/grouped/s1/img.dcm"
+touch -d "60 minutes ago" "$R/grouped/s1/img.dcm" "$R/grouped/s1"
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "derived.grouped${TAB}derived${TAB}/data/grouped${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem" true false
+check other_copy_kept "$R" grouped/s1 exist "the verified copy is the uploader's, not this one"
+
+# 2h - EXTERNAL OWNERSHIP MUST HOLD EVEN WHEN THE CONDITION IS MET. A site moved
+# from upload.mode=s3 to direct keeps its old S3 markers, and they still match.
+# The staged-reclaimer CronJob owns this tree and confirms against XNAT; this
+# engine used to consult ownership only after a FAILED condition, and deleted.
+R="$WORK/c2h"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T=derived.deidentified run_engine "$R" "$STAGES_DEID" true false
+check external_owner_kept "$R" deidentified/s1 exist "a matching marker must not override the CronJob's authority"
+if grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass external_owner_logged "kept line says the deletes are delegated"
+else
+    fail external_owner_logged "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
 # 3 — never uploaded -> kept regardless of age
 R="$WORK/c3"; build_case "$R"; mk_session "$R" assigned s1 600
 run_engine "$R" "$STAGES_ASSIGNED" true false
