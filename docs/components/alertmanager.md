@@ -86,6 +86,10 @@ route (root) ──► email-primary             every alert no branch below cla
  │     session that lands in XNAT; the uploader re-logs success on every
  │     --loop pass, so any shorter repeat is just mail about an upload that
  │     already worked.
+ ├─ alertname = "XNATResourcesRepaired" ────► email-xnat-repair
+ │     group_by [alertname, cluster], group_wait 2m, repeat_interval 720h.
+ │     XNAT had lost files and the uploader re-sent them. One firing-only
+ │     mail per edge, because one XNAT restart repairs many sessions at once.
  ├─ severity = "info" ──────────────────────► slack-only   (Slack configured)
  │                                            info-email   (no Slack)
  │     repeat_interval 720h. CARotationDue trips at T-365d and stays firing
@@ -186,7 +190,7 @@ longer a pattern to fall back on.
 | `sites/<site>/secrets.enc.yaml` | the `alertmanager-smtp` Secret (`username`, `password`) named by `.smtpSecretRef`, and a Slack webhook Secret (key `webhook-url`) named by `.slackWebhookSecretRef` |
 | `charts/mgmt/values.yaml` (`kube-prometheus-stack:`) | `alertmanagerSpec.configSecret = alertmanager-aisedge-config`, `alertmanagerSpec.secrets` (which Secrets get mounted under `/etc/alertmanager/secrets/`), and `retention: 744h` — which must exceed the longest `repeat_interval` in the config |
 | `charts/mgmt/files/prometheus-rules/*.yaml` | the PrometheusRule files that produce the alerts (see `prometheus.md`) |
-| `charts/mgmt/files/loki-ruler-rules.yaml` | the log-derived alerts (`DICOMRejectedUnmappedAET`, `XNATUploadSuccess`, `SessionStagedNotConfirmedInXNAT`) that Loki's ruler posts to this same Alertmanager |
+| `charts/mgmt/files/loki-ruler-rules.yaml` | the log-derived alerts (`DICOMRejectedUnmappedAET`, `XNATUploadSuccess`, `XNATResourcesRepaired`, `SessionStagedNotConfirmedInXNAT`) that Loki's ruler posts to this same Alertmanager |
 
 ## Operations
 

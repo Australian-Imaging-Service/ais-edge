@@ -157,6 +157,14 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
+3	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
+2	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S1.E1'"}
+2	{"namespace":"xnat-upload","cluster":"upload-first"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S2.E2'"}
+3	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S3.E3': ['proj:S3:E3:1-T1:DICOM']"}
+2	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S3.E3'"}
+2	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S4.E4'"}
+40	{"namespace":"xnat-upload","cluster":"repair-slow"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S5.E5': ['proj:S5:E5:1-T1:DICOM']"}
+2	{"namespace":"xnat-upload","cluster":"repair-slow"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S5.E5'"}
 EOF
 }
 
@@ -176,6 +184,12 @@ disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above t
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
+upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
+upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
+upload_slow_repair	XNATUploadSuccess	repair-slow	nofire	the re-send took 38m; still a repair, still no "upload completed"
+repair_alerts	XNATResourcesRepaired	repair-fixed	fire	XNAT had lost 2 resources and the uploader re-sent them
+repair_not_on_first_upload	XNATResourcesRepaired	upload-first	nofire	a first upload creates resources; nothing was repaired
 EOF
 }
 
