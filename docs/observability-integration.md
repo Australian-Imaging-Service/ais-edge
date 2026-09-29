@@ -213,7 +213,7 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |
 | `IngestPodCrashLoop` | warning | Prom | >3 restarts/1h in the release namespace |
 | `NodeCountChanged` | info | Prom | `kube_node_info` changed in 10m |
-| `CPUThrottlingHigh` | info | Prom | kube-prometheus-stack's rule re-added without the `data-policy` container (the upstream copy is off via `defaultRules.disabled`): >25% of CFS periods throttled over 5m, for 15m |
+| `CPUThrottlingHigh` | info | Prom | kube-prometheus-stack's rule re-added without this release's own `data-policy` pods, scoped by namespace and pod (the upstream copy is off via `defaultRules.disabled`): >25% of CFS periods throttled over 5m, for 15m |
 
 Two alertnames appear in the shipped Alertmanager routing but in **no rule on this tier**: `DICOMRejectedUnmappedAET` and `SessionStagedNotConfirmedInXNAT` both have matchers in `charts/edge/files/alertmanager-config.yaml` (routed to `email-no-resolved`, because a "[RESOLVED]" mail for either would be false reassurance) and nothing that raises them. Those routes are currently inert. Do not read the Alertmanager config as an inventory — it is the wider fleet's routing table, and this tier fills in part of it.
 

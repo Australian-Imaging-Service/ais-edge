@@ -21,9 +21,10 @@ groups:
       description: The number of nodes in this cluster changed in the last 10 minutes. On a tier-1 appliance there is exactly
         one node, so this should never fire.
 
-# Upstream CPUThrottlingHigh, minus the data-policy reporter.
+# Upstream CPUThrottlingHigh, minus this release's data-policy reporter pods.
 # The upstream copy is off: kube-prometheus-stack.defaultRules.disabled in values.yaml.
 # No interval: evaluated at the Prometheus default, as upstream is.
+# __RELEASE_NAMESPACE__ is substituted by templates/observability.yaml.
 - name: ais-edge-resources
   rules:
   - alert: CPUThrottlingHigh

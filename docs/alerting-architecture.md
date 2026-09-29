@@ -94,7 +94,7 @@ with `.Files.Get` and Helm never templates it.
 | `KubePodCrashLooping` | Prometheus | Container restart count, kube-state-metrics. |
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
-| `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without the data-policy reporter. That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
+| `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without this release's own data-policy reporter pods (scoped by namespace and pod; a same-named container elsewhere still alerts). That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
 `component`, `level` — are built by Vector from **pod labels**, not from the

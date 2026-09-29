@@ -149,7 +149,10 @@ metadata:
   labels:
     {{- include "edge.labels" $ | nindent 4 }}
 spec:
-{{ $.Files.Get $path | indent 2 }}
+{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
+       release's own data-policy pods. A plain replace, never tpl: the files
+       carry Prometheus's own {{ $labels }} templates. */}}
+{{ $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | indent 2 }}
 {{- end }}
 
 ---
