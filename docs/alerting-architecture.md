@@ -88,10 +88,13 @@ with `.Files.Get` and Helm never templates it.
 | DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for the `__unmapped_aet__` subtree — an AE title nobody has mapped to a project yet. |
+| `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. |
+| `XNATResourcesRepaired` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session but had lost files, and the uploader re-sent them. `XNATUploadSuccess` leaves those sessions out, so a repair is never mailed as "upload completed". |
 | `KubeNodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
 | `KubePodCrashLooping` | Prometheus | Container restart count, kube-state-metrics. |
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
+| `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without the data-policy reporter. That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
 `component`, `level` — are built by Vector from **pod labels**, not from the
@@ -115,18 +118,19 @@ that content comes from:
   `files/prometheus-rules/*.yaml` and emits one object per severity file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
   `ais-edge-warning` (`IngestPodCrashLoop`) and `ais-edge-info`
-  (`NodeCountChanged`). Those objects deliberately carry **no** `release` label;
+  (`NodeCountChanged`, and `CPUThrottlingHigh` in place of the upstream copy). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
   is `false`. While it is `true` the operator selects only rules labelled with
   its own release, so it would load none of these — silently, with nothing to
   see in any log.
 - **The Loki ruler ships with a rule set.**
-  `charts/edge/files/loki-ruler-rules.yaml` holds 11 LogQL alerts in four groups
+  `charts/edge/files/loki-ruler-rules.yaml` holds 18 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
-  `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError` and
-  `OrthancStorageGrowing`, which ship but are not tabulated.
+  `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError`,
+  `OrthancStorageGrowing` and the other rules of those groups, which ship but
+  are not tabulated.
   `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
   `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled
   `loki_rule: "true"` — the **label**, not the name and not the namespace, is
@@ -134,7 +138,9 @@ that content comes from:
   render time from `dataPolicy.originals` (`__DP_MIN_FREE_DISK_PCT__`,
   `__DP_QUARANTINE_ALERT_AFTER_S__`), because LogQL cannot compare two extracted
   fields; left unreplaced they are a rule-load syntax error and Loki drops the
-  whole group. The template `fail`s outright if the file is missing or empty. A
+  whole group. `DataPolicyReporterSilent` takes two more the same way: the
+  site's `clusterLabel` (`__CLUSTER_LABEL__`, escaped for LogQL) and its
+  silence window (`__DP_REPORT_SILENCE_S__`). The template `fail`s outright if the file is missing or empty. A
   site adds rules of its own by applying a *second* ConfigMap in the same
   namespace carrying the same label — not by editing this one (next section).
 - **Alertmanager runs the chart's own configuration, not the subchart's.**
@@ -148,6 +154,7 @@ that content comes from:
   alert this chart raises to a `null` receiver — a healthy-looking stack that
   delivers nothing. The rendered config's root receiver is `email-primary`, with
   severity-based routes onto `email-no-resolved`, `email-upload-success`,
+  `email-xnat-repair`,
   `info-email`, and a deliberately empty `null-meta` for kube-prometheus-stack's
   own meta-alerts. `observability.stack.alerting.*` from the site file is
   substituted into it as `__SENTINEL__` tokens — a plain `replace`, never `tpl`,

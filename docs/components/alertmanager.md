@@ -113,6 +113,9 @@ route (group_by: [alertname, cluster, session], group_wait 30s,
   ├─ alertname=DICOMRejectedUnmappedAET        → email-no-resolved
   ├─ alertname=XNATUploadSuccess               → email-upload-success
   │                                              (group_wait 10s, repeat 720h)
+  ├─ alertname=XNATResourcesRepaired           → email-xnat-repair
+  │                                              (group_by [alertname, cluster],
+  │                                               group_wait 2m, repeat 720h)
   ├─ severity=info                             → info-email  (repeat 720h)
   ├─ alertname=SessionStagedNotConfirmedInXNAT → email-no-resolved (repeat 24h)
   ├─ severity=critical                         → email-primary
@@ -125,6 +128,8 @@ receivers:
   email-primary         to: <emailTo>, send_resolved: true
   email-no-resolved     to: <emailTo>, send_resolved: false
   email-upload-success  to: <emailTo>, Subject "XNAT upload completed — <session>"
+  email-xnat-repair     to: <emailTo>, send_resolved: false,
+                        Subject "XNAT was missing files, re-sent from <cluster>"
   info-email            to: <emailTo>, Subject "AIS-Edge [info]: <alertname>"
   null-meta             no *_configs at all — Alertmanager's null sink
 

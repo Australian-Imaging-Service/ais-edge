@@ -465,6 +465,9 @@ route:
       receiver: email-no-resolved     # firing-only: "resolved" would mislead
     - matchers: ['alertname = "XNATUploadSuccess"']
       receiver: email-upload-success
+    - matchers: ['alertname = "XNATResourcesRepaired"']
+      receiver: email-xnat-repair     # firing-only, one mail per edge per burst
+      group_by: ["alertname", "cluster"]
 receivers:
   # A receiver with a name and no *_configs is Alertmanager's null sink.
   - name: "null-meta"
@@ -476,7 +479,7 @@ receivers:
     email_configs:
       - to: "__ALERT_EMAIL_TO__"
         send_resolved: false
-  # ... email-upload-success, info-email
+  # ... email-upload-success, email-xnat-repair, info-email
 ```
 
 ---
