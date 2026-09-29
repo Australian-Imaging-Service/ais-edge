@@ -136,6 +136,7 @@ receivers:
 
 inhibit_rules:
   alertname=KubernetesAPIServerDown  inhibits  alertname=NodeNotReady
+  alertname=ReclaimerRunUnavailable  inhibits  alertname=ReclaimerNotSucceeding
 ```
 
 **`null-meta` is the only null receiver here, and it is deliberate.** `Watchdog`
@@ -168,10 +169,18 @@ Secret nothing created, and Alertmanager treats that ENOENT as unrecoverable at
 send time — `severity=info` alerts were delivered *nowhere* and existed only as
 an error line in the pod log.
 
-The single inhibition rule is the one worth having on one node: if the API server
+Two inhibition rules ship. The first is the one worth having on one node: if the API server
 is unreachable, node readiness cannot be evaluated at all — kube-state-metrics
 reads it through that same API server — so `NodeNotReady` is a symptom of the
-outage already being reported. The subchart's severity-based inhibitions
+outage already being reported. The second keeps one reclaimer outage to one
+mail. A reclaimer that cannot reach XNAT logs why and fails every run, so
+`ReclaimerRunUnavailable` fires, and `ReclaimerNotSucceeding` would follow
+within the hour for the same cause. It is held back only while the specific
+alert fires: once that clears, a reclaimer still not succeeding is dying
+without logging why, and it mails on its own. A different reclaimer fault that
+starts during an outage therefore mails late, up to about 3h after the last
+logged failure; at recovery one stray `ReclaimerNotSucceeding` mail, then its
+resolve, is possible, because the two alerts clear a minute or so apart. The subchart's severity-based inhibitions
 (critical suppressing warning, and so on) are **not** in this config; this file
 replaces `alertmanager.yaml` wholesale rather than merging with it.
 
@@ -293,7 +302,7 @@ kubectl -n xnat-ingest rollout restart statefulset/alertmanager-ais-kps-alertman
 | SMTP Secret not mounted | `smtp_auth_password_file` reads a path that does not exist; authentication fails at notify time, long after a green install | `alertmanagerSpec.secrets` must name whatever `observability.stack.alerting.existingSecret` names — `alertmanager-smtp` by default. The render `fail`s when the two disagree, so this one cannot reach a cluster |
 | SMTP password leak | Attacker can send mail-as-us | Never in `values.yaml` — it lives SOPS-encrypted in `sites/<site>/secrets.enc.yaml`. Rotate with `scripts/site-secrets.sh edit` + `apply`, then restart the StatefulSet |
 | `kube-prometheus-stack.alertmanager.config` edited, expecting it to change routing | It generates `alertmanager-ais-kps-alertmanager`, which this release does not mount. The edit renders cleanly, passes review, and has no effect | Routing lives in `charts/edge/files/alertmanager-config.yaml`; the site-level knobs are `observability.stack.alerting.*`. Verify with the `.spec.configSecret` command in Operations |
-| Inhibit rule too broad | Real alerts hidden during an outage | Only one rule ships: `KubernetesAPIServerDown` inhibits `NodeNotReady`, and only because node readiness is unknowable while the API server is down. It carries no `equal:` clause — with one node and one API server there is nothing to disambiguate |
+| Inhibit rule too broad | Real alerts hidden during an outage | Two rules ship. `KubernetesAPIServerDown` inhibits `NodeNotReady`, and only because node readiness is unknowable while the API server is down. `ReclaimerRunUnavailable` inhibits `ReclaimerNotSucceeding`, the same reclaimer failure seen from its log and from its CronJob; a different reclaimer fault that starts during an outage mails only once `ReclaimerRunUnavailable` clears, up to about 3h after the last logged failure. Neither carries an `equal:` clause: one node, one API server, one reclaimer, and the Loki-sourced alert carries a `cluster` label that the Prometheus-sourced one does not |
 | Alertmanager pod restart | Brief delivery gap | Silences and the notification log survive on the PVC. 1 replica; HA needs peers, which a single node cannot provide |
 | Alerts fire but Alertmanager is always red | Operators learn to ignore it | `nodeExporter`, `kubeControllerManager`, `kubeScheduler`, `kubeProxy` and `kubeEtcd` are disabled precisely because those targets do not exist on a single k0s node and would each contribute a permanent "target down" |
 

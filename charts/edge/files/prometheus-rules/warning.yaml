@@ -29,3 +29,88 @@ groups:
       summary: Ingest pod {{ $labels.pod }} crashlooping
       description: '{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour AND is not ready now. New DICOMs may not be received, staged, or uploaded. The readiness clause is what
         makes this clear on recovery: without it the alert kept paging for a full hour after the pod was healthy again, because the restarts stayed inside the 1h window.'
+
+# Upstream KubeJobFailed, minus this release's staged-reclaimer Jobs, and
+# ReclaimerNotSucceeding, which covers those Jobs instead.
+# The upstream copy is off: kube-prometheus-stack.defaultRules.disabled in values.yaml.
+# No interval: evaluated at the Prometheus default, as upstream is.
+# __RELEASE_NAMESPACE__ is substituted by templates/observability.yaml.
+# __RECLAIMER_ALERT_AFTER_S__: dataPolicy.derived.stagedReclaimer.alertAfter, in seconds.
+- name: ais-edge-jobs
+  rules:
+  - alert: KubeJobFailed
+    # WHY THE RECLAIMER IS LEFT OUT: a failed Job is kept (failedJobsHistoryLimit),
+    # so one self-healing DNS blip on 2026-09-27 kept this firing, and mailing
+    # daily, until the Job was deleted by hand two days later.
+    # Reclaimer failures are covered below by ReclaimerNotSucceeding, and by
+    # ReclaimerRunUnavailable (Loki) when the run logs why. Both clear on the
+    # next good run, whatever Jobs history keeps.
+    # SCOPE: only <release>-staged-reclaimer-<n> Jobs in this release's namespace.
+    # The expression is upstream verbatim (kube-prometheus-stack 87.19.2); only
+    # the `unless` is ours.
+    expr: |-
+      (
+        kube_job_failed{job="kube-state-metrics", namespace=~".*"}  > 0
+      )
+      unless on (namespace, job_name)
+      kube_job_failed{namespace="__RELEASE_NAMESPACE__", job_name=~".+-staged-reclaimer-[0-9]+"}
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      description: Job {{ $labels.namespace }}/{{ $labels.job_name }} failed to complete. Removing failed job after investigation should clear this alert on cluster {{ $labels.cluster }}.
+      runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
+      summary: Job failed to complete.
+
+  - alert: ReclaimerNotSucceeding
+    # The staged-reclaimer CronJob has had no successful run for alertAfter,
+    # for ANY reason. ReclaimerRunUnavailable only sees runs that log why they
+    # stopped; this also sees the ones that cannot: killed at the deadline,
+    # OOM, a crash, an image that will not pull, runs never scheduled.
+    # Reads the CronJob's last success, so kept failed Jobs cannot hold it
+    # firing, which is what went wrong with KubeJobFailed.
+    # SECOND HALF: a CronJob that has never succeeded has no last success, so
+    # its age is taken from creation instead. Without it a reclaimer broken
+    # from install would never alert.
+    # Held back while ReclaimerRunUnavailable fires (alertmanager-config.yaml,
+    # inhibit_rules): one outage, one mail.
+    expr: |-
+      (
+        time() - max by (namespace, cronjob) (
+          kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob=~".+-staged-reclaimer"}
+        )
+        > __RECLAIMER_ALERT_AFTER_S__
+      )
+      or
+      (
+        (
+          time() - max by (namespace, cronjob) (
+            kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob=~".+-staged-reclaimer"}
+          )
+          > __RECLAIMER_ALERT_AFTER_S__
+        )
+        unless on (namespace, cronjob)
+        kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob=~".+-staged-reclaimer"}
+      )
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Staged reclaimer {{ $labels.cronjob }} has not succeeded for {{ $value | humanizeDuration }}
+      description: |
+        No run of {{ $labels.namespace }}/{{ $labels.cronjob }} has completed successfully
+        for {{ $value | humanizeDuration }} (counted from its creation if none ever has).
+        While this fires no staged session is confirmed against XNAT or reclaimed, so the
+        staged tree only grows.
+        Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
+        Arriving on its own, the runs are ending without logging why:
+          1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+               kubectl -n {{ $labels.namespace }} get cronjob {{ $labels.cronjob }}
+          2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
+             its deadline (DeadlineExceeded in kubectl describe job).
+               kubectl -n {{ $labels.namespace }} get jobs,pods -l component=s3-reclaimer
+          3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+               kubectl -n {{ $labels.namespace }} logs -l component=s3-reclaimer --tail=50
+        If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
+        with it: it must stay above two periods plus deadlineSeconds.
+        Clears on the next successful run.

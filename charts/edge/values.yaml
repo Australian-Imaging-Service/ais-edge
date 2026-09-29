@@ -430,6 +430,15 @@ dataPolicy:
       maxRemovals: 50
       # Killed if a run hangs on an unreachable XNAT, before the next is due.
       deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run,
+      # whatever the cause: failed, killed at the deadline, crashed, not started.
+      # Default: one failed run never fires it. Two failed runs, then a third not
+      # succeeding within 15m, do: about 3h15m after the last success.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it. Raise it when you slow the schedule.
+      # The chart refuses less (reading the period from the usual schedule
+      # forms; others are checked against deadlineSeconds only), and forever/never.
+      alertAfter: 3h
       resources:
         requests: {cpu: 20m, memory: 64Mi}
         limits: {memory: 256Mi}
@@ -1167,6 +1176,10 @@ kube-prometheus-stack:
       # the same rule, minus the data-policy reporter.
       # CAUTION: re-enable it and every throttled container alerts twice.
       CPUThrottlingHigh: true
+      # Replaced by ais-edge-jobs in files/prometheus-rules/warning.yaml: the
+      # same rule, minus the staged-reclaimer's own Jobs, whose failures
+      # ReclaimerRunUnavailable reports. Same caution as above.
+      KubeJobFailed: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true

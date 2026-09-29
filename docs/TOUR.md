@@ -749,15 +749,16 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **twenty-three**
-alerts of its own: eighteen log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and five metric rules evaluated by Prometheus
+Dashboards and alert rules ship with the chart. It defines **twenty-seven**
+alerts of its own: twenty log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and seven metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
-`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
-`NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
+`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
+`ReclaimerNotSucceeding`, `NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
 kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
-apart from `CPUThrottlingHigh`, which the chart replaces with a copy that leaves
-out the data-policy reporter. The ones specific to this tier are:
+apart from `CPUThrottlingHigh` and `KubeJobFailed`, which the chart replaces with
+copies that leave out the data-policy reporter and the staged-reclaimer's own
+Jobs. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
@@ -781,9 +782,24 @@ The alert expressions are unit-tested against recorded log fixtures
 (`tests/loki-rules/`), including the case that asserts a tqdm progress bar
 reading `401.71it/s` does **not** raise a credential alert.
 
-Two tier-2 alerts — `ReclaimerRunUnavailable` and
-`SessionStagedNotConfirmedInXNAT` — are deliberately absent, because there is no
-S3 reclaimer and no staging bucket on a single node.
+`ReclaimerRunUnavailable` and `SessionStagedNotConfirmedInXNAT` are shared with
+tier-2. Under `upload.mode=direct` the staged-reclaimer CronJob runs the same
+`reclaim-staged.sh` against the local upload tree instead of a bucket, so a
+reclaimer that keeps failing, or a session XNAT never confirms, raises the same
+two alerts. One failed run does not: the next hourly run finishing clears it.
+
+`ReclaimerRunUnavailable` only sees runs that log why they stopped. A run killed
+at its deadline, OOM-killed, crashing, stuck on an image pull or never scheduled
+logs nothing, so **`ReclaimerNotSucceeding`** watches the CronJob itself: no
+successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h) raises
+it, counted from creation if it has never succeeded. One failed run never fires
+it, even when the next run takes its full deadline to succeed; two failed runs,
+then a third not succeeding within 15 minutes, do, about 3h15m after the last
+success. It clears on the next good run, however many failed Jobs history
+keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
+outage sends one mail. If you slow the schedule, raise `alertAfter` with it: it
+must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
+the usual schedule forms (hourly, every N hours, daily).
 
 ---
 

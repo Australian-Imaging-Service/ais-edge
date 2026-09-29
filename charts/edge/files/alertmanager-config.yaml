@@ -384,4 +384,21 @@ inhibit_rules:
     # being enforced when nothing is. Tier-1 is one node and one API server,
     # so there is genuinely nothing to disambiguate.
 
+  # One reclaimer outage, one mail. A reclaimer that cannot reach XNAT logs
+  # why and fails every run, so ReclaimerRunUnavailable fires first (its `for`
+  # is 75m) and ReclaimerNotSucceeding would follow within the hour, for the
+  # same cause. The specific one wins. Once it clears, a reclaimer still not
+  # succeeding is dying without saying why, and that mails on its own.
+  # LIMITS: a different reclaimer fault that starts during an outage mails only
+  # once ReclaimerRunUnavailable clears, up to about 3h after the last logged
+  # failure. At recovery the two clear a minute or so apart, so one stray
+  # ReclaimerNotSucceeding mail, then its resolve, is possible.
+  - source_matchers:
+      - alertname = "ReclaimerRunUnavailable"
+    target_matchers:
+      - alertname = "ReclaimerNotSucceeding"
+    # No `equal:`, as above. The source comes from Loki and carries `cluster`,
+    # the target from Prometheus and does not, so equal: [cluster] would never
+    # match. One node, one reclaimer.
+
 templates: []

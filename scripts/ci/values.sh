@@ -195,6 +195,17 @@ observability:
   enabled: false
 EOF
 
+# The reclaimer slowed to every 6h, alertAfter raised with it (floor 12h50m).
+# It must render, and promtool.sh checks its threshold is 13h in seconds, so a
+# template that hardcoded the default would be caught.
+cat >"$V/edge-reclaimer-six-hourly.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    stagedReclaimer:
+      schedule: "17 */6 * * *"
+      alertAfter: 13h
+EOF
+
 cat >"$V/edge-obsstack-on.yaml" <<'EOF'
 # Alerting is required whenever the local stack is on: without it Alertmanager
 # renders with receiver "null" and every alert is discarded. The guard refuses
@@ -715,6 +726,20 @@ printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no
 # non-positive loop is a division by zero at render time rather than a slow
 # poll. Needs the observability stack on, since the guard lives beside the rules.
 printf 'upload:\n  direct:\n    loop: 0\n'                 >"$V/neg-edge-upload-loop-zero.yaml"
+# ReclaimerNotSucceeding compares alertAfter with the time since the last
+# successful run, so it must exceed 2 x the schedule period + deadlineSeconds:
+# one failed run then a slow success already goes that long. forever/never/
+# empty ("-", no limit) and 0 are refused too. Needs the observability stack
+# on, like the loop guard above.
+# 1h: under the hourly floor (2h50m). six-hourly-3h: the default 3h, left as
+# it is when the schedule is slowed, which would mail every cycle.
+printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      alertAfter: 1h\n' >"$V/neg-edge-reclaimer-alert-after-1h.yaml"
+printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      schedule: "17 */6 * * *"\n' >"$V/neg-edge-reclaimer-six-hourly-3h.yaml"
+for w in forever never '""' 0 30m; do
+  n="$(printf '%s' "$w" | tr -d '"')"; n="${n:-empty}"
+  printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      alertAfter: %s\n' "$w" \
+    >"$V/neg-edge-reclaimer-alert-after-$n.yaml"
+done
 printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-not-reviewed.yaml"
 # The pre-0.6.0 path. Accepting it as an alias would leave the very confusion
 # the move exists to end, so it must fail and name the new key.
@@ -1107,6 +1132,7 @@ edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml ed
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
+edge-reclaimer-six-hourly	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reclaimer-six-hourly.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
@@ -1169,6 +1195,13 @@ neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
 neg-edge-upload-loop-zero	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-upload-loop-zero.yaml	upload.direct.loop must be a positive number of seconds
+neg-edge-reclaimer-alert-after-forever	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-forever.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-never	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-never.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-empty	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-empty.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-0	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-0.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-30m	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-30m.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-1h	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-1h.yaml	must be longer than 10200s
+neg-edge-reclaimer-six-hourly-3h	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-six-hourly-3h.yaml	must be longer than 46200s
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
 neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty

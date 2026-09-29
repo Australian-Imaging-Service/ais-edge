@@ -144,6 +144,35 @@ data:
      they are authored. `release` is deliberately NOT set: the guard above
      forces ruleSelectorNilUsesHelmValues=false, so Prometheus selects every
      PrometheusRule in the namespace and no label has to be kept in step. */}}
+{{- /* ReclaimerNotSucceeding's threshold, compared with the time since the
+       last successful run. ONE failed run followed by a success that takes
+       its full deadline already goes 2 x the period + deadlineSeconds without
+       one, so anything at or under that mails for a single failure.
+       The period is read from the schedule where the form allows it: hourly
+       at minute M, every N hours at minute M, daily at H:M, and the @hourly,
+       @daily and @midnight macros. Any other schedule is floored at
+       deadlineSeconds alone.
+       forever/never/empty render as "-" (no limit), which reads as 0 here. */ -}}
+{{- $sr := .Values.dataPolicy.derived.stagedReclaimer }}
+{{- $reclaimerAlertAfterS := include "edge.durationSeconds" (.Values.dataPolicy.derived.stagedReclaimer.alertAfter | default "") | int64 }}
+{{- $reclaimerDeadlineS := $sr.deadlineSeconds | int64 }}
+{{- $sched := $sr.schedule | toString | trim }}
+{{- $periodS := 0 }}
+{{- if or (regexMatch "^[0-9]+\\s+\\*\\s+\\*\\s+\\*\\s+\\*$" $sched) (eq $sched "@hourly") }}
+  {{- $periodS = 3600 }}
+{{- else if regexMatch "^[0-9]+\\s+\\*/[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched }}
+  {{- /* atoi, not int: int reads a leading zero as octal. */ -}}
+  {{- $periodS = mul 3600 (regexReplaceAll "^[0-9]+\\s+\\*/([0-9]+)\\s.*$" $sched "${1}" | atoi) }}
+{{- else if or (regexMatch "^[0-9]+\\s+[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched) (has $sched (list "@daily" "@midnight")) }}
+  {{- $periodS = 86400 }}
+{{- end }}
+{{- $reclaimerFloorS := $reclaimerDeadlineS }}
+{{- if $periodS }}
+  {{- $reclaimerFloorS = add (mul 2 $periodS) $reclaimerDeadlineS }}
+{{- end }}
+{{- if le $reclaimerAlertAfterS $reclaimerFloorS }}
+  {{- fail (printf "dataPolicy.derived.stagedReclaimer.alertAfter must be longer than %ds, got %q. That is 2 x the period of schedule %q plus deadlineSeconds (%ds), or deadlineSeconds alone when the period cannot be read from the schedule: one failed run followed by a slow success already goes that long without a success, so ReclaimerNotSucceeding would mail for a single failure. forever/never/empty are refused as well; to stop the alert, silence it in Alertmanager." $reclaimerFloorS (toString .Values.dataPolicy.derived.stagedReclaimer.alertAfter) $sched $reclaimerDeadlineS) }}
+{{- end }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
 {{- $sev := base $path | trimSuffix ".yaml" }}
 ---
@@ -158,7 +187,14 @@ spec:
 {{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
        release's own data-policy pods. A plain replace, never tpl: the files
        carry Prometheus's own {{ $labels }} templates. */}}
-{{ $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | indent 2 }}
+{{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
+{{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
+       reads a bare __NAME__ as a metric name, so the rule loads, reports
+       healthy and compares against a series that never exists. */ -}}
+{{- if regexMatch "__[A-Z0-9_-]+__" $promRules }}
+  {{- fail (printf "a __*__ sentinel survived substitution in %s. Prometheus would read it as a metric name that never exists, so the rule would load, look healthy and never fire. Add the matching replace above." $path) }}
+{{- end }}
+{{ $promRules | indent 2 }}
 {{- end }}
 
 ---

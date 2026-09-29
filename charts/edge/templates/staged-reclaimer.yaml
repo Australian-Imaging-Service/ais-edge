@@ -52,6 +52,16 @@ spec:
       # killed before the next one is due, rather than pinning Forbid forever.
       activeDeadlineSeconds: {{ .Values.dataPolicy.derived.stagedReclaimer.deadlineSeconds }}
       template:
+        metadata:
+          labels:
+            {{- include "edge.labels" . | nindent 12 }}
+            app: xnat-ingest
+            # LOAD-BEARING. Vector turns pod labels into the Loki stream labels
+            # the ruler selects on; without these the stream is component="unknown"
+            # and ReclaimerRunUnavailable / SessionStagedNotConfirmedInXNAT match
+            # nothing. Same values as charts/mgmt, so the rules stay shared.
+            # scripts/ci/runtime-templates.sh fails if they go.
+            component: s3-reclaimer
         spec:
           restartPolicy: Never
           # NO POD securityContext, deliberately, and matching the other ingest
