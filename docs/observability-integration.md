@@ -200,17 +200,20 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `SessionUploadStalled` | warning | Loki | `event="upload_started"` with no matching `event="upload_completed"` per session over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
 | `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m. **Cannot fire** — the staged term is `{component="assign"} \| json \| session != ""` and assign emits no `session` key, so it is always zero, §2c |
 | `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation-fail lines from assign in 1h |
-| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened |
+| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
+| `XNATRepairAttempted` | warning | Loki | xnat-ingest's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from orthanc in 10m (deid stalled) |
 | `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (an unmapped AET nobody has mapped) |
+| `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |
 | `KubernetesAPIServerDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
 | `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |
 | `IngestPodCrashLoop` | warning | Prom | >3 restarts/1h in the release namespace |
 | `NodeCountChanged` | info | Prom | `kube_node_info` changed in 10m |
+| `CPUThrottlingHigh` | info | Prom | kube-prometheus-stack's rule re-added without this release's own `data-policy` pods, scoped by namespace and pod (the upstream copy is off via `defaultRules.disabled`): >25% of CFS periods throttled over 5m, for 15m |
 
 Two alertnames appear in the shipped Alertmanager routing but in **no rule on this tier**: `DICOMRejectedUnmappedAET` and `SessionStagedNotConfirmedInXNAT` both have matchers in `charts/edge/files/alertmanager-config.yaml` (routed to `email-no-resolved`, because a "[RESOLVED]" mail for either would be false reassurance) and nothing that raises them. Those routes are currently inert. Do not read the Alertmanager config as an inventory — it is the wider fleet's routing table, and this tier fills in part of it.
 

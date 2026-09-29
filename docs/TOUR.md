@@ -749,20 +749,28 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **fifteen** alerts of
-its own — eleven log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and four metric rules evaluated by Prometheus
+Dashboards and alert rules ship with the chart. It defines **twenty-three**
+alerts of its own: eighteen log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and five metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
 `KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
-`NodeCountChanged`) — on top of kube-prometheus-stack's own default rule set,
-which contributes roughly another 130 and is left enabled. The ones specific to
-this tier are:
+`NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
+kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
+apart from `CPUThrottlingHigh`, which the chart replaces with a copy that leaves
+out the data-policy reporter. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
   originals. Do not ignore it.
 - **`QuarantinedDataUnresolved`** — something has sat in quarantine longer than
   `alertAfter`. Almost always an AE title missing from `aetMap`.
+- **`DataPolicyReporterSilent`**: the data-policy reporter has stopped sending
+  `stage_report`. The two alerts above read only those lines, so while this
+  fires a filling disk would go unreported.
+- **`XNATRepairAttempted`**: XNAT already held a session with files missing,
+  and the uploader tried to re-send them. It normally stands in for the
+  "upload completed" mail for that session, and does not say whether the
+  re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
 - **`OrthancDeidLuaError`** — de-identification itself is failing (Orthanc Lua

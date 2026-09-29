@@ -98,6 +98,20 @@ data:
   {{- end }}
   {{- $uploadCycle := add $uploadLoop 35 }}
   {{- $rules = $rules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadCycle))) }}
+  {{- /* No reporter, nothing to go silent: without this a site that turns the
+         reporter off gets DataPolicyReporterSilent firing for ever. The block
+         is fenced by marker comments in the rules file. */ -}}
+  {{- if not .Values.dataPolicy.reporter.enabled }}
+    {{- $rules = regexReplaceAll "(?s)  # >>> DataPolicyReporterSilent.*?  # <<< DataPolicyReporterSilent\n" $rules "" }}
+  {{- end }}
+  {{- /* DataPolicyReporterSilent. Pinned to this site's clusterLabel so the
+         absent series carries it; escaped for the LogQL string it sits in. */ -}}
+  {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}
+  {{- /* Silence window: at least 30m and at least 3 sweeps, so a pod restart
+         or one slow sweep never fires it. */ -}}
+  {{- $reportSilenceS := max 1800 (mul 3 (int .Values.dataPolicy.reporter.interval)) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule ships with a literal
          __..._ where a number belongs, Loki rejects the whole group at load
          time, and every OTHER alert in this file stops evaluating with it.
@@ -141,7 +155,10 @@ metadata:
   labels:
     {{- include "edge.labels" $ | nindent 4 }}
 spec:
-{{ $.Files.Get $path | indent 2 }}
+{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
+       release's own data-policy pods. A plain replace, never tpl: the files
+       carry Prometheus's own {{ $labels }} templates. */}}
+{{ $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | indent 2 }}
 {{- end }}
 
 ---

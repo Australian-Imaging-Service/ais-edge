@@ -211,6 +211,15 @@ observability:
     caBundleSecret: ''
 EOF
 
+# The reporter switched off, with the stack on. DataPolicyReporterSilent must
+# not render here: with no reporter it would fire for ever. runtime-templates.sh
+# checks the rule and the reporter DaemonSet come and go together.
+cat >"$V/edge-reporter-off.yaml" <<'EOF'
+dataPolicy:
+  reporter:
+    enabled: false
+EOF
+
 cat >"$V/edge-observability-on.yaml" <<'EOF'
 observability:
   enabled: true
@@ -1097,6 +1106,7 @@ edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-d
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
+edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml

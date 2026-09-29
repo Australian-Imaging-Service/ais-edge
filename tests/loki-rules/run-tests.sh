@@ -240,6 +240,36 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS0"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S1.E1'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"upload-first","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S2.E2'"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S3.E3': ['proj:S3:E3:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S3.E3'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S4.E4'"}
+9	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-gap","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S5.E5': ['proj:S5:E5:1-T1:DICOM']"}
+1	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-gap","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S5.E5'"}
+18	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-edge","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S9.E9': ['proj:S9:E9:1-T1:DICOM']"}
+9	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-edge","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S9.E9'"}
+25	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S10.E10': ['proj:S10:E10:1-T1:DICOM']"}
+25	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S10.E10'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S10.E10'"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-failed","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S7.E7': ['proj:S7:E7:1-T1:DICOM']"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-failed","level":"ERROR"}	{"message":"'proj.S7.E7' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S7:E7:1-T1:DICOM"}
+8	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S8.E8'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S8.E8': ['proj:S8:E8:1-T1:DICOM']"}
+1	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"ERROR"}	{"message":"'proj.S8.E8' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S8:E8:1-T1:DICOM"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-live"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS1"}
 2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
@@ -286,6 +316,23 @@ upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, b
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
 rejected_unmapped_aet	DICOMRejectedUnmappedAET	aet-bad	fire	scanner sent an AE title not in aetMap — studies quarantined, never reached XNAT
 rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title must never raise a rejection
+upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
+upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
+upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
+upload_repair_gap	XNATUploadSuccess	repair-gap	nofire	8m between a repair and its success line (verdict and metadata calls): still a repair
+upload_repair_window_edge	XNATUploadSuccess	repair-edge	nofire	success 9m ago, still in its window; repair 18m ago, still inside the 20m suppression
+upload_later_pass	XNATUploadSuccess	repair-later	fire	a new pass 23m after a repair is an upload again
+upload_failed_repair	XNATUploadSuccess	repair-failed	nofire	a failed repair logs no success line, so nothing to mail
+upload_prior_success_failed_repair	XNATUploadSuccess	repair-prior-ok	nofire	an upload 8m ago then a failed repair 2m ago: suppressed now; its own mail went at the time
+repair_attempt_succeeded	XNATRepairAttempted	repair-fixed	fire	XNAT was missing 2 resources and the uploader re-sent them
+repair_attempt_failed	XNATRepairAttempted	repair-failed	fire	a failed repair is still reported; the mail claims only the attempt
+repair_attempt_prior_success	XNATRepairAttempted	repair-prior-ok	fire	an earlier success must not make this a success claim: it claims only the attempt
+repair_not_on_first_upload	XNATRepairAttempted	upload-first	nofire	a first upload creates resources; nothing was repaired
+repair_failing_every_pass	XNATUploadRetryStorm	repair-storm	fire	a repair failing on every pass raises the retry storm
+reporter_live	DataPolicyReporterSilent	reporter-live	nofire	stage_report 3m ago
+reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	last stage_report 45m ago, over the 30m window
+reporter_never	DataPolicyReporterSilent	reporter-never	fire	no line at all, as for a reporter that never started
+reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but no stage_report: the disk alerts are still blind
 EOF
 }
 
@@ -365,7 +412,7 @@ while IFS=$'\t' read -r name alert cluster expect desc; do
         skip "$name" "$alert is not in this tier's ruleset"
         continue
     fi
-    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" <<'PY'
+    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" "$cluster" <<'PY'
 
 import sys, re, yaml
 
@@ -399,8 +446,14 @@ expr = expr.replace("__DP_MIN_FREE_DISK_PCT__",
                     str(orig.get("facilityBackup", {}).get("minFreeDiskPercent", 10)))
 expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
                     seconds(orig.get("quarantine", {}).get("alertAfter", "24h")))
+# Same formula as templates/observability.yaml: max(30m, 3 sweeps).
+interval = int((dp.get("reporter") or {}).get("interval", 300))
+expr = expr.replace("__DP_REPORT_SILENCE_S__", str(max(1800, 3 * interval)))
+# The chart pins this to the site's clusterLabel; here, to the case's cluster.
+expr = expr.replace("__CLUSTER_LABEL__", sys.argv[4])
 
-left = re.findall(r"__DP_[A-Z_]+__", expr)
+# ANY sentinel, not only __DP_*__: __CLUSTER_LABEL__ is one too.
+left = re.findall(r"__[A-Z][A-Z0-9_]*__", expr)
 if left:
     raise SystemExit("unsubstituted sentinel(s) in %s: %s — the harness and the "
                      "chart disagree about what to replace" % (sys.argv[2], left))

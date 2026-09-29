@@ -1160,6 +1160,13 @@ loki:
 
 kube-prometheus-stack:
   fullnameOverride: ais-kps
+  # Upstream alert rules: all on, except those this chart replaces.
+  defaultRules:
+    disabled:
+      # Replaced by ais-edge-resources in files/prometheus-rules/info.yaml:
+      # the same rule, minus the data-policy reporter.
+      # CAUTION: re-enable it and every throttled container alerts twice.
+      CPUThrottlingHigh: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true

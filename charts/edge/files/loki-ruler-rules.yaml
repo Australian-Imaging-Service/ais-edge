@@ -389,13 +389,86 @@ groups:
       description: "Session {{ $labels.session }} landed in XNAT (pushed by\nxnat-ingest-upload on cluster {{ $labels.cluster }}).\nVerify in the pod logs:\n  kubectl -n xnat-ingest logs deploy/xnat-ingest-upload\
         \ --tail=30\n"
       summary: "XNAT upload completed \u2014 {{ $labels.session }}"
-    expr: "sum by (cluster, session) (\n  count_over_time(\n    {namespace=\"xnat-ingest\", component=\"upload\"}\n    |~ \"Successfully uploaded all files in\"\n    | regexp \"Successfully uploaded all\
-      \ files in '(?P<session>[^']+)'\"\n    [10m]\n  )\n) > 0\n"
+    # A REPAIR IS NOT AN UPLOAD. xnat-ingest logs the same success line after
+    # re-sending files XNAT had lost, so `unless` drops any session with a
+    # "Repaired" line in the last 20m; XNATRepairAttempted reports those.
+    # 20m = this rule's 10m window + up to 10m between the two lines of one
+    # pass (the verdict and metadata calls; 5-8s measured on 2026-09-28).
+    # Edge: a new pass for the same session inside those 20m is not mailed.
+    expr: |
+      (
+        sum by (cluster, session) (
+          count_over_time(
+            {namespace="xnat-ingest", component="upload"}
+            |~ "Successfully uploaded all files in"
+            | regexp "Successfully uploaded all files in '(?P<session>[^']+)'"
+            [10m]
+          )
+        ) > 0
+      )
+      unless on (cluster, session)
+      sum by (cluster, session) (
+        count_over_time(
+          {namespace="xnat-ingest", component="upload"}
+          |~ "Repaired [0-9]+ incomplete resource"
+          | regexp `incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
+          [20m]
+        )
+      )
     for: 0s
     labels:
       category: pipeline-success
       severity: info
       source: loki-ruler
+  - alert: XNATRepairAttempted
+    # XNAT HELD THE SESSION WITH FILES MISSING, AND THE UPLOADER TRIED TO
+    # RE-SEND THEM. xnat-ingest logs "Repaired" only when a resource already
+    # existed on XNAT with files missing (upload_api.py, repaired_on_xnat); a
+    # first upload never does. Seen 2026-09-23 and 2026-09-28: XNAT restarted,
+    # listed 0 of N files for sessions it held, and every edge re-sent them.
+    # AN ATTEMPT, NOT A RESULT: the line is logged after the transfers whether
+    # or not they failed (upload_api.py:490, before the verdict), and no log
+    # line ties a later success to this attempt. So this claims only the
+    # attempt. A failed repair logs ERROR lines: XNATUploadRetryStorm.
+    # $value is the number of scan resources (max, not sum: a retried repair
+    # must not count twice).
+    # CAUTION: matches xnat-ingest's own wording (0.15.6); a reword silences it.
+    expr: |
+      max by (cluster, session) (
+        max_over_time(
+          {namespace="xnat-ingest", component="upload"}
+          |~ "Repaired [0-9]+ incomplete resource"
+          | regexp `Repaired (?P<resources>[0-9]+) incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
+          | unwrap resources
+          | __error__=""
+          [10m]
+        )
+      ) > 0
+    for: 0s
+    labels:
+      category: xnat-integrity
+      severity: warning
+      source: loki-ruler
+    annotations:
+      summary: XNAT was missing files for {{ $labels.session }}; the uploader tried to re-send them
+      description: |
+        XNAT already held session {{ $labels.session }}, but {{ $value }} of
+        its scan resource(s) were missing files. The uploader on
+        {{ $labels.cluster }} tried to re-send them. This mail does not say
+        whether that worked:
+
+          kubectl -n xnat-ingest logs -l component=upload --since=1h | grep -F "{{ $labels.session }}"
+
+        "Successfully uploaded all files in" after the repair means it
+        completed; "did not upload cleanly" means it did not, and
+        XNATUploadRetryStorm follows if it keeps failing. XNATUploadSuccess
+        leaves this session out for 20m, so its "upload completed" mail is
+        normally not sent (nor for a new pass inside those 20m).
+
+        If this session had uploaded completely before, XNAT lost files:
+        check whether it restarted and what its archive storage holds. Only
+        sessions still staged on an edge are repaired; anything already
+        cleared from the edge stays incomplete on XNAT.
   - alert: XNATAuthFailure
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\
       \\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\" [15m])) > 3\n"
@@ -521,6 +594,42 @@ groups:
     
         Check EdgeDiskLow too: a stage that never drains eventually fills the
         volume, and that alert is the one with the deadline.
+  # >>> DataPolicyReporterSilent: templates/observability.yaml drops this block
+  # when dataPolicy.reporter.enabled is false. Keep both marker lines.
+  - alert: DataPolicyReporterSilent
+    # WATCHES THE WATCHER. EdgeDiskLow, StageBacklogAgeing and
+    # QuarantinedDataUnresolved read only stage_report lines. When those stop,
+    # all three go quiet, which looks exactly like a healthy site.
+    # absent_over_time is true when nothing matched, including a reporter that
+    # never started, so no series has to exist first.
+    # __CLUSTER_LABEL__: this site's clusterLabel, so the alert carries it.
+    # __DP_REPORT_SILENCE_S__: max(30m, 3 x dataPolicy.reporter.interval).
+    # Both substituted by templates/observability.yaml.
+    expr: |
+      absent_over_time(
+        {namespace="xnat-ingest", component="data-policy", cluster="__CLUSTER_LABEL__"}
+        | json | event="stage_report"
+        [__DP_REPORT_SILENCE_S__s])
+    for: 0s
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-storage
+    annotations:
+      summary: data-policy on {{ $labels.cluster }} has stopped reporting
+      description: |
+        No stage_report from the data-policy reporter on {{ $labels.cluster }}
+        for __DP_REPORT_SILENCE_MIN__ minutes. EdgeDiskLow, StageBacklogAgeing
+        and QuarantinedDataUnresolved read only those lines, so none of them
+        can fire while this one is firing: a filling disk would go unreported.
+
+        Either the reporter is down or stuck, or its logs are not reaching Loki:
+
+          kubectl -n xnat-ingest get pods -l app=data-policy
+          kubectl -n xnat-ingest logs -l app=data-policy --tail=20
+
+        Nothing is deleted or held back because of this.
+  # <<< DataPolicyReporterSilent
   - alert: PipelineSessionStuck
     expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_stuck\" [15m])) > 0\n"
     for: 10m
