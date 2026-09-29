@@ -432,10 +432,12 @@ dataPolicy:
       deadlineSeconds: 3000
       # ReclaimerNotSucceeding fires after this long with no successful run,
       # whatever the cause: failed, killed at the deadline, crashed, not started.
-      # Default: two hourly runs missed, each given its full deadline.
-      # CAUTION: keep above 2 x the schedule period + deadlineSeconds, or one bad
+      # Default: one failed run never fires it. Two failed runs, then a third not
+      # succeeding within 15m, do: about 3h15m after the last success.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
       # run fires it. Raise it when you slow the schedule.
-      # The chart refuses forever/never and anything not above deadlineSeconds.
+      # The chart refuses less (reading the period from the usual schedule
+      # forms; others are checked against deadlineSeconds only), and forever/never.
       alertAfter: 3h
       resources:
         requests: {cpu: 20m, memory: 64Mi}

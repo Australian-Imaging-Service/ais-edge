@@ -119,10 +119,22 @@ tests:
 
   # Never succeeded: there is no last-success series at all, so the age is
   # taken from creation. Quiet while young, fires past alertAfter.
+  # The same half must stay scoped. Never succeeded and just as old, but quiet:
+  # another CronJob in this namespace, and a reclaimer-named one elsewhere.
+  # A second reclaimer in this namespace that DID succeed must not stand the
+  # first one down: the `unless` joins on cronjob as well as namespace.
   - interval: 1m
     input_series:
       - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
         values: '0x300'
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-backup"}'
+        values: '0x300'
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="other-team", cronjob="their-staged-reclaimer"}'
+        values: '0x300'
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge2-staged-reclaimer"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge2-staged-reclaimer"}'
+        values: '9000x300'
     alert_rule_test:
       - eval_time: 170m
         alertname: ReclaimerNotSucceeding

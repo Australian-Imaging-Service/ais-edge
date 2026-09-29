@@ -385,10 +385,14 @@ inhibit_rules:
     # so there is genuinely nothing to disambiguate.
 
   # One reclaimer outage, one mail. A reclaimer that cannot reach XNAT logs
-  # why and fails every run, so ReclaimerRunUnavailable fires 75m after the
-  # first failed run and ReclaimerNotSucceeding would follow an hour after
-  # that, for the same cause. The specific one wins. Once it clears, a reclaimer still not
+  # why and fails every run, so ReclaimerRunUnavailable fires first (its `for`
+  # is 75m) and ReclaimerNotSucceeding would follow within the hour, for the
+  # same cause. The specific one wins. Once it clears, a reclaimer still not
   # succeeding is dying without saying why, and that mails on its own.
+  # LIMITS: a different reclaimer fault that starts during an outage mails only
+  # once ReclaimerRunUnavailable clears, up to about 3h after the last logged
+  # failure. At recovery the two clear a minute or so apart, so one stray
+  # ReclaimerNotSucceeding mail, then its resolve, is possible.
   - source_matchers:
       - alertname = "ReclaimerRunUnavailable"
     target_matchers:

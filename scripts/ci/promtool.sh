@@ -64,7 +64,7 @@ TESTS_DIR="$RULES_DIR/tests"
 ci_heading "promtool check rules (source)"
 shopt -s nullglob
 # A sentinel with no test value would pass every check below as a metric name.
-unfilled="$(cat "$RULES_DIR"/*.yaml | grep -oE '__[A-Z0-9_]+__' | grep -vx '__RELEASE_NAMESPACE__' | sort -u | tr '\n' ' ' || true)"
+unfilled="$(cat "$RULES_DIR"/*.yaml | grep -oE '__[A-Z0-9_-]+__' | grep -vx '__RELEASE_NAMESPACE__' | sort -u | tr '\n' ' ' || true)"
 if [ -n "$unfilled" ]; then
   ci_fail "sentinel(s) with no entry in RULE_TEST_VALUES: ${unfilled}. promtool would read each as a metric name, and the unit tests would compare against nothing"
 else
@@ -225,6 +225,32 @@ PY
           *)       ci_fail "${line#FAIL }" ;;
         esac
       done <<< "$scoped"
+    fi
+  fi
+
+  # The same threshold on a render with alertAfter set away from the default
+  # (13h with a 6-hourly schedule). Comparing the default render with the
+  # default alone cannot tell a substitution from a hardcoded 10800.
+  six="$CI_RENDER_DIR/edge-reclaimer-six-hourly.yaml"
+  if [ "$(ci_obs_chart)" = "charts/edge" ]; then
+    if [ ! -s "$six" ]; then
+      ci_fail "no render at $six: the edge-reclaimer-six-hourly case is missing from ci_render_cases"
+    else
+      got="$(python3 - "$six" <<'PY'
+import re, sys, yaml
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "PrometheusRule":
+        for g in d["spec"].get("groups", []):
+            for r in g.get("rules") or []:
+                if r.get("alert") == "ReclaimerNotSucceeding":
+                    print(" ".join(sorted(set(re.findall(r">\s*(\d+)", r["expr"])))))
+PY
+)"
+      if [ "$got" = "46800" ]; then
+        ci_pass "ReclaimerNotSucceeding follows alertAfter: 13h renders as 46800s"
+      else
+        ci_fail "ReclaimerNotSucceeding with alertAfter 13h renders threshold(s) '${got:-none}', expected 46800"
+      fi
     fi
   fi
 

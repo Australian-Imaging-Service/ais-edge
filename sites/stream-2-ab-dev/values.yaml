@@ -339,6 +339,6 @@ dataPolicy:
       deadlineSeconds: 3000
       # ReclaimerNotSucceeding fires after this long with no successful run,
       # whatever the cause: failed, killed at the deadline, crashed, not started.
-      # CAUTION: keep above 2 x the schedule period + deadlineSeconds, or one bad
-      # run fires it. Raise it when you slow the schedule.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it; the chart refuses less. Raise it when you slow the schedule.
       alertAfter: 3h

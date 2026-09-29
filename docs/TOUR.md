@@ -791,12 +791,15 @@ two alerts. One failed run does not: the next hourly run finishing clears it.
 `ReclaimerRunUnavailable` only sees runs that log why they stopped. A run killed
 at its deadline, OOM-killed, crashing, stuck on an image pull or never scheduled
 logs nothing, so **`ReclaimerNotSucceeding`** watches the CronJob itself: no
-successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h, which
-is two hourly runs missed) raises it, counted from creation if it has never
-succeeded. It clears on the next good run, however many failed Jobs history
+successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h) raises
+it, counted from creation if it has never succeeded. One failed run never fires
+it, even when the next run takes its full deadline to succeed; two failed runs,
+then a third not succeeding within 15 minutes, do, about 3h15m after the last
+success. It clears on the next good run, however many failed Jobs history
 keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
-outage sends one mail. If you slow the schedule, raise `alertAfter` with it:
-keep it above two periods plus `deadlineSeconds`.
+outage sends one mail. If you slow the schedule, raise `alertAfter` with it: it
+must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
+the usual schedule forms (hourly, every N hours, daily).
 
 ---
 
