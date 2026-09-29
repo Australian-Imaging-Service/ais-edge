@@ -324,7 +324,8 @@ ci_heading "DataPolicyReporterSilent watches exactly the configured edges"
 inv_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
 import glob, os, re, sys, yaml
 # Render cases that opt edges out, and which ones (scripts/ci/values.sh).
-OPTED_OUT = {"mgmt-reporter-optout": {"edge-beta"}, "mgmt-reporter-optout-all": {"edge-alpha"}}
+OPTED_OUT = {"mgmt-reporter-optout": {"edge-beta"}, "mgmt-reporter-optout-all": {"edge-alpha"},
+             "mgmt-reporter-optout-all-never": {"edge-alpha"}}
 problems, checked, multi = [], 0, False
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "mgmt-*.yaml"))):
     case = os.path.basename(path)[:-len(".yaml")]

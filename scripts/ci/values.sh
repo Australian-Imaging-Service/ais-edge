@@ -138,6 +138,10 @@ edges:
     konnectivityNodePort: 30132
     dataPolicyReporter: false
 EOF
+# With no reporting edge the rule is dropped and reporterSilentAfter is unused,
+# so a value the guard would refuse must still render. The guard applies only
+# where DataPolicyReporterSilent exists (neg-mgmt-reporter-silent-*).
+printf 'dataPolicy:\n  reporterSilentAfter: never\n' >"$V/mgmt-reporter-silent-never.yaml"
 
 # The other exposure mode: ClusterIP behind the ssl-passthrough Ingress, no
 # cluster-wide port to track. Both modes have to render, because the chart
@@ -1190,6 +1194,7 @@ mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
 mgmt-reporter-optout-all	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml
+mgmt-reporter-optout-all-never	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml mgmt-reporter-silent-never.yaml
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
 mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
