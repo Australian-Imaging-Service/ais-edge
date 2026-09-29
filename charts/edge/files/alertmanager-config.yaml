@@ -29,6 +29,7 @@
 # Routing tree:
 #   alertname=DICOMRejectedUnmappedAET  →  email, firing only
 #   alertname=XNATUploadSuccess         →  email, one per session
+#   alertname=XNATResourcesRepaired     →  email, one per edge per burst, firing only
 #   severity=info                       →  slack, or email if no Slack (see below)
 #   severity=critical                   →  email + slack, or email if no Slack
 #   everything else                     →  email
@@ -200,6 +201,17 @@ route:
       # newer builds, and hours are unambiguous across all of them.
       repeat_interval: 720h
       continue: false
+    # XNAT had lost files and the uploader re-sent them. Firing only: the
+    # repair is already done when this fires, so "[RESOLVED]" says nothing.
+    - matchers:
+        - alertname = "XNATResourcesRepaired"
+      receiver: email-xnat-repair
+      # One mail per edge: an XNAT restart repairs many sessions at once.
+      group_by: ["alertname", "cluster"]
+      group_wait: 2m           # gather the whole burst into that one mail
+      group_interval: 30m
+      repeat_interval: 720h    # an event; repeating it tells nobody anything
+      continue: false
     # slack-only when a webhook Secret is configured, info-email when not.
     # Substituted by templates/observability.yaml; see the header.
     - matchers:
@@ -296,6 +308,13 @@ receivers:
         send_resolved: false
         headers:
           Subject: 'AIS-Edge: XNAT upload completed — {{ .CommonLabels.session }}'
+
+  - name: email-xnat-repair
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge: XNAT was missing files, re-sent from {{ .CommonLabels.cluster }}'
 
   # THE FALLBACK FOR severity=info ON A SITE WITH NO SLACK.
   #

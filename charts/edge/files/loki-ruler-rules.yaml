@@ -389,13 +389,74 @@ groups:
       description: "Session {{ $labels.session }} landed in XNAT (pushed by\nxnat-ingest-upload on cluster {{ $labels.cluster }}).\nVerify in the pod logs:\n  kubectl -n xnat-ingest logs deploy/xnat-ingest-upload\
         \ --tail=30\n"
       summary: "XNAT upload completed \u2014 {{ $labels.session }}"
-    expr: "sum by (cluster, session) (\n  count_over_time(\n    {namespace=\"xnat-ingest\", component=\"upload\"}\n    |~ \"Successfully uploaded all files in\"\n    | regexp \"Successfully uploaded all\
-      \ files in '(?P<session>[^']+)'\"\n    [10m]\n  )\n) > 0\n"
+    # A REPAIR IS NOT AN UPLOAD. xnat-ingest logs the same success line after
+    # re-sending files XNAT had lost, so `unless` drops any session with a
+    # "Repaired" line in the last hour; XNATResourcesRepaired reports those.
+    # 1h, not 10m: the repair line comes first, and a big resource can take
+    # minutes to re-send before the success line follows.
+    expr: |
+      (
+        sum by (cluster, session) (
+          count_over_time(
+            {namespace="xnat-ingest", component="upload"}
+            |~ "Successfully uploaded all files in"
+            | regexp "Successfully uploaded all files in '(?P<session>[^']+)'"
+            [10m]
+          )
+        ) > 0
+      )
+      unless on (cluster, session)
+      sum by (cluster, session) (
+        count_over_time(
+          {namespace="xnat-ingest", component="upload"}
+          |~ "Repaired [0-9]+ incomplete resource"
+          | regexp `incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
+          [1h]
+        )
+      )
     for: 0s
     labels:
       category: pipeline-success
       severity: info
       source: loki-ruler
+  - alert: XNATResourcesRepaired
+    # XNAT HELD THE SESSION BUT HAD LOST FILES, AND THE UPLOADER RE-SENT THEM.
+    # xnat-ingest logs this only when a resource already existed on XNAT with
+    # files missing (upload_api.py, repaired_on_xnat); a first upload never
+    # does. Seen 2026-09-23 and 2026-09-28: XNAT restarted, listed 0 of N
+    # files for sessions it held, and every edge re-sent them.
+    # $value is the number of scan resources re-sent.
+    # CAUTION: matches xnat-ingest's own wording (0.15.6); a reword silences it.
+    expr: |
+      sum by (cluster, session) (
+        sum_over_time(
+          {namespace="xnat-ingest", component="upload"}
+          |~ "Repaired [0-9]+ incomplete resource"
+          | regexp `Repaired (?P<resources>[0-9]+) incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
+          | unwrap resources
+          | __error__=""
+          [10m]
+        )
+      ) > 0
+    for: 0s
+    labels:
+      category: xnat-integrity
+      severity: warning
+      source: loki-ruler
+    annotations:
+      summary: XNAT was missing files for {{ $labels.session }}; the edge re-sent them
+      description: |
+        XNAT already held session {{ $labels.session }} but was missing files
+        in {{ $value }} of its scan resource(s). The uploader on
+        {{ $labels.cluster }} re-sent them, and the session is complete on
+        XNAT again.
+
+        If this session had uploaded completely before, XNAT lost files:
+        check whether it restarted and what its archive storage holds. Only
+        sessions still staged on an edge are repaired; anything already
+        cleared from the edge stays incomplete on XNAT.
+
+          kubectl -n xnat-ingest logs -l component=upload --since=1h | grep -E "is missing|Repaired"
   - alert: XNATAuthFailure
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\
       \\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\" [15m])) > 3\n"

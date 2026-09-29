@@ -240,6 +240,14 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS0"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S1.E1'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"upload-first","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S2.E2'"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S3.E3': ['proj:S3:E3:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S3.E3'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S4.E4'"}
+40	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-slow","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S5.E5': ['proj:S5:E5:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-slow","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S5.E5'"}
 3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-live"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
 45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
 3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
@@ -289,6 +297,12 @@ upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, b
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
 rejected_unmapped_aet	DICOMRejectedUnmappedAET	aet-bad	fire	scanner sent an AE title not in aetMap — studies quarantined, never reached XNAT
 rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title must never raise a rejection
+upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
+upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
+upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
+upload_slow_repair	XNATUploadSuccess	repair-slow	nofire	the re-send took 38m; still a repair, still no "upload completed"
+repair_alerts	XNATResourcesRepaired	repair-fixed	fire	XNAT had lost 2 resources and the uploader re-sent them
+repair_not_on_first_upload	XNATResourcesRepaired	upload-first	nofire	a first upload creates resources; nothing was repaired
 reporter_live	DataPolicyReporterSilent	reporter-live	nofire	stage_report 3m ago
 reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	last stage_report 45m ago, over the 30m window
 reporter_never	DataPolicyReporterSilent	reporter-never	fire	no line at all, as for a reporter that never started
