@@ -767,9 +767,10 @@ out the data-policy reporter. The ones specific to this tier are:
 - **`DataPolicyReporterSilent`**: the data-policy reporter has stopped sending
   `stage_report`. The two alerts above read only those lines, so while this
   fires a filling disk would go unreported.
-- **`XNATResourcesRepaired`**: XNAT already held a session but had lost files,
-  and the uploader re-sent them. It replaces the "upload completed" mail for
-  that session. If the session had uploaded completely before, check XNAT.
+- **`XNATRepairAttempted`**: XNAT already held a session with files missing,
+  and the uploader tried to re-send them. It normally stands in for the
+  "upload completed" mail for that session, and does not say whether the
+  re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
 - **`OrthancDeidLuaError`** — de-identification itself is failing (Orthanc Lua

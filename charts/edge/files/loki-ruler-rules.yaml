@@ -391,9 +391,10 @@ groups:
       summary: "XNAT upload completed \u2014 {{ $labels.session }}"
     # A REPAIR IS NOT AN UPLOAD. xnat-ingest logs the same success line after
     # re-sending files XNAT had lost, so `unless` drops any session with a
-    # "Repaired" line in the last hour; XNATResourcesRepaired reports those.
-    # 1h, not 10m: the repair line comes first, and a big resource can take
-    # minutes to re-send before the success line follows.
+    # "Repaired" line in the last 20m; XNATRepairAttempted reports those.
+    # 20m = this rule's 10m window + up to 10m between the two lines of one
+    # pass (the verdict and metadata calls; 5-8s measured on 2026-09-28).
+    # Edge: a new pass for the same session inside those 20m is not mailed.
     expr: |
       (
         sum by (cluster, session) (
@@ -411,7 +412,7 @@ groups:
           {namespace="xnat-ingest", component="upload"}
           |~ "Repaired [0-9]+ incomplete resource"
           | regexp `incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
-          [1h]
+          [20m]
         )
       )
     for: 0s
@@ -419,17 +420,22 @@ groups:
       category: pipeline-success
       severity: info
       source: loki-ruler
-  - alert: XNATResourcesRepaired
-    # XNAT HELD THE SESSION BUT HAD LOST FILES, AND THE UPLOADER RE-SENT THEM.
-    # xnat-ingest logs this only when a resource already existed on XNAT with
-    # files missing (upload_api.py, repaired_on_xnat); a first upload never
-    # does. Seen 2026-09-23 and 2026-09-28: XNAT restarted, listed 0 of N
-    # files for sessions it held, and every edge re-sent them.
-    # $value is the number of scan resources re-sent.
+  - alert: XNATRepairAttempted
+    # XNAT HELD THE SESSION WITH FILES MISSING, AND THE UPLOADER TRIED TO
+    # RE-SEND THEM. xnat-ingest logs "Repaired" only when a resource already
+    # existed on XNAT with files missing (upload_api.py, repaired_on_xnat); a
+    # first upload never does. Seen 2026-09-23 and 2026-09-28: XNAT restarted,
+    # listed 0 of N files for sessions it held, and every edge re-sent them.
+    # AN ATTEMPT, NOT A RESULT: the line is logged after the transfers whether
+    # or not they failed (upload_api.py:490, before the verdict), and no log
+    # line ties a later success to this attempt. So this claims only the
+    # attempt. A failed repair logs ERROR lines: XNATUploadRetryStorm.
+    # $value is the number of scan resources (max, not sum: a retried repair
+    # must not count twice).
     # CAUTION: matches xnat-ingest's own wording (0.15.6); a reword silences it.
     expr: |
-      sum by (cluster, session) (
-        sum_over_time(
+      max by (cluster, session) (
+        max_over_time(
           {namespace="xnat-ingest", component="upload"}
           |~ "Repaired [0-9]+ incomplete resource"
           | regexp `Repaired (?P<resources>[0-9]+) incomplete resource\(s\) on XNAT in '(?P<session>[^']+)'`
@@ -444,19 +450,25 @@ groups:
       severity: warning
       source: loki-ruler
     annotations:
-      summary: XNAT was missing files for {{ $labels.session }}; the edge re-sent them
+      summary: XNAT was missing files for {{ $labels.session }}; the uploader tried to re-send them
       description: |
-        XNAT already held session {{ $labels.session }} but was missing files
-        in {{ $value }} of its scan resource(s). The uploader on
-        {{ $labels.cluster }} re-sent them, and the session is complete on
-        XNAT again.
+        XNAT already held session {{ $labels.session }}, but {{ $value }} of
+        its scan resource(s) were missing files. The uploader on
+        {{ $labels.cluster }} tried to re-send them. This mail does not say
+        whether that worked:
+
+          kubectl -n xnat-ingest logs -l component=upload --since=1h | grep -F "{{ $labels.session }}"
+
+        "Successfully uploaded all files in" after the repair means it
+        completed; "did not upload cleanly" means it did not, and
+        XNATUploadRetryStorm follows if it keeps failing. XNATUploadSuccess
+        leaves this session out for 20m, so its "upload completed" mail is
+        normally not sent (nor for a new pass inside those 20m).
 
         If this session had uploaded completely before, XNAT lost files:
         check whether it restarted and what its archive storage holds. Only
         sessions still staged on an edge are repaired; anything already
         cleared from the edge stays incomplete on XNAT.
-
-          kubectl -n xnat-ingest logs -l component=upload --since=1h | grep -E "is missing|Repaired"
   - alert: XNATAuthFailure
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\
       \\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\" [15m])) > 3\n"
