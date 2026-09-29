@@ -157,6 +157,24 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
+3	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
+2	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S1.E1'"}
+2	{"namespace":"xnat-upload","cluster":"upload-first"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S2.E2'"}
+3	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S3.E3': ['proj:S3:E3:1-T1:DICOM']"}
+2	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S3.E3'"}
+2	{"namespace":"xnat-upload","cluster":"repair-mixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S4.E4'"}
+9	{"namespace":"xnat-upload","cluster":"repair-gap"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S5.E5': ['proj:S5:E5:1-T1:DICOM']"}
+1	{"namespace":"xnat-upload","cluster":"repair-gap"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S5.E5'"}
+18	{"namespace":"xnat-upload","cluster":"repair-edge"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S9.E9': ['proj:S9:E9:1-T1:DICOM']"}
+9	{"namespace":"xnat-upload","cluster":"repair-edge"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S9.E9'"}
+25	{"namespace":"xnat-upload","cluster":"repair-later"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S10.E10': ['proj:S10:E10:1-T1:DICOM']"}
+25	{"namespace":"xnat-upload","cluster":"repair-later"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S10.E10'"}
+2	{"namespace":"xnat-upload","cluster":"repair-later"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S10.E10'"}
+3	{"namespace":"xnat-upload","cluster":"repair-failed"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S7.E7': ['proj:S7:E7:1-T1:DICOM']"}
+3	{"namespace":"xnat-upload","cluster":"repair-failed"}	{"level":"ERROR","message":"'proj.S7.E7' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S7:E7:1-T1:DICOM"}
+8	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S8.E8'"}
+2	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S8.E8': ['proj:S8:E8:1-T1:DICOM']"}
+1	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"ERROR","message":"'proj.S8.E8' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S8:E8:1-T1:DICOM"}
 EOF
 }
 
@@ -176,6 +194,18 @@ disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above t
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
+upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
+upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
+upload_repair_gap	XNATUploadSuccess	repair-gap	nofire	8m between a repair and its success line (verdict and metadata calls): still a repair
+upload_repair_window_edge	XNATUploadSuccess	repair-edge	nofire	success 9m ago, still in its window; repair 18m ago, still inside the 20m suppression
+upload_later_pass	XNATUploadSuccess	repair-later	fire	a new pass 23m after a repair is an upload again
+upload_failed_repair	XNATUploadSuccess	repair-failed	nofire	a failed repair logs no success line, so nothing to mail
+upload_prior_success_failed_repair	XNATUploadSuccess	repair-prior-ok	nofire	an upload 8m ago then a failed repair 2m ago: suppressed now; its own mail went at the time
+repair_attempt_succeeded	XNATRepairAttempted	repair-fixed	fire	XNAT was missing 2 resources and the uploader re-sent them
+repair_attempt_failed	XNATRepairAttempted	repair-failed	fire	a failed repair is still reported; the mail claims only the attempt
+repair_attempt_prior_success	XNATRepairAttempted	repair-prior-ok	fire	an earlier success must not make this a success claim: it claims only the attempt
+repair_not_on_first_upload	XNATRepairAttempted	upload-first	nofire	a first upload creates resources; nothing was repaired
 EOF
 }
 
