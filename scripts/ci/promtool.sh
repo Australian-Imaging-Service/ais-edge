@@ -27,7 +27,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 PROMTOOL="$(ci_promtool)"
-RULES_DIR="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
+RULES_SRC="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
+
+# THRESHOLD SENTINELS stand where PromQL wants a number; the chart fills them
+# from values at render. Left as they are, PromQL reads each as a METRIC NAME:
+# `promtool check rules` passes and the rule compares against a series that
+# never exists, so a unit test would only ever see it quiet. Passes (a) and (b)
+# therefore run on a copy with each set to a FIXED test value, which the unit
+# tests are written against. What the chart fills in is checked on the render.
+# __RELEASE_NAMESPACE__ is not listed: it sits inside a label string, parses,
+# and the tests match it literally.
+RULE_TEST_VALUES=(
+  "__RECLAIMER_ALERT_AFTER_S__=10800"   # 3h, the chart default today
+)
+RULES_DIR="$CI_WORK_DIR/prometheus-rules-src"
+rm -rf "$RULES_DIR"; cp -r "$RULES_SRC" "$RULES_DIR"
+for kv in "${RULE_TEST_VALUES[@]}"; do
+  find "$RULES_DIR" -name '*.yaml' -exec sed -i "s/${kv%%=*}/${kv#*=}/g" {} +
+done
 
 # Which alerts must exist depends on the TIER. s3-uploader and the S3 reclaimer
 # do not exist on a single node, so naming them here would demand rules for
@@ -46,6 +63,13 @@ TESTS_DIR="$RULES_DIR/tests"
 # -----------------------------------------------------------------------------
 ci_heading "promtool check rules (source)"
 shopt -s nullglob
+# A sentinel with no test value would pass every check below as a metric name.
+unfilled="$(cat "$RULES_DIR"/*.yaml | grep -oE '__[A-Z0-9_]+__' | grep -vx '__RELEASE_NAMESPACE__' | sort -u | tr '\n' ' ' || true)"
+if [ -n "$unfilled" ]; then
+  ci_fail "sentinel(s) with no entry in RULE_TEST_VALUES: ${unfilled}. promtool would read each as a metric name, and the unit tests would compare against nothing"
+else
+  ci_pass "every threshold sentinel has a test value"
+fi
 rule_files=("$RULES_DIR"/*.yaml)
 if [ "${#rule_files[@]}" -eq 0 ]; then
   ci_fail "no rule files in $RULES_DIR — the alerting stack would be empty and nothing else here would notice"
@@ -141,7 +165,7 @@ print(n)
     # Twice means every match mails twice; the upstream copy alone brings back
     # the noise the copy exists to remove.
     if [ "$(ci_obs_chart)" = "charts/edge" ]; then
-      scoped="$(python3 - "$extract_dir" <<'PY'
+      scoped="$(python3 - "$extract_dir" "$REPO_ROOT/charts/edge/values.yaml" <<'PY'
 import glob, re, sys, yaml
 SCOPED = {
     # alert: (exclusion that must be present, with the namespace captured)
@@ -170,6 +194,29 @@ for alert, pat in SCOPED.items():
               "so the exclusion matches nothing" % (alert, h[0][0], m.group(1)))
     else:
         print("PASS %s is defined once (%s), its exclusion scoped to namespace %s" % (alert, h[0][0], m.group(1)))
+
+# ReclaimerNotSucceeding is this chart's own, not a fork, so the checks are
+# its own: scoped to one substituted namespace, and every threshold the chart
+# DEFAULT alertAfter in seconds. A unit slip (minutes for seconds) or a missed
+# replace renders a loadable rule that is simply wrong or never fires.
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+d = str(yaml.safe_load(open(sys.argv[2]))["dataPolicy"]["derived"]["stagedReclaimer"]["alertAfter"])
+want = int(d[:-1]) * UNITS[d[-1]] if d[-1] in UNITS else int(d)
+found = []
+for f in sorted(glob.glob(sys.argv[1] + "/*.yaml")):
+    for g in (yaml.safe_load(open(f)) or {}).get("groups", []):
+        found += [r.get("expr", "") for r in g.get("rules") or [] if r.get("alert") == "ReclaimerNotSucceeding"]
+if len(found) != 1:
+    print("FAIL ReclaimerNotSucceeding is defined %d time(s); expected exactly one" % len(found))
+else:
+    nss = set(re.findall(r'namespace="([^"]*)"', found[0]))
+    got = sorted(set(int(x) for x in re.findall(r">\s*(\d+)", found[0])))
+    if len(nss) != 1 or any("__" in n for n in nss):
+        print("FAIL ReclaimerNotSucceeding names namespace(s) %s; expected one, substituted" % sorted(nss))
+    elif got != [want]:
+        print("FAIL ReclaimerNotSucceeding thresholds %s, expected [%d]: alertAfter=%s in seconds" % (got, want, d))
+    else:
+        print("PASS ReclaimerNotSucceeding is scoped to namespace %s, threshold %ds (alertAfter=%s)" % (nss.pop(), want, d))
 PY
 )"
       while IFS= read -r line; do
@@ -180,6 +227,47 @@ PY
       done <<< "$scoped"
     fi
   fi
+
+  # An inhibit rule whose alertname matches nothing is inert, and says so
+  # nowhere. alertmanager-config.yaml once carried a whole block keyed on a
+  # source alert no rule file defined. Every name in inhibit_rules must be an
+  # alert this render ships, from the PrometheusRules or the Loki rules.
+  inhibit="$(python3 - "$render" <<'PY'
+import re, sys, yaml
+names, am = set(), None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d:
+        continue
+    if d.get("kind") == "PrometheusRule":
+        names |= {r["alert"] for g in d["spec"].get("groups", []) for r in g.get("rules") or [] if r.get("alert")}
+    data = d.get("data") or {}
+    if d.get("kind") == "ConfigMap" and "ais-edge-rules.yaml" in data:
+        doc = yaml.safe_load(data["ais-edge-rules.yaml"]) or {}
+        names |= {r["alert"] for g in doc.get("groups", []) for r in g.get("rules") or [] if r.get("alert")}
+    if d.get("kind") == "Secret" and "alertmanager.yaml" in (d.get("stringData") or {}):
+        am = yaml.safe_load(d["stringData"]["alertmanager.yaml"])
+if am is None:
+    print("FAIL no rendered Alertmanager config to check"); raise SystemExit
+rules = am.get("inhibit_rules") or []
+missing, seen = [], 0
+for i, r in enumerate(rules):
+    for side in ("source_matchers", "target_matchers"):
+        for m in r.get(side) or []:
+            hit = re.fullmatch(r'\s*alertname\s*=\s*"([^"]+)"\s*', m)
+            if hit:
+                seen += 1
+                if hit.group(1) not in names:
+                    missing.append("inhibit_rules[%d].%s: %s" % (i, side, hit.group(1)))
+if missing:
+    print("FAIL inhibit rules name alerts no rule defines, so they suppress nothing: " + "; ".join(missing))
+else:
+    print("PASS %d inhibit rule(s), all %d alertname(s) defined in this render" % (len(rules), seen))
+PY
+)"
+  case "$inhibit" in
+    PASS*) ci_pass "${inhibit#PASS }" ;;
+    *)     ci_fail "${inhibit#FAIL }" ;;
+  esac
 fi
 
 # -----------------------------------------------------------------------------

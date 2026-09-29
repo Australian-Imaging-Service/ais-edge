@@ -217,6 +217,9 @@ fi
 # SessionStagedNotConfirmedInXNAT select on. Without them the stream is
 # component="unknown" and both alerts match nothing (seen on tier-1 until
 # 2026-09-29). At least one render must have the reclaimer.
+# That count also pins the NAME: the CronJob is found by its -staged-reclaimer
+# suffix, which ReclaimerNotSucceeding and KubeJobFailed's exclusion select on,
+# so a rename finds none and fails here rather than blinding both.
 #
 # DataPolicyReporterSilent renders exactly when the reporter DaemonSet does:
 # with no reporter it would fire for ever. At least one render must have the

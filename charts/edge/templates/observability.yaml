@@ -144,6 +144,16 @@ data:
      they are authored. `release` is deliberately NOT set: the guard above
      forces ruleSelectorNilUsesHelmValues=false, so Prometheus selects every
      PrometheusRule in the namespace and no label has to be kept in step. */}}
+{{- /* ReclaimerNotSucceeding's threshold. It is compared with the time since
+       the last successful run, so it has to be a real, finite number of
+       seconds: forever/never parse to -1 and would fire at once, and anything
+       at or under the deadline fires between healthy runs. */ -}}
+{{- $reclaimerAlertAfter := .Values.dataPolicy.derived.stagedReclaimer.alertAfter }}
+{{- $reclaimerAlertAfterS := include "edge.durationSeconds" ($reclaimerAlertAfter | default "") | int64 }}
+{{- $reclaimerDeadlineS := .Values.dataPolicy.derived.stagedReclaimer.deadlineSeconds | int64 }}
+{{- if le $reclaimerAlertAfterS $reclaimerDeadlineS }}
+  {{- fail (printf "dataPolicy.derived.stagedReclaimer.alertAfter must be a finite duration longer than deadlineSeconds (%ds), got %q. ReclaimerNotSucceeding compares it with the time since the last successful run: forever/never/empty read as -1 and fire at once, and a value at or under the deadline fires between healthy runs. Keep it above 2 x the schedule period + deadlineSeconds; to stop the alert, silence it in Alertmanager." $reclaimerDeadlineS (toString $reclaimerAlertAfter)) }}
+{{- end }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
 {{- $sev := base $path | trimSuffix ".yaml" }}
 ---
@@ -158,7 +168,14 @@ spec:
 {{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
        release's own data-policy pods. A plain replace, never tpl: the files
        carry Prometheus's own {{ $labels }} templates. */}}
-{{ $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | indent 2 }}
+{{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
+{{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
+       reads a bare __NAME__ as a metric name, so the rule loads, reports
+       healthy and compares against a series that never exists. */ -}}
+{{- if regexMatch "__[A-Z0-9_]+__" $promRules }}
+  {{- fail (printf "a __*__ sentinel survived substitution in %s. Prometheus would read it as a metric name that never exists, so the rule would load, look healthy and never fire. Add the matching replace above." $path) }}
+{{- end }}
+{{ $promRules | indent 2 }}
 {{- end }}
 
 ---

@@ -430,6 +430,13 @@ dataPolicy:
       maxRemovals: 50
       # Killed if a run hangs on an unreachable XNAT, before the next is due.
       deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run,
+      # whatever the cause: failed, killed at the deadline, crashed, not started.
+      # Default: two hourly runs missed, each given its full deadline.
+      # CAUTION: keep above 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it. Raise it when you slow the schedule.
+      # The chart refuses forever/never and anything not above deadlineSeconds.
+      alertAfter: 3h
       resources:
         requests: {cpu: 20m, memory: 64Mi}
         limits: {memory: 256Mi}

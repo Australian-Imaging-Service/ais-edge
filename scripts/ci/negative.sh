@@ -70,7 +70,7 @@ ci_heading "guard census"
 # file<TAB>expected fail-call-sites
 expected_census() {
   cat <<'EOF'
-charts/edge/templates/observability.yaml	7
+charts/edge/templates/observability.yaml	9
 charts/mgmt/templates/_helpers.tpl	19
 charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	13
@@ -108,7 +108,14 @@ EOF
 #     __UPLOAD_STUCK_ERRORS__ was introduced: it fires only if someone adds a
 #     sentinel to the rules file without adding the matching replace, which is a
 #     template edit rather than a misconfiguration, so no values file reaches it.
-UNREACHABLE_GUARDS=3
+#   charts/edge/templates/observability.yaml, "a __*__ sentinel survived
+#   substitution in files/prometheus-rules/..."
+#     The same tripwire for the Prometheus rule files, added with
+#     __RECLAIMER_ALERT_AFTER_S__. It matters MORE there: PromQL reads a bare
+#     __NAME__ as a metric name, so an unfilled sentinel loads, reports healthy
+#     and never fires, with no error anywhere. Again a template edit, not a
+#     misconfiguration.
+UNREACHABLE_GUARDS=4
 
 # Any template not listed above is expected to contain no guards at all. That
 # half matters as much as the counts: a guard added to a file nobody watches is

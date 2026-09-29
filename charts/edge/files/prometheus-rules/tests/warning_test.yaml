@@ -1,8 +1,12 @@
 # promtool unit tests for files/prometheus-rules/warning.yaml
 #
-# KubeJobFailed without this release's staged-reclaimer Jobs.
+# KubeJobFailed without this release's staged-reclaimer Jobs, and
+# ReclaimerNotSucceeding, which covers those Jobs instead.
 # __RELEASE_NAMESPACE__ is the literal the raw rule compares against; the chart
 # substitutes the real namespace at render time.
+# __RECLAIMER_ALERT_AFTER_S__ stands where PromQL wants a number, so
+# scripts/ci/promtool.sh runs these tests on a copy with it set to 10800 (3h,
+# the chart default today). The timings below are written against that.
 rule_files:
   - ../warning.yaml
 
@@ -49,3 +53,119 @@ tests:
               description: 'Job other-team/their-staged-reclaimer-29841317 failed to complete. Removing failed job after investigation should clear this alert on cluster .'
               runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
               summary: Job failed to complete.
+
+  # ReclaimerNotSucceeding. __RECLAIMER_ALERT_AFTER_S__ is 10800 (3h) here: see
+  # the header. The reclaimer last succeeded at t=0 and not again until 240m.
+  # Its failed Job stays kept (failedJobsHistoryLimit) the whole time.
+  # Just as stale, and quiet: a reclaimer-named CronJob in another namespace,
+  # and another CronJob in this one.
+  - interval: 1m
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
+        values: '0x239 14400x60'
+      - series: 'kube_job_failed{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", job_name="edge-staged-reclaimer-29841317", condition="true"}'
+        values: '1x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="other-team", cronjob="their-staged-reclaimer"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-backup"}'
+        values: '0x300'
+    alert_rule_test:
+      # Exactly 3h since the last success is not OVER 3h.
+      - eval_time: 180m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      # Over it, still pending: for is 15m.
+      - eval_time: 190m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      # One alert, not two: the never-succeeded half stands down once a
+      # success exists.
+      - eval_time: 200m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: __RELEASE_NAMESPACE__
+              cronjob: edge-staged-reclaimer
+            exp_annotations:
+              summary: 'Staged reclaimer edge-staged-reclaimer has not succeeded for 3h 20m 0s'
+              description: |
+                No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
+                for 3h 20m 0s (counted from its creation if none ever has).
+                While this fires no staged session is confirmed against XNAT or reclaimed, so the
+                staged tree only grows.
+                Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
+                Arriving on its own, the runs are ending without logging why:
+                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+                       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
+                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
+                     its deadline (DeadlineExceeded in kubectl describe job).
+                       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer
+                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+                       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50
+                If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
+                with it: it must stay above two periods plus deadlineSeconds.
+                Clears on the next successful run.
+      # The kept failed Job fires nothing here: this rule owns it now.
+      - eval_time: 200m
+        alertname: KubeJobFailed
+        exp_alerts: []
+      # The success at 240m clears it, with the failed Job still kept.
+      - eval_time: 245m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+
+  # Never succeeded: there is no last-success series at all, so the age is
+  # taken from creation. Quiet while young, fires past alertAfter.
+  - interval: 1m
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 200m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: __RELEASE_NAMESPACE__
+              cronjob: edge-staged-reclaimer
+            exp_annotations:
+              summary: 'Staged reclaimer edge-staged-reclaimer has not succeeded for 3h 20m 0s'
+              description: |
+                No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
+                for 3h 20m 0s (counted from its creation if none ever has).
+                While this fires no staged session is confirmed against XNAT or reclaimed, so the
+                staged tree only grows.
+                Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
+                Arriving on its own, the runs are ending without logging why:
+                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+                       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
+                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
+                     its deadline (DeadlineExceeded in kubectl describe job).
+                       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer
+                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+                       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50
+                If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
+                with it: it must stay above two periods plus deadlineSeconds.
+                Clears on the next successful run.
+
+  # Hourly successes with ONE run missed (none at 120m). The gap peaks just
+  # under 2h at 179m, below alertAfter: a single bad run must not mail.
+  - interval: 1m
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", cronjob="edge-staged-reclaimer"}'
+        values: '0x59 3600x119 10800x59 14400x60'
+    alert_rule_test:
+      - eval_time: 179m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 299m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []

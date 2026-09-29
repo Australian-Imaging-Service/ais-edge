@@ -749,12 +749,12 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **twenty-six**
+Dashboards and alert rules ship with the chart. It defines **twenty-seven**
 alerts of its own: twenty log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and six metric rules evaluated by Prometheus
+(`files/loki-ruler-rules.yaml`) and seven metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
 `KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
-`NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
+`ReclaimerNotSucceeding`, `NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
 kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
 apart from `CPUThrottlingHigh` and `KubeJobFailed`, which the chart replaces with
 copies that leave out the data-policy reporter and the staged-reclaimer's own
@@ -787,6 +787,16 @@ tier-2. Under `upload.mode=direct` the staged-reclaimer CronJob runs the same
 `reclaim-staged.sh` against the local upload tree instead of a bucket, so a
 reclaimer that keeps failing, or a session XNAT never confirms, raises the same
 two alerts. One failed run does not: the next hourly run finishing clears it.
+
+`ReclaimerRunUnavailable` only sees runs that log why they stopped. A run killed
+at its deadline, OOM-killed, crashing, stuck on an image pull or never scheduled
+logs nothing, so **`ReclaimerNotSucceeding`** watches the CronJob itself: no
+successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h, which
+is two hourly runs missed) raises it, counted from creation if it has never
+succeeded. It clears on the next good run, however many failed Jobs history
+keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
+outage sends one mail. If you slow the schedule, raise `alertAfter` with it:
+keep it above two periods plus `deadlineSeconds`.
 
 ---
 

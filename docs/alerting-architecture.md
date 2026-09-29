@@ -96,7 +96,8 @@ with `.Files.Get` and Helm never templates it.
 | `KubePodCrashLooping` | Prometheus | Container restart count, kube-state-metrics. |
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
-| `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerRunUnavailable` owns those instead. |
+| `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
+| `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage mails once. |
 | `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without this release's own data-policy reporter pods (scoped by namespace and pod; a same-named container elsewhere still alerts). That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
@@ -120,8 +121,8 @@ that content comes from:
   `charts/edge/templates/observability.yaml` globs
   `files/prometheus-rules/*.yaml` and emits one object per severity file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
-  `ais-edge-warning` (`IngestPodCrashLoop`, and `KubeJobFailed` in place of the
-  upstream copy) and `ais-edge-info`
+  `ais-edge-warning` (`IngestPodCrashLoop`, `ReclaimerNotSucceeding`, and
+  `KubeJobFailed` in place of the upstream copy) and `ais-edge-info`
   (`NodeCountChanged`, and `CPUThrottlingHigh` in place of the upstream copy). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
