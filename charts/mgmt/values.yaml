@@ -101,6 +101,8 @@ dataPolicy:
   # reported fires too.
   # CAUTION: keep above 3 x the edges' dataPolicy.reporter.interval (300s by
   # default), or one slow sweep or a pod restart fires it.
+  # The chart refuses forever/never/empty and anything under 1m: this is a
+  # query window, not a retention.
   reporterSilentAfter: 30m
 
   derived:

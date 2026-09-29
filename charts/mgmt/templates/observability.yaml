@@ -708,7 +708,16 @@ data:
   {{- else }}
     {{- $lokiRules = regexReplaceAll "(?s)      # >>> DataPolicyReporterSilent.*?      # <<< DataPolicyReporterSilent\\n" $lokiRules "" }}
   {{- end }}
-  {{- $reportSilenceS := int (include "mgmt.durationSeconds" .Values.dataPolicy.reporterSilentAfter) }}
+  {{- /* The LogQL lookback of DataPolicyReporterSilent, so it must be a real
+         window. The shared parser reads forever/never/empty as -1, right for
+         retention and wrong here: Loki rejects "-1s" as a duration, and the
+         rule group with it. 0 is a window with nothing in it, so every edge
+         would read as silent. Under a minute is also under the ruler's own
+         cadence, and the alert text rounds it to 0 minutes. */}}
+  {{- $reportSilenceS := include "mgmt.durationSeconds" (.Values.dataPolicy.reporterSilentAfter | default "") | int }}
+  {{- if lt $reportSilenceS 60 }}
+    {{- fail (printf "dataPolicy.reporterSilentAfter must be a finite duration of at least 1m, got %q. It is DataPolicyReporterSilent's LogQL lookback: forever/never/empty read as -1, which Loki rejects along with the rule group, and 0 would report every edge silent. Keep it above 3 x the edges' dataPolicy.reporter.interval." (toString .Values.dataPolicy.reporterSilentAfter)) }}
+  {{- end }}
   {{- $lokiRules = $lokiRules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
   {{- $lokiRules = $lokiRules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule would ship with a
