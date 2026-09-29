@@ -133,6 +133,34 @@ print(n)
         printf '%s\n' "$out" | sed 's/^/        /'
       fi
     done
+
+    # CPUThrottlingHigh: upstream copy off, this chart's copy on, once in total.
+    # Twice means every throttled container mails twice; the upstream copy
+    # alone means data-policy mails several times a day for nothing.
+    if [ "$(ci_obs_chart)" = "charts/edge" ]; then
+      thr="$(python3 - "$extract_dir" <<'PY'
+import glob, sys, yaml
+hits = []
+for f in sorted(glob.glob(sys.argv[1] + "/*.yaml")):
+    for g in (yaml.safe_load(open(f)) or {}).get("groups", []):
+        for r in g.get("rules") or []:
+            if r.get("alert") == "CPUThrottlingHigh":
+                hits.append((f.rsplit("/", 1)[1][:-5], 'container!="data-policy"' in r.get("expr", "")))
+if len(hits) != 1:
+    print("FAIL CPUThrottlingHigh is defined %d time(s) (%s); expected only this chart's copy, "
+          "with kube-prometheus-stack.defaultRules.disabled.CPUThrottlingHigh keeping the upstream one off"
+          % (len(hits), ", ".join(h[0] for h in hits) or "none"))
+elif not hits[0][1]:
+    print("FAIL the only CPUThrottlingHigh (%s) does not exclude container data-policy" % hits[0][0])
+else:
+    print("PASS CPUThrottlingHigh is defined once (%s), without data-policy" % hits[0][0])
+PY
+)"
+      case "$thr" in
+        PASS*) ci_pass "${thr#PASS }" ;;
+        *)     ci_fail "${thr#FAIL }" ;;
+      esac
+    fi
   fi
 fi
 

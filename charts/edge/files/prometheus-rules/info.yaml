@@ -20,3 +20,42 @@ groups:
       summary: Node inventory changed on the tier-1 host
       description: The number of nodes in this cluster changed in the last 10 minutes. On a tier-1 appliance there is exactly
         one node, so this should never fire.
+
+# Upstream CPUThrottlingHigh, minus the data-policy reporter.
+# The upstream copy is off: kube-prometheus-stack.defaultRules.disabled in values.yaml.
+# No interval: evaluated at the Prometheus default, as upstream is.
+- name: ais-edge-resources
+  rules:
+  - alert: CPUThrottlingHigh
+    # WHY data-policy IS LEFT OUT: it is runnable for well under a second
+    # every few minutes, so a 5m window holds ~6 CFS periods. A burst that
+    # clips 4 of them for a millisecond reads as 67% and fires, at 0.0014
+    # cores average (measured on stream-2-ab-dev, 2026-09-29).
+    # Its real failure, a sweep too slow to report, is DataPolicyReporterSilent.
+    # CAUTION: must match the container name in templates/data-policy.yaml.
+    # scripts/ci/runtime-templates.sh fails if that container is renamed.
+    # Otherwise identical to upstream (kube-prometheus-stack 87.19.2).
+    expr: |-
+      sum without (id, metrics_path, name, image, endpoint, job, node) (
+        topk by (cluster, namespace, pod, container, instance) (1,
+          increase(
+            container_cpu_cfs_throttled_periods_total{container!="", container!="data-policy", job="kubelet", metrics_path="/metrics/cadvisor"}
+          [5m])
+        )
+      )
+      / on (cluster, namespace, pod, container, instance) group_left
+      sum without (id, metrics_path, name, image, endpoint, job, node) (
+        topk by (cluster, namespace, pod, container, instance) (1,
+          increase(
+            container_cpu_cfs_periods_total{job="kubelet", metrics_path="/metrics/cadvisor"}
+          [5m])
+        )
+      )
+      > ( 25 / 100 )
+    for: 15m
+    labels:
+      severity: info
+    annotations:
+      description: '{{ $value | humanizePercentage }} throttling of CPU in namespace {{ $labels.namespace }} for container {{ $labels.container }} in pod {{ $labels.pod }} on cluster {{ $labels.cluster }}.'
+      runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/cputhrottlinghigh
+      summary: Processes experience elevated CPU throttling.

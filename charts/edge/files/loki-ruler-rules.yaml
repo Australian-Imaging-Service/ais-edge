@@ -521,6 +521,39 @@ groups:
     
         Check EdgeDiskLow too: a stage that never drains eventually fills the
         volume, and that alert is the one with the deadline.
+  - alert: DataPolicyReporterSilent
+    # WATCHES THE WATCHER. EdgeDiskLow, StageBacklogAgeing and
+    # QuarantinedDataUnresolved read only stage_report lines. When those stop,
+    # all three go quiet, which looks exactly like a healthy site.
+    # absent_over_time is true when nothing matched, including a reporter that
+    # never started, so no series has to exist first.
+    # __CLUSTER_LABEL__: this site's clusterLabel, so the alert carries it.
+    # __DP_REPORT_SILENCE_S__: max(30m, 3 x dataPolicy.reporter.interval).
+    # Both substituted by templates/observability.yaml.
+    expr: |
+      absent_over_time(
+        {namespace="xnat-ingest", component="data-policy", cluster="__CLUSTER_LABEL__"}
+        | json | event="stage_report"
+        [__DP_REPORT_SILENCE_S__s])
+    for: 0s
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-storage
+    annotations:
+      summary: data-policy on {{ $labels.cluster }} has stopped reporting
+      description: |
+        No stage_report from the data-policy reporter on {{ $labels.cluster }}
+        for __DP_REPORT_SILENCE_MIN__ minutes. EdgeDiskLow, StageBacklogAgeing
+        and QuarantinedDataUnresolved read only those lines, so none of them
+        can fire while this one is firing: a filling disk would go unreported.
+
+        Either the reporter is down or stuck, or its logs are not reaching Loki:
+
+          kubectl -n xnat-ingest get pods -l app=data-policy
+          kubectl -n xnat-ingest logs -l app=data-policy --tail=20
+
+        Nothing is deleted or held back because of this.
   - alert: PipelineSessionStuck
     expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_stuck\" [15m])) > 0\n"
     for: 10m

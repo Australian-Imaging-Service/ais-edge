@@ -240,6 +240,9 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS0"}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-live"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS1"}
 2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
@@ -286,6 +289,10 @@ upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, b
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
 rejected_unmapped_aet	DICOMRejectedUnmappedAET	aet-bad	fire	scanner sent an AE title not in aetMap — studies quarantined, never reached XNAT
 rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title must never raise a rejection
+reporter_live	DataPolicyReporterSilent	reporter-live	nofire	stage_report 3m ago
+reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	last stage_report 45m ago, over the 30m window
+reporter_never	DataPolicyReporterSilent	reporter-never	fire	no line at all, as for a reporter that never started
+reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but no stage_report: the disk alerts are still blind
 EOF
 }
 
@@ -365,7 +372,7 @@ while IFS=$'\t' read -r name alert cluster expect desc; do
         skip "$name" "$alert is not in this tier's ruleset"
         continue
     fi
-    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" <<'PY'
+    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" "$cluster" <<'PY'
 
 import sys, re, yaml
 
@@ -399,8 +406,14 @@ expr = expr.replace("__DP_MIN_FREE_DISK_PCT__",
                     str(orig.get("facilityBackup", {}).get("minFreeDiskPercent", 10)))
 expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
                     seconds(orig.get("quarantine", {}).get("alertAfter", "24h")))
+# Same formula as templates/observability.yaml: max(30m, 3 sweeps).
+interval = int((dp.get("reporter") or {}).get("interval", 300))
+expr = expr.replace("__DP_REPORT_SILENCE_S__", str(max(1800, 3 * interval)))
+# The chart pins this to the site's clusterLabel; here, to the case's cluster.
+expr = expr.replace("__CLUSTER_LABEL__", sys.argv[4])
 
-left = re.findall(r"__DP_[A-Z_]+__", expr)
+# ANY sentinel, not only __DP_*__: __CLUSTER_LABEL__ is one too.
+left = re.findall(r"__[A-Z][A-Z0-9_]*__", expr)
 if left:
     raise SystemExit("unsubstituted sentinel(s) in %s: %s — the harness and the "
                      "chart disagree about what to replace" % (sys.argv[2], left))

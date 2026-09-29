@@ -36,3 +36,40 @@ tests:
                 The number of nodes in this cluster changed in the last 10
                 minutes. On a tier-1 appliance there is exactly one node, so
                 this should never fire.
+
+  # CPUThrottlingHigh without the data-policy reporter.
+  # data-policy and upload are both throttled in 4 of every 6 CFS periods
+  # (67%, over the 25% bar) for 40 minutes; vector is never throttled.
+  # Only upload may alert: data-policy is excluded, vector is fine.
+  - interval: 1m
+    input_series:
+      - series: 'container_cpu_cfs_periods_total{namespace="xnat-ingest", pod="edge-data-policy-abcde", container="data-policy", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+6x40'
+      - series: 'container_cpu_cfs_throttled_periods_total{namespace="xnat-ingest", pod="edge-data-policy-abcde", container="data-policy", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+4x40'
+      - series: 'container_cpu_cfs_periods_total{namespace="xnat-ingest", pod="edge-upload-abcde", container="upload", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+6x40'
+      - series: 'container_cpu_cfs_throttled_periods_total{namespace="xnat-ingest", pod="edge-upload-abcde", container="upload", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+4x40'
+      - series: 'container_cpu_cfs_periods_total{namespace="xnat-ingest", pod="edge-vector-abcde", container="vector", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+6x40'
+      - series: 'container_cpu_cfs_throttled_periods_total{namespace="xnat-ingest", pod="edge-vector-abcde", container="vector", instance="10.0.0.1:10250", job="kubelet", metrics_path="/metrics/cadvisor"}'
+        values: '0+0x40'
+    alert_rule_test:
+      # Still pending: for is 15m.
+      - eval_time: 10m
+        alertname: CPUThrottlingHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CPUThrottlingHigh
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              namespace: xnat-ingest
+              pod: edge-upload-abcde
+              container: upload
+              instance: 10.0.0.1:10250
+            exp_annotations:
+              description: '66.67% throttling of CPU in namespace xnat-ingest for container upload in pod edge-upload-abcde on cluster .'
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/cputhrottlinghigh
+              summary: Processes experience elevated CPU throttling.

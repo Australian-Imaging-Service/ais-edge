@@ -98,6 +98,14 @@ data:
   {{- end }}
   {{- $uploadCycle := add $uploadLoop 35 }}
   {{- $rules = $rules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadCycle))) }}
+  {{- /* DataPolicyReporterSilent. Pinned to this site's clusterLabel so the
+         absent series carries it; escaped for the LogQL string it sits in. */ -}}
+  {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}
+  {{- /* Silence window: at least 30m and at least 3 sweeps, so a pod restart
+         or one slow sweep never fires it. */ -}}
+  {{- $reportSilenceS := max 1800 (mul 3 (int .Values.dataPolicy.reporter.interval)) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule ships with a literal
          __..._ where a number belongs, Loki rejects the whole group at load
          time, and every OTHER alert in this file stops evaluating with it.
