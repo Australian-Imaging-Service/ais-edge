@@ -594,6 +594,8 @@ groups:
     
         Check EdgeDiskLow too: a stage that never drains eventually fills the
         volume, and that alert is the one with the deadline.
+  # >>> DataPolicyReporterSilent: templates/observability.yaml drops this block
+  # when dataPolicy.reporter.enabled is false. Keep both marker lines.
   - alert: DataPolicyReporterSilent
     # WATCHES THE WATCHER. EdgeDiskLow, StageBacklogAgeing and
     # QuarantinedDataUnresolved read only stage_report lines. When those stop,
@@ -627,6 +629,7 @@ groups:
           kubectl -n xnat-ingest logs -l app=data-policy --tail=20
 
         Nothing is deleted or held back because of this.
+  # <<< DataPolicyReporterSilent
   - alert: PipelineSessionStuck
     expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_stuck\" [15m])) > 0\n"
     for: 10m

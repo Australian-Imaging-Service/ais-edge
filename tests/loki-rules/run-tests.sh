@@ -319,9 +319,16 @@ rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title mus
 upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
 upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
 upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
-upload_slow_repair	XNATUploadSuccess	repair-slow	nofire	the re-send took 38m; still a repair, still no "upload completed"
-repair_alerts	XNATResourcesRepaired	repair-fixed	fire	XNAT had lost 2 resources and the uploader re-sent them
-repair_not_on_first_upload	XNATResourcesRepaired	upload-first	nofire	a first upload creates resources; nothing was repaired
+upload_repair_gap	XNATUploadSuccess	repair-gap	nofire	8m between a repair and its success line (verdict and metadata calls): still a repair
+upload_repair_window_edge	XNATUploadSuccess	repair-edge	nofire	success 9m ago, still in its window; repair 18m ago, still inside the 20m suppression
+upload_later_pass	XNATUploadSuccess	repair-later	fire	a new pass 23m after a repair is an upload again
+upload_failed_repair	XNATUploadSuccess	repair-failed	nofire	a failed repair logs no success line, so nothing to mail
+upload_prior_success_failed_repair	XNATUploadSuccess	repair-prior-ok	nofire	an upload 8m ago then a failed repair 2m ago: suppressed now; its own mail went at the time
+repair_attempt_succeeded	XNATRepairAttempted	repair-fixed	fire	XNAT was missing 2 resources and the uploader re-sent them
+repair_attempt_failed	XNATRepairAttempted	repair-failed	fire	a failed repair is still reported; the mail claims only the attempt
+repair_attempt_prior_success	XNATRepairAttempted	repair-prior-ok	fire	an earlier success must not make this a success claim: it claims only the attempt
+repair_not_on_first_upload	XNATRepairAttempted	upload-first	nofire	a first upload creates resources; nothing was repaired
+repair_failing_every_pass	XNATUploadRetryStorm	repair-storm	fire	a repair failing on every pass raises the retry storm
 reporter_live	DataPolicyReporterSilent	reporter-live	nofire	stage_report 3m ago
 reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	last stage_report 45m ago, over the 30m window
 reporter_never	DataPolicyReporterSilent	reporter-never	fire	no line at all, as for a reporter that never started

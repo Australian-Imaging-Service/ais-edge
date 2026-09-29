@@ -33,26 +33,35 @@ groups:
     # clips 4 of them for a millisecond reads as 67% and fires, at 0.0014
     # cores average (measured on stream-2-ab-dev, 2026-09-29).
     # Its real failure, a sweep too slow to report, is DataPolicyReporterSilent.
+    # SCOPE: only the DaemonSet's own pods (<release>-data-policy-<hash>) in
+    # this release's namespace. A same-named container anywhere else still alerts.
     # CAUTION: must match the container name in templates/data-policy.yaml.
     # scripts/ci/runtime-templates.sh fails if that container is renamed.
-    # Otherwise identical to upstream (kube-prometheus-stack 87.19.2).
+    # The ratio is upstream verbatim (kube-prometheus-stack 87.19.2); only the
+    # `unless` is ours.
     expr: |-
-      sum without (id, metrics_path, name, image, endpoint, job, node) (
-        topk by (cluster, namespace, pod, container, instance) (1,
-          increase(
-            container_cpu_cfs_throttled_periods_total{container!="", container!="data-policy", job="kubelet", metrics_path="/metrics/cadvisor"}
-          [5m])
+      (
+        sum without (id, metrics_path, name, image, endpoint, job, node) (
+          topk by (cluster, namespace, pod, container, instance) (1,
+            increase(
+              container_cpu_cfs_throttled_periods_total{container!="", job="kubelet", metrics_path="/metrics/cadvisor", }
+            [5m])
+          )
         )
-      )
-      / on (cluster, namespace, pod, container, instance) group_left
-      sum without (id, metrics_path, name, image, endpoint, job, node) (
-        topk by (cluster, namespace, pod, container, instance) (1,
-          increase(
-            container_cpu_cfs_periods_total{job="kubelet", metrics_path="/metrics/cadvisor"}
-          [5m])
+        / on (cluster, namespace, pod, container, instance) group_left
+        sum without (id, metrics_path, name, image, endpoint, job, node) (
+          topk by (cluster, namespace, pod, container, instance) (1,
+            increase(
+              container_cpu_cfs_periods_total{job="kubelet", metrics_path="/metrics/cadvisor", }
+            [5m])
+          )
         )
+        > ( 25 / 100 )
       )
-      > ( 25 / 100 )
+      unless on (namespace, pod, container)
+      max by (namespace, pod, container) (
+        container_cpu_cfs_periods_total{namespace="__RELEASE_NAMESPACE__", container="data-policy", pod=~".+-data-policy-[a-z0-9]{5}", job="kubelet", metrics_path="/metrics/cadvisor"}
+      )
     for: 15m
     labels:
       severity: info

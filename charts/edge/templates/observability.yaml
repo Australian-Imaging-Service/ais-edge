@@ -98,6 +98,12 @@ data:
   {{- end }}
   {{- $uploadCycle := add $uploadLoop 35 }}
   {{- $rules = $rules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadCycle))) }}
+  {{- /* No reporter, nothing to go silent: without this a site that turns the
+         reporter off gets DataPolicyReporterSilent firing for ever. The block
+         is fenced by marker comments in the rules file. */ -}}
+  {{- if not .Values.dataPolicy.reporter.enabled }}
+    {{- $rules = regexReplaceAll "(?s)  # >>> DataPolicyReporterSilent.*?  # <<< DataPolicyReporterSilent\n" $rules "" }}
+  {{- end }}
   {{- /* DataPolicyReporterSilent. Pinned to this site's clusterLabel so the
          absent series carries it; escaped for the LogQL string it sits in. */ -}}
   {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}

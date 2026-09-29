@@ -212,6 +212,10 @@ fi
 # `value:` keys, and ASSIGNED_DIR reached the pod as "86400". Every edge render
 # is loaded with duplicate keys refused, not only the data-policy object.
 #
+# DataPolicyReporterSilent renders exactly when the reporter DaemonSet does:
+# with no reporter it would fire for ever. At least one render must have the
+# Loki rules without a reporter, or that half is checked vacuously.
+#
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
 # (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
@@ -252,6 +256,7 @@ def env(c):
     return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
 
 problems, checked, delegated, layouts = [], 0, 0, set()
+rules_renders, reporter_off = 0, 0
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     case = os.path.basename(path)[:-len(".yaml")]
     try:
@@ -269,6 +274,17 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                 up = env(c)
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+    for d in docs:
+        if d.get("kind") == "ConfigMap" and "ais-edge-rules.yaml" in (d.get("data") or {}):
+            rules_renders += 1
+            names = {r.get("alert") for g in yaml.safe_load(d["data"]["ais-edge-rules.yaml"]).get("groups", [])
+                     for r in g.get("rules") or []}
+            if ("DataPolicyReporterSilent" in names) != (dp is not None):
+                problems.append("%s: DataPolicyReporterSilent is %s but the reporter DaemonSet is %s"
+                                % (case, "rendered" if "DataPolicyReporterSilent" in names else "absent",
+                                   "rendered" if dp is not None else "absent"))
+            if dp is None:
+                reporter_off += 1
     if dp is None:
         continue
     checked += 1
@@ -302,6 +318,8 @@ if checked == 0:
 for want in ("orthanc", "ingest"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if rules_renders and not reporter_off:
+    problems.append("no render has the Loki rules without a reporter, so the reporter-off gating goes unchecked")
 if checked and not delegated:
     problems.append("no render sets EXTERNAL_RECLAIM_STAGE, so the delegation wiring goes unchecked")
 if problems:

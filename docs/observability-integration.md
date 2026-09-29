@@ -208,7 +208,7 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (an unmapped AET nobody has mapped) |
-| `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires |
+| `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |
 | `KubernetesAPIServerDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
 | `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |
 | `IngestPodCrashLoop` | warning | Prom | >3 restarts/1h in the release namespace |
