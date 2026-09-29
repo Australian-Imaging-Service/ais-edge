@@ -109,6 +109,40 @@ edges:
     konnectivityNodePort: 30133
 EOF
 
+# DataPolicyReporterSilent is keyed on `edges`. An edge that runs without a
+# reporter opts out; with none left the rule must not render at all (an empty
+# inventory is not valid LogQL). runtime-templates.sh checks both cases.
+cat >"$V/mgmt-reporter-optout.yaml" <<'EOF'
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+  - name: edge-beta
+    nodeIP: 198.51.100.22
+    s3SecretRef: edge-beta-s3
+    exposure: nodePort
+    apiNodePort: 30444
+    konnectivityNodePort: 30133
+    dataPolicyReporter: false
+EOF
+cat >"$V/mgmt-reporter-optout-all.yaml" <<'EOF'
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+    dataPolicyReporter: false
+EOF
+# With no reporting edge the rule is dropped and reporterSilentAfter is unused,
+# so a value the guard would refuse must still render. The guard applies only
+# where DataPolicyReporterSilent exists (neg-mgmt-reporter-silent-*).
+printf 'dataPolicy:\n  reporterSilentAfter: never\n' >"$V/mgmt-reporter-silent-never.yaml"
+
 # The other exposure mode: ClusterIP behind the ssl-passthrough Ingress, no
 # cluster-wide port to track. Both modes have to render, because the chart
 # supports a fleet with one site on each during a migration.
@@ -482,6 +516,13 @@ EOF
 # XNATResourceIncompleteAndStuck's threshold is derived from this value, so a
 # non-positive loop is a division by zero at render time, not just a slow poll.
 printf 'xnatUpload:\n  loop: 0\n'                          >"$V/neg-mgmt-upload-loop-zero.yaml"
+# DataPolicyReporterSilent's LogQL lookback. forever/never/empty parse to -1,
+# which Loki rejects as a duration (and the rule group with it); 0 and anything
+# under a minute are refused too. Codex reproduced the rejection on Loki 3.6.8.
+for w in forever never '""' 0 30s; do
+  n="$(printf '%s' "$w" | tr -d '"')"; n="${n:-empty}"
+  printf 'dataPolicy:\n  reporterSilentAfter: %s\n' "$w" >"$V/neg-mgmt-reporter-silent-$n.yaml"
+done
 printf 'observability:\n  alerting:\n    emailTo: ""\n'   >"$V/neg-mgmt-no-emailto.yaml"
 printf 'observability:\n  alerting:\n    smtpHost: ""\n'  >"$V/neg-mgmt-no-smtphost.yaml"
 printf 'xnatUpload:\n  xnatSecretRef: ""\n'               >"$V/neg-mgmt-no-xnatsecret.yaml"
@@ -1151,6 +1192,9 @@ ci_positive_cases() {
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
+mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
+mgmt-reporter-optout-all	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml
+mgmt-reporter-optout-all-never	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml mgmt-reporter-silent-never.yaml
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
 mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
@@ -1203,6 +1247,11 @@ neg-mgmt-vector-loki-wrong-ns	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wr
 neg-mgmt-vector-loki-wrong-svc	charts/mgmt	mgmt-base.yaml neg-mgmt-vector-loki-wrong-svc.yaml	but this release's Loki Service is
 neg-mgmt-loki-s3-no-seaweedfs	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-s3-no-seaweedfs.yaml	requires seaweedfs.enabled=true
 neg-mgmt-upload-loop-zero	charts/mgmt	mgmt-base.yaml neg-mgmt-upload-loop-zero.yaml	xnatUpload.loop must be a positive number of seconds
+neg-mgmt-reporter-silent-forever	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-forever.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
+neg-mgmt-reporter-silent-never	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-never.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
+neg-mgmt-reporter-silent-empty	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-empty.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
+neg-mgmt-reporter-silent-0	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-0.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
+neg-mgmt-reporter-silent-30s	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-30s.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
 neg-mgmt-no-emailto	charts/mgmt	mgmt-base.yaml neg-mgmt-no-emailto.yaml	emailTo is empty
 neg-mgmt-no-smtphost	charts/mgmt	mgmt-base.yaml neg-mgmt-no-smtphost.yaml	smtpHost is empty
 neg-mgmt-no-xnatsecret	charts/mgmt	mgmt-base.yaml neg-mgmt-no-xnatsecret.yaml	xnatSecretRef must name a Secret

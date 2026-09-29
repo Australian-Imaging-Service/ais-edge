@@ -312,6 +312,62 @@ PY
 )" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
 
 # -----------------------------------------------------------------------------
+# DataPolicyReporterSilent watches exactly the configured edges
+# -----------------------------------------------------------------------------
+# Its inventory is built from `edges` at render time (templates/observability.yaml).
+# It must list every edge that runs a reporter and nothing else; with none, the
+# rule must be gone rather than rendered empty. A missing edge is an edge
+# nobody watches; an extra one fires for ever. Edges are read from their Loki
+# client Certificates (<edge>-loki-client), which render in every mode that
+# renders the rules; k0smotron Clusters do not (k0smotron.enabled=false).
+ci_heading "DataPolicyReporterSilent watches exactly the configured edges"
+inv_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, re, sys, yaml
+# Render cases that opt edges out, and which ones (scripts/ci/values.sh).
+OPTED_OUT = {"mgmt-reporter-optout": {"edge-beta"}, "mgmt-reporter-optout-all": {"edge-alpha"},
+             "mgmt-reporter-optout-all-never": {"edge-alpha"}}
+problems, checked, multi = [], 0, False
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "mgmt-*.yaml"))):
+    case = os.path.basename(path)[:-len(".yaml")]
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    cm = [d for d in docs if d.get("kind") == "ConfigMap" and "ais-edge-pipeline.yaml" in (d.get("data") or {})]
+    if not cm:
+        continue
+    checked += 1
+    edges = {d["metadata"]["name"][:-len("-loki-client")] for d in docs
+             if d.get("kind") == "Certificate" and d["metadata"]["name"].endswith("-loki-client")}
+    want = edges - OPTED_OUT.get(case, set())
+    rules = {r["alert"]: r for g in yaml.safe_load(cm[0]["data"]["ais-edge-pipeline.yaml"]).get("groups", [])
+             for r in g.get("rules") or [] if r.get("alert")}
+    rule = rules.get("DataPolicyReporterSilent")
+    if not want:
+        if rule:
+            problems.append("%s: no edge runs a reporter, but DataPolicyReporterSilent is rendered" % case)
+        continue
+    if not rule:
+        problems.append("%s: edges %s run a reporter but DataPolicyReporterSilent is missing" % (case, sorted(want)))
+        continue
+    inv = set(re.findall(r'label_replace\(vector\(1\), "cluster", "([^"]+)"', rule["expr"]))
+    m = re.search(r'cluster=~"([^"]*)"', rule["expr"])
+    rx = set(m.group(1).split("|")) if m else set()
+    if inv != want or rx != want:
+        problems.append("%s: DataPolicyReporterSilent watches %s (regex %s), expected %s"
+                        % (case, sorted(inv), sorted(rx), sorted(want)))
+    multi = multi or len(want) > 1
+if not checked:
+    problems.append("no mgmt render carries the Loki rules: the check would pass on nothing")
+elif not multi:
+    problems.append("no render has two reporting edges, so the per-edge inventory is checked vacuously")
+for c in OPTED_OUT:
+    if not os.path.exists(os.path.join(sys.argv[1], c + ".yaml")):
+        problems.append("render case %s is missing, so the opt-out half goes unchecked" % c)
+if problems:
+    raise SystemExit("; ".join(problems))
+print("DataPolicyReporterSilent watches exactly the reporting edges in %d mgmt render(s), opt-outs included" % checked)
+PY
+)" && ci_pass "$inv_out" || ci_fail "reporter inventory: $inv_out"
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control

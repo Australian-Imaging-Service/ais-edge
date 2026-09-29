@@ -94,6 +94,17 @@ dataPolicy:
   # render time. MUST match charts/edge/values.yaml on the single-node tier.
   stageAgeAlertAfter: 7d
 
+  # Read by DataPolicyReporterSilent: how long an edge's data-policy reporter
+  # may send no stage_report before that edge is reported silent. EdgeDiskLow,
+  # StageBacklogAgeing and QuarantinedDataUnresolved are blind to that edge
+  # for as long as it is. One alert per configured edge; an edge that never
+  # reported fires too.
+  # CAUTION: keep above 3 x the edges' dataPolicy.reporter.interval (300s by
+  # default), or one slow sweep or a pod restart fires it.
+  # The chart refuses forever/never/empty and anything under 1m: this is a
+  # query window, not a retention.
+  reporterSilentAfter: 30m
+
   derived:
     orthancStorage: {location: /data/orthanc-storage, backend: orthanc-rest, reclaim: onGrouped, minAge: 7d, maximumStorageSizeMB: 0, maximumPatientCount: 0}
     grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine
@@ -186,6 +197,10 @@ dataPolicy:
 #   - name: edge-dev
 #     nodeIP: 203.101.230.171
 #     s3SecretRef: edge-dev-s3
+#     # Optional, default true. Set false ONLY for an edge whose own site file
+#     # sets dataPolicy.reporter.enabled: false; otherwise
+#     # DataPolicyReporterSilent fires for it for ever.
+#     dataPolicyReporter: true
 edges: []
 
 k0smotron:

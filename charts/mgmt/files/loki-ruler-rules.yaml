@@ -673,6 +673,58 @@ groups:
         
             Check EdgeDiskLow too: a stage that never drains eventually fills the
             volume, and that alert is the one with the deadline.
+      # >>> DataPolicyReporterSilent: templates/observability.yaml drops this
+      # block when no configured edge runs a reporter. Keep both marker lines.
+      - alert: DataPolicyReporterSilent
+        # WATCHES THE WATCHERS, one per edge. EdgeDiskLow, StageBacklogAgeing
+        # and QuarantinedDataUnresolved read only stage_report lines. When an
+        # edge's reporter or its log shipping stops, all three go quiet for
+        # that edge, which looks exactly like a healthy site.
+        # KEYED ON THE CONFIGURED EDGES, not on what Loki has seen:
+        # __EDGE_REPORTERS__ is one label_replace(vector(1)) per edge, so an
+        # edge that never reported fires too; `unless` drops each edge that
+        # did report in the window.
+        # The cluster label IS the edge name (templates/_helpers.tpl), and
+        # names are DNS labels, so they are safe inside these LogQL strings.
+        # __DP_REPORT_SILENCE_S__: dataPolicy.reporterSilentAfter.
+        # Cannot see its own evaluator: if this Loki is down, nothing fires.
+        expr: |
+          (
+            __EDGE_REPORTERS__
+          )
+          unless on (cluster)
+          sum by (cluster) (
+            count_over_time(
+              {namespace="xnat-ingest", component="data-policy", cluster=~"__EDGE_REPORTER_REGEX__"}
+              | json | event="stage_report"
+              [__DP_REPORT_SILENCE_S__s]
+            )
+          )
+        for: 0s
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-storage
+        annotations:
+          summary: data-policy on {{ $labels.cluster }} has stopped reporting
+          description: |
+            No stage_report from the data-policy reporter on edge
+            {{ $labels.cluster }} for __DP_REPORT_SILENCE_MIN__ minutes, or
+            none ever. EdgeDiskLow, StageBacklogAgeing and
+            QuarantinedDataUnresolved read only those lines, so none of them
+            can fire for this edge while this one is firing.
+
+            Either the reporter is down or stuck, or the edge's logs are not
+            reaching this Loki (edge offline, Vector down, client
+            certificate expired):
+
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} -n xnat-ingest get pods -l app=data-policy
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} -n xnat-ingest logs -l app=data-policy --tail=20
+
+            If this edge deliberately runs without a reporter, set
+            dataPolicyReporter: false on its edges[] entry.
+            Nothing is deleted or held back because of this.
+      # <<< DataPolicyReporterSilent
       - alert: PipelineSessionStuck
         # dataPolicy.reporter.stuckAfter MADE REAL. A session whose reclaim
         # condition never comes true is kept for ever, correctly, and every pass
