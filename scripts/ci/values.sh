@@ -109,6 +109,36 @@ edges:
     konnectivityNodePort: 30133
 EOF
 
+# DataPolicyReporterSilent is keyed on `edges`. An edge that runs without a
+# reporter opts out; with none left the rule must not render at all (an empty
+# inventory is not valid LogQL). runtime-templates.sh checks both cases.
+cat >"$V/mgmt-reporter-optout.yaml" <<'EOF'
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+  - name: edge-beta
+    nodeIP: 198.51.100.22
+    s3SecretRef: edge-beta-s3
+    exposure: nodePort
+    apiNodePort: 30444
+    konnectivityNodePort: 30133
+    dataPolicyReporter: false
+EOF
+cat >"$V/mgmt-reporter-optout-all.yaml" <<'EOF'
+edges:
+  - name: edge-alpha
+    nodeIP: 198.51.100.21
+    s3SecretRef: edge-alpha-s3
+    exposure: nodePort
+    apiNodePort: 30443
+    konnectivityNodePort: 30132
+    dataPolicyReporter: false
+EOF
+
 # The other exposure mode: ClusterIP behind the ssl-passthrough Ingress, no
 # cluster-wide port to track. Both modes have to render, because the chart
 # supports a fleet with one site on each during a migration.
@@ -1151,6 +1181,8 @@ ci_positive_cases() {
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
+mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
+mgmt-reporter-optout-all	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
 mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml

@@ -687,6 +687,30 @@ data:
   {{- end }}
   {{- $uploadCycle := add $uploadLoop 35 }}
   {{- $lokiRules = $lokiRules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadCycle))) }}
+  {{- /* DataPolicyReporterSilent: one series per configured edge that runs a
+         reporter (edges[].dataPolicyReporter, default true). The edge name is
+         the cluster label and a DNS label, so it goes into the LogQL as is.
+         No such edge: drop the fenced rule, since an empty inventory is not
+         valid LogQL and Loki would reject the whole group with it. */}}
+  {{- $reporters := list }}
+  {{- range .Values.edges }}
+    {{- if ne (toString .dataPolicyReporter) "false" }}
+      {{- $reporters = append $reporters .name }}
+    {{- end }}
+  {{- end }}
+  {{- if $reporters }}
+    {{- $inventory := list }}
+    {{- range $reporters }}
+      {{- $inventory = append $inventory (printf "label_replace(vector(1), \"cluster\", \"%s\", \"\", \"\")" .) }}
+    {{- end }}
+    {{- $lokiRules = $lokiRules | replace "__EDGE_REPORTERS__" (join " or " $inventory) }}
+    {{- $lokiRules = $lokiRules | replace "__EDGE_REPORTER_REGEX__" (join "|" $reporters) }}
+  {{- else }}
+    {{- $lokiRules = regexReplaceAll "(?s)      # >>> DataPolicyReporterSilent.*?      # <<< DataPolicyReporterSilent\\n" $lokiRules "" }}
+  {{- end }}
+  {{- $reportSilenceS := int (include "mgmt.durationSeconds" .Values.dataPolicy.reporterSilentAfter) }}
+  {{- $lokiRules = $lokiRules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
+  {{- $lokiRules = $lokiRules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule would ship with a
          literal __DP_..._ in place of a number, Loki would reject the group at
          load time, and every OTHER rule in the same file would stop evaluating

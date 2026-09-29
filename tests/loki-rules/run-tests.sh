@@ -175,6 +175,10 @@ cat <<EOF
 8	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S8.E8'"}
 2	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"INFO","message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S8.E8': ['proj:S8:E8:1-T1:DICOM']"}
 1	{"namespace":"xnat-upload","cluster":"repair-prior-ok"}	{"level":"ERROR","message":"'proj.S8.E8' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S8:E8:1-T1:DICOM"}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-live"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
+45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-unlisted"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
 EOF
 }
 
@@ -206,6 +210,11 @@ repair_attempt_succeeded	XNATRepairAttempted	repair-fixed	fire	XNAT was missing 
 repair_attempt_failed	XNATRepairAttempted	repair-failed	fire	a failed repair is still reported; the mail claims only the attempt
 repair_attempt_prior_success	XNATRepairAttempted	repair-prior-ok	fire	an earlier success must not make this a success claim: it claims only the attempt
 repair_not_on_first_upload	XNATRepairAttempted	upload-first	nofire	a first upload creates resources; nothing was repaired
+reporter_live	DataPolicyReporterSilent	reporter-live	nofire	configured edge, stage_report 3m ago
+reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	configured edge, last stage_report 45m ago, over the 30m window
+reporter_never	DataPolicyReporterSilent	reporter-never	fire	configured edge that never reported: keyed on the config, not on Loki
+reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but no stage_report: the disk alerts are still blind
+reporter_unlisted	DataPolicyReporterSilent	reporter-unlisted	nofire	not in edges: never watched, whatever it logs
 EOF
 }
 
@@ -310,8 +319,17 @@ expr = expr.replace("__DP_MIN_FREE_DISK_PCT__",
                     str(orig.get("facilityBackup", {}).get("minFreeDiskPercent", 10)))
 expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
                     seconds(orig.get("quarantine", {}).get("alertAfter", "24h")))
+expr = expr.replace("__DP_REPORT_SILENCE_S__", seconds(dp.get("reporterSilentAfter", "30m")))
+# The edge inventory, built the way templates/observability.yaml builds it:
+# one label_replace(vector(1)) per configured edge. reporter-unlisted is NOT
+# configured, so it must never fire whatever it logs.
+EDGES = ["reporter-live", "reporter-stale", "reporter-never", "reporter-other"]
+expr = expr.replace("__EDGE_REPORTERS__", " or ".join(
+    'label_replace(vector(1), "cluster", "%s", "", "")' % e for e in EDGES))
+expr = expr.replace("__EDGE_REPORTER_REGEX__", "|".join(EDGES))
 
-left = re.findall(r"__DP_[A-Z_]+__", expr)
+# ANY sentinel, not only __DP_*__.
+left = re.findall(r"__[A-Z][A-Z0-9_]*__", expr)
 if left:
     raise SystemExit("unsubstituted sentinel(s) in %s: %s — the harness and the "
                      "chart disagree about what to replace" % (sys.argv[2], left))

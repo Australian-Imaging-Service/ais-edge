@@ -140,6 +140,12 @@ Each entry produces, automatically: a hosted control plane, an S3 bucket named
 `ingest-<name>`, an S3 identity scoped to that bucket, an uploader, and a
 reclaimer.
 
+Each entry is also watched by `DataPolicyReporterSilent`, which warns when that
+edge's data-policy reporter sends nothing for `dataPolicy.reporterSilentAfter`
+(30m), including an edge that has never reported. Set `dataPolicyReporter: false`
+on an entry only if that edge's own site file turns the reporter off; otherwise
+the alert fires for it for ever.
+
 `sshUser`/`sshKey` belong to `join: ssh`, the default: this node pushes the join
 to the edge over 22, and `scripts/uninstall.sh` later reaches back the same way
 to run `k0s reset` and wipe `/data`. If nothing can dial *into* the site — a
