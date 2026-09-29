@@ -1167,6 +1167,10 @@ kube-prometheus-stack:
       # the same rule, minus the data-policy reporter.
       # CAUTION: re-enable it and every throttled container alerts twice.
       CPUThrottlingHigh: true
+      # Replaced by ais-edge-jobs in files/prometheus-rules/warning.yaml: the
+      # same rule, minus the staged-reclaimer's own Jobs, whose failures
+      # ReclaimerRunUnavailable reports. Same caution as above.
+      KubeJobFailed: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true

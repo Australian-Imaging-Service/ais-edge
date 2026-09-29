@@ -212,6 +212,12 @@ fi
 # `value:` keys, and ASSIGNED_DIR reached the pod as "86400". Every edge render
 # is loaded with duplicate keys refused, not only the data-policy object.
 #
+# The staged-reclaimer's pods must carry app=xnat-ingest, component=s3-reclaimer:
+# Vector turns them into the stream labels ReclaimerRunUnavailable and
+# SessionStagedNotConfirmedInXNAT select on. Without them the stream is
+# component="unknown" and both alerts match nothing (seen on tier-1 until
+# 2026-09-29). At least one render must have the reclaimer.
+#
 # DataPolicyReporterSilent renders exactly when the reporter DaemonSet does:
 # with no reporter it would fire for ever. At least one render must have the
 # Loki rules without a reporter, or that half is checked vacuously.
@@ -256,7 +262,7 @@ def env(c):
     return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
 
 problems, checked, delegated, layouts = [], 0, 0, set()
-rules_renders, reporter_off = 0, 0
+rules_renders, reporter_off, reclaimers = 0, 0, 0
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     case = os.path.basename(path)[:-len(".yaml")]
     try:
@@ -275,6 +281,14 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
     for d in docs:
+        if d.get("kind") == "CronJob" and d["metadata"]["name"].endswith("-staged-reclaimer"):
+            reclaimers += 1
+            pod = ((d["spec"].get("jobTemplate") or {}).get("spec") or {}).get("template") or {}
+            lbl = (pod.get("metadata") or {}).get("labels") or {}
+            if lbl.get("component") != "s3-reclaimer" or lbl.get("app") != "xnat-ingest":
+                problems.append("%s: staged-reclaimer pods carry component=%r app=%r; the reclaimer "
+                                "alerts select component=\"s3-reclaimer\" and would match nothing"
+                                % (case, lbl.get("component"), lbl.get("app")))
         if d.get("kind") == "ConfigMap" and "ais-edge-rules.yaml" in (d.get("data") or {}):
             rules_renders += 1
             names = {r.get("alert") for g in yaml.safe_load(d["data"]["ais-edge-rules.yaml"]).get("groups", [])
@@ -318,6 +332,8 @@ if checked == 0:
 for want in ("orthanc", "ingest"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if checked and not reclaimers:
+    problems.append("no render has the staged-reclaimer, so its load-bearing pod labels go unchecked")
 if rules_renders and not reporter_off:
     problems.append("no render has the Loki rules without a reporter, so the reporter-off gating goes unchecked")
 if checked and not delegated:

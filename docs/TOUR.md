@@ -749,15 +749,16 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **twenty-three**
-alerts of its own: eighteen log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and five metric rules evaluated by Prometheus
+Dashboards and alert rules ship with the chart. It defines **twenty-six**
+alerts of its own: twenty log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and six metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
-`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
+`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
 `NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
 kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
-apart from `CPUThrottlingHigh`, which the chart replaces with a copy that leaves
-out the data-policy reporter. The ones specific to this tier are:
+apart from `CPUThrottlingHigh` and `KubeJobFailed`, which the chart replaces with
+copies that leave out the data-policy reporter and the staged-reclaimer's own
+Jobs. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
@@ -781,9 +782,11 @@ The alert expressions are unit-tested against recorded log fixtures
 (`tests/loki-rules/`), including the case that asserts a tqdm progress bar
 reading `401.71it/s` does **not** raise a credential alert.
 
-Two tier-2 alerts — `ReclaimerRunUnavailable` and
-`SessionStagedNotConfirmedInXNAT` — are deliberately absent, because there is no
-S3 reclaimer and no staging bucket on a single node.
+`ReclaimerRunUnavailable` and `SessionStagedNotConfirmedInXNAT` are shared with
+tier-2. Under `upload.mode=direct` the staged-reclaimer CronJob runs the same
+`reclaim-staged.sh` against the local upload tree instead of a bucket, so a
+reclaimer that keeps failing, or a session XNAT never confirms, raises the same
+two alerts. One failed run does not: the next hourly run finishing clears it.
 
 ---
 

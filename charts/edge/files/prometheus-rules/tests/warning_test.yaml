@@ -1,0 +1,51 @@
+# promtool unit tests for files/prometheus-rules/warning.yaml
+#
+# KubeJobFailed without this release's staged-reclaimer Jobs.
+# __RELEASE_NAMESPACE__ is the literal the raw rule compares against; the chart
+# substitutes the real namespace at render time.
+rule_files:
+  - ../warning.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Three failed Jobs, failed for 30 minutes:
+  #   the reclaimer's own Job in the release namespace      -> excluded
+  #   another Job in the release namespace                  -> alerts
+  #   a Job also named like the reclaimer, another namespace -> alerts
+  - interval: 1m
+    input_series:
+      - series: 'kube_job_failed{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", job_name="edge-staged-reclaimer-29841317", condition="true"}'
+        values: '1x30'
+      - series: 'kube_job_failed{job="kube-state-metrics", namespace="__RELEASE_NAMESPACE__", job_name="edge-backup-1234", condition="true"}'
+        values: '1x30'
+      - series: 'kube_job_failed{job="kube-state-metrics", namespace="other-team", job_name="their-staged-reclaimer-29841317", condition="true"}'
+        values: '1x30'
+    alert_rule_test:
+      # Still pending: for is 15m.
+      - eval_time: 10m
+        alertname: KubeJobFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: KubeJobFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: kube-state-metrics
+              namespace: __RELEASE_NAMESPACE__
+              job_name: edge-backup-1234
+              condition: "true"
+            exp_annotations:
+              description: 'Job __RELEASE_NAMESPACE__/edge-backup-1234 failed to complete. Removing failed job after investigation should clear this alert on cluster .'
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
+              summary: Job failed to complete.
+          - exp_labels:
+              severity: warning
+              job: kube-state-metrics
+              namespace: other-team
+              job_name: their-staged-reclaimer-29841317
+              condition: "true"
+            exp_annotations:
+              description: 'Job other-team/their-staged-reclaimer-29841317 failed to complete. Removing failed job after investigation should clear this alert on cluster .'
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
+              summary: Job failed to complete.

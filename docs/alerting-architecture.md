@@ -90,10 +90,13 @@ with `.Files.Get` and Helm never templates it.
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for the `__unmapped_aet__` subtree — an AE title nobody has mapped to a project yet. |
 | `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. Rendered only while `dataPolicy.reporter.enabled` is true. |
 | `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. xnat-ingest logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
+| `ReclaimerRunUnavailable` | Loki ruler | The staged-reclaimer's run-level `reclaim_unavailable` with no `reclaim_finished` since, for 75m, `{component="s3-reclaimer"}`. Shared with tier-2; it needs the CronJob's pod labels, which CI checks. |
+| `SessionStagedNotConfirmedInXNAT` | Loki ruler | A session the reclaimer saw 48 to 72h ago and has never confirmed in XNAT since. Shared with tier-2. |
 | `KubeNodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
 | `KubePodCrashLooping` | Prometheus | Container restart count, kube-state-metrics. |
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
+| `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerRunUnavailable` owns those instead. |
 | `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without this release's own data-policy reporter pods (scoped by namespace and pod; a same-named container elsewhere still alerts). That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
@@ -117,7 +120,8 @@ that content comes from:
   `charts/edge/templates/observability.yaml` globs
   `files/prometheus-rules/*.yaml` and emits one object per severity file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
-  `ais-edge-warning` (`IngestPodCrashLoop`) and `ais-edge-info`
+  `ais-edge-warning` (`IngestPodCrashLoop`, and `KubeJobFailed` in place of the
+  upstream copy) and `ais-edge-info`
   (`NodeCountChanged`, and `CPUThrottlingHigh` in place of the upstream copy). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
@@ -125,7 +129,7 @@ that content comes from:
   its own release, so it would load none of these — silently, with nothing to
   see in any log.
 - **The Loki ruler ships with a rule set.**
-  `charts/edge/files/loki-ruler-rules.yaml` holds 18 LogQL alerts in four groups
+  `charts/edge/files/loki-ruler-rules.yaml` holds 20 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
   `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError`,

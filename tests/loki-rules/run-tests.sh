@@ -287,6 +287,13 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
 5	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat.invalid, port=443)"}
 6	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+30	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+90	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+30	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-blip"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+10	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-blip"}	{"component":"s3-reclaimer","event":"reclaim_finished","session":"","message":"examined=1 removed=0"}
+30	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+90	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+3600	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"stage-t1-lost"}	{"component":"s3-reclaimer","event":"reclaim_kept","session":"proj.T1.SESS","reason":"incomplete_in_xnat"}
 EOF
 }
 
@@ -301,6 +308,10 @@ auth_progress_bar	XNATAuthFailure	auth-tqdm	nofire	tqdm "401.71it/s" must never 
 staged_unconfirmed	SessionStagedNotConfirmedInXNAT	stage-lost	fire	seen 60h ago, never confirmed
 staged_confirmed	SessionStagedNotConfirmedInXNAT	stage-ok	nofire	confirmed inside the 72h window
 staged_too_recent	SessionStagedNotConfirmedInXNAT	stage-new	nofire	only 1h old — outside the offset window
+reclaimer_t1_stuck	ReclaimerRunUnavailable	rec-t1-stuck	fire	tier-1 namespace: aborted twice, never recovered
+reclaimer_t1_blip	ReclaimerRunUnavailable	rec-t1-blip	nofire	one failed run, then a run finished: the DNS blip of 2026-09-27
+reclaimer_t1_unlabelled	ReclaimerRunUnavailable	rec-t1-unlabelled	nofire	the same lines on a component=unknown stream are invisible: why the pod labels are load-bearing
+staged_t1_unconfirmed	SessionStagedNotConfirmedInXNAT	stage-t1-lost	fire	tier-1 namespace: seen 60h ago, never confirmed
 disk_below_threshold	EdgeDiskLow	disk-low	fire	4% free vs minFreeDiskPercent 10
 disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above the limit
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h

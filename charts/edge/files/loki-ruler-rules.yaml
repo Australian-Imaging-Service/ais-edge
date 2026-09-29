@@ -381,6 +381,70 @@ groups:
     annotations:
       summary: '>10 invalid DICOM sessions on {{ $labels.cluster }} in last hour'
       description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber \u2014 check scanner config."
+  - alert: SessionStagedNotConfirmedInXNAT
+    # SHARED WITH charts/mgmt: expr, for and labels are the tier-2 rule verbatim
+    # (the namespace regex already covers xnat-ingest). Only the steps differ,
+    # because they name this tier's objects; promtool.sh lists that difference.
+    # Fed by the staged-reclaimer CronJob, whose pods must carry
+    # component=s3-reclaimer (templates/staged-reclaimer.yaml).
+    expr: |
+      (sum by (cluster, session) (count_over_time(
+        {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
+        | json | event=~"reclaim_.*" | session != "" [24h] offset 48h)) > 0)
+      unless on (cluster, session)
+      (sum by (cluster, session) (count_over_time(
+        {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
+        | json | event="reclaim_confirmed" [72h])) > 0)
+    for: 30m
+    labels:
+      severity: critical
+      source: loki-ruler
+      category: delivery-absence
+    annotations:
+      summary: Session {{ $labels.session }} staged >48h ago and is NOT confirmed in XNAT
+      description: |
+        {{ $labels.session }} on {{ $labels.cluster }} has been waiting in the upload
+        tree for more than 48 hours, and the reclaimer has never confirmed that XNAT
+        holds its files. Nothing will have errored. Check, in order:
+          1. What does the uploader say?
+               kubectl -n xnat-ingest logs -l component=upload --since=24h | grep -F "{{ $labels.session }}"
+          2. Does XNAT actually hold it, with every file?
+          3. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
+             means a partial upload; reclaim_unavailable means it could not decide
+             at all (see ReclaimerRunUnavailable).
+  - alert: ReclaimerRunUnavailable
+    # SHARED WITH charts/mgmt, as SessionStagedNotConfirmedInXNAT above.
+    # Replaces KubeJobFailed for the reclaimer on this tier: that one fired on a
+    # single self-healing DNS blip (2026-09-27) and stayed for days, because the
+    # failed Job is kept. This needs the run to keep failing for 75m.
+    expr: |
+      (sum by (cluster, reason) (count_over_time(
+        {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
+        | json | event="reclaim_unavailable" | session = "" [3h])) > 0)
+      unless on (cluster)
+      (sum by (cluster) (count_over_time(
+        {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
+        | json | event="reclaim_finished" [70m])) > 0)
+    for: 75m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: delivery-absence
+    annotations:
+      summary: Reclaimer on {{ $labels.cluster }} aborted before deciding anything ({{ $labels.reason }})
+      description: |
+        The staged-session reclaimer failed its pre-flight and examined nothing.
+        Nothing was deleted, but nothing was CONFIRMED either, so while this fires
+        no staged session is checked against XNAT or reclaimed.
+          1. What did it say? (a failed job's pod may already be gone; Loki keeps it)
+               kubectl -n xnat-ingest logs -l component=s3-reclaimer --tail=50
+          2. reason={{ $labels.reason }} names the failed dependency:
+               xnat_probe_failed / xnat_credentials_missing -> XNAT or upload.direct.existingSecret
+               minage_unparseable / reclaim_disabled        -> dataPolicy values
+               missing_tool                                 -> the job image
+          3. Sessions staged while this fires are still tracked:
+             SessionStagedNotConfirmedInXNAT fires on any never confirmed.
+        One failed run does not fire this: the next hourly run finishing clears it.
 - name: ais-edge-pipeline-info
   interval: 30s
   rules:

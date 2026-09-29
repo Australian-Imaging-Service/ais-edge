@@ -37,7 +37,9 @@ if [ "$(ci_obs_chart)" = "charts/mgmt" ]; then
     export ABSENCE_ALERTS="SessionStagedNotConfirmedInXNAT ReclaimerRunUnavailable"
 else
     export LOOPING_LOG_ALERTS="XNATAuthFailure XNATUploadSuccess"
-    export ABSENCE_ALERTS=""   # no reclaimer on a single node — nothing of this shape to check
+    # The staged-reclaimer CronJob (upload.mode=direct) runs reclaim-staged.sh
+    # here too, so the same two absence alerts guard it.
+    export ABSENCE_ALERTS="SessionStagedNotConfirmedInXNAT ReclaimerRunUnavailable"
 fi
 TESTS_DIR="$RULES_DIR/tests"
 
@@ -134,41 +136,48 @@ print(n)
       fi
     done
 
-    # CPUThrottlingHigh: upstream copy off, this chart's copy on, once in total.
-    # Twice means every throttled container mails twice; the upstream copy
-    # alone means data-policy mails several times a day for nothing.
+    # Scoped copies of upstream rules: upstream copy off, this chart's copy on,
+    # once in total, and the exclusion scoped to this release's own workload.
+    # Twice means every match mails twice; the upstream copy alone brings back
+    # the noise the copy exists to remove.
     if [ "$(ci_obs_chart)" = "charts/edge" ]; then
-      thr="$(python3 - "$extract_dir" <<'PY'
+      scoped="$(python3 - "$extract_dir" <<'PY'
 import glob, re, sys, yaml
-hits = []
+SCOPED = {
+    # alert: (exclusion that must be present, with the namespace captured)
+    "CPUThrottlingHigh": r'unless on \(namespace, pod, container\)\s*max by \(namespace, pod, container\) \(\s*'
+                         r'container_cpu_cfs_periods_total\{namespace="([^"]+)", container="data-policy", pod=~"\.\+-data-policy-',
+    "KubeJobFailed":     r'unless on \(namespace, job_name\)\s*'
+                         r'kube_job_failed\{namespace="([^"]+)", job_name=~"\.\+-staged-reclaimer-',
+}
+hits = {a: [] for a in SCOPED}
 for f in sorted(glob.glob(sys.argv[1] + "/*.yaml")):
     for g in (yaml.safe_load(open(f)) or {}).get("groups", []):
         for r in g.get("rules") or []:
-            if r.get("alert") == "CPUThrottlingHigh":
-                hits.append((f.rsplit("/", 1)[1][:-5], r.get("expr", "")))
-# The exclusion must be the scoped one: this release's reporter pods only,
-# with the namespace sentinel substituted by templates/observability.yaml.
-scope = re.compile(r'unless on \(namespace, pod, container\)\s*max by \(namespace, pod, container\) \(\s*'
-                   r'container_cpu_cfs_periods_total\{namespace="([^"]+)", container="data-policy", pod=~"\.\+-data-policy-')
-if len(hits) != 1:
-    print("FAIL CPUThrottlingHigh is defined %d time(s) (%s); expected only this chart's copy, "
-          "with kube-prometheus-stack.defaultRules.disabled.CPUThrottlingHigh keeping the upstream one off"
-          % (len(hits), ", ".join(h[0] for h in hits) or "none"))
-elif not scope.search(hits[0][1]):
-    print("FAIL the only CPUThrottlingHigh (%s) does not carry the scoped data-policy exclusion "
-          "(unless on (namespace, pod, container) over the release's reporter pods)" % hits[0][0])
-elif "__" in scope.search(hits[0][1]).group(1):
-    print("FAIL CPUThrottlingHigh (%s) still names namespace %s: the sentinel was not substituted, "
-          "so the exclusion matches nothing" % (hits[0][0], scope.search(hits[0][1]).group(1)))
-else:
-    print("PASS CPUThrottlingHigh is defined once (%s), without data-policy in namespace %s only"
-          % (hits[0][0], scope.search(hits[0][1]).group(1)))
+            if r.get("alert") in SCOPED:
+                hits[r["alert"]].append((f.rsplit("/", 1)[1][:-5], r.get("expr", "")))
+for alert, pat in SCOPED.items():
+    h = hits[alert]
+    m = re.search(pat, h[0][1]) if len(h) == 1 else None
+    if len(h) != 1:
+        print("FAIL %s is defined %d time(s) (%s); expected only this chart's copy, with "
+              "kube-prometheus-stack.defaultRules.disabled.%s keeping the upstream one off"
+              % (alert, len(h), ", ".join(x[0] for x in h) or "none", alert))
+    elif not m:
+        print("FAIL the only %s (%s) does not carry its scoped exclusion" % (alert, h[0][0]))
+    elif "__" in m.group(1):
+        print("FAIL %s (%s) still names namespace %s: the sentinel was not substituted, "
+              "so the exclusion matches nothing" % (alert, h[0][0], m.group(1)))
+    else:
+        print("PASS %s is defined once (%s), its exclusion scoped to namespace %s" % (alert, h[0][0], m.group(1)))
 PY
 )"
-      case "$thr" in
-        PASS*) ci_pass "${thr#PASS }" ;;
-        *)     ci_fail "${thr#FAIL }" ;;
-      esac
+      while IFS= read -r line; do
+        case "$line" in
+          PASS\ *) ci_pass "${line#PASS }" ;;
+          *)       ci_fail "${line#FAIL }" ;;
+        esac
+      done <<< "$scoped"
     fi
   fi
 fi
@@ -609,6 +618,8 @@ FORCED = {
     "XNATUploadSuccess": "scoped to component=upload — a bare namespace selector matched Loki's own ruler-query log, which contains both the success phrase and the regexp, and fired an alert about its own evaluation",
     "XNATAuthFailure":   "scoped to component=upload — a bare namespace selector matched a 401/403 logged by any pod in the namespace",
     "XNATRepairAttempted": "scoped to component=upload, for the same reason as XNATUploadSuccess: it matches the uploader's own log text, and a bare namespace selector would also match Loki logging this rule's query. The description also names each tier's own failure alert (XNATUploadRetryStorm here, SessionStagedNotConfirmedInXNAT on tier-2).",
+    "SessionStagedNotConfirmedInXNAT": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim (its namespace regex already covers xnat-ingest). The steps name each tier's own objects: S3 staging and deploy/mgmt-upload-<edge> on tier-2, the upload tree and component=upload here.",
+    "ReclaimerRunUnavailable": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim. The reason list differs: tier-2's filer and bucket reasons cannot occur with STORAGE=filesystem, and the kubectl step names this tier's namespace.",
     "XNATUploadFailingForAllSessions": "different uploader, not drift — tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count xnat-ingest's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
     "SessionUploadStalled": "different uploader, not drift — the tier-2 rule selects component=\"s3-uploader\" and matches event=\"upload_started\"/\"upload_completed\", which that script emits. install.sh forces upload.mode=direct on tier-1, so no s3-uploader is rendered AND those event fields are never written: xnat-ingest emits eight event names and neither of those is among them. Measured on a live tier-1 install: 0 pods carry component=s3-uploader and 0 upload log lines carry an event field. The tier-1 rule therefore selects component=upload and matches the binary's own log text. Re-pointing the selector alone would have left it just as dead.",
     "XNATResourceIncompleteAndStuck": "ANNOTATION ONLY, and only the remediation steps. expr, for, labels and summary are identical modulo the namespace, and the line breaks in expr were aligned to tier-2's so this exemption covers nothing but the description. The steps cannot be shared: they name the workload to read logs from and restart, which is deploy/edge-upload in one namespace here and deploy/mgmt-upload-<edge> in xnat-upload on tier-2, and tier-2's copy also carries the measurements from the incident that produced the rule. An operator following tier-2's steps on tier-1 would address a workload that does not exist.",

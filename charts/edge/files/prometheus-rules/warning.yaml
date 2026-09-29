@@ -29,3 +29,32 @@ groups:
       summary: Ingest pod {{ $labels.pod }} crashlooping
       description: '{{ $labels.namespace }}/{{ $labels.pod }} has restarted >3 times in the last hour AND is not ready now. New DICOMs may not be received, staged, or uploaded. The readiness clause is what
         makes this clear on recovery: without it the alert kept paging for a full hour after the pod was healthy again, because the restarts stayed inside the 1h window.'
+
+# Upstream KubeJobFailed, minus this release's staged-reclaimer Jobs.
+# The upstream copy is off: kube-prometheus-stack.defaultRules.disabled in values.yaml.
+# No interval: evaluated at the Prometheus default, as upstream is.
+# __RELEASE_NAMESPACE__ is substituted by templates/observability.yaml.
+- name: ais-edge-jobs
+  rules:
+  - alert: KubeJobFailed
+    # WHY THE RECLAIMER IS LEFT OUT: a failed Job is kept (failedJobsHistoryLimit),
+    # so one self-healing DNS blip on 2026-09-27 kept this firing, and mailing
+    # daily, until the Job was deleted by hand two days later.
+    # ReclaimerRunUnavailable (Loki) owns reclaimer failures instead: it fires
+    # when runs keep failing for 75m and clears when one finishes.
+    # SCOPE: only <release>-staged-reclaimer-<n> Jobs in this release's namespace.
+    # The expression is upstream verbatim (kube-prometheus-stack 87.19.2); only
+    # the `unless` is ours.
+    expr: |-
+      (
+        kube_job_failed{job="kube-state-metrics", namespace=~".*"}  > 0
+      )
+      unless on (namespace, job_name)
+      kube_job_failed{namespace="__RELEASE_NAMESPACE__", job_name=~".+-staged-reclaimer-[0-9]+"}
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      description: Job {{ $labels.namespace }}/{{ $labels.job_name }} failed to complete. Removing failed job after investigation should clear this alert on cluster {{ $labels.cluster }}.
+      runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
+      summary: Job failed to complete.
