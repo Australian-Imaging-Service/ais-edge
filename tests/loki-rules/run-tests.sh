@@ -157,6 +157,9 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-forever"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","policy":"forever","free_pct":13,"min_free_pct":10,"entries":767,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-stuck"}	{"component":"data-policy","event":"stage_report","stage":"derived.orthancStorage","location":"/data/orthanc-storage","policy":"onGrouped","free_pct":13,"entries":780,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-fresh"}	{"component":"data-policy","event":"stage_report","stage":"derived.deidentified","location":"/data/deidentified","policy":"onUploaded","free_pct":13,"entries":3,"oldest_age_s":3600}
 3	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
 2	{"namespace":"xnat-upload","cluster":"repair-fixed"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S1.E1'"}
 2	{"namespace":"xnat-upload","cluster":"upload-first"}	{"level":"INFO","message":"Successfully uploaded all files in 'proj.S2.E2'"}
@@ -198,6 +201,9 @@ disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above t
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+stage_age_forever_quiet	StageBacklogAgeing	age-forever	nofire	facility backup kept forever by policy: 49-day-old originals are the point (cai-lfs3, 2026-09-30)
+stage_age_stuck	StageBacklogAgeing	age-stuck	fire	a stage with a reclaim policy whose oldest entry is 49 days old
+stage_age_fresh	StageBacklogAgeing	age-fresh	nofire	oldest entry 1h old, under the 7d limit
 upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
 upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
 upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
@@ -320,6 +326,7 @@ expr = expr.replace("__DP_MIN_FREE_DISK_PCT__",
 expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
                     seconds(orig.get("quarantine", {}).get("alertAfter", "24h")))
 expr = expr.replace("__DP_REPORT_SILENCE_S__", seconds(dp.get("reporterSilentAfter", "30m")))
+expr = expr.replace("__DP_STAGE_AGE_ALERT_AFTER_S__", seconds(dp.get("stageAgeAlertAfter", "7d")))
 # The edge inventory, built the way templates/observability.yaml builds it:
 # one label_replace(vector(1)) per configured edge. reporter-unlisted is NOT
 # configured, so it must never fire whatever it logs.

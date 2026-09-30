@@ -92,6 +92,8 @@ dataPolicy:
   # Lives here rather than in charts/edge because this chart renders the Loki
   # rules on this tier, and the threshold is substituted into the expression at
   # render time. MUST match charts/edge/values.yaml on the single-node tier.
+  # Not applied to stages kept forever (policy "forever", e.g. the facility
+  # backup): old entries there are by design.
   stageAgeAlertAfter: 7d
 
   # Read by DataPolicyReporterSilent: how long an edge's data-policy reporter
