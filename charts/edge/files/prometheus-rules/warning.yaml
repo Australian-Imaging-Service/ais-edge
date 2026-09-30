@@ -45,7 +45,8 @@ groups:
     # Reclaimer failures are covered below by ReclaimerNotSucceeding, and by
     # ReclaimerRunUnavailable (Loki) when the run logs why. Both clear on the
     # next good run, whatever Jobs history keeps.
-    # SCOPE: only <release>-staged-reclaimer-<n> Jobs in this release's namespace.
+    # SCOPE: Jobs named <name>-staged-reclaimer-<n> in this release's namespace
+    # (the regex does not pin the release name; one release per namespace).
     # The expression is upstream verbatim (kube-prometheus-stack 87.19.2); only
     # the `unless` is ours.
     expr: |-
@@ -73,7 +74,7 @@ groups:
     # its age is taken from creation instead. Without it a reclaimer broken
     # from install would never alert.
     # Held back while ReclaimerRunUnavailable fires (alertmanager-config.yaml,
-    # inhibit_rules): one outage, one mail.
+    # inhibit_rules), so one outage does not raise both alerts.
     expr: |-
       (
         time() - max by (namespace, cronjob) (
@@ -100,10 +101,12 @@ groups:
       description: |
         No run of {{ $labels.namespace }}/{{ $labels.cronjob }} has completed successfully
         for {{ $value | humanizeDuration }} (counted from its creation if none ever has).
-        While this fires no staged session is confirmed against XNAT or reclaimed, so the
-        staged tree only grows.
+        No run has completed in full, so confirming staged sessions against XNAT and
+        reclaiming them may be falling behind (a run can do part of its work before it
+        fails or reaches its deadline).
         Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
-        Arriving on its own, the runs are ending without logging why:
+        Arriving on its own usually means runs are ending without logging why, but the
+        CronJob may also be suspended or not scheduled, or Loki may be missing the logs:
           1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
                kubectl -n {{ $labels.namespace }} get cronjob {{ $labels.cronjob }}
           2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at

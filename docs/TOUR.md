@@ -798,7 +798,8 @@ it, even when the next run takes its full deadline to succeed; two failed runs,
 then a third not succeeding within 15 minutes, do, about 3h15m after the last
 success. It clears on the next good run, however many failed Jobs history
 keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
-outage sends one mail. If you slow the schedule, raise `alertAfter` with it: it
+outage raises one alert rather than two: its firing mail and its resolve, one
+pair per logged reason. If you slow the schedule, raise `alertAfter` with it: it
 must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
 the usual schedule forms (hourly, every N hours, daily).
 

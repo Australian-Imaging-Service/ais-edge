@@ -242,6 +242,60 @@ PY
     fi
   fi
 
+  # The KubeJobFailed fork must stay upstream's rule plus the one `unless`.
+  # CI above only proves it is defined once with its exclusion; nothing
+  # noticed if a kube-prometheus-stack bump changed upstream's expression,
+  # `for`, labels or annotations and left the fork stale. Rendered once more
+  # with upstream's copy switched back on, then compared.
+  if [ "$(ci_obs_chart)" = "charts/edge" ]; then
+    drift_render="$CI_WORK_DIR/upstream-kubejobfailed.yaml"
+    if ! "$(ci_helm)" template edge "$REPO_ROOT/charts/edge" \
+          -f "$CI_VALUES_DIR/edge-base.yaml" -f "$CI_VALUES_DIR/edge-obsstack-on.yaml" \
+          --set kube-prometheus-stack.defaultRules.disabled.KubeJobFailed=false \
+          --namespace xnat-ingest >"$drift_render" 2>"$drift_render.err"; then
+      ci_fail "rendering with upstream KubeJobFailed on failed: $(head -c 300 "$drift_render.err")"
+    else
+      drift="$(python3 - "$drift_render" <<'PY'
+import re, sys, yaml
+copies = []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d or d.get("kind") != "PrometheusRule":
+        continue
+    for g in d["spec"].get("groups", []):
+        for r in g.get("rules") or []:
+            if r.get("alert") == "KubeJobFailed":
+                copies.append((d["metadata"]["name"], g["name"], r))
+fork = [c for c in copies if c[1] == "ais-edge-jobs"]
+upstream = [c for c in copies if c[1] != "ais-edge-jobs"]
+def flat(e):
+    return " ".join(e.split())
+def bare(e):
+    e = flat(e)
+    return e[1:-1].strip() if e.startswith("(") and e.endswith(")") else e
+if len(fork) != 1 or len(upstream) != 1:
+    print("FAIL expected one fork and one upstream KubeJobFailed, found %d and %d" % (len(fork), len(upstream)))
+    raise SystemExit
+f, u = fork[0][2], upstream[0][2]
+head = flat(f["expr"]).split(" unless on (namespace, job_name) ")[0]
+bad = []
+if bare(head) != bare(u["expr"]):
+    bad.append("expr: fork %r vs upstream %r" % (bare(head), bare(u["expr"])))
+for k in ("for", "labels", "annotations"):
+    if f.get(k) != u.get(k):
+        bad.append("%s: fork %r vs upstream %r" % (k, f.get(k), u.get(k)))
+if bad:
+    print("FAIL the KubeJobFailed fork has drifted from upstream (%s): %s" % (upstream[0][0], "; ".join(bad)))
+else:
+    print("PASS the KubeJobFailed fork is upstream's rule (%s) plus its exclusion" % upstream[0][0])
+PY
+)"
+      case "$drift" in
+        PASS*) ci_pass "${drift#PASS }" ;;
+        *)     ci_fail "${drift#FAIL }" ;;
+      esac
+    fi
+  fi
+
   # The same threshold on a render with alertAfter set away from the default
   # (13h with a 6-hourly schedule). Comparing the default render with the
   # default alone cannot tell a substitution from a hardcoded 10800.

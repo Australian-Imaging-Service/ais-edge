@@ -384,7 +384,7 @@ inhibit_rules:
     # being enforced when nothing is. Tier-1 is one node and one API server,
     # so there is genuinely nothing to disambiguate.
 
-  # One reclaimer outage, one mail. A reclaimer that cannot reach XNAT logs
+  # One reclaimer outage, one alert. A reclaimer that cannot reach XNAT logs
   # why and fails every run, so ReclaimerRunUnavailable fires first (its `for`
   # is 75m) and ReclaimerNotSucceeding would follow within the hour, for the
   # same cause. The specific one wins. Once it clears, a reclaimer still not
