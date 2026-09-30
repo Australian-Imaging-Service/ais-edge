@@ -260,6 +260,25 @@ dataPolicy:
   dryRun: false
 EOF
 
+# LEADING ZEROS ARE DECIMAL. edge.durationSeconds used int64, which reads a
+# leading zero as octal: "08d" rendered 0 ("expire immediately"), "010d" 8 days.
+# runtime-templates.sh checks each row's seconds column.
+# QUOTED on purpose: YAML reads an unquoted 07200 as octal itself.
+# 9999999999s is the 10-digit ceiling; one digit more is a negative case.
+cat >"$V/edge-duration-base10.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    facilityBackup:
+      retain: "9999999999s"
+    quarantine:
+      alertAfter: "07200"
+  derived:
+    orthancStorage:
+      minAge: "010d"
+    assigned:
+      minAge: "08d"
+EOF
+
 # De-identification off. One key now, and the group label needs no clearing:
 # the chart derives it from the engine, so it cannot be left dangling.
 # policyReviewed is what acknowledges that identifiable data would reach XNAT.
@@ -871,6 +890,16 @@ dataPolicy:
       minAge: "7 days"
 EOF
 
+# 11 digits, the first length refused. Nothing else fails on overflow: atoi
+# saturates at MaxInt64 and mul wraps int64 (20 nines + "d" rendered -86400),
+# and the engine reads a negative minAge as 0. The cap sits well below both.
+cat >"$V/neg-edge-duration-11-digits.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    assigned:
+      minAge: "12345678901s"
+EOF
+
 # Same guard on the management side. Both charts read the SAME dataPolicy block
 # from the site file, so a duration the two disagree about would mean the edge
 # and the reclaimer enforcing different windows from one line of config.
@@ -1125,6 +1154,7 @@ edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
+edge-duration-base10	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-duration-base10.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
@@ -1226,6 +1256,7 @@ neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
+neg-edge-duration-11-digits	charts/edge	edge-base.yaml neg-edge-duration-11-digits.yaml	has more than 10 digits
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
 neg-edge-deid-missing-trial-tag	charts/edge	edge-base.yaml neg-edge-deid-missing-trial-tag.yaml	Restore the tag(s) with their

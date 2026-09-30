@@ -721,6 +721,13 @@ never has to do arithmetic on unit suffixes.
 `forever` is NOT a duration and never becomes one. It renders as `-`, which the
 engine treats as "no rule", so an unparseable or absent value can never be
 mistaken for 0 (which would read as "expire immediately").
+
+BASE 10, ALWAYS. The number goes through atoi, never int or int64.
+int64 reads a leading zero as octal: "010d" was 8 days, "08d" and "09h" were 0.
+atoi is strconv.Atoi, base 10 only, so "08d" is 8 days.
+
+CAUTION: an UNQUOTED 010 in a values file is still 8 seconds.
+YAML reads it as octal before this helper sees it. Quote it, or add a unit.
 */}}
 {{- define "edge.durationSeconds" -}}
 {{- $d := . | toString | trim -}}
@@ -735,13 +742,21 @@ mistaken for 0 (which would read as "expire immediately").
        scripts/ci/values.sh, which is why this validates first and fails loudly
        rather than defaulting. */ -}}
 {{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
-{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
-{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
-{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
-{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
-{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
-{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
-{{- else -}}{{ $d | int64 }}
+{{- else if regexMatch "^[0-9]{11,}" $d -}}
+{{- /* AT MOST 10 DIGITS, about 317 years of seconds.
+       Overflow raises no error. atoi saturates at MaxInt64,
+       then mul wraps int64: 20 nines + "d" rendered -86400.
+       The engine reads a negative minAge as 0, "expire immediately".
+       Leading zeros count: the cap is on what atoi is handed.
+       10 digits of years still fits int64 after the mul. */ -}}
+{{- fail (printf "dataPolicy: %q has more than 10 digits. The limit is 10 (about 317 years in seconds): a longer number can overflow without an error, saturating or wrapping to a negative number of seconds, and a negative minAge is read as 0, 'expire immediately'. Use a larger unit, or forever where the key accepts it." $d) -}}
+{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | atoi }}
+{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | atoi) 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | atoi) 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | atoi) 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | atoi) 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | atoi) 31536000 }}
+{{- else -}}{{ $d | atoi }}
 {{- end -}}
 {{- end }}
 
