@@ -427,6 +427,13 @@ block from the site file, so they must agree on what "24h" means.
 `forever`/`never` are not durations. They render as -1, which no oldest_age_s
 can exceed, so a stage set to `forever` can never trip an age alert. Rendering
 0 instead would make every stage trip it immediately.
+
+Numbers are read in base 10 and capped at 10 digits, so a leading zero or an
+overflow cannot become 0 either. Keep edge.durationSeconds identical.
+The reclaimer's minAge is parsed by to_seconds in files/reclaim-staged.sh to
+the same base-10, 10-digit rules. Change them together.
+CAUTION: quote durations. YAML reads an unquoted 010 as octal (8) before this
+helper sees it.
 */}}
 {{- define "mgmt.durationSeconds" -}}
 {{- $d := . | toString | trim -}}
@@ -441,12 +448,26 @@ can exceed, so a stage set to `forever` can never trip an age alert. Rendering
        scripts/ci/values.sh, which is why this validates first and fails loudly
        rather than defaulting. */ -}}
 {{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
-{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
-{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
-{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
-{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
-{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
-{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
-{{- else -}}{{ $d | int64 }}
+{{- else -}}
+{{- $digits := regexFind "^[0-9]+" $d -}}
+{{- /* AT MOST 10 DIGITS, about 317 years of seconds. A longer number can
+       overflow: int64 turned that into 0 and atoi clamps it so mul wraps.
+       Digits count as written, leading zeros included. */ -}}
+{{- if gt (len $digits) 10 -}}
+{{- fail (printf "dataPolicy: %q has more than 10 digits. No dataPolicy duration needs that many (10 digits of seconds is about 317 years; use a larger unit, or forever where the key accepts it), and a longer number can overflow, which must NOT come out as 0 ('expire immediately') or as a wrapped value." $d) -}}
+{{- end -}}
+{{- /* atoi, NOT int64. int64 parses like Go base 0, so a leading zero meant
+       octal: "010d" was 8 days and "08d" was 0. atoi is always base 10. */ -}}
+{{- $n := atoi $digits -}}
+{{- /* The regex above already proved one suffix at most, so this only picks
+       the multiplier. */ -}}
+{{- if hasSuffix "s" $d -}}{{ $n }}
+{{- else if hasSuffix "m" $d -}}{{ mul $n 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul $n 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul $n 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul $n 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul $n 31536000 }}
+{{- else -}}{{ $n }}
+{{- end -}}
 {{- end -}}
 {{- end }}

@@ -98,12 +98,13 @@ prefixes() { printf '%s\n' "$*" | tr ' ' '\t' > "$CASE_DIR/list-prefixes.json.ra
              printf '%s' "$(cat "$CASE_DIR/list-prefixes.json.raw")" > "$CASE_DIR/list-prefixes.json"; }
 
 # One object plus one manifest, timestamped long ago so minAge never blocks.
-session_with() {   # <session> <nfiles>
-    local s="$1" n="$2" items="" i
+# OPTION: a third argument sets LastModified, for the cases about minAge itself.
+session_with() {   # <session> <nfiles> [LastModified]
+    local s="$1" n="$2" lm="${3:-2020-01-01T00:00:00+00:00}" items="" i
     for i in $(seq 1 "$n"); do
-        items="$items{\"Key\":\"staged/$s/scan/DICOM/f$i.dcm\",\"Size\":100,\"LastModified\":\"2020-01-01T00:00:00+00:00\"},"
+        items="$items{\"Key\":\"staged/$s/scan/DICOM/f$i.dcm\",\"Size\":100,\"LastModified\":\"$lm\"},"
     done
-    items="$items{\"Key\":\"staged/$s/scan/DICOM/__MANIFEST__.json\",\"Size\":42,\"LastModified\":\"2020-01-01T00:00:00+00:00\"}"
+    items="$items{\"Key\":\"staged/$s/scan/DICOM/__MANIFEST__.json\",\"Size\":42,\"LastModified\":\"$lm\"}"
     printf '{"Contents":[%s]}' "$items" > "$CASE_DIR/objects.$s.json"
     local cks="" i2
     for i2 in $(seq 1 "$n"); do
@@ -493,6 +494,55 @@ printf '\n%s== could-not-decide vs nothing-to-do ==%s\n' "$_B" "$_O"
 run_case preflight_xnat_fanout no  reclaim_unavailable
 run_case nothing_to_do         no  reclaim_finished
 run_case preflight_no_listing  no  reclaim_unavailable
+
+# =============================================================================
+# minAge: read in base 10, at most 10 digits
+# =============================================================================
+# to_seconds used plain bash arithmetic, which reads a leading zero as octal.
+#   "010d"  was 8 days.
+#   "08d"   was an arithmetic error. MIN_AGE_S came back empty, the age test
+#           errored, `if` read that as false, and the session went straight on
+#           to the XNAT check and removal.
+#   "999999999999999d" wrapped negative, with the same result.
+# Every session here is too young to go, so a delete is the failure.
+# S3 is the mgmt chart's s3Staged.minAge; fs_ is the edge's stagedReclaimer.minAge.
+ago() { date -u -d "$1 ago" +%Y-%m-%dT%H:%M:%S+00:00; }
+setup_minage_08d()       { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
+setup_minage_010d()      { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '9 days')"; xnat_has subj EXP1 visit 2; }
+setup_minage_11_digits() { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
+setup_minage_overflow()  { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
+setup_fs_minage_08d()    { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+                           find "$1/$SESS" -exec touch -d '1 hour ago' {} +; }
+setup_fs_minage_010d()   { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+                           find "$1/$SESS" -exec touch -d '9 days ago' {} +; }
+
+# The skip line carries the parsed number. Assert it, not only the skip.
+minage_read_as() {   # <log> <minAge> <seconds>
+    grep -qF "minAge is $2 ($3s)" "$1" && return 0
+    printf 'minAge %s should read as %ss; the run said: %s' "$2" "$3" \
+        "$(grep -o 'minAge is [^"]*' "$1" | head -1)"
+    return 1
+}
+assert_minage_08d()     { minage_read_as "$1" 08d 691200; }
+assert_minage_010d()    { minage_read_as "$1" 010d 864000; }
+assert_fs_minage_08d()  { minage_read_as "$1" 08d 691200; }
+assert_fs_minage_010d() { minage_read_as "$1" 010d 864000; }
+
+# Refused before anything is examined, under the reason the runbook names.
+minage_refused() {
+    grep '"event":"reclaim_unavailable","session":""' "$1" | grep -q '"reason":"minage_unparseable"' \
+        || { printf 'no run-level reclaim_unavailable with reason=minage_unparseable'; return 1; }
+}
+assert_minage_11_digits() { minage_refused "$1"; }
+assert_minage_overflow()  { minage_refused "$1"; }
+
+printf '\n%s== minAge is read in base 10, at most 10 digits ==%s\n' "$_B" "$_O"
+run_case    minage_08d         no  reclaim_skipped      MIN_AGE=08d
+run_case    minage_010d        no  reclaim_skipped      MIN_AGE=010d
+run_case    minage_11_digits   no  reclaim_unavailable  MIN_AGE=10000000000d
+run_case    minage_overflow    no  reclaim_unavailable  MIN_AGE=999999999999999d
+run_fs_case fs_minage_08d      no  reclaim_skipped      MIN_AGE=08d
+run_fs_case fs_minage_010d     no  reclaim_skipped      MIN_AGE=010d
 
 printf '\n%sreclaimer: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then

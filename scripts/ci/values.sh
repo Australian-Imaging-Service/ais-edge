@@ -172,6 +172,18 @@ dataPolicy:
   dryRun: false
 EOF
 
+# Leading zeros must read as base 10. sprig's int64 read them as octal, so
+# "010d" rendered 691200 (8 days) and "08d" rendered 0, which puts
+# QuarantinedDataUnresolved on every quarantined study at once.
+# runtime-templates.sh asserts the thresholds that reach the Loki rules.
+cat >"$V/mgmt-duration-base10.yaml" <<'EOF'
+dataPolicy:
+  stageAgeAlertAfter: "010d"
+  originals:
+    quarantine:
+      alertAfter: "08d"
+EOF
+
 # A management node with no SeaweedFS: Loki on a filesystem PVC, no uploader,
 # no reclaimer. This is the tier-1 shape, and it is the case where the
 # loki.storage / seaweedfs.enabled coupling has to hold.
@@ -325,6 +337,22 @@ cat >"$V/edge-datapolicy-on.yaml" <<'EOF'
 dataPolicy:
   enabled: true
   dryRun: false
+EOF
+
+# The edge half of the base-10 case. Before the fix these rendered 691200,
+# 0 ("expire immediately") and 3712. "0000007200" is also exactly 10 digits,
+# the most the parser accepts, and takes the plain-seconds branch.
+# runtime-templates.sh asserts the numbers in stages.tsv.
+cat >"$V/edge-duration-base10.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    quarantine:
+      alertAfter: "0000007200"
+  derived:
+    assigned:
+      minAge: "010d"
+    orthancStorage:
+      minAge: "08d"
 EOF
 
 # De-identification off. One key now, and the group label needs no clearing:
@@ -1027,6 +1055,11 @@ dataPolicy:
       alertAfter: "one day"
 EOF
 
+# More than 10 digits is refused, not parsed. A long enough number overflows,
+# and int64 turned an overflow into 0. 11 digits is the first length refused.
+printf 'dataPolicy:\n  derived:\n    assigned:\n      minAge: "10000000000d"\n' >"$V/neg-edge-duration-11-digits.yaml"
+printf 'dataPolicy:\n  stageAgeAlertAfter: "10000000000s"\n'                  >"$V/neg-mgmt-duration-11-digits.yaml"
+
 cat >"$V/neg-edge-filedrop-reclaim.yaml" <<'EOF'
 dataPolicy:
   enabled: true
@@ -1198,6 +1231,7 @@ mgmt-reporter-optout-all-never	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-a
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
 mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
+mgmt-duration-base10	charts/mgmt	mgmt-base.yaml mgmt-duration-base10.yaml
 mgmt-no-seaweedfs	charts/mgmt	mgmt-base.yaml mgmt-no-seaweedfs.yaml
 mgmt-shared-bucket	charts/mgmt	mgmt-base.yaml mgmt-shared-bucket.yaml
 mgmt-letsencrypt	charts/mgmt	mgmt-base.yaml mgmt-letsencrypt.yaml
@@ -1214,6 +1248,7 @@ edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
+edge-duration-base10	charts/edge	edge-base.yaml edge-duration-base10.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
@@ -1325,6 +1360,8 @@ neg-mgmt-cloud-nodeport	charts/mgmt	mgmt-base.yaml neg-mgmt-cloud-nodeport.yaml	
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
+neg-edge-duration-11-digits	charts/edge	edge-base.yaml neg-edge-duration-11-digits.yaml	has more than 10 digits
+neg-mgmt-duration-11-digits	charts/mgmt	mgmt-base.yaml neg-mgmt-duration-11-digits.yaml	has more than 10 digits
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
 neg-mgmt-telemetry-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-telemetry-retain.yaml	were removed: Helm cannot template a subchart
 neg-mgmt-podlogfiles-retain	charts/mgmt	mgmt-base.yaml neg-mgmt-podlogfiles-retain.yaml	has no time-based retention
