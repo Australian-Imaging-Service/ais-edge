@@ -292,9 +292,13 @@ See the CAUTION in Step 3 for why `and ignoring (...) == 0` is wrong here.
 expr: (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 14
 for: 1h
 ```
-The shipped `CertificateExpiringSoon` (`prometheus-rules/warning.yaml`) is the
-same expression at 60 days; copy it rather than this snippet if you want the
-label and annotation wiring too.
+The shipped `CertificateExpiringSoon` (`prometheus-rules/warning.yaml`) keeps
+this 14-day floor and adds the check that matters sooner: a certificate more
+than a day past its own renewal time (`certmanager_certificate_renewal_timestamp_seconds`),
+which means cert-manager tried and failed. It no longer uses 60 days, which is
+inside cert-manager's own renewal window and fired on every healthy 90-day
+certificate. Copy it rather than this snippet if you want the label and
+annotation wiring too.
 
 ---
 

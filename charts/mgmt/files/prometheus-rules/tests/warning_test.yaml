@@ -134,3 +134,81 @@ tests:
                 back, CertSyncStale, CertSyncNeverSucceeded and ReclaimerNotSucceeding
                 cannot fire, because they read its CronJob series.
                   kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+
+  # ---------------------------------------------------------------------
+  # CertificateExpiringSoon: late renewal only. promtool's clock starts at 0,
+  # so each series holds absolute timestamps in seconds from t=0.
+  # The prod case of 2026-09-30: a 90-day certificate with 40 days left and
+  # renewal due in 10 days. The old "< 60 days" rule fired on it daily.
+  - interval: 1m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="cai-lfs3-loki-client"}'
+        values: '3456000x180'
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="cai-lfs3-loki-client"}'
+        values: '864000x180'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+
+  # Renewal due at t=0 and never done: quiet for the first day (a retry is
+  # normal), fires once it is a day overdue plus the 1h `for`. A certificate
+  # renewed on time (renewal moved on) next to it stays quiet.
+  - interval: 5m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="late-cert"}'
+        values: '2592000x400'
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="late-cert"}'
+        values: '0x400'
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="renewed-cert"}'
+        values: '2592000x400'
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="renewed-cert"}'
+        values: '0x60 5184000x340'
+    alert_rule_test:
+      - eval_time: 12h
+        alertname: CertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 26h
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: cert-manager
+              exported_namespace: ais-mgmt
+              name: late-cert
+            exp_annotations:
+              summary: 'Certificate ais-mgmt/late-cert is overdue for renewal'
+              description: |
+                cert-manager was due to renew this certificate over a day ago and has not, or it
+                expires within 14 days. Healthy certificates never fire this: cert-manager renews at
+                notAfter minus renewBefore (30 days before expiry for a 90-day certificate).
+                  kubectl -n ais-mgmt describe certificate late-cert
+                  kubectl -n ais-mgmt get certificaterequests,orders,challenges
+                  kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep late-cert
+
+  # Under 14 days from expiry fires whatever the renewal time says (a
+  # renewBefore set too short to leave time to act).
+  - interval: 5m
+    input_series:
+      - series: 'certmanager_certificate_expiration_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="short-renewbefore"}'
+        values: '864000x40'
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{namespace="cert-manager", exported_namespace="ais-mgmt", name="short-renewbefore"}'
+        values: '777600x40'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: cert-manager
+              exported_namespace: ais-mgmt
+              name: short-renewbefore
+            exp_annotations:
+              summary: 'Certificate ais-mgmt/short-renewbefore is overdue for renewal'
+              description: |
+                cert-manager was due to renew this certificate over a day ago and has not, or it
+                expires within 14 days. Healthy certificates never fire this: cert-manager renews at
+                notAfter minus renewBefore (30 days before expiry for a 90-day certificate).
+                  kubectl -n ais-mgmt describe certificate short-renewbefore
+                  kubectl -n ais-mgmt get certificaterequests,orders,challenges
+                  kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep short-renewbefore

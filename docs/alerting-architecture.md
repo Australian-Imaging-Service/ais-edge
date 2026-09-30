@@ -78,7 +78,7 @@ here that no longer ships reads as coverage that does not exist.
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
 | `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter (capitalised exactly so — PromQL is case-sensitive). |
-| `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_expiration_timestamp_seconds` from mgmt cert-manager. |
+| `CertificateExpiringSoon` | Prometheus | cert-manager's own metrics: fires when a certificate is more than a day past its renewal time (`certmanager_certificate_renewal_timestamp_seconds`, i.e. `notAfter - renewBefore`) or within 14 days of expiry. It used to fire at 60 days left, which every healthy 90-day certificate reaches 30 days before cert-manager renews it, so it mailed daily with nothing wrong. |
 | `CertSyncStale` | Prometheus | `kube_cronjob_status_last_successful_time` for any `*-cert-sync-*` CronJob older than 24h — an edge whose Loki client cert stopped being refreshed. |
 | `CertSyncNeverSucceeded` | Prometheus | `kube_cronjob_info` `unless on (namespace, cronjob)` a last-success timestamp — catches a site whose Secrets were never delivered at all, which "stale" cannot see. |
 | `CARotationDue` | Prometheus | `ais-edge-ca` inside a year of expiry. Fleet-wide reissue is a planned job, not an incident, so it is `info`. |
