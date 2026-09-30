@@ -457,6 +457,8 @@ spec:
       # scheduled run. A site that is genuinely down still ends the Job
       # failed, which is what CertSyncStale needs.
       backoffLimit: 2
+      # CAUTION: CertSyncNeverSucceeded waits 30m after a first scheduled
+      # run. Raise this toward that and a slow but healthy run pages.
       activeDeadlineSeconds: 900
       template:
         metadata:

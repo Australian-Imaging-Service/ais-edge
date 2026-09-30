@@ -35,6 +35,11 @@
 #     cluster to prove it. scripts/check-alert-inputs.sh will report this
 #     metric as missing until the chart is installed. Re-run it after the
 #     first install and treat a still-missing input as a real finding.
+#   * Measured 2026-09-30 on the ais-edge-dev management cluster: every input
+#     below has a series for mgmt-cert-sync-cai-lfs3. That is
+#     kube_cronjob_created, kube_cronjob_status_last_schedule_time and
+#     kube_cronjob_status_last_successful_time, each labelled
+#     namespace + cronjob.
 # =============================================================================
 groups:
   - name: ais-edge-cert-sync
@@ -68,20 +73,45 @@ groups:
               {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
 
       # A CronJob that has NEVER succeeded produces no
-      # last_successful_time series at all, so the rule above cannot see it —
-      # the exact shape of "the alert was green from the day it was written".
-      # This is the case where mTLS is switched on and distribution has never
-      # once worked.
+      # last_successful_time series at all, so the rule above cannot see it.
+      # That is the exact shape of "the alert was green from the day it was
+      # written": mTLS switched on and distribution never once working.
       - alert: CertSyncNeverSucceeded
+        # The clock starts at the first SCHEDULED run, not at creation.
+        # A healthy new edge can wait ~6h for its first "23 */6 * * *" run.
+        # The old kube_cronjob_info form paged critical at 2h, before that
+        # run, unless a manual seed had already succeeded.
+        #
+        # The `or` half: 24h old and never scheduled at all. The chart
+        # refuses schedules coarser than daily, so a first run is always
+        # due inside 24h.
+        #
+        # install.sh's manual <cronjob>-init seed can set
+        # last_successful_time but never sets last_schedule_time. A seed
+        # success clears this; a seed failure waits for the first scheduled
+        # run.
+        #
+        # max by (namespace, cronjob) gives both halves one label set and
+        # folds duplicate series from a kube-state-metrics rollover.
+        #
+        # CAUTION: the value is a timestamp or an age, by branch. Keep it
+        # out of the annotations.
         expr: |
-          kube_cronjob_info{cronjob=~".+-cert-sync-.+"}
+          (
+            max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~".+-cert-sync-.+"})
+            or
+            (time() - max by (namespace, cronjob) (kube_cronjob_created{cronjob=~".+-cert-sync-.+"}) > 86400)
+          )
           unless on (namespace, cronjob) kube_cronjob_status_last_successful_time
-        for: 2h
+        # CAUTION: keep above the Job's activeDeadlineSeconds (900s in
+        # templates/cert-sync.yaml). A healthy first run ends inside that.
+        for: 30m
         labels: { severity: critical }
         annotations:
           summary: "cert-sync has never completed a run for {{ $labels.cronjob }}"
           description: |
-            {{ $labels.namespace }}/{{ $labels.cronjob }} exists but has no
+            {{ $labels.namespace }}/{{ $labels.cronjob }} has had a scheduled
+            run, or has existed for over 24h without one, and has no
             successful run on record. That edge has never received a synced
             copy of the management Secrets, so anything depending on rotation
             there is running on whatever was pushed at build time by hand.

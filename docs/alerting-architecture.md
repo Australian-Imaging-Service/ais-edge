@@ -80,7 +80,7 @@ here that no longer ships reads as coverage that does not exist.
 | `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter (capitalised exactly so — PromQL is case-sensitive). |
 | `CertificateExpiringSoon` | Prometheus | `certmanager_certificate_expiration_timestamp_seconds` from mgmt cert-manager. |
 | `CertSyncStale` | Prometheus | `kube_cronjob_status_last_successful_time` for any `*-cert-sync-*` CronJob older than 24h — an edge whose Loki client cert stopped being refreshed. |
-| `CertSyncNeverSucceeded` | Prometheus | `kube_cronjob_info` `unless on (namespace, cronjob)` a last-success timestamp — catches a site whose Secrets were never delivered at all, which "stale" cannot see. |
+| `CertSyncNeverSucceeded` | Prometheus | A `*-cert-sync-*` CronJob that has had a scheduled run (`kube_cronjob_status_last_schedule_time`), or has existed 24h without one (`kube_cronjob_created`), `unless on (namespace, cronjob)` a last-success timestamp, held for 30m. Catches a site whose Secrets were never delivered at all, which "stale" cannot see. It waits for the first scheduled run because on a new edge that can be ~6h away; the old `kube_cronjob_info` form paged critical 2h after creation if nothing had succeeded yet, whether or not a run had been due. |
 | `CARotationDue` | Prometheus | `ais-edge-ca` inside a year of expiry. Fleet-wide reissue is a planned job, not an incident, so it is `info`. |
 | `CertificateRenewed` | Prometheus | `changes(certmanager_certificate_renewal_timestamp_seconds[1h])` — an `info` receipt that rotation is actually happening. |
 

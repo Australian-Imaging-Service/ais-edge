@@ -63,11 +63,23 @@ rather than assumed:
   never produced a sample in its life; it has been removed, and
   `scripts/ci/promtool.sh` now rejects the shape. To say anything about a join
   metric, work on the SERIES SET rather than the value: `unless on (...)`
-  against another metric, as `CertSyncNeverSucceeded` does
+  against another metric, as `CertSyncNeverSucceeded` first did
   (`kube_cronjob_info{...} unless on (namespace, cronjob)
-  kube_cronjob_status_last_successful_time` — "a cronjob exists with no
-  success recorded"), or against the same metric at an `offset` to spot one
+  kube_cronjob_status_last_successful_time`, read as "a cronjob exists with
+  no success recorded"), or against the same metric at an `offset` to spot one
   that has just appeared. Never look for a change in the value.
+
+  That rule also shows the second half of the lesson: the series set has to
+  mean the thing you are asking about. "Exists" was the wrong question there.
+  A new edge's CronJob exists up to ~6h before its first run is due, so the
+  rule paged critical at 2h on a healthy new edge that had simply not been
+  scheduled yet (and whose manual seed had not succeeded). It now puts the
+  same `unless on (namespace, cronjob)` against
+  `kube_cronjob_status_last_schedule_time` (a run has been scheduled) or a
+  `kube_cronjob_created` older than 24h (nothing was ever scheduled). Both
+  are timestamps, not join metrics. The first has no series until a run has
+  been scheduled; the second exists from creation, and the `> 86400`
+  comparison is what keeps only CronJobs over a day old.
 
 ## What kube-state-metrics has access to
 
