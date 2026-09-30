@@ -41,14 +41,28 @@ DE-IDENTIFICATION
   Any OTHER AE title is rejected for ingest but NOT discarded: the original
   is written to /facility-backup/__unmapped_aet__/<AET>/... and only then
   removed from Orthanc. Add the AET above and re-send to ingest it.
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}
+  Enabled. The xnat-ingest deidentify stage runs between assign and upload,
+  and the uploader reads only its output, {{ include "edge.uploadSourceDir" . }}.
+  {{- if .Values.ingest.deidentify.specs }}
+  {{ len .Values.ingest.deidentify.specs }} recipe(s):
+    {{- range $path, $_ := .Values.ingest.deidentify.specs }}
+    {{ $path }}
+    {{- end }}
+  {{- else }}
+  Recipes from ConfigMap {{ .Values.ingest.deidentify.specConfigMap }}:
+    {{- range $_, $path := .Values.ingest.deidentify.specFiles }}
+    {{ $path }}
+    {{- end }}
+  {{- end }}
 {{- else }}
   *** DISABLED. Studies reach XNAT with PHI intact. ***
 {{- end }}
 
 UPLOAD
 {{- if eq .Values.upload.mode "s3" }}
-  Mode s3 — sessions are staged to s3://{{ .Values.upload.s3.bucket }}/{{ .Values.upload.s3.prefix }}/
-  at {{ .Values.upload.s3.endpoint }}, and the management cluster pushes them
+  Mode s3 — sessions are staged to s3://{{ include "edge.s3Bucket" . }}/{{ .Values.upload.s3.prefix }}/
+  at {{ include "edge.s3Endpoint" . }}, and the management cluster pushes them
   into XNAT. This edge never talks to XNAT directly.
 {{- else }}
   Mode direct — sessions are uploaded straight to XNAT. No management cluster
