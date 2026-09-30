@@ -307,6 +307,7 @@ label and annotation wiring too.
 | `charts/mgmt/files/alertmanager-slack-receivers.yaml` | Slack receivers, spliced in only when a webhook Secret exists |
 | `charts/mgmt/files/prometheus-rules/{critical,warning,info}.yaml` | Prometheus rules, by severity |
 | `charts/mgmt/files/prometheus-rules/cert-sync.yaml` | `CertSyncStale` + `CertSyncNeverSucceeded` — grouped by subject rather than severity, because they are one mechanism at two severities. `promtool.sh` globs `*.yaml` here, so a new file needs no wiring |
+| `charts/mgmt/files/prometheus-rules/reclaimer.yaml` | `ReclaimerNotSucceeding`, one alert per edge, `cluster=<edge>` taken from the CronJob name. Its namespace, release prefix and threshold are sentinels filled at render, so `promtool.sh` tests a copy with fixed test values and checks the render separately |
 | `charts/mgmt/files/prometheus-rules/tests/*.yaml` | promtool unit tests — one per rule file, `cert-sync_test.yaml` included |
 | `charts/mgmt/files/loki-ruler-rules.yaml` | Every log-derived alert |
 | `charts/mgmt/values.yaml` | Retention, scrape interval, storage size |

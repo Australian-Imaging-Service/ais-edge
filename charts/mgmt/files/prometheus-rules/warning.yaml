@@ -57,3 +57,23 @@ groups:
           summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in <60 days"
           description: "cert-manager normally auto-renews 30 days before expiry. If this fires, renewal has failed — investigate cert-manager logs."
 
+      # Every CronJob alert here reads kube-state-metrics: CertSyncStale,
+      # CertSyncNeverSucceeded and ReclaimerNotSucceeding. With its series
+      # gone they have nothing to evaluate and stay quiet, which reads as
+      # healthy. defaultRules is off on this chart, so no upstream TargetDown
+      # or KubeStateMetrics* rule covers it.
+      # `== 1` inside absent(): a target that is discovered but failing (up 0)
+      # counts as down too, not only one that has vanished.
+      - alert: KubeStateMetricsDown
+        expr: |
+          absent(up{job="kube-state-metrics"} == 1)
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "kube-state-metrics is not being scraped"
+          description: |
+            No successful scrape of kube-state-metrics for 15 minutes. Until it is
+            back, CertSyncStale, CertSyncNeverSucceeded and ReclaimerNotSucceeding
+            cannot fire, because they read its CronJob series.
+              kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+

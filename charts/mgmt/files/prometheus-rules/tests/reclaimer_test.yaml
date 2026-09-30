@@ -1,0 +1,147 @@
+# promtool unit tests for files/prometheus-rules/reclaimer.yaml
+# Run by scripts/ci/promtool.sh on a copy with the sentinels set to:
+#   namespace xnat-upload, prefix mgmt, alertAfter 10800 (3h, the default).
+rule_files:
+  - ../reclaimer.yaml
+
+evaluation_interval: 30s
+
+tests:
+  # Stale edge: last success t=0, next success at 240m. Its failed Job is
+  # kept the whole time and must not matter.
+  # Just as stale and quiet: another prefix in the namespace, the same name
+  # in another namespace, and a cert-sync CronJob.
+  - interval: 1m
+    name: stale reclaimer fires per edge, scoped, clears on success
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-alpha"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-alpha"}'
+        values: '0x239 14400x60'
+      - series: 'kube_job_failed{job="kube-state-metrics", namespace="xnat-upload", job_name="mgmt-reclaim-edge-alpha-29841317", condition="true"}'
+        values: '1x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="xnat-upload", cronjob="other-reclaim-edge-alpha"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="other-team", cronjob="mgmt-reclaim-edge-alpha"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="ais-mgmt", cronjob="mgmt-cert-sync-edge-alpha"}'
+        values: '0x300'
+      # A healthy second edge: hourly successes.
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-cai-lfs3"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-cai-lfs3"}'
+        values: '0x59 3600x60 7200x60 10800x60 14400x60'
+    alert_rule_test:
+      - eval_time: 180m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 190m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 200m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: xnat-upload
+              cronjob: mgmt-reclaim-edge-alpha
+              cluster: edge-alpha
+            exp_annotations:
+              summary: 'Staging reclaimer for edge-alpha has not succeeded for 3h 20m 0s'
+              description: |
+                No run of xnat-upload/mgmt-reclaim-edge-alpha has completed successfully
+                for 3h 20m 0s (counted from its creation if none ever has).
+                No run for edge edge-alpha has completed in full, so confirming its staged
+                sessions against XNAT and reclaiming them may be falling behind (a run can do part
+                of its work before it fails or reaches its deadline).
+                Held back while ReclaimerRunUnavailable fires for the same edge, which names the
+                failed dependency. Arriving on its own usually means runs are ending without logging
+                why, but the CronJob may also be suspended or not scheduled, or Loki may be missing
+                the logs:
+                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+                       kubectl -n xnat-upload get cronjob mgmt-reclaim-edge-alpha
+                       kubectl -n xnat-upload describe cronjob mgmt-reclaim-edge-alpha
+                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or killed at the
+                     deadline. (On this chart the Jobs carry no component label; the pods do.)
+                       kubectl -n xnat-upload get pods -l component=s3-reclaimer
+                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+                If the schedule was slowed, raise dataPolicy.derived.s3Staged.alertAfter with it: it
+                must stay above two periods plus deadlineSeconds.
+                Clears on the next successful run.
+      - eval_time: 245m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+
+  # Never succeeded: age from creation. A second reclaimer that DID succeed
+  # must not stand it down (the unless joins on cronjob too). The edge name
+  # holds "-reclaim-", so the cluster label must come from the anchored prefix.
+  - interval: 1m
+    name: never-succeeded reclaimer fires, per cronjob, anchored edge name
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-reclaim-lab"}'
+        values: '0x300'
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-beta"}'
+        values: '0x300'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-beta"}'
+        values: '9000x300'
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="other-team", cronjob="mgmt-reclaim-edge-gamma"}'
+        values: '0x300'
+      # Another CronJob in the namespace that never succeeded either.
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-backup"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 170m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 200m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: xnat-upload
+              cronjob: mgmt-reclaim-reclaim-lab
+              cluster: reclaim-lab
+            exp_annotations:
+              summary: 'Staging reclaimer for reclaim-lab has not succeeded for 3h 20m 0s'
+              description: |
+                No run of xnat-upload/mgmt-reclaim-reclaim-lab has completed successfully
+                for 3h 20m 0s (counted from its creation if none ever has).
+                No run for edge reclaim-lab has completed in full, so confirming its staged
+                sessions against XNAT and reclaiming them may be falling behind (a run can do part
+                of its work before it fails or reaches its deadline).
+                Held back while ReclaimerRunUnavailable fires for the same edge, which names the
+                failed dependency. Arriving on its own usually means runs are ending without logging
+                why, but the CronJob may also be suspended or not scheduled, or Loki may be missing
+                the logs:
+                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+                       kubectl -n xnat-upload get cronjob mgmt-reclaim-reclaim-lab
+                       kubectl -n xnat-upload describe cronjob mgmt-reclaim-reclaim-lab
+                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or killed at the
+                     deadline. (On this chart the Jobs carry no component label; the pods do.)
+                       kubectl -n xnat-upload get pods -l component=s3-reclaimer
+                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+                If the schedule was slowed, raise dataPolicy.derived.s3Staged.alertAfter with it: it
+                must stay above two periods plus deadlineSeconds.
+                Clears on the next successful run.
+
+  # One failed run, then a success that takes its full 3000s deadline:
+  # the gap peaks just under 2h50m, below 3h, so it must never mail.
+  - interval: 1m
+    name: one failed run then a slow success stays quiet
+    input_series:
+      - series: 'kube_cronjob_created{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-alpha"}'
+        values: '0x400'
+      - series: 'kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="xnat-upload", cronjob="mgmt-reclaim-edge-alpha"}'
+        values: '0x169 10200x60 14400x60 18000x60 21600x60'
+    alert_rule_test:
+      - eval_time: 169m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 185m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []
+      - eval_time: 350m
+        alertname: ReclaimerNotSucceeding
+        exp_alerts: []

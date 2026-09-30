@@ -1608,8 +1608,9 @@ and the rule then fires **critical** on both sessions — including
 healthy. It will read as data loss for data that is present.
 
 Note which alert does *not* cover this: `ReclaimerRunUnavailable` stays quiet,
-because the runs complete normally — they just cannot confirm anything. The
-absence alert is doing its job; the input it depends on has gone bad.
+because the runs complete normally: they just cannot confirm anything.
+`ReclaimerNotSucceeding` stays quiet for the same reason: every run succeeds.
+The absence alert is doing its job; the input it depends on has gone bad.
 
 Check whether it is still happening before assuming the 08-12 pages are real:
 

@@ -480,9 +480,13 @@ groups:
         # true and fire. That is the intended threshold — "could not confirm
         # anything for more than an hour", not "missed once".
         #
-        # NOT COVERED, deliberately: a reclaimer that stops running altogether
-        # emits neither event, so this stays silent. SessionStagedNotConfirmedInXNAT
-        # is the 48h backstop for that case.
+        # NOT COVERED HERE: a reclaimer that stops running altogether, or dies
+        # without logging (deadline kill, OOM, crash, image pull), emits
+        # neither event, so this stays silent. ReclaimerNotSucceeding
+        # (files/prometheus-rules/reclaimer.yaml) covers it, per edge, from the
+        # CronJob's last success. SessionStagedNotConfirmedInXNAT is NOT a
+        # backstop for it: its staged half reads the reclaimer's own reclaim_.*
+        # events, so it goes blind together with the reclaimer.
         expr: |
           (sum by (cluster, reason) (count_over_time(
             {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
