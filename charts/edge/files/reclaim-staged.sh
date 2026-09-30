@@ -284,8 +284,6 @@ if [ "$STORAGE" = "s3" ]; then
     esac
 fi
 
-# minAge -> seconds. An unparseable value must NOT collapse to 0: that would
-# make every staged session instantly eligible.
 if [ "$STORAGE" = "filesystem" ]; then
     # A MISSING ROOT IS NOT AN EMPTY ROOT. If the path is absent or is not a
     # directory the correct answer is "I cannot examine anything", never "there
@@ -299,23 +297,42 @@ if [ "$STORAGE" = "filesystem" ]; then
     esac
 fi
 
+# minAge -> seconds. An unparseable value must NOT collapse to 0: that would
+# make every staged session instantly eligible.
+# GUIDING: both charts pass minAge through as written, so THIS is its parser.
+# BASE 10 (10#). Plain $(( )) reads a leading zero as octal: "010d" was 8 days,
+# and "08d" an arithmetic error that left MIN_AGE_S empty, so the age test
+# failed open and only the XNAT check stood between a session and removal.
+# AT MOST 10 DIGITS, as in the charts' durationSeconds, so the multiply cannot
+# wrap. "999999999999999d" wrapped negative and failed open the same way.
+# CAUTION: YAML reads an unquoted 010 as octal (8) before it gets here.
 to_seconds() {
     local v="${1:-}" n u
     n="${v%[a-zA-Z]}"; u="${v#"$n"}"
     case "$n" in ''|*[!0-9]*) echo ERR; return ;; esac
+    [ "${#n}" -le 10 ] || { echo ERR; return; }
     case "$u" in
-        ''|s) echo "$n" ;;
-        m)    echo $(( n * 60 )) ;;
-        h)    echo $(( n * 3600 )) ;;
-        d)    echo $(( n * 86400 )) ;;
-        w)    echo $(( n * 604800 )) ;;
+        ''|s) echo $(( 10#$n )) ;;
+        m)    echo $(( 10#$n * 60 )) ;;
+        h)    echo $(( 10#$n * 3600 )) ;;
+        d)    echo $(( 10#$n * 86400 )) ;;
+        w)    echo $(( 10#$n * 604800 )) ;;
         *)    echo ERR ;;
     esac
 }
 MIN_AGE_S=$(to_seconds "$MIN_AGE")
-if [ "$MIN_AGE_S" = "ERR" ]; then
-    unavailable minage_unparseable "dataPolicy.derived.s3Staged.minAge=${MIN_AGE} is not a duration I can parse (expected e.g. 0, 90m, 12h, 1d, 2w) — refusing to run rather than treating it as 0"
+# Name the key the operator set: the edge chart (STORAGE=filesystem) passes
+# stagedReclaimer.minAge, the mgmt chart s3Staged.minAge.
+if [ "$STORAGE" = "filesystem" ]; then
+    _minage_key="dataPolicy.derived.stagedReclaimer.minAge"
+else
+    _minage_key="dataPolicy.derived.s3Staged.minAge"
 fi
+# Check the RESULT, not only for ERR: empty or negative must refuse as well.
+case "$MIN_AGE_S" in
+    ''|*[!0-9]*)
+        unavailable minage_unparseable "${_minage_key}=${MIN_AGE} is not a duration I can parse (expected at most 10 digits and an optional s/m/h/d/w, e.g. 0, 90m, 12h, 1d, 2w), so refusing to run rather than treating it as 0" ;;
+esac
 
 # The per-run removal cap is the blast-radius bound, and a non-numeric value
 # does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer

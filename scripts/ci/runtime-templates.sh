@@ -349,6 +349,53 @@ PY
 )" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
 
 # -----------------------------------------------------------------------------
+# Durations are read in base 10
+# -----------------------------------------------------------------------------
+# edge.durationSeconds used int64, which reads a leading zero as octal.
+# Measured before the fix: "08d" rendered 0, which the engine reads as "expire
+# immediately", and "010d" rendered 691200 (8 days).
+# edge-duration-base10 puts one such value on each stage row; this checks the
+# seconds the engine is handed, in the stages.tsv it actually reads.
+# The 10-digit row pins the ceiling from below; neg-edge-duration-11-digits
+# pins it from above.
+ci_heading "durations render in base 10"
+
+dur_render="$CI_RENDER_DIR/edge-duration-base10.yaml"
+if [ ! -s "$dur_render" ]; then
+  ci_fail "no render at $dur_render: the edge-duration-base10 case is missing from ci_positive_cases"
+else
+  # 2>&1: SystemExit writes to stderr (see above).
+  dur_out="$(python3 - "$dur_render" 2>&1 <<'PY'
+import sys, yaml
+
+# stage, 1-based stages.tsv column, expected seconds, value set in the fixture
+WANT = [
+    ("derived.assigned",         7, "691200",     "08d"),
+    ("derived.orthancStorage",   7, "864000",     "010d"),
+    ("originals.quarantine",     5, "7200",       "07200"),
+    ("originals.facilityBackup", 7, "9999999999", "9999999999s"),
+]
+
+rows = None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+        rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+if rows is None:
+    raise SystemExit("no stages.tsv in the render, so nothing was checked")
+
+bad = []
+for stage, col, want, given in WANT:
+    got = rows[stage][col - 1] if stage in rows and len(rows[stage]) >= col else None
+    if got != want:
+        bad.append("%s=%r rendered %r, expected %s" % (stage, given, got, want))
+if bad:
+    raise SystemExit("; ".join(bad) + ". A leading zero must be decimal: octal turns 08d into 0, 'expire immediately'.")
+print("%d leading-zero and ceiling durations render in base 10 (08d=691200, 010d=864000)" % len(WANT))
+PY
+)" && ci_pass "$dur_out" || ci_fail "durations: $dur_out"
+fi
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control

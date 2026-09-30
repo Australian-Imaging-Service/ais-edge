@@ -437,6 +437,20 @@ setup_fs_undeclared_file() {
 setup_fs_min_age_blocks() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
     touch "$1/$SESS/1.scan/DICOM/f1.dcm"; }
 
+# MIN_AGE IS BASE 10. $(( )) read a leading zero as octal.
+# 010d was 8 days: this 9-day-old session was removed.
+# 08d was a shell error: MIN_AGE_S came back empty, the age test errored,
+# and a session written seconds ago was removed.
+# The seconds are asserted too, so skipping for another reason cannot pass.
+setup_fs_min_age_010d() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+    touch -d '9 days ago' "$1/$SESS/1.scan/DICOM/f1.dcm"; }
+assert_fs_min_age_010d() { grep -qF 'minAge is 010d (864000s)' "$1" || { echo "010d was not read as 864000s"; return 1; }; }
+setup_fs_min_age_08d()  { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
+    touch "$1/$SESS/1.scan/DICOM/f1.dcm"; }
+assert_fs_min_age_08d()  { grep -qF 'minAge is 08d (691200s)' "$1" || { echo "08d was not read as 691200s"; return 1; }; }
+# 10 digits is the ceiling and still accepted; 11 is refused further down.
+setup_fs_min_age_10_digits() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+
 printf '\n%s== reclaimer decision paths, filesystem backend ==%s\n' "$_B" "$_O"
 run_fs_case fs_happy_path         yes reclaim_removed
 run_fs_case fs_partial_upload     no  reclaim_kept
@@ -446,6 +460,9 @@ run_fs_case fs_dry_run            no  reclaim_skipped      DRY_RUN=true
 run_fs_case fs_build_dir_ignored  yes reclaim_removed
 run_fs_case fs_undeclared_file    no  reclaim_kept
 run_fs_case fs_min_age_blocks     no  reclaim_skipped      MIN_AGE=1d
+run_fs_case fs_min_age_010d       no  reclaim_skipped      MIN_AGE=010d
+run_fs_case fs_min_age_08d        no  reclaim_skipped      MIN_AGE=08d
+run_fs_case fs_min_age_10_digits  no  reclaim_skipped      MIN_AGE=9999999999s
 
 # REFUSALS. Each of these must abort the whole run rather than examine anything:
 # a reclaimer that cannot trust its own configuration must not delete under it.
@@ -458,6 +475,22 @@ setup_fs_bad_storage()   { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
 run_fs_case fs_root_unsafe        no  reclaim_unavailable  STAGED_ROOT=/data
 run_fs_case fs_root_missing       no  reclaim_unavailable  STAGED_ROOT=/nonexistent-staged-root
 run_fs_case fs_bad_storage        no  reclaim_unavailable  STORAGE=nfs
+
+# MORE THAN 10 DIGITS IS REFUSED, as in the chart.
+# 20 digits got past the old ERR check, then `[` errored on it and read as
+# old enough: the session was removed. 11 was accepted as 391 years.
+# reason is asserted: ReclaimerRunUnavailable's runbook maps it to dataPolicy values.
+setup_fs_min_age_11_digits() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_fs_min_age_20_digits() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+minage_refused() {
+    grep '"event":"reclaim_unavailable","session":""' "$1" | grep -q '"reason":"minage_unparseable"' \
+        || { echo "no run-level reclaim_unavailable carrying reason=minage_unparseable"; return 1; }
+}
+assert_fs_min_age_11_digits() { minage_refused "$1"; }
+assert_fs_min_age_20_digits() { minage_refused "$1"; }
+
+run_fs_case fs_min_age_11_digits  no  reclaim_unavailable  MIN_AGE=12345678901s
+run_fs_case fs_min_age_20_digits  no  reclaim_unavailable  MIN_AGE=99999999999999999999s
 
 printf '\n%s== reclaimer decision paths ==%s\n' "$_B" "$_O"
 run_case happy_path            yes reclaim_removed
