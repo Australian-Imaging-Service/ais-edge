@@ -169,8 +169,6 @@ print(n)
 import glob, re, sys, yaml
 SCOPED = {
     # alert: (exclusion that must be present, with the namespace captured)
-    "CPUThrottlingHigh": r'unless on \(namespace, pod, container\)\s*max by \(namespace, pod, container\) \(\s*'
-                         r'container_cpu_cfs_periods_total\{namespace="([^"]+)", container="data-policy", pod=~"\.\+-data-policy-',
     "KubeJobFailed":     r'unless on \(namespace, job_name\)\s*'
                          r'kube_job_failed\{namespace="([^"]+)", job_name=~"\.\+-staged-reclaimer-',
 }
@@ -194,6 +192,22 @@ for alert, pat in SCOPED.items():
               "so the exclusion matches nothing" % (alert, h[0][0], m.group(1)))
     else:
         print("PASS %s is defined once (%s), its exclusion scoped to namespace %s" % (alert, h[0][0], m.group(1)))
+
+# Upstream rules this chart must NOT fork: exactly one copy, upstream's.
+# CPUThrottlingHigh: the data-policy reporter has no CPU limit, so it has no
+# CFS series and upstream's rule is right as is. A second copy, or
+# defaultRules.disabled.CPUThrottlingHigh, is the old fork coming back or the
+# rule vanishing.
+UPSTREAM = {"CPUThrottlingHigh": "ais-kps-kubernetes-resources"}
+for alert, want in UPSTREAM.items():
+    where = [f.rsplit("/", 1)[1][:-5] for f in sorted(glob.glob(sys.argv[1] + "/*.yaml"))
+             for g in (yaml.safe_load(open(f)) or {}).get("groups", [])
+             for r in g.get("rules") or [] if r.get("alert") == alert]
+    if where != [want]:
+        print("FAIL %s is defined in %s; expected only kube-prometheus-stack's copy (%s)"
+              % (alert, ", ".join(where) or "no rule file", want))
+    else:
+        print("PASS %s is defined once, upstream's copy (%s)" % (alert, want))
 
 # ReclaimerNotSucceeding is this chart's own, not a fork, so the checks are
 # its own: scoped to one substituted namespace, and every threshold the chart
@@ -225,6 +239,60 @@ PY
           *)       ci_fail "${line#FAIL }" ;;
         esac
       done <<< "$scoped"
+    fi
+  fi
+
+  # The KubeJobFailed fork must stay upstream's rule plus the one `unless`.
+  # CI above only proves it is defined once with its exclusion; nothing
+  # noticed if a kube-prometheus-stack bump changed upstream's expression,
+  # `for`, labels or annotations and left the fork stale. Rendered once more
+  # with upstream's copy switched back on, then compared.
+  if [ "$(ci_obs_chart)" = "charts/edge" ]; then
+    drift_render="$CI_WORK_DIR/upstream-kubejobfailed.yaml"
+    if ! "$(ci_helm)" template edge "$REPO_ROOT/charts/edge" \
+          -f "$CI_VALUES_DIR/edge-base.yaml" -f "$CI_VALUES_DIR/edge-obsstack-on.yaml" \
+          --set kube-prometheus-stack.defaultRules.disabled.KubeJobFailed=false \
+          --namespace xnat-ingest >"$drift_render" 2>"$drift_render.err"; then
+      ci_fail "rendering with upstream KubeJobFailed on failed: $(head -c 300 "$drift_render.err")"
+    else
+      drift="$(python3 - "$drift_render" <<'PY'
+import re, sys, yaml
+copies = []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d or d.get("kind") != "PrometheusRule":
+        continue
+    for g in d["spec"].get("groups", []):
+        for r in g.get("rules") or []:
+            if r.get("alert") == "KubeJobFailed":
+                copies.append((d["metadata"]["name"], g["name"], r))
+fork = [c for c in copies if c[1] == "ais-edge-jobs"]
+upstream = [c for c in copies if c[1] != "ais-edge-jobs"]
+def flat(e):
+    return " ".join(e.split())
+def bare(e):
+    e = flat(e)
+    return e[1:-1].strip() if e.startswith("(") and e.endswith(")") else e
+if len(fork) != 1 or len(upstream) != 1:
+    print("FAIL expected one fork and one upstream KubeJobFailed, found %d and %d" % (len(fork), len(upstream)))
+    raise SystemExit
+f, u = fork[0][2], upstream[0][2]
+head = flat(f["expr"]).split(" unless on (namespace, job_name) ")[0]
+bad = []
+if bare(head) != bare(u["expr"]):
+    bad.append("expr: fork %r vs upstream %r" % (bare(head), bare(u["expr"])))
+for k in ("for", "labels", "annotations"):
+    if f.get(k) != u.get(k):
+        bad.append("%s: fork %r vs upstream %r" % (k, f.get(k), u.get(k)))
+if bad:
+    print("FAIL the KubeJobFailed fork has drifted from upstream (%s): %s" % (upstream[0][0], "; ".join(bad)))
+else:
+    print("PASS the KubeJobFailed fork is upstream's rule (%s) plus its exclusion" % upstream[0][0])
+PY
+)"
+      case "$drift" in
+        PASS*) ci_pass "${drift#PASS }" ;;
+        *)     ci_fail "${drift#FAIL }" ;;
+      esac
     fi
   fi
 

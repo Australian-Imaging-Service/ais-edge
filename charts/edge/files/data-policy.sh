@@ -145,6 +145,17 @@ jlog() {
     exit 1
 }
 
+# INTERVAL must be whole seconds. busybox sleep returns at once on anything it
+# cannot read ("1e+06", "5x", "-1"), so the loop would sweep back to back, with
+# no CPU limit to slow it. The chart renders canonical seconds
+# (edge.reporterIntervalSeconds); this catches a hand-edited env. Exit, as
+# above, so the restart shows.
+case "$INTERVAL" in
+    ''|0*|*[!0-9]*)
+        jlog startup_failed "" "INTERVAL=${INTERVAL} is not whole seconds (dataPolicy.reporter.interval); refusing to sweep back to back"
+        exit 1 ;;
+esac
+
 # Free percent for the filesystem holding a path.
 #
 # busybox df has no -P, so the LAST line is parsed: a long device name wraps
@@ -670,5 +681,9 @@ while true; do
     done < "$STAGES_FILE"
 
     [ "$ONESHOT" = "true" ] && break
-    sleep "$INTERVAL"
+    # A failed sleep returns at once: exit rather than sweep back to back.
+    sleep "$INTERVAL" || {
+        jlog sleep_failed "" "sleep ${INTERVAL} failed; exiting rather than sweeping back to back"
+        exit 1
+    }
 done

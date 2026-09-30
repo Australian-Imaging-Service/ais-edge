@@ -246,14 +246,21 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
-      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
-      # a quota below one core is clipped in nearly EVERY CFS period it
-      # runs in, which both trips CPUThrottlingHigh and stretches the
-      # sweep about 11x. requests stays at 5m, so its scheduler weight is
-      # still tiny and it yields under contention; the limit only bounds
-      # a runaway.
+      # 5m = cgroup cpu.weight 1: yields to Burstable pods, NOT to BestEffort ones.
       requests: {cpu: 5m, memory: 16Mi}
-      limits:   {cpu: 1, memory: 64Mi}
+      # NO CPU LIMIT, on purpose. A sweep is a sub-second burst of pipelines
+      # (find | stat | sort | md5sum) that briefly wants more than one core.
+      # Any CFS quota throttles most of the few periods it runs in (61% at
+      # cpu: 1, 0.0014 cores average, stream-2-ab-dev 2026-09-30), and
+      # CPUThrottlingHigh flapped on it. No quota: no throttling, no series.
+      # CPU is bounded by the script running one pipeline at a time, and by
+      # the interval floor (edge.validate, templates/_helpers.tpl).
+      # CAUTION: re-adding limits.cpu brings the CPUThrottlingHigh mails back,
+      # and scripts/ci/runtime-templates.sh fails on it. A site that must cap
+      # CPU (namespace policy) needs the reporter excluded from that rule
+      # again, as #26 did: make it a decision, not an accident.
+      # CAUTION: parallelism in data-policy.sh (&, xargs -P) is uncapped.
+      limits: {memory: 64Mi}
 
   # ---------------------------------------------------------------------
   # ORIGINALS
@@ -1172,13 +1179,14 @@ kube-prometheus-stack:
   # Upstream alert rules: all on, except those this chart replaces.
   defaultRules:
     disabled:
-      # Replaced by ais-edge-resources in files/prometheus-rules/info.yaml:
-      # the same rule, minus the data-policy reporter.
-      # CAUTION: re-enable it and every throttled container alerts twice.
-      CPUThrottlingHigh: true
+      # CPUThrottlingHigh is not listed: upstream's copy runs unmodified. The
+      # data-policy reporter has no CPU limit, so the rule has nothing to read
+      # for it (see dataPolicy.reporter.resources).
       # Replaced by ais-edge-jobs in files/prometheus-rules/warning.yaml: the
       # same rule, minus the staged-reclaimer's own Jobs, whose failures
-      # ReclaimerRunUnavailable reports. Same caution as above.
+      # ReclaimerRunUnavailable and ReclaimerNotSucceeding report.
+      # CAUTION: remove this and upstream's copy alerts on the reclaimer's
+      # failed Jobs again; scripts/ci/promtool.sh fails on two copies.
       KubeJobFailed: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:

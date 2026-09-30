@@ -107,6 +107,7 @@ run_engine() {
         -e EDGE_NAME=test -e STAGES_FILE=/data/stages.tsv -e ONESHOT=true \
         -e RECLAIM_ENABLED="$en" -e DRY_RUN="$dry" -e MAX_REMOVALS="$maxrm" \
         -e SETTLE_MINUTES=5 \
+        -e INTERVAL="${INTERVAL_T:-300}" \
         -e STUCK_AFTER_S="${STUCK_AFTER_S_T:-0}" \
         -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         -e UPLOAD_STATE_DIR=/data/LOGS/s3-uploader-state \
@@ -463,6 +464,14 @@ logged undelegated_stuck "$R" stage_stuck present "same tree, nothing delegated 
 else
     printf '  SKIP  %-26s %s\n' "orthanc_auth" "$ORTHANC_IMG unavailable"
 fi
+
+# INTERVAL that busybox sleep cannot read: the engine must refuse to start,
+# not sweep back to back. "1e+06" is what toString made of 1000000 before the
+# chart rendered canonical seconds.
+R="$WORK/badinterval"; build_case "$R"; mk_session "$R" assigned s1 60
+INTERVAL_T=1e+06 run_engine "$R" "$STAGES_ASSIGNED" false true
+logged interval_refused "$R" startup_failed present "INTERVAL=1e+06 refused at startup"
+logged interval_no_sweep "$R" stage_report absent "and nothing swept"
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi

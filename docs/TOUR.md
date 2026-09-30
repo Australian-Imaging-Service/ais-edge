@@ -749,16 +749,17 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **twenty-seven**
+Dashboards and alert rules ship with the chart. It defines **twenty-six**
 alerts of its own: twenty log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and seven metric rules evaluated by Prometheus
+(`files/loki-ruler-rules.yaml`) and six metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
 `KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
-`ReclaimerNotSucceeding`, `NodeCountChanged`, `CPUThrottlingHigh`). They come on top of
+`ReclaimerNotSucceeding`, `NodeCountChanged`). They come on top of
 kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
-apart from `CPUThrottlingHigh` and `KubeJobFailed`, which the chart replaces with
-copies that leave out the data-policy reporter and the staged-reclaimer's own
-Jobs. The ones specific to this tier are:
+apart from `KubeJobFailed`, which the chart replaces with a copy that leaves out
+the staged-reclaimer's own Jobs. Upstream's `CPUThrottlingHigh` runs unmodified:
+the data-policy reporter has no CPU limit, so the kernel never throttles it and
+the rule has no series to read for it. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
@@ -797,7 +798,8 @@ it, even when the next run takes its full deadline to succeed; two failed runs,
 then a third not succeeding within 15 minutes, do, about 3h15m after the last
 success. It clears on the next good run, however many failed Jobs history
 keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
-outage sends one mail. If you slow the schedule, raise `alertAfter` with it: it
+outage raises one alert rather than two: its firing mail and its resolve, one
+pair per logged reason. If you slow the schedule, raise `alertAfter` with it: it
 must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
 the usual schedule forms (hourly, every N hours, daily).
 

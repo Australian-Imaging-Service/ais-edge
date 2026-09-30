@@ -94,10 +94,12 @@ tests:
               description: |
                 No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
                 for 3h 20m 0s (counted from its creation if none ever has).
-                While this fires no staged session is confirmed against XNAT or reclaimed, so the
-                staged tree only grows.
+                No run has completed in full, so confirming staged sessions against XNAT and
+                reclaiming them may be falling behind (a run can do part of its work before it
+                fails or reaches its deadline).
                 Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
-                Arriving on its own, the runs are ending without logging why:
+                Arriving on its own usually means runs are ending without logging why, but the
+                CronJob may also be suspended or not scheduled, or Loki may be missing the logs:
                   1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
                        kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
                   2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
@@ -151,10 +153,12 @@ tests:
               description: |
                 No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
                 for 3h 20m 0s (counted from its creation if none ever has).
-                While this fires no staged session is confirmed against XNAT or reclaimed, so the
-                staged tree only grows.
+                No run has completed in full, so confirming staged sessions against XNAT and
+                reclaiming them may be falling behind (a run can do part of its work before it
+                fails or reaches its deadline).
                 Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
-                Arriving on its own, the runs are ending without logging why:
+                Arriving on its own usually means runs are ending without logging why, but the
+                CronJob may also be suspended or not scheduled, or Loki may be missing the logs:
                   1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
                        kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
                   2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at

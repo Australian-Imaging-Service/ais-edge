@@ -173,7 +173,7 @@ Two inhibition rules ship. The first is the one worth having on one node: if the
 is unreachable, node readiness cannot be evaluated at all — kube-state-metrics
 reads it through that same API server — so `NodeNotReady` is a symptom of the
 outage already being reported. The second keeps one reclaimer outage to one
-mail. A reclaimer that cannot reach XNAT logs why and fails every run, so
+alert rather than two. A reclaimer that cannot reach XNAT logs why and fails every run, so
 `ReclaimerRunUnavailable` fires, and `ReclaimerNotSucceeding` would follow
 within the hour for the same cause. It is held back only while the specific
 alert fires: once that clears, a reclaimer still not succeeding is dying

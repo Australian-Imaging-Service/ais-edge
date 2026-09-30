@@ -198,6 +198,9 @@ EOF
 # The reclaimer slowed to every 6h, alertAfter raised with it (floor 12h50m).
 # It must render, and promtool.sh checks its threshold is 13h in seconds, so a
 # template that hardcoded the default would be caught.
+# A NUMERIC interval (Helm reads it as float64): the reporter's INTERVAL env
+# must be "3600", and DataPolicyReporterSilent's window 3 x 3600 = 10800s.
+printf 'dataPolicy:\n  reporter:\n    interval: 3600\n' >"$V/edge-reporter-interval-3600.yaml"
 cat >"$V/edge-reclaimer-six-hourly.yaml" <<'EOF'
 dataPolicy:
   derived:
@@ -732,6 +735,14 @@ EOF
 
 # -- edge ---------------------------------------------------------------------
 printf 'upload:\n  mode: both\n'                          >"$V/neg-edge-bad-mode.yaml"
+# dataPolicy.reporter.interval must be whole seconds >= 60. 0 sweeps back to
+# back (no CPU limit caps it); a unit string reads as 0 where
+# DataPolicyReporterSilent sizes its window, so 30m+ would look silent.
+printf 'dataPolicy:\n  reporter:\n    interval: 0\n'      >"$V/neg-edge-reporter-interval-0.yaml"
+printf 'dataPolicy:\n  reporter:\n    interval: 5m\n'     >"$V/neg-edge-reporter-interval-unit.yaml"
+# Numbers over a day, including ones toString would write in exponent form.
+printf 'dataPolicy:\n  reporter:\n    interval: 1000000\n' >"$V/neg-edge-reporter-interval-1e6.yaml"
+printf 'dataPolicy:\n  reporter:\n    interval: 1e20\n'    >"$V/neg-edge-reporter-interval-1e20.yaml"
 printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-endpoint.yaml"
 # perSiteBuckets derives <bucketPrefix>-<clusterLabel>, which is safe and is
 # now the normal path — so an empty bucket alone is no longer an error. What
@@ -1163,6 +1174,7 @@ edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-inge
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
 edge-reclaimer-six-hourly	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reclaimer-six-hourly.yaml
+edge-reporter-interval-3600	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-interval-3600.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
@@ -1221,6 +1233,10 @@ neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-cert
 neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
 neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
+neg-edge-reporter-interval-0	charts/edge	edge-base.yaml neg-edge-reporter-interval-0.yaml	dataPolicy.reporter.interval must be whole seconds
+neg-edge-reporter-interval-unit	charts/edge	edge-base.yaml neg-edge-reporter-interval-unit.yaml	dataPolicy.reporter.interval must be whole seconds
+neg-edge-reporter-interval-1e6	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e6.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
+neg-edge-reporter-interval-1e20	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e20.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification

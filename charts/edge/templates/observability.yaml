@@ -109,7 +109,11 @@ data:
   {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}
   {{- /* Silence window: at least 30m and at least 3 sweeps, so a pod restart
          or one slow sweep never fires it. */ -}}
-  {{- $reportSilenceS := max 1800 (mul 3 (int .Values.dataPolicy.reporter.interval)) }}
+  {{- $reportIntervalS := 300 }}
+  {{- if .Values.dataPolicy.reporter.enabled }}
+    {{- $reportIntervalS = include "edge.reporterIntervalSeconds" . | atoi }}
+  {{- end }}
+  {{- $reportSilenceS := max 1800 (mul 3 $reportIntervalS) }}
   {{- $rules = $rules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
   {{- $rules = $rules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule ships with a literal
@@ -184,9 +188,10 @@ metadata:
   labels:
     {{- include "edge.labels" $ | nindent 4 }}
 spec:
-{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
-       release's own data-policy pods. A plain replace, never tpl: the files
-       carry Prometheus's own {{ $labels }} templates. */}}
+{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-jobs (KubeJobFailed's exclusion,
+       ReclaimerNotSucceeding) to this release's own staged-reclaimer. A plain
+       replace, never tpl: the files carry Prometheus's own {{ $labels }}
+       templates. */}}
 {{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
 {{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
        reads a bare __NAME__ as a metric name, so the rule loads, reports
