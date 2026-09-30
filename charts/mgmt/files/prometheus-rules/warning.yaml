@@ -48,9 +48,11 @@ groups:
             them blindly — check dataPolicy.derived.s3Staged and the
             s3-reclaimer logs first, then grow the disk.
 
-      # Fires only when cert-manager is LATE: a day past the certificate's
-      # own renewal time (status.renewalTime = notAfter - renewBefore), or
-      # under 14 days from expiry whatever renewBefore says.
+      # Fires when cert-manager is LATE: a day past the certificate's own
+      # renewal time (status.renewalTime = notAfter - renewBefore). Also, as an
+      # expiry safety threshold, under 14 days from expiry whatever renewBefore
+      # says (that half would fire on a healthy certificate shorter-lived than
+      # 14 days; none is issued here).
       # WHY NOT "< 60 days left": cert-manager renews 90-day certificates 30
       # days before expiry, so every healthy one spent days 30 to 60 of its
       # life "expiring soon", and the warning route re-mailed it daily. On
@@ -66,11 +68,14 @@ groups:
         for: 1h
         labels: { severity: warning }
         annotations:
-          summary: "Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} is overdue for renewal"
+          summary: "Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} is overdue for renewal or expires within 14 days"
           description: |
-            cert-manager was due to renew this certificate over a day ago and has not, or it
-            expires within 14 days. Healthy certificates never fire this: cert-manager renews at
-            notAfter minus renewBefore (30 days before expiry for a 90-day certificate).
+            Either cert-manager was due to renew this certificate over a day ago and has not, or
+            it expires within 14 days (an expiry safety threshold, which also catches a
+            renewBefore set too short to act on). cert-manager renews at notAfter minus
+            renewBefore, 30 days before expiry for the 90-day certificates here, so those only
+            reach this when renewal has failed. A certificate whose whole lifetime is under 14
+            days would fire it while healthy.
               kubectl -n {{ $labels.exported_namespace }} describe certificate {{ $labels.name }}
               kubectl -n {{ $labels.exported_namespace }} get certificaterequests,orders,challenges
               kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep {{ $labels.name }}

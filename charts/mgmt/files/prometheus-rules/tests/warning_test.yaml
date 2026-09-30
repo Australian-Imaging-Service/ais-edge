@@ -177,11 +177,14 @@ tests:
               exported_namespace: ais-mgmt
               name: late-cert
             exp_annotations:
-              summary: 'Certificate ais-mgmt/late-cert is overdue for renewal'
+              summary: 'Certificate ais-mgmt/late-cert is overdue for renewal or expires within 14 days'
               description: |
-                cert-manager was due to renew this certificate over a day ago and has not, or it
-                expires within 14 days. Healthy certificates never fire this: cert-manager renews at
-                notAfter minus renewBefore (30 days before expiry for a 90-day certificate).
+                Either cert-manager was due to renew this certificate over a day ago and has not, or
+                it expires within 14 days (an expiry safety threshold, which also catches a
+                renewBefore set too short to act on). cert-manager renews at notAfter minus
+                renewBefore, 30 days before expiry for the 90-day certificates here, so those only
+                reach this when renewal has failed. A certificate whose whole lifetime is under 14
+                days would fire it while healthy.
                   kubectl -n ais-mgmt describe certificate late-cert
                   kubectl -n ais-mgmt get certificaterequests,orders,challenges
                   kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep late-cert
@@ -204,11 +207,14 @@ tests:
               exported_namespace: ais-mgmt
               name: short-renewbefore
             exp_annotations:
-              summary: 'Certificate ais-mgmt/short-renewbefore is overdue for renewal'
+              summary: 'Certificate ais-mgmt/short-renewbefore is overdue for renewal or expires within 14 days'
               description: |
-                cert-manager was due to renew this certificate over a day ago and has not, or it
-                expires within 14 days. Healthy certificates never fire this: cert-manager renews at
-                notAfter minus renewBefore (30 days before expiry for a 90-day certificate).
+                Either cert-manager was due to renew this certificate over a day ago and has not, or
+                it expires within 14 days (an expiry safety threshold, which also catches a
+                renewBefore set too short to act on). cert-manager renews at notAfter minus
+                renewBefore, 30 days before expiry for the 90-day certificates here, so those only
+                reach this when renewal has failed. A certificate whose whole lifetime is under 14
+                days would fire it while healthy.
                   kubectl -n ais-mgmt describe certificate short-renewbefore
                   kubectl -n ais-mgmt get certificaterequests,orders,challenges
                   kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep short-renewbefore
