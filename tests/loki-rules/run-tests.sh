@@ -190,6 +190,9 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-forever"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","policy":"forever","free_pct":13,"min_free_pct":10,"entries":767,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-stuck"}	{"component":"data-policy","event":"stage_report","stage":"derived.orthancStorage","location":"/data/orthanc-storage","policy":"onGrouped","free_pct":13,"entries":780,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-fresh"}	{"component":"data-policy","event":"stage_report","stage":"derived.deidentified","location":"/data/deidentified","policy":"onUploaded","free_pct":13,"entries":3,"oldest_age_s":3600}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"Traceback (most recent call last):"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"    retries = retries.increment("}
@@ -317,6 +320,9 @@ disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above t
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+stage_age_forever_quiet	StageBacklogAgeing	age-forever	nofire	facility backup kept forever by policy: 49-day-old originals are the point (cai-lfs3, 2026-09-30)
+stage_age_stuck	StageBacklogAgeing	age-stuck	fire	a stage with a reclaim policy whose oldest entry is 49 days old
+stage_age_fresh	StageBacklogAgeing	age-fresh	nofire	oldest entry 1h old, under the 7d limit
 retry_one_traceback	XNATUploadRetryStorm	retry-one	nofire	one failure is ~96 lines — must count as ONE, not fire
 retry_many_tracebacks	XNATUploadRetryStorm	retry-many	fire	3 separate failures, none at level=ERROR — the 24h live case
 retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures must still fire on their own
@@ -460,6 +466,9 @@ expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
 # Same formula as templates/observability.yaml: max(30m, 3 sweeps).
 interval = int((dp.get("reporter") or {}).get("interval", 300))
 expr = expr.replace("__DP_REPORT_SILENCE_S__", str(max(1800, 3 * interval)))
+# charts/edge reads dataPolicy.reporter.stageAgeAlertAfter (charts/mgmt: dataPolicy.stageAgeAlertAfter).
+expr = expr.replace("__DP_STAGE_AGE_ALERT_AFTER_S__",
+                    seconds((dp.get("reporter") or {}).get("stageAgeAlertAfter", "7d")))
 # The chart pins this to the site's clusterLabel; here, to the case's cluster.
 expr = expr.replace("__CLUSTER_LABEL__", sys.argv[4])
 
