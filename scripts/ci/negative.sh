@@ -74,7 +74,7 @@ charts/mgmt/templates/_helpers.tpl	24
 charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	15
 charts/mgmt/templates/edge-clusters.yaml	11
-charts/mgmt/templates/observability.yaml	12
+charts/mgmt/templates/observability.yaml	14
 charts/mgmt/templates/s3-staged-reclaimer.yaml	2
 charts/mgmt/templates/seaweedfs.yaml	2
 charts/edge/templates/_helpers.tpl	34
@@ -102,7 +102,13 @@ EOF
 #     already substituted. Without the guard the rule would ship containing a
 #     literal __DP_..._, Loki would reject the whole group at load time, and
 #     every OTHER alert in that file would stop evaluating with it.
-UNREACHABLE_GUARDS=2
+#   observability.yaml, "a __*__ sentinel survived substitution in
+#   files/prometheus-rules/..."
+#     The same tripwire for the Prometheus rule files, added with the
+#     ReclaimerNotSucceeding sentinels. It matters MORE there: PromQL reads a
+#     bare __NAME__ as a metric name, so an unfilled sentinel loads, reports
+#     healthy and never fires. A template edit, not a misconfiguration.
+UNREACHABLE_GUARDS=3
 
 # Any template not listed above is expected to contain no guards at all. That
 # half matters as much as the counts: a guard added to a file nobody watches is

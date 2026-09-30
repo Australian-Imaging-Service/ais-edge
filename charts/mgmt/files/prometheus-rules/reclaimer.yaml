@@ -1,0 +1,68 @@
+# =============================================================================
+# Reclaimer alerts: "this edge's staging reclaimer has stopped succeeding"
+# =============================================================================
+# templates/s3-staged-reclaimer.yaml renders ONE CronJob per edge, named
+# <fullname>-reclaim-<edge>, in xnatUpload.namespace.
+# ReclaimerRunUnavailable (Loki) only sees runs that log why they stopped.
+# This sees the ones that cannot: deadline kill, OOM, crash, image pull,
+# never scheduled. Reads the CronJob's last success, so kept failed Jobs
+# (failedJobsHistoryLimit: 3) cannot hold it firing.
+# Sentinels, substituted by templates/observability.yaml:
+#   __RECLAIMER_NAMESPACE__     xnatUpload.namespace
+#   __RECLAIMER_CRONJOB_PREFIX__  mgmt.fullname
+#   __RECLAIMER_ALERT_AFTER_S__   dataPolicy.derived.s3Staged.alertAfter, seconds
+groups:
+  - name: ais-edge-reclaimer
+    interval: 30s
+    rules:
+      - alert: ReclaimerNotSucceeding
+        # cluster=<edge> comes from the CronJob name, so Alertmanager can
+        # group per edge and the inhibit can use equal: [cluster] against
+        # ReclaimerRunUnavailable, whose cluster is the edge too.
+        # SECOND HALF: never succeeded, so the age is taken from creation.
+        expr: |
+          label_replace(
+            (
+              time() - max by (namespace, cronjob) (
+                kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RECLAIMER_NAMESPACE__", cronjob=~"__RECLAIMER_CRONJOB_PREFIX__-reclaim-.+"}
+              )
+              > __RECLAIMER_ALERT_AFTER_S__
+            )
+            or
+            (
+              (
+                time() - max by (namespace, cronjob) (
+                  kube_cronjob_created{job="kube-state-metrics", namespace="__RECLAIMER_NAMESPACE__", cronjob=~"__RECLAIMER_CRONJOB_PREFIX__-reclaim-.+"}
+                )
+                > __RECLAIMER_ALERT_AFTER_S__
+              )
+              unless on (namespace, cronjob)
+              kube_cronjob_status_last_successful_time{job="kube-state-metrics", namespace="__RECLAIMER_NAMESPACE__", cronjob=~"__RECLAIMER_CRONJOB_PREFIX__-reclaim-.+"}
+            ),
+            "cluster", "$1", "cronjob", "__RECLAIMER_CRONJOB_PREFIX__-reclaim-(.+)"
+          )
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Staging reclaimer for {{ $labels.cluster }} has not succeeded for {{ $value | humanizeDuration }}"
+          description: |
+            No run of {{ $labels.namespace }}/{{ $labels.cronjob }} has completed successfully
+            for {{ $value | humanizeDuration }} (counted from its creation if none ever has).
+            No run for edge {{ $labels.cluster }} has completed in full, so confirming its staged
+            sessions against XNAT and reclaiming them may be falling behind (a run can do part
+            of its work before it fails or reaches its deadline).
+            Held back while ReclaimerRunUnavailable fires for the same edge, which names the
+            failed dependency. Arriving on its own usually means runs are ending without logging
+            why, but the CronJob may also be suspended or not scheduled, or Loki may be missing
+            the logs:
+              1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
+                   kubectl -n {{ $labels.namespace }} get cronjob {{ $labels.cronjob }}
+                   kubectl -n {{ $labels.namespace }} describe cronjob {{ $labels.cronjob }}
+              2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or killed at the
+                 deadline. (On this chart the Jobs carry no component label; the pods do.)
+                   kubectl -n {{ $labels.namespace }} get pods -l component=s3-reclaimer
+              3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
+                   kubectl -n {{ $labels.namespace }} logs -l component=s3-reclaimer --tail=50
+            If the schedule was slowed, raise dataPolicy.derived.s3Staged.alertAfter with it: it
+            must stay above two periods plus deadlineSeconds.
+            Clears on the next successful run.

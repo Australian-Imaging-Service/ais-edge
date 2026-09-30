@@ -121,6 +121,15 @@ dataPolicy:
       # code only means the call returned, not that the data landed.
       verifyAgainstXnat: true
       schedule: "17 * * * *"     # how often the reclaimer runs
+      # Killed if a run hangs, before the next is due (activeDeadlineSeconds).
+      deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run for
+      # an edge, whatever the cause: failed, killed at the deadline, crashed,
+      # not started. One failed run never fires it; two, then a third not
+      # succeeding within 15m, do (about 3h15m after the last success).
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds. The chart
+      # refuses less, and forever/never; raise it when you slow the schedule.
+      alertAfter: 3h
       # Cap per run. CAUTION: bounds a "delete everything" bug to this many
       # sessions; at hourly this still drains ~1200/day if truly needed.
       maxRemovals: 50

@@ -82,6 +82,7 @@ firing alerts to Alertmanager.
 | `charts/mgmt/files/prometheus-rules/warning.yaml` | warning alerts |
 | `charts/mgmt/files/prometheus-rules/info.yaml` | info alerts |
 | `charts/mgmt/files/prometheus-rules/cert-sync.yaml` | per-edge cert-sync staleness (`CertSyncStale`, `CertSyncNeverSucceeded`) |
+| `charts/mgmt/files/prometheus-rules/reclaimer.yaml` | per-edge reclaimer health (`ReclaimerNotSucceeding`). The only rule file with sentinels (namespace, release prefix, threshold), filled by `observability.yaml`; not rendered under `s3Staged.reclaim: never` |
 | Per-component: ServiceMonitor / PodMonitor objects (released alongside Service definitions) | tell Prometheus what to scrape |
 
 The rule files are **not** enumerated in any template. `observability.yaml`

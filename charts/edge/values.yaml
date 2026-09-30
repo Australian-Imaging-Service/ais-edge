@@ -209,13 +209,16 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
-      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
-      # a quota below one core is clipped in nearly EVERY CFS period it
-      # runs in, which both trips CPUThrottlingHigh and stretches the
-      # sweep about 11x. requests stays at 5m, so its scheduler weight is
-      # still tiny and it yields under contention; the limit only bounds
-      # a runaway.
+      # 5m = cgroup cpu.weight 1: yields to Burstable pods, NOT to BestEffort ones.
       requests: {cpu: 5m, memory: 16Mi}
+      # cpu: 1, not a fraction: a sweep is a burst of pipelines (find | stat |
+      # sort | md5sum), and at 100m it ran about 11x slower.
+      # Even at 1 core most CFS periods it runs in are throttled (61%, ~0.2s
+      # per sweep, measured on stream-2-ab-dev 2026-09-30). Harmless here:
+      # tier-2 loads no CPUThrottlingHigh (charts/mgmt defaultRules.create: false).
+      # Kept as a ceiling on small edges (2 vCPU in docs/clouds/openstack-nectar.md).
+      # CAUTION: wherever kube-prometheus-stack's default rules scrape this
+      #   pod, CPUThrottlingHigh flaps on it; drop limits.cpu there.
       limits:   {cpu: 1, memory: 64Mi}
 
   # ---------------------------------------------------------------------

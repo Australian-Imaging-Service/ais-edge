@@ -93,7 +93,7 @@ spec:
       # Shorter than the hourly default schedule: a run hung on a wedged filer
       # must be reaped before the next one is due, or Forbid silently
       # skips every subsequent run.
-      activeDeadlineSeconds: 3000
+      activeDeadlineSeconds: {{ $root.Values.dataPolicy.derived.s3Staged.deadlineSeconds | int }}
       template:
         metadata:
           labels:

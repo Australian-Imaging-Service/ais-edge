@@ -746,7 +746,43 @@ Files rather than inline YAML for the same reason as everything else above:
 `{{ $labels.node }}`, `{{ $labels.pod }}` and `{{ $labels.name }}` in the
 annotations are Prometheus's templates, not Helm's.
 */ -}}
+{{- /* ReclaimerNotSucceeding's threshold (files/prometheus-rules/reclaimer.yaml).
+       Floor: 2 x schedule period + deadlineSeconds. One failed run then a
+       success that takes its full deadline already goes that long.
+       Checked only where a reclaimer renders (reclaim != never). */ -}}
+{{- $s3staged := .Values.dataPolicy.derived.s3Staged }}
+{{- $reclaimerAlertAfterS := include "mgmt.durationSeconds" (.Values.dataPolicy.derived.s3Staged.alertAfter | default "") | int64 }}
+{{- if ne (toString $s3staged.reclaim) "never" }}
+  {{- $reclaimerDeadlineS := .Values.dataPolicy.derived.s3Staged.deadlineSeconds | int64 }}
+  {{- $sched := $s3staged.schedule | toString | trim }}
+  {{- $periodS := 0 }}
+  {{- if regexMatch "^\\*/[0-9]+\\s+\\*\\s+\\*\\s+\\*\\s+\\*$" $sched }}
+    {{- $periodS = mul 60 (regexReplaceAll "^\\*/([0-9]+)\\s.*$" $sched "${1}" | atoi) }}
+  {{- else if or (regexMatch "^[0-9]+\\s+\\*\\s+\\*\\s+\\*\\s+\\*$" $sched) (eq $sched "@hourly") }}
+    {{- $periodS = 3600 }}
+  {{- else if regexMatch "^[0-9]+\\s+\\*/[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched }}
+    {{- /* atoi, not int: int reads a leading zero as octal. */ -}}
+    {{- $periodS = mul 3600 (regexReplaceAll "^[0-9]+\\s+\\*/([0-9]+)\\s.*$" $sched "${1}" | atoi) }}
+  {{- else if or (regexMatch "^[0-9]+\\s+[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched) (has $sched (list "@daily" "@midnight")) }}
+    {{- $periodS = 86400 }}
+  {{- end }}
+  {{- $reclaimerFloorS := $reclaimerDeadlineS }}
+  {{- if $periodS }}
+    {{- $reclaimerFloorS = add (mul 2 $periodS) $reclaimerDeadlineS }}
+  {{- end }}
+  {{- if le $reclaimerAlertAfterS $reclaimerFloorS }}
+    {{- fail (printf "dataPolicy.derived.s3Staged.alertAfter must be longer than %ds, got %q. That is 2 x the period of schedule %q plus deadlineSeconds (%ds), or deadlineSeconds alone when the period cannot be read from the schedule: one failed run followed by a slow success already goes that long without a success, so ReclaimerNotSucceeding would mail for a single failure. forever/never/empty are refused as well; to stop the alert, silence it in Alertmanager." $reclaimerFloorS (toString .Values.dataPolicy.derived.s3Staged.alertAfter) $sched $reclaimerDeadlineS) }}
+  {{- end }}
+{{- end }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+{{- /* No reclaimer CronJob renders under reclaim: never, so neither does its rule. */ -}}
+{{- if not (and (eq (base $path) "reclaimer.yaml") (eq (toString $s3staged.reclaim) "never")) }}
+{{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
+{{- /* A surviving sentinel is SILENT here: PromQL reads a bare __NAME__ as a
+       metric name, so the rule loads, looks healthy and never fires. */ -}}
+{{- if regexMatch "__[A-Z0-9_-]+__" $promRules }}
+  {{- fail (printf "a __*__ sentinel survived substitution in %s. Prometheus would read it as a metric name that never exists, so the rule would load, look healthy and never fire. Add the matching replace above." $path) }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -756,8 +792,9 @@ metadata:
     {{- include "mgmt.labels" $ | nindent 4 }}
     release: {{ include "mgmt.prometheusReleaseLabel" $ }}
 spec:
-  {{- $.Files.Get $path | nindent 2 }}
+  {{- $promRules | nindent 2 }}
 ---
+{{- end }}
 {{- end }}
 
 {{/* ===================================================================== */}}

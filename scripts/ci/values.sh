@@ -142,6 +142,11 @@ EOF
 # so a value the guard would refuse must still render. The guard applies only
 # where DataPolicyReporterSilent exists (neg-mgmt-reporter-silent-*).
 printf 'dataPolicy:\n  reporterSilentAfter: never\n' >"$V/mgmt-reporter-silent-never.yaml"
+# ReclaimerNotSucceeding: a slowed schedule with alertAfter raised with it must
+# render (promtool.sh checks its threshold is 13h in seconds), and with
+# reclaim: never there is no reclaimer, so no rule and no guard to trip.
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      schedule: "17 */6 * * *"\n      alertAfter: 13h\n' >"$V/mgmt-reclaimer-six-hourly.yaml"
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      reclaim: never\n      alertAfter: never\n' >"$V/mgmt-reclaimer-off.yaml"
 
 # The other exposure mode: ClusterIP behind the ssl-passthrough Ingress, no
 # cluster-wide port to track. Both modes have to render, because the chart
@@ -550,6 +555,15 @@ printf 'xnatUpload:\n  loop: 0\n'                          >"$V/neg-mgmt-upload-
 for w in forever never '""' 0 30s; do
   n="$(printf '%s' "$w" | tr -d '"')"; n="${n:-empty}"
   printf 'dataPolicy:\n  reporterSilentAfter: %s\n' "$w" >"$V/neg-mgmt-reporter-silent-$n.yaml"
+done
+# ReclaimerNotSucceeding's alertAfter must exceed 2 x the schedule period +
+# deadlineSeconds (one failed run then a slow success goes that long).
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      alertAfter: 1h\n' >"$V/neg-mgmt-reclaimer-alert-after-1h.yaml"
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      schedule: "17 */6 * * *"\n' >"$V/neg-mgmt-reclaimer-six-hourly-3h.yaml"
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      schedule: "*/30 * * * *"\n      alertAfter: 1h\n' >"$V/neg-mgmt-reclaimer-every-30m-1h.yaml"
+for w in forever never '""' 0 30m; do
+  n="$(printf '%s' "$w" | tr -d '"')"; n="${n:-empty}"
+  printf 'dataPolicy:\n  derived:\n    s3Staged:\n      alertAfter: %s\n' "$w" >"$V/neg-mgmt-reclaimer-alert-after-$n.yaml"
 done
 printf 'observability:\n  alerting:\n    emailTo: ""\n'   >"$V/neg-mgmt-no-emailto.yaml"
 printf 'observability:\n  alerting:\n    smtpHost: ""\n'  >"$V/neg-mgmt-no-smtphost.yaml"
@@ -1228,6 +1242,8 @@ mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
 mgmt-reporter-optout-all	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml
 mgmt-reporter-optout-all-never	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml mgmt-reporter-silent-never.yaml
+mgmt-reclaimer-six-hourly	charts/mgmt	mgmt-base.yaml mgmt-reclaimer-six-hourly.yaml
+mgmt-reclaimer-off	charts/mgmt	mgmt-base.yaml mgmt-reclaimer-off.yaml
 mgmt-sni-exposure	charts/mgmt	mgmt-base.yaml mgmt-sni-exposure.yaml
 mgmt-observability-off	charts/mgmt	mgmt-base.yaml mgmt-observability-off.yaml
 mgmt-datapolicy-on	charts/mgmt	mgmt-base.yaml mgmt-datapolicy-on.yaml
@@ -1287,6 +1303,14 @@ neg-mgmt-reporter-silent-never	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-sile
 neg-mgmt-reporter-silent-empty	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-empty.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
 neg-mgmt-reporter-silent-0	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-0.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
 neg-mgmt-reporter-silent-30s	charts/mgmt	mgmt-base.yaml neg-mgmt-reporter-silent-30s.yaml	dataPolicy.reporterSilentAfter must be a finite duration of at least 1m
+neg-mgmt-reclaimer-alert-after-forever	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-forever.yaml	s3Staged.alertAfter must be longer than
+neg-mgmt-reclaimer-alert-after-never	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-never.yaml	s3Staged.alertAfter must be longer than
+neg-mgmt-reclaimer-alert-after-empty	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-empty.yaml	s3Staged.alertAfter must be longer than
+neg-mgmt-reclaimer-alert-after-0	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-0.yaml	s3Staged.alertAfter must be longer than
+neg-mgmt-reclaimer-alert-after-30m	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-30m.yaml	s3Staged.alertAfter must be longer than
+neg-mgmt-reclaimer-alert-after-1h	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-alert-after-1h.yaml	must be longer than 10200s
+neg-mgmt-reclaimer-six-hourly-3h	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-six-hourly-3h.yaml	must be longer than 46200s
+neg-mgmt-reclaimer-every-30m-1h	charts/mgmt	mgmt-base.yaml neg-mgmt-reclaimer-every-30m-1h.yaml	must be longer than 6600s
 neg-mgmt-no-emailto	charts/mgmt	mgmt-base.yaml neg-mgmt-no-emailto.yaml	emailTo is empty
 neg-mgmt-no-smtphost	charts/mgmt	mgmt-base.yaml neg-mgmt-no-smtphost.yaml	smtpHost is empty
 neg-mgmt-no-xnatsecret	charts/mgmt	mgmt-base.yaml neg-mgmt-no-xnatsecret.yaml	xnatSecretRef must name a Secret

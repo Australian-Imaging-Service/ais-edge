@@ -162,10 +162,22 @@ never fire. The `REMOVED` block in `charts/mgmt/files/prometheus-rules/info.yaml
 and `kube-state-metrics.md` carry the measurement. The two surviving info
 alerts are the ones that were really at stake.)
 
-Inhibit rules: when `ManagementClusterDown` fires, four named mgmt-plane
-alerts are suppressed — `SeaweedFSDiskFull`, `CertificateExpiringSoon`,
-`CARotationDue`, `CertificateRenewed` (no point reporting cert-manager or
-SeaweedFS symptoms when the cluster they both run on is gone).
+Inhibit rules: when `ManagementClusterDown` fires, six named mgmt-plane
+alerts are suppressed: `SeaweedFSDiskFull`, `CertificateExpiringSoon`,
+`CARotationDue`, `CertificateRenewed`, `ReclaimerNotSucceeding` and
+`KubeStateMetricsDown` (no point reporting cert-manager, SeaweedFS,
+reclaimer or kube-state-metrics symptoms when the cluster they all run on is
+gone).
+
+A second rule holds `ReclaimerNotSucceeding` back while
+`ReclaimerRunUnavailable` fires **for the same edge**. A reclaimer that cannot
+reach XNAT logs why and fails every run, so both would otherwise fire for one
+cause. This one does use `equal: ["cluster"]`, and unlike the old form below it
+compares real values: `ReclaimerRunUnavailable` carries the edge's Loki stream
+label, and `ReclaimerNotSucceeding` takes the edge from its CronJob name with
+`label_replace`. Without the `equal`, one edge's outage would hide another
+edge's silent failure. `scripts/ci/promtool.sh` fails if it goes, and if the
+two labels stop agreeing on any rendered edge.
 
 That list is exhaustive **by alertname on purpose**, and the shape matters as
 much as the contents. It used to be `severity =~ "warning|info"` scoped by
@@ -248,7 +260,7 @@ kubectl -n ais-mgmt get secret alertmanager-aisedge-config \
 | SMTP relay unreachable | Alerts queue up; eventually drop after `notify.deadline` | Configure a fallback receiver (Slack); monitor Alertmanager's own metrics for delivery failures |
 | Slack webhook revoked | Slack notifications silently drop | Alertmanager logs the error; rotate the webhook Secret named by `observability.alerting.slackWebhookSecretRef` in `sites/<site>/secrets.enc.yaml`, re-apply it with `scripts/site-secrets.sh apply <site>`, then restart the StatefulSet. There is no `02d` script any more — steps 3 (site Secrets) and 4 (management chart) of `install.sh` replaced it |
 | SMTP password leak | Attacker can send mail-as-us | Stored in the `alertmanager-smtp` Secret and mounted at `/etc/alertmanager/secrets/`, never templated into a manifest; rotate at the relay, then `scripts/site-secrets.sh edit <site>` + `apply <site>` and restart the StatefulSet |
-| Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the existing rule only inhibits when `ManagementClusterDown` is firing, and only the four alertnames it names — it cannot widen by itself the way the old `severity =~ "warning\|info"` form could |
+| Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the `ManagementClusterDown` rule only inhibits while it fires, and only the six alertnames it names, so it cannot widen by itself the way the old `severity =~ "warning\|info"` form could. The reclaimer rule matches per edge (`equal: ["cluster"]`), so one edge's outage never hides another's |
 | Alertmanager pod restart | Brief delivery gap | StatefulSet replicas: 1 today; bump to 3 with peer config for HA |
 
 ## Replacements / future

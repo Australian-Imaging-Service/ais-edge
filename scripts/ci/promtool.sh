@@ -27,12 +27,30 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib.sh"
 
 PROMTOOL="$(ci_promtool)"
-RULES_DIR="$REPO_ROOT/charts/mgmt/files/prometheus-rules"
+RULES_SRC="$REPO_ROOT/charts/mgmt/files/prometheus-rules"
+# Sentinels the chart fills at render. Passes (a) and (b) run on a copy with
+# fixed test values; the unit tests are written against these.
+RULE_TEST_VALUES=(
+  "__RECLAIMER_ALERT_AFTER_S__=10800"     # 3h, the chart default
+  "__RECLAIMER_NAMESPACE__=xnat-upload"   # xnatUpload.namespace default
+  "__RECLAIMER_CRONJOB_PREFIX__=mgmt"     # the release name render.sh uses
+)
+RULES_DIR="$CI_WORK_DIR/prometheus-rules-src"
+rm -rf "$RULES_DIR"; cp -r "$RULES_SRC" "$RULES_DIR"
+for kv in "${RULE_TEST_VALUES[@]}"; do
+  find "$RULES_DIR" -name '*.yaml' -exec sed -i "s/${kv%%=*}/${kv#*=}/g" {} +
+done
 TESTS_DIR="$RULES_DIR/tests"
 
 # -----------------------------------------------------------------------------
 ci_heading "promtool check rules (source)"
 shopt -s nullglob
+unfilled="$(cat "$RULES_DIR"/*.yaml | grep -oE '__[A-Z0-9_-]+__' | sort -u | tr '\n' ' ' || true)"
+if [ -n "$unfilled" ]; then
+  ci_fail "sentinel(s) with no entry in RULE_TEST_VALUES: ${unfilled}"
+else
+  ci_pass "every sentinel has a test value"
+fi
 rule_files=("$RULES_DIR"/*.yaml)
 if [ "${#rule_files[@]}" -eq 0 ]; then
   ci_fail "no rule files in $RULES_DIR — the alerting stack would be empty and nothing else here would notice"
@@ -118,6 +136,115 @@ print(n)
     done
   fi
 fi
+
+# -----------------------------------------------------------------------------
+# ReclaimerNotSucceeding is wired to the reclaimers it watches, per edge
+# -----------------------------------------------------------------------------
+# The rule selects <fullname>-reclaim-<edge> CronJobs by regex and derives
+# cluster=<edge> from the name with label_replace. The Alertmanager inhibit
+# then matches it against ReclaimerRunUnavailable with equal: [cluster], and
+# that alert's cluster is the reclaimer's CLUSTER_LABEL. If any of those drift
+# apart the rule still loads and reports healthy: it either watches nothing,
+# or one edge's outage mutes another edge's failure. So, on every mgmt render:
+#   - the rule renders exactly when a reclaimer CronJob does;
+#   - every reclaimer's namespace and name are selected by the rule;
+#   - label_replace on its name gives its CLUSTER_LABEL;
+#   - the threshold is alertAfter in seconds (10800 by default, 46800 in
+#     mgmt-reclaimer-six-hourly, so a hardcoded default is caught);
+# and on mgmt-defaults, the inhibit keeps equal: [cluster] and every inhibit
+# alertname is an alert the render ships.
+ci_heading "ReclaimerNotSucceeding matches its reclaimers, per edge"
+wiring="$(python3 - "$CI_RENDER_DIR" <<'PY'
+import glob, os, re, sys, yaml
+EXPECT = {"mgmt-defaults": 10800, "mgmt-reclaimer-six-hourly": 46800}
+problems, checked, reclaimers_seen, seen = [], 0, 0, set()
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "mgmt-*.yaml"))):
+    case = os.path.basename(path)[:-5]
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    crons = []
+    for d in docs:
+        if d.get("kind") != "CronJob":
+            continue
+        pod = d["spec"]["jobTemplate"]["spec"]["template"]
+        if (pod.get("metadata", {}).get("labels") or {}).get("component") != "s3-reclaimer":
+            continue
+        env = {e["name"]: e.get("value") for c in pod["spec"]["containers"] for e in c.get("env", []) if "value" in e}
+        crons.append((d["metadata"].get("namespace"), d["metadata"]["name"], env.get("CLUSTER_LABEL")))
+    rules = [r for d in docs if d.get("kind") == "PrometheusRule"
+             for g in d["spec"].get("groups", []) for r in g.get("rules") or [] if r.get("alert") == "ReclaimerNotSucceeding"]
+    if not crons and not rules:
+        continue
+    # observability off: no PrometheusRule renders at all, so there is no rule
+    # to wire. Only a render that ships rules must ship this one with them.
+    if not any(d.get("kind") == "PrometheusRule" for d in docs):
+        continue
+    checked += 1
+    if bool(crons) != bool(rules) or len(rules) > 1:
+        problems.append("%s: %d reclaimer CronJob(s) but %d ReclaimerNotSucceeding rule(s)" % (case, len(crons), len(rules)))
+        continue
+    reclaimers_seen += len(crons)
+    expr = rules[0]["expr"]
+    ns_sel = set(re.findall(r'namespace="([^"]*)"', expr))
+    cj_sel = set(re.findall(r'cronjob=~"([^"]*)"', expr))
+    lr = re.search(r'"cluster",\s*"\$1",\s*"cronjob",\s*"([^"]*)"', expr)
+    if len(ns_sel) != 1 or len(cj_sel) != 1 or not lr:
+        problems.append("%s: cannot read one namespace, one cronjob regex and the label_replace from the rule" % case)
+        continue
+    ns, cj_re, lr_re = ns_sel.pop(), cj_sel.pop(), lr.group(1)
+    for cns, name, label in crons:
+        seen.add(case)
+        if cns != ns:
+            problems.append("%s: reclaimer %s is in namespace %s, the rule watches %s" % (case, name, cns, ns))
+        if not re.fullmatch(cj_re, name):
+            problems.append("%s: reclaimer %s is not matched by the rule's cronjob=~%r" % (case, name, cj_re))
+        m = re.fullmatch(lr_re, name)
+        if not m or m.group(1) != label:
+            problems.append("%s: label_replace gives cluster=%r for %s, but its CLUSTER_LABEL (the Loki cluster of ReclaimerRunUnavailable) is %r"
+                            % (case, m.group(1) if m else None, name, label))
+    if case in EXPECT:
+        got = sorted(set(int(x) for x in re.findall(r">\s*(\d+)", expr)))
+        if got != [EXPECT[case]]:
+            problems.append("%s: thresholds %s, expected [%d]" % (case, got, EXPECT[case]))
+for case in EXPECT:
+    if case not in seen:
+        problems.append("render case %s has no reclaimer, so its threshold goes unchecked" % case)
+
+# The inhibit, on the default render.
+docs = [d for d in yaml.safe_load_all(open(os.path.join(sys.argv[1], "mgmt-defaults.yaml"))) if d]
+names = {r["alert"] for d in docs if d.get("kind") == "PrometheusRule" for g in d["spec"].get("groups", []) for r in g.get("rules") or [] if r.get("alert")}
+for d in docs:
+    data = d.get("data") or {}
+    if d.get("kind") == "ConfigMap" and "ais-edge-pipeline.yaml" in data:
+        names |= {r["alert"] for g in (yaml.safe_load(data["ais-edge-pipeline.yaml"]) or {}).get("groups", []) for r in g.get("rules") or [] if r.get("alert")}
+am = [yaml.safe_load(d["stringData"]["alertmanager.yaml"]) for d in docs if d.get("kind") == "Secret" and "alertmanager.yaml" in (d.get("stringData") or {})]
+if len(am) != 1:
+    problems.append("mgmt-defaults: expected one rendered Alertmanager config, found %d" % len(am))
+else:
+    rules = am[0].get("inhibit_rules") or []
+    pair = [r for r in rules if 'alertname = "ReclaimerRunUnavailable"' in (r.get("source_matchers") or [])
+            and 'alertname = "ReclaimerNotSucceeding"' in (r.get("target_matchers") or [])]
+    if len(pair) != 1 or "cluster" not in (pair[0].get("equal") or []):
+        problems.append("mgmt-defaults: the ReclaimerRunUnavailable -> ReclaimerNotSucceeding inhibit is missing or lacks equal: [cluster]; one edge's outage would mute another edge's failure")
+    for i, r in enumerate(rules):
+        for side in ("source_matchers", "target_matchers"):
+            for m in r.get(side) or []:
+                eq = re.fullmatch(r'\s*alertname\s*=\s*"([^"]+)"\s*', m)
+                rx = re.fullmatch(r'\s*alertname\s*=~\s*"([^"]+)"\s*', m)
+                for n in ([eq.group(1)] if eq else rx.group(1).split("|") if rx else []):
+                    if n not in names:
+                        problems.append("mgmt-defaults: inhibit_rules[%d].%s names %s, which no rule in the render defines" % (i, side, n))
+if not reclaimers_seen:
+    problems.append("no render has a reclaimer CronJob: the check looked at nothing")
+if problems:
+    print("FAIL " + " | ".join(problems))
+else:
+    print("PASS %d render(s), %d reclaimer CronJob(s) matched per edge; inhibit keeps equal: [cluster]; every inhibit alertname is defined" % (checked, reclaimers_seen))
+PY
+)"
+case "$wiring" in
+  PASS*) ci_pass "${wiring#PASS }" ;;
+  *)     ci_fail "${wiring#FAIL }" ;;
+esac
 
 # -----------------------------------------------------------------------------
 # Recurring-log rules must out-range the emitter's loop period

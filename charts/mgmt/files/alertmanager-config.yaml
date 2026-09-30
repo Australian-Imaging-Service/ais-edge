@@ -414,6 +414,20 @@ inhibit_rules:
   - source_matchers:
       - alertname = "ManagementClusterDown"
     target_matchers:
-      - alertname =~ "SeaweedFSDiskFull|CertificateExpiringSoon|CARotationDue|CertificateRenewed"
+      - alertname =~ "SeaweedFSDiskFull|CertificateExpiringSoon|CARotationDue|CertificateRenewed|ReclaimerNotSucceeding|KubeStateMetricsDown"
+
+  # One reclaimer outage, one alert per edge rather than two. A reclaimer that
+  # cannot reach XNAT logs why and fails every run, so ReclaimerRunUnavailable
+  # fires first and ReclaimerNotSucceeding would follow for the same cause.
+  # equal: [cluster] is REQUIRED here: main runs one reclaimer per edge, and
+  # both alerts carry cluster=<edge> (the Loki stream label; label_replace on
+  # the CronJob name). Without it one edge's outage would hide another edge's
+  # silent failure. Once the source clears, a reclaimer still not succeeding
+  # mails on its own.
+  - source_matchers:
+      - alertname = "ReclaimerRunUnavailable"
+    target_matchers:
+      - alertname = "ReclaimerNotSucceeding"
+    equal: ["cluster"]
 
 templates: []

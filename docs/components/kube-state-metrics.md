@@ -26,6 +26,12 @@ our alerts depend on it:
   cannot be templated with the release name; the regex is what makes one rule
   cover both layouts)
 - `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
+- `ReclaimerNotSucceeding`: `kube_cronjob_status_last_successful_time` and
+  `kube_cronjob_created` for each edge's `<release>-reclaim-<edge>` CronJob
+
+Because so much reads it, `KubeStateMetricsDown` (warning) fires when KSM has
+not been scraped successfully for 15 minutes: with its series gone, every
+alert above has nothing to evaluate and stays quiet, which looks healthy.
 
 Two caveats on that list, both measured on the live management Prometheus
 rather than assumed:

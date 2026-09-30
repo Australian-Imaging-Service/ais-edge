@@ -80,3 +80,57 @@ tests:
       - eval_time: 20m
         alertname: SeaweedFSDiskFull
         exp_alerts: []
+
+  # ---------------------------------------------------------------------
+  # KubeStateMetricsDown: the CronJob alerts' blind spot. absent() over an
+  # expression (not a bare selector) carries no labels, hence no job here.
+  # Healthy: up 1 throughout, quiet.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kube-state-metrics", instance="10.244.0.20:8080"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: KubeStateMetricsDown
+        exp_alerts: []
+
+  # Discovered but failing (up 0): fires once 15m have passed.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kube-state-metrics", instance="10.244.0.20:8080"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: KubeStateMetricsDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: KubeStateMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'kube-state-metrics is not being scraped'
+              description: |
+                No successful scrape of kube-state-metrics for 15 minutes. Until it is
+                back, CertSyncStale, CertSyncNeverSucceeded and ReclaimerNotSucceeding
+                cannot fire, because they read its CronJob series.
+                  kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
+
+  # Gone entirely (no up series at all, e.g. the pod is Pending): fires too.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="apiserver", instance="10.0.0.1:6443"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: KubeStateMetricsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'kube-state-metrics is not being scraped'
+              description: |
+                No successful scrape of kube-state-metrics for 15 minutes. Until it is
+                back, CertSyncStale, CertSyncNeverSucceeded and ReclaimerNotSucceeding
+                cannot fire, because they read its CronJob series.
+                  kubectl get pods -A -l app.kubernetes.io/name=kube-state-metrics
