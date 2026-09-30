@@ -238,7 +238,7 @@ kubectl get clusterissuer
 | ais-edge-ca-secret deletion | All edges lose trust on next renewal cycle | Back up the Secret to offline storage; document the recovery procedure |
 | Webhook down during apply | New Certificates / Issuers can't be created | The webhook is part of cert-manager itself; pod restart fixes it |
 | 10-year CA expiry | Any new cert issued after expiry would chain to a expired CA | `CARotationDue` alert fires at year 9; `scripts/rotate-ca.sh` orchestrates the bundled transition |
-| Renewal failure | Server cert expires; clients reject | `CertificateExpiringSoon` alert fires 60 days before (overlapping the 30-day auto-renew window) |
+| Renewal failure | Server cert expires; clients reject | `CertificateExpiringSoon` fires a day after a certificate's renewal time passes without a renewal, or within 14 days of expiry. It no longer fires at 60 days: that overlapped the 30-day auto-renew window, so healthy 90-day certificates alerted daily for a month each cycle |
 | Compromised CA private key | Attacker can mint impostor server certs | Run `rotate-ca.sh` immediately; documented procedure |
 
 ## Replacements / future

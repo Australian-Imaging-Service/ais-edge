@@ -48,14 +48,37 @@ groups:
             them blindly — check dataPolicy.derived.s3Staged and the
             s3-reclaimer logs first, then grow the disk.
 
+      # Fires when cert-manager is LATE: a day past the certificate's own
+      # renewal time (status.renewalTime = notAfter - renewBefore). Also, as an
+      # expiry safety threshold, under 14 days from expiry whatever renewBefore
+      # says (that half would fire on a healthy certificate shorter-lived than
+      # 14 days; none is issued here).
+      # WHY NOT "< 60 days left": cert-manager renews 90-day certificates 30
+      # days before expiry, so every healthy one spent days 30 to 60 of its
+      # life "expiring soon", and the warning route re-mailed it daily. On
+      # prod both 90-day certificates fired from 2026-09-19 while healthy,
+      # renewal scheduled for 2026-10-10.
+      # exported_namespace is the Certificate's namespace; namespace is
+      # cert-manager's own, the scrape target.
       - alert: CertificateExpiringSoon
         expr: |
-          (certmanager_certificate_expiration_timestamp_seconds - time()) / 86400 < 60
+          (time() - certmanager_certificate_renewal_timestamp_seconds > 86400)
+          or
+          (certmanager_certificate_expiration_timestamp_seconds - time() < 14 * 86400)
         for: 1h
         labels: { severity: warning }
         annotations:
-          summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} expires in <60 days"
-          description: "cert-manager normally auto-renews 30 days before expiry. If this fires, renewal has failed — investigate cert-manager logs."
+          summary: "Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} is overdue for renewal or expires within 14 days"
+          description: |
+            Either cert-manager was due to renew this certificate over a day ago and has not, or
+            it expires within 14 days (an expiry safety threshold, which also catches a
+            renewBefore set too short to act on). cert-manager renews at notAfter minus
+            renewBefore, 30 days before expiry for the 90-day certificates here, so those only
+            reach this when renewal has failed. A certificate whose whole lifetime is under 14
+            days would fire it while healthy.
+              kubectl -n {{ $labels.exported_namespace }} describe certificate {{ $labels.name }}
+              kubectl -n {{ $labels.exported_namespace }} get certificaterequests,orders,challenges
+              kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep {{ $labels.name }}
 
       # Every CronJob alert here reads kube-state-metrics: CertSyncStale,
       # CertSyncNeverSucceeded and ReclaimerNotSucceeding. With its series
