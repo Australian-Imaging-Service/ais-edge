@@ -184,9 +184,10 @@ metadata:
   labels:
     {{- include "edge.labels" $ | nindent 4 }}
 spec:
-{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-resources' exclusion to this
-       release's own data-policy pods. A plain replace, never tpl: the files
-       carry Prometheus's own {{ $labels }} templates. */}}
+{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-jobs (KubeJobFailed's exclusion,
+       ReclaimerNotSucceeding) to this release's own staged-reclaimer. A plain
+       replace, never tpl: the files carry Prometheus's own {{ $labels }}
+       templates. */}}
 {{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
 {{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
        reads a bare __NAME__ as a metric name, so the rule loads, reports

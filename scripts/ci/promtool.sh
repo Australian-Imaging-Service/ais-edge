@@ -169,8 +169,6 @@ print(n)
 import glob, re, sys, yaml
 SCOPED = {
     # alert: (exclusion that must be present, with the namespace captured)
-    "CPUThrottlingHigh": r'unless on \(namespace, pod, container\)\s*max by \(namespace, pod, container\) \(\s*'
-                         r'container_cpu_cfs_periods_total\{namespace="([^"]+)", container="data-policy", pod=~"\.\+-data-policy-',
     "KubeJobFailed":     r'unless on \(namespace, job_name\)\s*'
                          r'kube_job_failed\{namespace="([^"]+)", job_name=~"\.\+-staged-reclaimer-',
 }
@@ -194,6 +192,22 @@ for alert, pat in SCOPED.items():
               "so the exclusion matches nothing" % (alert, h[0][0], m.group(1)))
     else:
         print("PASS %s is defined once (%s), its exclusion scoped to namespace %s" % (alert, h[0][0], m.group(1)))
+
+# Upstream rules this chart must NOT fork: exactly one copy, upstream's.
+# CPUThrottlingHigh: the data-policy reporter has no CPU limit, so it has no
+# CFS series and upstream's rule is right as is. A second copy, or
+# defaultRules.disabled.CPUThrottlingHigh, is the old fork coming back or the
+# rule vanishing.
+UPSTREAM = {"CPUThrottlingHigh": "ais-kps-kubernetes-resources"}
+for alert, want in UPSTREAM.items():
+    where = [f.rsplit("/", 1)[1][:-5] for f in sorted(glob.glob(sys.argv[1] + "/*.yaml"))
+             for g in (yaml.safe_load(open(f)) or {}).get("groups", [])
+             for r in g.get("rules") or [] if r.get("alert") == alert]
+    if where != [want]:
+        print("FAIL %s is defined in %s; expected only kube-prometheus-stack's copy (%s)"
+              % (alert, ", ".join(where) or "no rule file", want))
+    else:
+        print("PASS %s is defined once, upstream's copy (%s)" % (alert, want))
 
 # ReclaimerNotSucceeding is this chart's own, not a fork, so the checks are
 # its own: scoped to one substituted namespace, and every threshold the chart

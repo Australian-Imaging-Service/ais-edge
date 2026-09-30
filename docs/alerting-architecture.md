@@ -98,7 +98,7 @@ with `.Files.Get` and Helm never templates it.
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
 | `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage mails once. |
-| `CPUThrottlingHigh` | Prometheus | The upstream rule is switched off (`kube-prometheus-stack.defaultRules.disabled`) and re-added in `ais-edge-info` without this release's own data-policy reporter pods (scoped by namespace and pod; a same-named container elsewhere still alerts). That container is runnable for well under a second per sweep, so a few clipped CFS periods read as 67% at 0.0014 cores average. Every other container is still covered. |
+| `CPUThrottlingHigh` | Prometheus | kube-prometheus-stack's rule, unmodified. The data-policy reporter carries no CPU limit (`dataPolicy.reporter.resources`), so it has no CFS quota, cAdvisor exports no `container_cpu_cfs_*` series for it, and the rule cannot see it. Under the old 1-core limit its sub-second, multi-process sweep was throttled in about 61% of the few CFS periods it ran in, at 0.0014 cores average, and the rule fired and cleared several times a day, each re-fire a new mail. Every container with a CPU limit is still covered. The reporter's real failure, going quiet, is `DataPolicyReporterSilent`. `scripts/ci/runtime-templates.sh` fails if the reporter renders a CPU limit again. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
 `component`, `level` — are built by Vector from **pod labels**, not from the
@@ -123,7 +123,7 @@ that content comes from:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
   `ais-edge-warning` (`IngestPodCrashLoop`, `ReclaimerNotSucceeding`, and
   `KubeJobFailed` in place of the upstream copy) and `ais-edge-info`
-  (`NodeCountChanged`, and `CPUThrottlingHigh` in place of the upstream copy). Those objects deliberately carry **no** `release` label;
+  (`NodeCountChanged`; `CPUThrottlingHigh` is upstream's own copy, unmodified). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
   is `false`. While it is `true` the operator selects only rules labelled with

@@ -225,6 +225,11 @@ fi
 # with no reporter it would fire for ever. At least one render must have the
 # Loki rules without a reporter, or that half is checked vacuously.
 #
+# The reporter renders WITHOUT limits.cpu. Its sweep is a sub-second burst of
+# several processes at once: under any CFS quota most of the few periods it
+# runs in are throttled, and upstream CPUThrottlingHigh fires and clears on it
+# all day. No quota, no throttling, and no series for the rule to read.
+#
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
 # (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
@@ -273,12 +278,13 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     except yaml.YAMLError as e:
         problems.append("%s: %s" % (case, " ".join(str(e).split())))
         continue
-    dp = up = None
+    dp = up = dp_cpu = None
     rows = {}
     for d in docs:
         for c in containers(d):
             if d.get("kind") == "DaemonSet" and c.get("name") == "data-policy":
                 dp = env(c)
+                dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
             if d.get("kind") == "Deployment" and c.get("name") == "uploader":
                 up = env(c)
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
@@ -305,6 +311,10 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     if dp is None:
         continue
     checked += 1
+    if dp_cpu is not None:
+        problems.append("%s: the data-policy reporter renders limits.cpu=%s. Its sweep is a sub-second, "
+                        "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
+                        "CPUThrottlingHigh flaps on it. Keep only the memory limit" % (case, dp_cpu))
     src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
     layouts.add("ingest" if src != adir else "orthanc")
     if not src.startswith("/"):
