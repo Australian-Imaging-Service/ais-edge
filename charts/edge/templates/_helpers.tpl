@@ -749,7 +749,7 @@ YAML reads it as octal before this helper sees it. Quote it, or add a unit.
        The engine reads a negative minAge as 0, "expire immediately".
        Leading zeros count: the cap is on what atoi is handed.
        10 digits of years still fits int64 after the mul. */ -}}
-{{- fail (printf "dataPolicy: %q has more than 10 digits. The limit is 10 (about 317 years in seconds): a longer number overflows without an error, saturating or wrapping to a negative number of seconds, and a negative minAge is read as 0, 'expire immediately'. Use a larger unit, or forever where the key accepts it." $d) -}}
+{{- fail (printf "dataPolicy: %q has more than 10 digits. The limit is 10 (about 317 years in seconds): a longer number can overflow without an error, saturating or wrapping to a negative number of seconds, and a negative minAge is read as 0, 'expire immediately'. Use a larger unit, or forever where the key accepts it." $d) -}}
 {{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | atoi }}
 {{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | atoi) 60 }}
 {{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | atoi) 3600 }}
