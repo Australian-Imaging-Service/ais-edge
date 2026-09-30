@@ -368,6 +368,72 @@ PY
 )" && ci_pass "$inv_out" || ci_fail "reporter inventory: $inv_out"
 
 # -----------------------------------------------------------------------------
+# Durations with a leading zero render in base 10
+# -----------------------------------------------------------------------------
+# edge.durationSeconds and mgmt.durationSeconds used sprig int64, which reads a
+# leading zero as octal: "010d" rendered 691200 (8 days) and "08d" rendered 0,
+# "expire immediately" on a retention stage. The *-duration-base10 cases in
+# scripts/ci/values.sh set such values; this reads the numbers where they are
+# consumed: the engine's stages.tsv, and the Loki rule thresholds.
+ci_heading "durations with a leading zero render in base 10"
+b10_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import os, re, sys, yaml
+# Keep in step with the *-duration-base10 fixtures in scripts/ci/values.sh.
+# Edge: (stage, stages.tsv column, input, seconds). Column 6 is the age,
+# column 4 alertAfter (0-based).
+EDGE = [("derived.assigned", 6, "010d", "864000"),
+        ("derived.orthancStorage", 6, "08d", "691200"),
+        ("originals.quarantine", 4, "0000007200", "7200")]
+# Mgmt: (alert, input, seconds), read from the alert's `oldest_age_s > N`.
+MGMT = [("StageBacklogAgeing", "010d", "864000"),
+        ("QuarantinedDataUnresolved", "08d", "691200")]
+problems, ok = [], []
+
+def docs(case):
+    path = os.path.join(sys.argv[1], case + ".yaml")
+    if not os.path.exists(path):
+        problems.append("render case %s is missing, so its durations go unchecked" % case)
+        return None
+    return [d for d in yaml.safe_load_all(open(path)) if d]
+
+def check(label, given, got, want):
+    if got == want:
+        ok.append("%s %s=%s" % (label, given, got))
+    else:
+        problems.append("%s %r rendered %r, expected %s" % (label, given, got, want))
+
+edge = docs("edge-duration-base10")
+if edge is not None:
+    tsv = [d["data"]["stages.tsv"] for d in edge
+           if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {})]
+    if not tsv:
+        problems.append("edge-duration-base10 has no stages.tsv")
+    else:
+        rows = {r[0]: r for r in (l.split("\t") for l in tsv[0].splitlines() if l.strip())}
+        for stage, col, given, want in EDGE:
+            row = rows.get(stage) or []
+            check("edge " + stage, given, row[col] if len(row) > col else None, want)
+
+mgmt = docs("mgmt-duration-base10")
+if mgmt is not None:
+    cms = [d["data"]["ais-edge-pipeline.yaml"] for d in mgmt
+           if d.get("kind") == "ConfigMap" and "ais-edge-pipeline.yaml" in (d.get("data") or {})]
+    if not cms:
+        problems.append("mgmt-duration-base10 has no Loki rules")
+    else:
+        rules = {r["alert"]: r for g in yaml.safe_load(cms[0]).get("groups", [])
+                 for r in g.get("rules") or [] if r.get("alert")}
+        for alert, given, want in MGMT:
+            m = re.search(r"oldest_age_s > (\S+) \[", (rules.get(alert) or {}).get("expr", ""))
+            check("mgmt " + alert, given, m.group(1) if m else None, want)
+
+if problems:
+    raise SystemExit("; ".join(problems))
+print("%d duration(s) with a leading zero render in base 10: %s" % (len(ok), ", ".join(ok)))
+PY
+)" && ci_pass "$b10_out" || ci_fail "base-10 durations: $b10_out"
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control
