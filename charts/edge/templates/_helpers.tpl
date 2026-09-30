@@ -431,25 +431,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* dataPolicy.reporter.interval: whole seconds, at least 60.
-         0 or a value sleep cannot read ("5x", "-1") returns at once, so the
-         reporter sweeps back to back; with no CPU limit nothing else caps it.
-         A unit string ("30m") does sleep, but observability.yaml sizes
-         DataPolicyReporterSilent's window from int of it, which is 0, so the
-         window stays at 30m and a 30m+ interval reads as silent between
-         healthy sweeps. Numbers are checked as numbers: toString would turn
-         1000000 into "1e+06". */ -}}
   {{- if .Values.dataPolicy.reporter.enabled }}
-    {{- $iv := .Values.dataPolicy.reporter.interval }}
-    {{- $ivOk := false }}
-    {{- if or (kindIs "float64" $iv) (kindIs "int" $iv) (kindIs "int64" $iv) }}
-      {{- $ivOk = and (eq (floor $iv) (float64 $iv)) (ge (float64 $iv) 60.0) }}
-    {{- else }}
-      {{- $ivOk = and (regexMatch "^[1-9][0-9]{0,9}$" (toString $iv)) (ge (atoi (toString $iv)) 60) }}
-    {{- end }}
-    {{- if not $ivOk }}
-      {{- fail (printf "dataPolicy.reporter.interval must be whole seconds, at least 60, got %v. 0 or a value sleep cannot read makes the reporter sweep back to back (it has no CPU limit to slow it), and a unit such as 30m reads as 0 where DataPolicyReporterSilent sizes its window, so it would report a healthy reporter silent." $iv) }}
-    {{- end }}
+    {{- $_ := include "edge.reporterIntervalSeconds" . }}
   {{- end }}
 
   {{- /* A removed key that is still set must fail, not be ignored — silently
@@ -729,6 +712,33 @@ really is on the old shared layout it must say so explicitly.
 {{- else if .Values.seaweedfs.perSiteBuckets -}}
 {{ printf "%s-%s" (.Values.seaweedfs.bucketPrefix | default "ingest") .Values.clusterLabel }}
 {{- end }}
+{{- end }}
+
+{{/*
+dataPolicy.reporter.interval as canonical decimal seconds, validated.
+BOTH consumers read this, never the raw value: the reporter's INTERVAL env
+(data-policy.yaml) and DataPolicyReporterSilent's window (observability.yaml).
+- Whole seconds, 60 to 86400 (one day).
+- 0, or anything sleep cannot read, returns at once: back-to-back sweeps, and
+  the reporter has no CPU limit to slow them.
+- Numbers are formatted here, not with toString: Helm reads values numbers
+  as float64 and toString writes 1000000 as "1e+06", which busybox sleep
+  rejects instantly.
+- A unit string ("30m") is refused: sleep would read it, but the window
+  calculation would not.
+*/}}
+{{- define "edge.reporterIntervalSeconds" -}}
+{{- $iv := .Values.dataPolicy.reporter.interval -}}
+{{- $s := "" -}}
+{{- if or (kindIs "float64" $iv) (kindIs "int" $iv) (kindIs "int64" $iv) -}}
+  {{- if eq (floor $iv) (float64 $iv) -}}{{- $s = printf "%.0f" (float64 $iv) -}}{{- end -}}
+{{- else -}}
+  {{- $s = toString $iv | trim -}}
+{{- end -}}
+{{- if not (and (regexMatch "^[1-9][0-9]{1,4}$" $s) (ge (atoi $s) 60) (le (atoi $s) 86400)) -}}
+  {{- fail (printf "dataPolicy.reporter.interval must be whole seconds, 60 to 86400, got %v. 0 or a value sleep cannot read makes the reporter sweep back to back (it has no CPU limit to slow it), and a unit such as 30m reads as 0 where DataPolicyReporterSilent sizes its window, so it would report a healthy reporter silent." $iv) -}}
+{{- end -}}
+{{- $s -}}
 {{- end }}
 
 {{/*

@@ -271,6 +271,7 @@ def env(c):
 
 problems, checked, delegated, layouts = [], 0, 0, set()
 rules_renders, reporter_off, reclaimers = 0, 0, 0
+interval_case_seen = False
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     case = os.path.basename(path)[:-len(".yaml")]
     try:
@@ -311,6 +312,21 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     if dp is None:
         continue
     checked += 1
+    # INTERVAL feeds busybox sleep, which returns at once on "1e+06" or "5m":
+    # the reporter would then sweep back to back. Plain digits only.
+    if not re.fullmatch(r"[1-9][0-9]*", dp.get("INTERVAL") or ""):
+        problems.append("%s: the reporter's INTERVAL renders %r, not whole seconds; busybox sleep "
+                        "returns at once on that and the reporter sweeps back to back" % (case, dp.get("INTERVAL")))
+    if case == "edge-reporter-interval-3600":
+        silence = [r.get("expr", "") for d in docs if d.get("kind") == "ConfigMap"
+                   for k, v in (d.get("data") or {}).items() if k.endswith("rules.yaml")
+                   for g in (yaml.safe_load(v) or {}).get("groups", []) for r in g.get("rules") or []
+                   if r.get("alert") == "DataPolicyReporterSilent"]
+        if dp.get("INTERVAL") != "3600" or not silence or "[10800s]" not in silence[0]:
+            problems.append("%s: numeric interval 3600 rendered INTERVAL=%r and a silence window %s; expected "
+                            "\"3600\" and [10800s]" % (case, dp.get("INTERVAL"),
+                            re.findall(r"\[\d+s\]", silence[0]) if silence else "(no rule)"))
+        interval_case_seen = True
     if dp_cpu is not None:
         problems.append("%s: the data-policy reporter renders limits.cpu=%s. Its sweep is a sub-second, "
                         "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
@@ -345,6 +361,8 @@ if checked == 0:
 for want in ("orthanc", "ingest"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if checked and not interval_case_seen:
+    problems.append("render case edge-reporter-interval-3600 is missing, so a numeric interval's rendering goes unchecked")
 if checked and not reclaimers:
     problems.append("no render has the staged-reclaimer, so its load-bearing pod labels go unchecked")
 if rules_renders and not reporter_off:

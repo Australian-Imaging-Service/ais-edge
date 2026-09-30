@@ -107,7 +107,9 @@ spec:
             - name: STAGES_FILE
               value: /etc/data-policy/stages.tsv
             - name: INTERVAL
-              value: {{ .Values.dataPolicy.reporter.interval | quote }}
+              # Canonical decimal seconds (edge.reporterIntervalSeconds), never
+              # the raw value: toString would render 1000000 as "1e+06".
+              value: {{ include "edge.reporterIntervalSeconds" . | quote }}
             {{- /* Reclaim needs BOTH switches. Rendered explicitly rather than
                    relying on the script's defaults so `helm get values` shows
                    what the running engine was told. */}}

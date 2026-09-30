@@ -109,7 +109,11 @@ data:
   {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}
   {{- /* Silence window: at least 30m and at least 3 sweeps, so a pod restart
          or one slow sweep never fires it. */ -}}
-  {{- $reportSilenceS := max 1800 (mul 3 (int .Values.dataPolicy.reporter.interval)) }}
+  {{- $reportIntervalS := 300 }}
+  {{- if .Values.dataPolicy.reporter.enabled }}
+    {{- $reportIntervalS = include "edge.reporterIntervalSeconds" . | atoi }}
+  {{- end }}
+  {{- $reportSilenceS := max 1800 (mul 3 $reportIntervalS) }}
   {{- $rules = $rules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
   {{- $rules = $rules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule ships with a literal
