@@ -1,0 +1,153 @@
+# TBPET edge site (MicroK8s VM microk8s-0, namespace ais-edge).
+#
+# STORAGE AND EXTERNAL SECRET CONTRACT:
+#   * Release edge retains edge-pipeline at the existing /data/ais-edge
+#     hostPath. Do not recreate or remove storage during this migration.
+#   * storageClass.create is false because hostpath-pipeline already exists on
+#     the cluster (created by the legacy release, resource-policy: keep).
+#   * The chart reads keys access-key / secret-key from the external
+#     s3-edge-credentials Secret. If provisioning a new site:
+#       kubectl -n ais-edge create secret generic s3-edge-credentials \
+#         --from-literal=access-key="$AWS_ACCESS_KEY_ID" \
+#         --from-literal=secret-key="$AWS_SECRET_ACCESS_KEY"
+clusterLabel: tbpet
+namespace: ais-edge
+topology: onprem
+
+# TBPET intentionally preserves original identifiers; neither de-id engine runs.
+deid:
+  engine: none
+  policyReviewed: true
+
+hostAliases:
+  enabled: false
+
+# Site egress goes through the facility proxy; pods have no proxy env
+# without this. Injected only into the uploader (the one pod that dials out).
+# NO_PROXY must keep covering the cluster CIDRs and orthanc.
+proxy:
+  HTTP_PROXY: "http://10.26.16.251:7777/"
+  HTTPS_PROXY: "http://10.26.16.251:7777/"
+  http_proxy: "http://10.26.16.251:7777/"
+  https_proxy: "http://10.26.16.251:7777/"
+  NO_PROXY: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local,10.1.0.0/16,10.152.183.0/24,192.168.0.0/24"
+  no_proxy: "localhost,127.0.0.1,::1,orthanc,.local,.svc,.cluster.local,10.1.0.0/16,10.152.183.0/24,192.168.0.0/24"
+
+dataPolicy:
+  enabled: true
+  dryRun: false
+  reporter:
+    enabled: true
+  originals:
+    facilityBackup:
+      enabled: false
+    fileDrop:
+      location: /data/usyd-export/TMP/RAW-DATA-EXPORT
+      reclaim: never
+  derived:
+    orthancStorage:
+      reclaim: onGrouped         # deletes only studies carrying processedLabel
+      minAge: 3d                 # age since Orthanc LastUpdate, NOT labelling
+    assigned:
+      reclaim: onUploaded        # s3 uploader reclaims after verified sync
+      minAge: 0
+
+storage:
+  storageClass:
+    # hostpath-pipeline already exists (legacy release, resource-policy keep);
+    create: false
+    name: hostpath-pipeline
+  pipeline:
+    hostPath: /data/ais-edge
+    capacity: 1500Gi
+  facilityBackup:
+    enabled: false
+
+orthanc:
+  aet: USYD-TBPET
+  stableAge: 86400
+  applyStableLabel: true
+  expose:
+    dicom: nodePort
+    http: nodePort
+    nodePorts:
+      dicom: 31014
+      http: 30842
+  auth:
+    enabled: false
+  extraMainDicomTags:
+    Study:
+      - PatientComments
+
+ingest:
+  orthancGroup:
+    enabled: true
+    interval: 300
+    toProcessLabel: xnat-ingest-ready
+    # Preserve the deployed label; no label migration is bundled here.
+    processedLabel: xnat-sorted
+    waitPeriod: 86400
+    copyMode: hardlink_or_copy
+  # Pipeline B: Windows RAW-DATA-EXPORT (NFS) -> /data/grouped-fs -> /data/assigned
+  fileDrop:
+    enabled: true
+    interval: 300
+    inputGlob: "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
+    exportClaim: usyd-data-export
+    exportMountPath: /data/usyd-export
+    perStudyWalk: true
+    waitPeriod: 86400
+    copyMode: symlink_or_copy
+    groupSessionField: StudyInstanceUID
+    groupScanField: SeriesNumber
+    datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
+  assign:
+    interval: 300
+    copyMode: hardlink_or_copy
+    tagMapping:
+      project: PatientComments
+      subject: PatientID
+      session: AccessionNumber
+      scan: SeriesDescription
+  associate:
+    enabled: false
+
+upload:
+  mode: s3
+  s3:
+    endpoint: https://s3.ap-southeast-2.amazonaws.com
+    bucket: ais-s3-tbp-s3bucket-1afz0bzdw5jd6
+    prefix: STAGING-202607
+    region: ap-southeast-2
+    existingSecret: s3-edge-credentials
+    caBundleSecret: tbpet-egress-ca
+    interval: 300
+    settleMinutes: 5
+    resources:
+      requests: {memory: 128Mi, cpu: 25m}
+      limits:   {memory: 512Mi, cpu: 500m}
+
+samba:
+  enabled: true
+  shareName: edge
+  subPath: "."
+  existingSecret: samba-credentials
+
+observability:
+  enabled: false
+  stack:
+    enabled: false
+
+# Create the secret before deploying:
+#   kubectl -n ais-edge create secret generic discord-webhook \
+#     --from-literal=url='https://discord.com/api/webhooks/...'
+watchdog:
+  enabled: true
+  schedule: "*/10 * * * *"
+  existingSecret: discord-webhook
+  caBundleSecret: tbpet-egress-ca
+  heartbeatHourUtc: "23"
+  thresholds:
+    diskPercent: 80
+    pendingHours: 6
+    groupedStuckHours: 6

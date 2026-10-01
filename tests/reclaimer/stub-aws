@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Stub `aws` for the reclaimer harness.
+#
+# Driven entirely by files in $SCENARIO, so a test case is data rather than
+# code. Any behaviour not explicitly configured returns the SAFE answer (an
+# error), because the property under test is "does it refuse to delete when it
+# cannot tell" — a stub that invents a plausible success would test the
+# opposite of what we care about.
+set -uo pipefail
+S="${SCENARIO:?SCENARIO required}"
+CALLS="${S}/calls.log"
+echo "aws $*" >> "$CALLS"
+
+die()  { echo "stub-aws: simulated failure: $*" >&2; exit 1; }
+file() { [ -f "$1" ] && cat "$1"; }
+
+case "${1:-}" in
+s3api)
+  case "${2:-}" in
+  head-bucket)
+      [ -f "$S/head-bucket.fail" ] && die "head-bucket"
+      exit 0 ;;
+
+  list-objects-v2)
+      # Three shapes, and the stub MUST honour --query the way the real CLI
+      # does. An earlier version of this stub ignored it and returned the whole
+      # JSON document where the script expected a scalar; the script then
+      # correctly refused to act on an unparseable answer, and seven cases
+      # "failed" because the harness was wrong rather than the script. Which
+      # is itself a useful data point — every one of those failures was the
+      # reclaimer keeping data it could not reason about.
+      if printf '%s\n' "$@" | grep -q -- '--delimiter'; then
+          [ -f "$S/list-prefixes.fail" ] && die "list prefixes"
+          file "$S/list-prefixes.json"
+          exit 0
+      fi
+      pfx=""; query=""
+      while [ $# -gt 0 ]; do
+          [ "$1" = "--prefix" ] && { pfx="$2"; shift; }
+          [ "$1" = "--query" ]  && { query="$2"; shift; }
+          shift
+      done
+      sess=$(printf '%s' "$pfx" | sed 's#^staged/##; s#/$##')
+      [ -f "$S/objects.${sess}.fail" ] && die "list objects $sess"
+      body='{"Contents": []}'
+      [ -f "$S/objects.${sess}.json" ] && body=$(cat "$S/objects.${sess}.json")
+
+      case "$query" in
+      *sort_by*LastModified*)
+          # --output text of the newest LastModified, or the literal None.
+          printf '%s' "$body" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+c = d.get("Contents") or []
+print(sorted(c, key=lambda o: o["LastModified"])[-1]["LastModified"] if c else "None")
+'
+          exit 0 ;;
+      "")
+          printf '%s' "$body"; exit 0 ;;
+      *)
+          printf '%s' "$body"; exit 0 ;;
+      esac ;;
+
+  list-multipart-uploads)
+      pfx=""
+      while [ $# -gt 0 ]; do
+          [ "$1" = "--prefix" ] && { pfx="$2"; shift; }
+          shift
+      done
+      sess=$(printf '%s' "$pfx" | sed 's#^staged/##; s#/$##')
+      [ -f "$S/multipart.${sess}.fail" ] && die "list multipart $sess"
+      body='{"Uploads": []}'
+      [ -f "$S/multipart.${sess}.json" ] && body=$(cat "$S/multipart.${sess}.json")
+      # The script asks for `length(Uploads || \`[]\`)` with --output text,
+      # i.e. a bare integer.
+      printf '%s' "$body" | python3 -c '
+import sys, json
+print(len((json.load(sys.stdin).get("Uploads") or [])))
+'
+      exit 0 ;;
+
+  head-object)
+      key=""
+      while [ $# -gt 0 ]; do
+          [ "$1" = "--key" ] && { key="$2"; shift; }
+          shift
+      done
+      # The two-consecutive-runs marker. Present only if the scenario says the
+      # prefix was already seen empty on a previous run.
+      base=$(basename "$key" .empty)
+      [ -f "$S/marker.${base}" ] && exit 0
+      exit 1 ;;
+
+  *) exit 0 ;;
+  esac ;;
+
+s3)
+  case "${2:-}" in
+  cp)
+      src="${3:-}"; dst="${4:-}"
+      if [ "$dst" = "-" ]; then
+          # Reading an object to stdout — the __MANIFEST__.json path.
+          key=$(printf '%s' "$src" | sed 's#^s3://[^/]*/##')
+          safe=$(printf '%s' "$key" | tr '/' '_')
+          [ -f "$S/getfail.${safe}" ] && die "get $key"
+          if [ -f "$S/get.${safe}" ]; then file "$S/get.${safe}"; exit 0; fi
+          die "no fixture for $key"
+      fi
+      # Writing the marker.
+      exit 0 ;;
+  rm) exit 0 ;;
+  *)  exit 0 ;;
+  esac ;;
+esac
+exit 0

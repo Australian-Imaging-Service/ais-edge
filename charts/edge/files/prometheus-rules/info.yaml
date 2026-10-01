@@ -1,0 +1,22 @@
+# =============================================================================
+# Info alerts  —  routine informational events. Slack-only by default;
+# do not page or email.
+# =============================================================================
+# NOTE: this file is a BARE `groups:` fragment, not a whole
+# PrometheusRule. charts/edge/templates/observability.yaml supplies the
+# apiVersion/kind/metadata and the namespace, so the namespace is NOT
+# hardcoded here — the old copy pinned `namespace: observability`, which
+# does not exist on the consolidated single node.
+
+groups:
+- name: ais-edge-info
+  interval: 5m
+  rules:
+  - alert: NodeCountChanged
+    expr: changes(count(kube_node_info)[10m:1m]) > 0
+    labels:
+      severity: info
+    annotations:
+      summary: Node inventory changed on the tier-1 host
+      description: The number of nodes in this cluster changed in the last 10 minutes. On a tier-1 appliance there is exactly
+        one node, so this should never fire.

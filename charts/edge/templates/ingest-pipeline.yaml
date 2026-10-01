@@ -1,0 +1,527 @@
+{{- /*
+The ingest pipeline: group -> assign.
+
+    group-orthanc   pull labelled studies out of Orthanc, hardlink their
+                    instances into /data/grouped as sessions
+    group (fs)      optional second source: a watched directory
+    assign          derive project/subject/session and collate into
+                    /data/assigned, ready for upload
+
+Every stage mounts the SAME pipeline PVC at /data. That is required, not
+tidiness: the stages hardlink between orthanc-storage/, grouped/ and
+assigned/, and a hardlink cannot cross a filesystem boundary. Split them and
+`hardlink_or_copy` silently degrades to a full byte copy of every study.
+*/ -}}
+{{- $img := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag -}}
+{{- if .Values.ingest.orthancGroup.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-group-orthanc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: group
+spec:
+  replicas: 1
+  # Two groupers against one Orthanc would double-pull the same studies.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: group
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: group
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: group
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "group-orthanc"]
+          args:
+            - "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
+            - "/data/orthanc-storage"
+            - "/data/grouped"
+            - "$(ORTHANC_USER)"
+            - "$(ORTHANC_PASSWORD)"
+            {{- /* The de-id/backup hook and the optional non-deid stable hook
+                   both apply this label. Validation rejects orphaned filters. */}}
+            {{- with .Values.ingest.orthancGroup.toProcessLabel }}
+            # Only stable, labelled studies are pulled. At non-deid sites this
+            # is a readiness gate, not evidence of de-identification.
+            - "--to-process-label"
+            - {{ . | quote }}
+            {{- end }}
+            - "--processed-label"
+            - {{ .Values.ingest.orthancGroup.processedLabel | quote }}
+            - "--copy-mode"
+            - {{ .Values.ingest.orthancGroup.copyMode | quote }}
+            - "--wait-period"
+            - {{ .Values.ingest.orthancGroup.waitPeriod | quote }}
+            - "--loop"
+            - {{ .Values.ingest.orthancGroup.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- if .Values.orthanc.auth.enabled }}
+            - name: ORTHANC_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-user
+            - name: ORTHANC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.orthanc.auth.existingSecret }}
+                  key: orthanc-password
+            {{- else }}
+            # Orthanc REST auth is off, but group-orthanc still requires
+            # positional user/password arguments.
+            - name: ORTHANC_USER
+              value: "orthanc"
+            - name: ORTHANC_PASSWORD
+              value: "orthanc"
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+---
+{{- end }}
+{{- if .Values.ingest.fileDrop.enabled }}
+{{- if .Values.ingest.fileDrop.perStudyWalk }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-fs-walker
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- /* .Files.Get, like s3-uploader.sh: keeps the script a real file that
+         `bash -n` can lint, free of Helm-escaping around ${...}. */}}
+  fs-walker.sh: |
+    {{- .Files.Get "files/fs-walker.sh" | nindent 4 }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-group-fs
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: group-fs
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: group-fs
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: group-fs
+      {{- if .Values.ingest.fileDrop.perStudyWalk }}
+      annotations:
+        # Checksum the script FILE, same rationale as the s3 uploader: the
+        # pod rolls exactly when the walker logic changes.
+        checksum/script: {{ .Files.Get "files/fs-walker.sh" | sha256sum }}
+      {{- end }}
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+{{- if .Values.ingest.fileDrop.perStudyWalk }}
+        {{- /* Per-study walker: group AND assign per study subdirectory —
+               see values.yaml ingest.fileDrop.perStudyWalk and
+               files/fs-walker.sh. The whole-glob container below is what it
+               replaces. */}}
+        - name: group-fs
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["bash", "/scripts/fs-walker.sh"]
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            - name: INPUT_GLOB
+              value: {{ .Values.ingest.fileDrop.inputGlob | quote }}
+            - name: DATATYPES
+              value: {{ .Values.ingest.fileDrop.datatypes | quote }}
+            - name: GROUP_SESSION_FIELD
+              value: {{ .Values.ingest.fileDrop.groupSessionField | quote }}
+            - name: GROUP_SCAN_FIELD
+              value: {{ .Values.ingest.fileDrop.groupScanField | quote }}
+            - name: WAIT_PERIOD
+              value: {{ .Values.ingest.fileDrop.waitPeriod | quote }}
+            - name: COPY_MODE
+              value: {{ .Values.ingest.fileDrop.copyMode | quote }}
+            - name: INTERVAL
+              value: {{ .Values.ingest.fileDrop.interval | quote }}
+            - name: PROJECT_FIELD
+              value: {{ get (include "edge.assignTagMapping" . | fromYaml) "project" | quote }}
+            - name: SUBJECT_FIELD
+              value: {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
+            - name: SESSION_FIELD
+              value: {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
+            {{- with get (include "edge.assignTagMapping" . | fromYaml) "scan" }}
+            - name: SCAN_FIELD
+              value: {{ . | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+{{- else }}
+        - name: group-fs
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "group"]
+          args:
+            - {{ .Values.ingest.fileDrop.inputGlob | quote }}
+            - "/data/grouped"
+            {{- range splitList ";" .Values.ingest.fileDrop.datatypes }}
+            {{- if . }}
+            - "--datatype"
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.ingest.fileDrop.groupSessionField }}
+            - "--session"
+            - {{ . | quote }}
+            - "generic/file-set"
+            {{- end }}
+            {{- with .Values.ingest.fileDrop.groupScanField }}
+            - "--scan"
+            - {{ . | quote }}
+            - "generic/file-set"
+            {{- end }}
+            # EXPLICIT, because 0.15.0 changed the default from "avoid" to none at all.
+            # In 0.13.1 `group` defaulted to --on-resource-clash=avoid and a repeated
+            # resource name was silently suffixed _2/_3. In 0.15.0 the option takes a
+            # <policy> <scope> pair and defaults to (), so an uncovered clash RAISES out
+            # of the loop and this stage stops. Passing it restores 0.13.1 behaviour.
+            #
+            # ON THIS STAGE ONLY. `group-orthanc` has no such option and would die with
+            # "no such option", and NOT via XINGEST_ON_RESOURCE_CLASH: that variable is
+            # still a plain click.Choice on `associate` and `deidentify`, where the pair
+            # form "avoid all" is not a valid choice.
+            - "--on-resource-clash"
+            - "avoid"
+            - "all"
+            - "--copy-mode"
+            - {{ .Values.ingest.fileDrop.copyMode | quote }}
+            - "--wait-period"
+            - {{ .Values.ingest.fileDrop.waitPeriod | quote }}
+            - "--loop"
+            - {{ .Values.ingest.fileDrop.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- if ne .Values.dataPolicy.originals.fileDrop.reclaim "never" }}
+            # Deleting what was just read. On this path there is no Orthanc
+            # copy and no facility backup, so the watched directory is the
+            # only copy — which is why dataPolicy defaults this to never and
+            # the chart refuses the combination while dataPolicy is enforced.
+            - name: XINGEST_UNLINK_SOURCE
+              value: "all"
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+{{- end }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
+        {{- if .Values.ingest.fileDrop.perStudyWalk }}
+        - name: scripts
+          configMap:
+            name: {{ include "edge.fullname" . }}-fs-walker
+            defaultMode: 0755
+        {{- end }}
+---
+{{- end }}
+{{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-assign
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: assign
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: assign
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: assign
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: assign
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "assign"]
+          args:
+            - "/data/grouped"
+            - "/data/assigned"
+            # project/subject/session come from the DICOM tags the de-id hook
+            # writes. routing.json's AETMap is the single source of truth for
+            # project — there is no hardcoded project ID anywhere.
+            - "--project"
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "project" | quote }}
+            - "--subject"
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
+            - "--session"
+            - {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
+            {{- with get (include "edge.assignTagMapping" . | fromYaml) "scan" }}
+            - "--scan"
+            - {{ . | quote }}
+            {{- end }}
+            - "--copy-mode"
+            - {{ .Values.ingest.assign.copyMode | quote }}
+            {{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
+            # dataPolicy.derived.grouped.reclaim = onAssigned.
+            #
+            # Drop each grouped session once it has been assigned. Without
+            # this, `assign --loop` rebuilds its work list from a live
+            # listing of /data/grouped every cycle and re-assigns the same
+            # sessions forever: /data/assigned is repopulated, the uploader
+            # re-stages, and the upload-success alert re-fires. That produced
+            # two days of duplicate mail.
+            #
+            # This deletes HARDLINKS, not data. The bytes remain in Orthanc
+            # storage and in the facility backup, both governed by
+            # dataPolicy.originals and both defaulting to forever.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+            - "--loop"
+            - {{ .Values.ingest.assign.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
+{{- end }}
+{{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
+---
+{{/*
+  The de-identification recipes, from the site file.
+
+  A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
+  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  sanitised into a legal key here and mapped back to the real path with
+  items[].path on the volume below, so the operator writes real paths and never
+  sees the restriction.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-deid-specs
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  {{- range $path, $recipe := .Values.ingest.deidentify.specs }}
+  {{ regexReplaceAll "[^-._a-zA-Z0-9]" $path "-" }}: |
+    {{- $recipe | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-deidentify
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: deidentify
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: deidentify
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: deidentify
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: deidentify
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "deidentify"]
+          args:
+            - "/data/assigned"
+            - "/data/deidentified"
+            - "/etc/xnat-ingest/deid-specs"
+            # --reid-dir, NOT a fourth positional. xnat-ingest 0.15.0 made reid_dir an
+            # OPTION; passing it positionally is rejected outright:
+            #   Usage: xnat-ingest deidentify [OPTIONS] INPUT_DIR OUTPUT_DIR SPEC_DIR
+            #   Error: Got unexpected extra argument (/data/reid)
+            # Measured against ghcr.io/australian-imaging-service/xnat-ingest:0.15.0.
+            - "--reid-dir"
+            - "/data/reid"
+            - "--copy-mode"
+            - {{ .Values.ingest.deidentify.copyMode | quote }}
+            {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
+            # dataPolicy.derived.assigned.reclaim = onDeidentified.
+            #
+            # Drop each assigned session once this stage has produced a
+            # COMPLETE de-identified copy of it. xnat-ingest counts the data
+            # files on both sides and refuses the unlink when they disagree, so
+            # a run that produced a short output leaves its input in place to be
+            # retried.
+            #
+            # Without this, /data/assigned is never emptied by anything: the
+            # data-policy engine's `onUploaded` condition looks for a marker the
+            # uploader writes for the tree it READS, which under this engine is
+            # /data/deidentified, not /data/assigned. So the assigned copy of
+            # every session ever processed accumulates on the edge disk.
+            #
+            # THIS TESTED "onAssigned" UNTIL NOW, WHICH COULD NEVER BE TRUE.
+            # onAssigned belongs to the `grouped` key and is not in this key's
+            # enum, so the condition was false at every site and the flag was
+            # never passed. Confirmed on a live edge: the running deidentify
+            # container had no --unlink-source in its arguments.
+            #
+            # Deletes hardlinks, not data, when copyMode is hardlink_or_copy.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+            - "--loop"
+            - {{ .Values.ingest.deidentify.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
+            - name: XINGEST_REID_ENCRYPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ingest.deidentify.reidEncryptKeySecret }}
+                  key: XINGEST_REID_ENCRYPT_KEY
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            - name: deid-specs
+              mountPath: /etc/xnat-ingest/deid-specs
+              readOnly: true
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        - name: deid-specs
+          configMap:
+            {{- if .Values.ingest.deidentify.specs }}
+            name: {{ include "edge.fullname" . }}-deid-specs
+            items:
+              {{- range $path, $recipe := .Values.ingest.deidentify.specs }}
+              - key: {{ regexReplaceAll "[^-._a-zA-Z0-9]" $path "-" | quote }}
+                path: {{ $path | quote }}
+              {{- end }}
+            {{- else }}
+            name: {{ .Values.ingest.deidentify.specConfigMap }}
+            {{- if .Values.ingest.deidentify.specFiles }}
+            items:
+              {{- range $key, $path := .Values.ingest.deidentify.specFiles }}
+              - key: {{ $key | quote }}
+                path: {{ $path | quote }}
+              {{- end }}
+            {{- end }}
+            {{- end }}
+{{- end }}
+{{- if .Values.ingest.associate.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-associate
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: associate
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: associate
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: associate
+    spec:
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: associate
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "associate"]
+          args:
+            - "/data/assigned"
+            {{- range splitList ";" .Values.ingest.associate.datatypes }}
+            {{- if . }}
+            - "--datatype"
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - "--copy-mode"
+            - {{ .Values.ingest.associate.copyMode | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- /* Side files in assigned sessions may be symlinks into the
+                   export share. */}}
+            {{- include "edge.exportVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.exportVolume" . | nindent 8 }}
+{{- end }}

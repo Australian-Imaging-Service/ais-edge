@@ -1,0 +1,62 @@
+# =============================================================================
+# Alertmanager receivers that require Slack  —  SPLICED INTO
+# files/alertmanager-config.yaml, NOT A STANDALONE CONFIG
+# =============================================================================
+# This is a fragment of the `receivers:` list. templates/observability.yaml
+# substitutes it for the slack-receivers sentinel at the end of the receivers
+# list in files/alertmanager-config.yaml, and ONLY when
+# observability.alerting.slackWebhookSecretRef names a Secret. The two-space
+# list indentation below is therefore load-bearing: the sentinel sits at column
+# 0 and these lines have to land as items of that list.
+#
+# THE SENTINELS ARE DESCRIBED, NOT SPELLED, IN THESE COMMENTS. `replace` is a
+# blind whole-file substitution, so writing a sentinel's exact name in prose
+# gets that prose replaced too — which is how an earlier draft of this fix
+# duplicated both receivers below into the header of the config file.
+#
+# WHY THESE TWO LIVE IN THEIR OWN FILE
+# Both read the webhook from a file the prometheus-operator mounts from
+# alertmanagerSpec.secrets. With no Secret there is no file, and Alertmanager
+# treats a missing api_url_file as an UNRECOVERABLE send error — it does not
+# retry and it does not fall back. Defining these receivers on a site with no
+# Slack therefore produces receivers that look configured and deliver nothing,
+# which is exactly how every severity=info alert on this cluster was being
+# discarded. Not rendering them at all is what makes "no Slack configured" a
+# state the routing tree can actually see: templates/observability.yaml points
+# the info and critical routes at email receivers instead, from the same
+# condition that decides whether this file is spliced in.
+#
+# LOADED WITH .Files.Get, NEVER INLINED IN A TEMPLATE — same reason as the main
+# config file. `{{ .CommonLabels.alertname }}` and `{{ range .Alerts }}` below
+# are ALERTMANAGER notification templates. Helm's delimiters are identical, so
+# inlining them would evaluate them against the chart context, find nothing,
+# and render empty strings: every Slack message would arrive with a blank title
+# and an empty body, with no error anywhere. Only __SENTINEL__ tokens are
+# substituted, by `replace`, which is plain string surgery and cannot touch a
+# `{{ ... }}` expression.
+#
+# The tokens here are replaced by the SAME chain that handles the main file,
+# because this fragment is spliced in before that chain runs. The recipient
+# address and webhook path below therefore need no separate handling.
+# =============================================================================
+  - name: email-and-slack
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: true
+    slack_configs:
+      - api_url_file: "__ALERT_SLACK_WEBHOOK_FILE__"
+        channel: "#ais-edge-alerts"
+        send_resolved: true
+        title: "{{ .CommonLabels.alertname }} — {{ .CommonLabels.severity }}"
+        text: |
+          {{ range .Alerts }}
+          *{{ .Labels.alertname }}* — `{{ .Labels.cluster }}`
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+  - name: slack-only
+    slack_configs:
+      - api_url_file: "__ALERT_SLACK_WEBHOOK_FILE__"
+        channel: "#ais-edge-alerts"
+        send_resolved: false

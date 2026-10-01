@@ -1,0 +1,601 @@
+# TIER-1 NOTE (why this file is not charts/mgmt's copy)
+# ---------------------------------------------------------------------------
+# This is the SINGLE-NODE ruleset. It was taken from the pre-consolidation
+# tier-1 branch, not from the tier-2 management chart, because tier-2's rules
+# key on components that DO NOT EXIST here: `s3-uploader` (there is no S3 hop)
+# and `s3-reclaimer` in namespace `xnat-upload` (there is no staging bucket and
+# no management-side reclaimer). Copying those wholesale gives a file that
+# loads cleanly and matches no stream — silence that is indistinguishable from
+# a healthy site.
+#
+# Two changes were needed on top of the old tier-1 file:
+#   * namespace="xnat-upload" -> "xnat-ingest". The consolidated chart is ONE
+#     release in ONE namespace; the old tier-1 split upload into its own.
+#   * EdgeDiskLow and QuarantinedDataUnresolved appended. The data-policy
+#     engine post-dates the old tier-1, and on a single node EdgeDiskLow is the
+#     ONLY disk-exhaustion alert in the system — node-exporter is disabled and
+#     there is no PVC-full rule.
+#
+# Every selector here is checked against the labels the chart actually renders
+# (app=orthanc, component=dicom-receiver|group|assign|upload|data-policy, all in
+# namespace xnat-ingest) and against the stream labels Vector promotes
+# (cluster, namespace, pod, container, node, app, component, level).
+# ---------------------------------------------------------------------------
+# =============================================================================
+# Loki ruler rules — log-derived alerts.
+# =============================================================================
+# These alerts evaluate LogQL queries on a schedule inside Loki and emit to
+# the kube-prometheus-stack Alertmanager (configured in loki-values.yaml.tpl
+# rulerConfig.alertmanager_url). They cover the pipeline events emitted by the
+# Orthanc, xnat-ingest group-orthanc/assign, and xnat-ingest upload pods.
+#
+# TIER-1 (single node): the pipeline is
+#   Orthanc (deid) -> xnat-ingest group-orthanc -> assign -> upload -> XNAT (HTTPS).
+# There is NO S3 hop and NO s3-uploader stage anymore, so rules that used to
+# key on the deleted s3-uploader component's events (upload_started /
+# upload_completed to SeaweedFS, mc-alias failures) have been retargeted onto
+# the real terminal upload stage (namespace="xnat-ingest", component="upload")
+# or removed where the signal was purely s3-uploader-internal. The SAME
+# alerting capability — stalled sessions, upload failures, XNAT upload success,
+# and storage backlog — is preserved against the components that still exist.
+#
+# The source-of-truth for these alerts is the structured JSON event itself.
+# Loki receives every log line from the single Vector DaemonSet, so running
+# the rules in Loki is the natural path.
+#
+# Rule file format is identical to Prometheus rule files. Loki's ruler
+# writes firing alerts to Alertmanager v2 with the labels and annotations
+# below, so the existing email/Slack receivers keep working unchanged.
+#
+# Companion: alerts/critical.yaml + alerts/warning.yaml + alerts/info.yaml
+# hold the K8s-metric-based alerts (node NotReady, pod restarts) that live in
+# Prometheus.
+# =============================================================================
+# NOTE: BARE `groups:` DOCUMENT, not a ConfigMap.
+# charts/edge/templates/observability.yaml wraps this in the ConfigMap that
+# Loki's ruler sidecar watches (label loki_rule). The pre-consolidation copy
+# was a complete ConfigMap manifest, and wrapping THAT produced a ConfigMap
+# nested inside a ConfigMap: the sidecar would have written a file containing
+# Kubernetes YAML where rule groups belong, and Loki would have loaded NO
+# rules at all while everything looked healthy.
+#
+# TIER-1 SCOPING: XNATUploadSuccess and XNATAuthFailure select
+# component="upload", where tier-2 selects the whole xnat-upload namespace.
+# That is not gratuitous drift — it is forced by the single-namespace collapse.
+#
+# On tier-2, namespace xnat-upload contains ONLY the uploader. On tier-1 the
+# one namespace also holds Loki, Grafana, Prometheus and Alertmanager, so a
+# bare {namespace="xnat-ingest"} selector matches THEIR logs too. Measured on
+# the live install:
+#
+#   * Loki logs each ruler query at INFO, and that query text contains both
+#     "Successfully uploaded all files in" and the regexp pattern. The rule
+#     therefore matched the ruler evaluating the rule, and fired a second
+#     XNATUploadSuccess whose session label was the literal
+#         (?P<session>[^
+#     A self-sustaining alert about its own evaluation.
+#   * XNATAuthFailure would match a 401/403 logged by ANY pod in the namespace,
+#     not just the uploader.
+
+groups:
+- name: ais-edge-pipeline-critical
+  interval: 1m
+  rules:
+  # Watches component="upload", NOT "s3-uploader". The s3-uploader is only
+  # rendered when upload.mode=s3, and install.sh forces upload.mode=direct on
+  # tier-1, so the old selector matched a component that never runs here and
+  # this alert could not fire at all. Verified: no s3-uploader Deployment
+  # exists on a tier-1 cluster.
+  #
+  # Failure counting is the same shape as XNATUploadRetryStorm: the traceback
+  # header, one per failure, or an ERROR-level line. Success is the PER-SESSION
+  # line; "Upload completed successfully" is per LOOP and is emitted even when
+  # every session was skipped, so it would mask a total outage.
+  # An idle edge logs neither, so it stays quiet.
+  - alert: XNATUploadFailingForAllSessions
+    annotations:
+      description: No completed uploads while failures keep coming. Likely network / SeaweedFS / credential break. Check `kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} logs -n xnat-ingest -l component=s3-uploader`.
+      summary: All upload attempts have failed for 15+ minutes on {{ $labels.cluster }}
+    expr: "(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  [15m])) > 2)\nunless on (cluster)\n(sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files in\" [15m])) > 0)\n"
+    for: 15m
+    labels:
+      severity: critical
+      source: loki-ruler
+- name: ais-edge-pipeline-warning
+  interval: 1m
+  rules:
+  # Counts one line PER FAILURE, not per line of output. The original form
+  # matched /error|failed|exception|traceback/ against every line, and one
+  # Python traceback is ~96 lines, so a single event cleared a threshold of
+  # 5 many times over.
+  #
+  # Keying on level="ERROR" alone is NOT enough, measured: over 24h this
+  # edge logged 11 tracebacks carrying real failures (DNS resolution and
+  # read timeouts to XNAT) and NOT ONE line at level="ERROR". xnat-ingest
+  # lets those reach stderr uncaught, and Vector labels unlabelled output
+  # "unknown", so an ERROR-only rule is silent through a real outage.
+  #
+  # So: match the traceback HEADER, which appears exactly once per failure,
+  # OR any ERROR-level line. Measured over the same 24h: 4 ten-minute
+  # windows contained failures, 3 to 4 each, hence a threshold of 2.
+  # NOT EVERY ERROR IS A RETRY. A session that uploaded successfully stays in the
+  # terminal tree until the staged reclaimer retires it, which is minAge later, and
+  # `upload --loop` re-reads that tree every cycle. XNAT answers the re-offer with
+  #
+  #   'DICOM' resource in '<session>' already exists on XNAT with different
+  #   checksums. Please delete on XNAT to overwrite
+  #
+  # which xnat-ingest logs at ERROR. So a HEALTHY site produced >2 ERRORs every ten
+  # minutes for as long as minAge, and this alert fired continuously after every
+  # successful delivery. Measured on a live install: 15 identical lines, all for a
+  # session that had just been delivered correctly.
+  #
+  # That is worse than noise. A rule that fires constantly on a working site is a
+  # rule nobody reads, and it would have hidden a real retry storm underneath it.
+  # The line is excluded rather than the threshold raised: a genuine storm looks
+  # different (tracebacks, auth failures, connection errors) and those still count.
+  #
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. On the pinned 0.15.6
+  # the re-offer is answered from a file-set comparison rather than a label one,
+  # so a session that really was delivered is skipped silently and the emitter
+  # quoted above is gone. What the exclusion now buys is separation of concerns:
+  # this phrase means one specific, actionable thing, and
+  # XNATResourceIncompleteAndStuck below counts it per session with a threshold
+  # and a runbook. Counting it here as well would page twice for one fault, and
+  # under a rule whose description sends the operator to look for the wrong
+  # thing. Removing the exclusion would be safe on this pin and wrong on any
+  # older one, so it stays.
+  - alert: XNATUploadRetryStorm
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\" or level = \"ERROR\"\n  !~ \"already exists on XNAT with different checksums\"\n  [10m])) > 2\n"
+    for: 10m
+    labels:
+      severity: warning
+      source: loki-ruler
+    annotations:
+      summary: '>5 XNAT upload errors in 10 minutes on {{ $labels.cluster }}'
+      description: xnat-ingest-upload is retrying. Likely transient network or XNAT credentials. Inspect `kubectl logs -n xnat-ingest -l component=upload` for the actual error.
+  # THE UPLOADER THIS TIER ACTUALLY RENDERS. This rule used to select
+  # component="s3-uploader" and match event="upload_started" / "upload_completed".
+  # Neither exists on this branch:
+  #   * upload.mode is always direct here, so no s3-uploader is ever rendered.
+  #     Measured on a live install: 0 pods carry that label; the uploader carries
+  #     component="upload".
+  #   * those event= fields come from our own files/s3-uploader.sh. The direct
+  #     uploader is the xnat-ingest binary, which emits `message` strings and no
+  #     event field at all. Measured on the same install: 0 lines carry "event":.
+  # So the ONE alert covering a stalled delivery could never fire, on the branch
+  # whose only delivery path is the one it was written to watch.
+  #
+  # The completion string below is the same one XNATUploadSuccess matches, which
+  # is known to work: it is what raises the upload-complete notifications.
+  #
+  # IT KEYS ON PROSE, NOT ON A STRUCTURED EVENT, so record what it depends on.
+  # The "started" side matches upload_api.py:263-266 in the PINNED image
+  # (ghcr.io/australian-imaging-service/xnat-ingest:0.15.0):
+  #
+  #     if always_include:
+  #         logger.info(f"Including {always_include} scans/files in upload from '{session.name}' to ...")
+  #
+  # Two ways that stops being true, neither of which fails loudly:
+  #   * upstream rewords the line. Nothing breaks; the alert just stops firing.
+  #   * A SITE SETS upload.direct.alwaysInclude TO "". That log line is guarded by
+  #     `if always_include`, so emptying the key removes the started signal, the
+  #     left side of the `unless` is always empty, and this alert silently never
+  #     fires again. See the note on alwaysInclude in charts/edge/values.yaml.
+  #
+  # The unconditional alternative, :400 "Uploaded '<resource>' in '<session>'",
+  # was considered and rejected: it fires only after a resource has moved, so a
+  # session that stalls at auth, project lookup or connection would emit nothing
+  # and the earliest failures - the ones most worth paging on - would go unseen.
+  #
+  # THE INTENDED ENDPOINT IS STRUCTURE, NOT PROSE. xnat-ingest already emits
+  # structured events: 9 `extra=` sites in the pinned image, carrying event,
+  # session and count keys (deid_failed, deid_incomplete, session_metadata_missing
+  # and five more). There is simply no upload_started / upload_completed among
+  # them yet. Adding those two upstream is a small change and would let this rule
+  # key on `| json | event="upload_started"` instead of on a sentence, which is
+  # both stabler and immune to the alwaysInclude coupling above. Until then the
+  # prose match is the only thing available, so it is written down rather than
+  # left as an accident.
+  - alert: XNATResourceIncompleteAndStuck
+    # A resource EXISTS on XNAT and DISAGREES with the staged copy in a way that
+    # uploading cannot fix: XNAT holds files staging does not, or holds a file
+    # whose content differs. An upload only ever adds, so neither is repairable.
+    # Only an operator deleting the resource on XNAT unblocks it.
+    #
+    # THIS IS NARROWER THAN IT WAS, AND THE PIN IS WHY. Up to xnat-ingest 0.15.0
+    # the uploader also skipped a merely SHORT resource: get_xnat_resource
+    # returned None whenever the resource existed, so the caller logged "already
+    # uploaded" and the session reported success while incomplete. From 0.15.3
+    # (PR #170) a short resource is repaired by uploading the shortfall and logs
+    # a warning, so it no longer reaches this rule. What is left is the
+    # genuinely unrepairable case, which is what the summary claims.
+    # KEEP THIS RULE AND ingest.image.tag IN STEP.
+    #
+    # THE COVERAGE HOLE RECORDED HERE IS NOW CLOSED, and the matcher that caused
+    # it has been dropped. Kept as a note because the shape can come back the
+    # next time someone tightens this rule.
+    #
+    # This rule used to require "Missing paths" as well as the phrase, so only
+    # the missing-or-extra branch matched. 0.15.0 had a SECOND emitter of the
+    # phrase -- "...different checksums. Please delete on XNAT to overwrite" --
+    # carrying no such line, so a differing-only ERROR reached NO rule at all:
+    # XNATUploadRetryStorm EXCLUDES the phrase on the assumption that this rule
+    # covers it, and XNATUploadFailingForAllSessions is suppressed whenever
+    # uploads are otherwise succeeding. Measured on the test cluster: 1214
+    # occurrences of the phrase in 7 days, 0 of "Missing paths", so this alert
+    # had never fired.
+    #
+    # The matcher could not just be deleted, because on 0.15.0 the phrase was
+    # ALSO emitted continuously for a HEALTHY resource: XNAT reports an empty
+    # digest until a catalog refresh populates it, and 0.15.0 compared the two
+    # checksum dicts whole, so it called a complete resource mismatched. That is
+    # what the 1214 were. Matching the phrase alone would have fired this alert
+    # on all of them, and the annotation tells the operator to delete the
+    # resource on XNAT, which on those is an instruction to delete good data.
+    #
+    # 0.15.3 fixes both ends at source. A file whose digest is empty is compared
+    # by NAME only (compare_resource_with_xnat, and api/check_upload_api.py
+    # guards the same way), so catalogue lag no longer reads as a mismatch; and
+    # CORRECTION: an earlier version of this note said the "please delete on
+    # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
+    # become a no-op. BOTH WERE WRONG. It is still at helpers/remotes.py:861-866
+    # and carries no "Missing paths" line; the grep that produced the claim
+    # missed it because the phrase is split across two adjacent string literals.
+    # Dropping the matcher is therefore NOT cosmetic -- it genuinely widens the
+    # rule, which is what closes the hole. It also DOUBLES the rate for a
+    # differing-only resource, because both emitters sit under the same
+    # `if not comparison.complete:` and only the second is guarded by
+    # `if comparison.differing`, so such a resource emits two matching lines per
+    # pass and crosses the threshold in about half the time. That errs toward
+    # alerting sooner on a real fault, so it is left as is.
+    #
+    # So dropping it changes no match on this pin, and it closes the hole
+    # against the next image that reintroduces a phrase-only emitter. It lands
+    # in the same commit as the pin because the ordering is unsafe in both
+    # directions: this matcher without the pin pages on good data, and the pin
+    # without this note leaves prose that is no longer true.
+    #
+    # TIER-1 APPLIES TOO, and this is not a copy of the tier-2 rule. The upload
+    # code path is SHARED: `xnat-ingest upload` resolves resources identically
+    # whether the input is a local tree or s3://. What differs is only the
+    # selector -- namespace is xnat-ingest here (one release, one namespace),
+    # not xnat-upload, and the workload is edge-upload rather than
+    # mgmt-upload-<edge>. Copying the tier-2 selector would load cleanly and
+    # match no stream.
+    #
+    # Tier-1 cannot hit the cause that produced it on tier-2 (there is no bucket
+    # to read mid-write) but ANY interrupted upload reaches the same state: a
+    # pod evicted mid-transfer, a dropped connection, an XNAT restart.
+    #
+    # WHY NOT FIRST-OBSERVATION. The same message appeared while XNAT was still
+    # cataloguing an accepted upload: the checksum comparison runs BEFORE the
+    # catalog refresh, and that refresh only fires when the file count is
+    # exactly zero.
+    #
+    # TWO DIFFERENT LAG BEHAVIOURS HAVE BEEN MEASURED AND BOTH WERE REAL.
+    # Where the refresh does fire, the window is bounded and lag emits ~10-15
+    # occurrences once. Where it did not, because the count was never zero, the
+    # digests stayed empty and the SAME message repeated every pass
+    # indefinitely: 1214 occurrences in 22 hours on the test cluster, for a
+    # resource that was completely healthy. No threshold separates that second
+    # case from a genuinely stuck resource, because they are the same rate; the
+    # matcher separated them.
+    #
+    # ON THE PINNED 0.15.6 NEITHER SHOULD REACH THIS RULE. The name-only
+    # comparison removes the second case at source, and the first now presents
+    # as MISSING files, which the uploader repairs rather than reporting here.
+    # The floor below is kept sized against the bounded burst anyway: it costs
+    # nothing, and it is the one number here that does not depend on the pin
+    # being what we think it is.
+    #
+    # THE THRESHOLD IS DERIVED FROM THE POLL INTERVAL, NOT FIXED, because one
+    # error is emitted per stuck resource per upload poll. A hardcoded 30
+    # silently assumed a 60s poll: at the 120s chart default a session with ONE
+    # stuck resource produces about 23 errors an hour and could never reach it.
+    #
+    # A CYCLE IS loop PLUS THE WORK, not loop, because the uploader sleeps the
+    # whole interval rather than the remainder. At the measured elapsed of ~35s
+    # the substituted threshold is
+    #     max(20, 1800 / (loop + 35))
+    # the count expected over HALF the 60m window, which makes the real rate
+    # exactly twice the threshold by construction. It is 20 at both shipped
+    # configurations, crossing in about 32 minutes at loop=60 and 52 at
+    # loop=120, plus the 15m `for:`.
+    #
+    # DERIVING FROM loop ALONE WOULD BREAK THE FAST END. The threshold would
+    # grow as 1/loop while the real rate grows as 1/(loop+35), so any loop below
+    # 37 would put the threshold above the achievable rate and the alert could
+    # never fire. scripts/ci/render.sh uses this same model, so the two files
+    # measure the same quantity.
+    #
+    # THE FLOOR SETS AN UPPER LIMIT ON loop. Below the floor of 20 a single
+    # stuck resource cannot reach the threshold, which happens at loop=145.
+    # Integer division makes the enforced bound 137, erring on the safe side.
+    #
+    # WHY [60m]. Measured gaps between occurrences: median 95s, but one of 39
+    # MINUTES while the uploader was busy with a large session. A short window
+    # goes false across that gap, resets the `for:` timer, and the alert never
+    # fires.
+    annotations:
+      description: |
+        The uploader keeps finding a resource on XNAT that disagrees with what it
+        holds locally in a way it cannot fix by uploading: XNAT holds files the
+        staged copy does not, or holds a file whose content differs. It retries
+        every pass and gets the same answer.
+
+        A resource that is merely SHORT is not this. The uploader repairs that
+        itself by uploading the shortfall, and logs a warning rather than the
+        error this rule counts.
+
+        NO DATA IS LOST: the de-identified copy is retained until delivery is confirmed.
+
+        1. list them
+             kubectl -n xnat-ingest logs deploy/edge-upload --since=60m \
+               | grep "already exists on XNAT with different checksums"
+        2. delete those resources on XNAT so the uploader can recreate them
+        3. NO RESTART IS NEEDED ON THE PINNED 0.15.6: the deletion is picked up
+           within one --loop interval. ON 0.15.0 AND EARLIER IT WAS, so do this
+           step if a site is still on one of those. Those versions hold one XNAT
+           connection for the pod lifetime and never invalidate the cached
+           listings, so the deletion stays invisible to them. Fixed by PR #171,
+           released in 0.15.3.
+             kubectl -n xnat-ingest rollout restart deploy/edge-upload
+      summary: '{{ $labels.session }} is incomplete on XNAT and will not self-repair'
+    # Line breaks match the tier-2 rule character for character. The cross-tier
+    # check in scripts/ci/promtool.sh compares the rendered rule as a string, so
+    # a purely cosmetic difference in where `| json` sits reads as drift and
+    # would have to be exempted, which would blunt the check for the one field
+    # that genuinely does differ.
+    expr: "sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  | json | message =~ \".*already exists on XNAT with different checksums.*\"\n  | regexp `resource in .(?P<resource>[^:]+:[^:]+:[^:]+):`\n  | label_format session=\"{{.resource}}\" [60m])) > __UPLOAD_STUCK_ERRORS__\n"
+    for: 15m
+    labels:
+      category: xnat-delivery
+      severity: warning
+      source: loki-ruler
+  - alert: SessionUploadStalled
+    annotations:
+      description: "The uploader logged that it began this session and has not logged a successful completion for it within the window. Could be a slow network, a large session, or XNAT refusing it. Inspect:\n  kubectl -n xnat-ingest logs -l component=upload --tail=50\n"
+      summary: Session {{ $labels.session }} on {{ $labels.cluster }} has been uploading for 15+ minutes
+    expr: "(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Including .* scans/files in upload from '\"\n  | regexp \"in upload from '(?P<session>[^']+)'\"\n  [15m])) > 0)\nunless on (cluster, session)\n(sum by (cluster, session) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  |~ \"Successfully uploaded all files in\"\n  | regexp \"Successfully uploaded all files in '(?P<session>[^']+)'\"\n  [15m])) > 0)\n"
+    for: 5m
+    labels:
+      severity: warning
+      source: loki-ruler
+  - alert: XNATBacklogGrowing
+    expr: "(sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  | json | session != \"\" [30m]))\n -\n sum(count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n\
+      \  |~ \"Successfully uploaded all files in\" [30m]))\n) > 3\n"
+    for: 30m
+    labels:
+      severity: warning
+      source: loki-ruler
+    annotations:
+      summary: XNAT upload backlog is growing
+      description: "Sessions are being staged faster than they're being pushed to XNAT. xnat-ingest-upload may be slow or partially failing \u2014 check `kubectl logs -n xnat-ingest -l component=upload`."
+  - alert: DICOMValidationFailureSpike
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"assign\"}\n  |~ \"(?i)invalid|validation.*fail\" [1h])) > 10\n"
+    for: 5m
+    labels:
+      severity: warning
+      source: loki-ruler
+    annotations:
+      summary: '>10 invalid DICOM sessions on {{ $labels.cluster }} in last hour'
+      description: "Sessions are landing in __invalid__/. Likely a scanner exporting DICOMs without AccessionNumber \u2014 check scanner config."
+- name: ais-edge-pipeline-info
+  interval: 30s
+  rules:
+  - alert: XNATUploadSuccess
+    annotations:
+      description: "Session {{ $labels.session }} landed in XNAT (pushed by\nxnat-ingest-upload on cluster {{ $labels.cluster }}).\nVerify in the pod logs:\n  kubectl -n xnat-ingest logs deploy/xnat-ingest-upload\
+        \ --tail=30\n"
+      summary: "XNAT upload completed \u2014 {{ $labels.session }}"
+    expr: "sum by (cluster, session) (\n  count_over_time(\n    {namespace=\"xnat-ingest\", component=\"upload\"}\n    |~ \"Successfully uploaded all files in\"\n    | regexp \"Successfully uploaded all\
+      \ files in '(?P<session>[^']+)'\"\n    [10m]\n  )\n) > 0\n"
+    for: 0s
+    labels:
+      category: pipeline-success
+      severity: info
+      source: loki-ruler
+  - alert: XNATAuthFailure
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"upload\"}\n  != \"it/s\"\n  |~ \"(?i)(unauthorized|forbidden|status[^0-9]{0,10}40[13]\\\\b|HTTP[^0-9]{0,10}40[13]\\\
+      \\b|\\\\b40[13][^0-9]{0,3}(unauthorized|forbidden))\" [15m])) > 3\n"
+    for: 0s
+    labels:
+      category: xnat-auth
+      severity: warning
+      source: loki-ruler
+    annotations:
+      description: "More than 3 authentication rejections (401/403) from XNAT in 15\nminutes \u2014 so this is NOT the routine session-cookie expiry, which\nthe uploader recovers from by itself within one\
+        \ ~62s loop and which\ncan never reach this threshold.\n\nCheck, in order:\n  1. Is XNAT up at all? A 5xx outage produces a 401 afterwards\n     because the pre-outage session id is no longer known.\
+        \ This rule\n     cannot see 5xx, so rule it out first:\n       kubectl -n xnat-ingest logs deploy/mgmt-upload-{{ $labels.cluster }} --tail=100 | grep -E \"50[0-9]|Connection\"\n  2. Did the credential\
+        \ change under the running pod? The uploader\n     reads xnat-credentials once at startup and holds one connection:\n       kubectl -n xnat-ingest rollout restart deploy/mgmt-upload-{{ $labels.cluster\
+        \ }}\n     If a restart fixes it, the Secret was rotated without one.\n  3. Is the account locked or the role revoked? Verify the\n     username/password in the xnat-credentials Secret against XNAT\n\
+        \     directly before assuming the Secret is wrong.\n\nNothing is lost while this fires: sessions stay in S3 staging and\nthe reclaimer refuses to remove anything it cannot confirm.\n"
+      summary: XNAT kept rejecting authenticated calls from the uploader on {{ $labels.cluster }}
+  - alert: OrthancDeidLuaError
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)lua.*error|traceback|stack\\\\s+traceback\" [10m])) > 0\n"
+    for: 1m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: deid
+    annotations:
+      summary: Orthanc deid Lua hook errored on {{ $labels.cluster }}
+      description: 'The deidentify-and-forward.lua hook produced a Lua error in
+
+        the last 10 minutes. Inspect the Orthanc pod logs and check
+
+        the deidentification-profile.json for syntax issues.
+
+        '
+  - alert: DeidentifyStageError
+    # Counterpart to OrthancDeidLuaError for the xnat-ingest engine. Whichever
+    # engine a site runs, a failure to de-identify has to be visible; without
+    # this, switching to ingest.deidentify silences OrthancDeidLuaError and puts
+    # nothing in its place, leaving the one thing you cannot afford to miss
+    # unwatched.
+    #
+    # Matches error text rather than a structured event: the stage logs
+    # tracebacks as plain text. tqdm writes progress bars to the same stream
+    # ("Processing staged sessions ... 100%|####|"), so the pattern is anchored
+    # on error words and never on a bare percentage.
+    expr: |
+      sum by (cluster) (count_over_time(
+        {namespace="xnat-ingest", component="deidentify"}
+        |~ "(?i)traceback|error:|exception|no applicable spec" [10m])) > 0
+    for: 1m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: deid
+    annotations:
+      summary: xnat-ingest deidentify errored on {{ $labels.cluster }}
+      description: >
+        The deidentify stage logged an error in the last 10 minutes. Sessions
+        that fail to de-identify are NOT uploaded, so this is a stall rather
+        than a leak. Check the pod logs and confirm the recipes under
+        ingest.deidentify.specConfigMap cover the formats being received.
+  - alert: OrthancStorageGrowing
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\" [1h])) > 1000\n"
+    for: 5m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: orthanc-backlog
+    annotations:
+      summary: Orthanc received >1k instances on {{ $labels.cluster }} in the last hour
+      description: 'Either a real ingest spike (legitimate, may need to scale
+
+        edge storage) or group-orthanc isn''t draining Orthanc. Check the
+
+        group-orthanc pod''s REST-pull loop and Orthanc''s storage PVC size.
+
+        '
+- name: ais-edge-data-policy
+  interval: 5m
+  rules:
+  - alert: EdgeDiskLow
+    expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | free_pct < __DP_MIN_FREE_DISK_PCT__ [15m])) > 0\n"
+    for: 5m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-storage
+    annotations:
+      summary: Edge {{ $labels.cluster }} is low on disk at {{ $labels.stage }}
+      description: "The data-policy engine reports less free space than\ndataPolicy.originals.facilityBackup.minFreeDiskPercent allows on\n{{ $labels.cluster }}, for stage {{ $labels.stage }}.\n\nNOTHING\
+        \ IS DELETED BECAUSE OF THIS. Originals are retained by\npolicy; a full disk stops new studies being accepted, it does not\ndiscard anything already held.\n\n  kubectl --kubeconfig kubeconfig-{{\
+        \ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=20\n\nFree space by growing the volume, or by enabling reclaim for the\nderived stages once you are satisfied with the\
+        \ dry-run decisions.\n"
+  - alert: StageBacklogAgeing
+    # dataPolicy.reporter.stageAgeAlertAfter MADE REAL.
+    #
+    # PipelineSessionStuck is per session and fires only on one whose reclaim
+    # condition keeps failing. A stage whose reclaim is `never` returns before
+    # that check runs, so it can never raise stage_stuck -- and `never` is the
+    # default for the deidentified tree. This is the question that needs no
+    # reclaim condition at all: has the oldest thing here been here too long.
+    expr: |
+      sum by (cluster, stage) (count_over_time(
+        {namespace="xnat-ingest", component="data-policy"}
+        | json | event="stage_report"
+        | oldest_age_s > __DP_STAGE_AGE_ALERT_AFTER_S__ [15m])) > 0
+    for: 15m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-storage
+    annotations:
+      summary: '{{ $labels.stage }} on {{ $labels.cluster }} has entries older than the configured limit'
+      description: |
+        The oldest entry in this stage has been there longer than
+        dataPolicy.reporter.stageAgeAlertAfter.
+    
+        NOTHING IS DELETED BECAUSE OF THIS. It says the stage is not draining
+        at the rate it should, which is either a downstream stage that has
+        stopped consuming, or a retention policy of `never` on a tree that
+        does in fact keep growing.
+    
+          kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\
+            -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_report
+    
+        Check EdgeDiskLow too: a stage that never drains eventually fills the
+        volume, and that alert is the one with the deadline.
+  - alert: PipelineSessionStuck
+    expr: "sum by (cluster, stage) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_stuck\" [15m])) > 0\n"
+    for: 10m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-pipeline
+    annotations:
+      summary: A session on {{ $labels.cluster }} is stuck at {{ $labels.stage }}
+      description: "A session has been failing its reclaim condition for longer than\ndataPolicy.reporter.stuckAfter.\n\nIT IS NOT LOST AND NOTHING HAS BEEN DELETED OR MOVED. The engine is\nkeeping a copy it cannot prove is reconstructible, which is correct.\nWhat this alert says is that the condition is never going to come\ntrue on its own, and that the steady reclaim_kept line for this\nsession is not routine.\n\nUsual causes: the stage downstream never produced what the condition\nlooks for, or a reclaim word that cannot be satisfied in this\nconfiguration.\n\n  kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} \\\n    -n xnat-ingest logs -l app=data-policy --tail=50 | grep stage_stuck\n\nThe event carries the session, the reclaim word and the age.\n"
+  # THE REJECTION ITSELF, as opposed to the quarantine directory ageing.
+  #
+  # This rule was missing on this branch entirely, while everything around it
+  # assumed it existed: QuarantinedDataUnresolved's own description below tells
+  # the operator the AE title "is in the DICOMRejectedUnmappedAET mail", and
+  # files/deidentify-and-forward.lua:188 carries
+  #
+  #     -- Keep the "REJECT: no project mapped for CalledAET <AET>" wording:
+  #     -- the DICOMRejectedUnmappedAET alert rule matches on it.
+  #
+  # So the Lua was preserving a log string for a consumer that did not exist,
+  # and the surviving alert pointed at a mail nobody could have received.
+  #
+  # THE GAP WAS A DETECTION GAP, not bookkeeping. QuarantinedDataUnresolved
+  # fires on the quarantine directory's OLDEST ENTRY via data-policy's
+  # stage_report, which is hours later and keyed on directory age. An unmapped
+  # AE title arriving now produced a REJECT line nothing watched, and then
+  # silence until the directory aged past alertAfter. The scanner meanwhile
+  # believes it delivered: the studies are neither in XNAT nor reported.
+  #
+  # Selector matches main's, and both labels it needs are forwarded by
+  # files/vector-local.yaml: app comes from the pod's `app: orthanc` label.
+  - alert: DICOMRejectedUnmappedAET
+    expr: |
+      sum by (cluster, aet) (
+        count_over_time(
+          {namespace="xnat-ingest", app="orthanc"}
+          |~ "REJECT: no project mapped for CalledAET"
+          | regexp "CalledAET (?P<aet>[A-Za-z0-9._-]+)"
+          [5m]
+        )
+      ) > 0
+    for: 0s
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: dicom-routing
+    annotations:
+      summary: DICOM REJECTED — unmapped scanner AE title '{{ $labels.aet }}' on {{ $labels.cluster }}
+      description: "Orthanc rejected one or more studies sent with AE title '{{ $labels.aet }}', which is not in this site's orthanc.deid.aetMap. The studies did NOT reach XNAT and the sending modality was told the transfer succeeded.\nThey are quarantined, not discarded. Add the AE title to orthanc.deid.aetMap in sites/{{ $labels.cluster }}/values.yaml, upgrade the release, then re-send from the quarantine directory.\n"
+  - alert: QuarantinedDataUnresolved
+    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", component=\"data-policy\"}\n  | json | event=\"stage_report\"\n  | stage=\"originals.quarantine\"\n  | oldest_age_s > __DP_QUARANTINE_ALERT_AFTER_S__\
+      \ [15m])) > 0\n"
+    for: 5m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: dicom-routing
+    annotations:
+      summary: Quarantined studies on {{ $labels.cluster }} older than the configured limit
+      description: 'Studies rejected for an unmapped AE title have been sitting in
+
+        quarantine on {{ $labels.cluster }} for longer than
+
+        dataPolicy.originals.quarantine.alertAfter.
+
+
+        They are NOT lost and NOT in XNAT. Nothing will move them without
+
+        an operator: add the AE title to orthanc.deid.aetMap in
+
+        sites/{{ $labels.cluster }}/values.yaml, upgrade the edge release,
+
+        then re-send from the quarantine directory. The offending AE title
+
+        is in the DICOMRejectedUnmappedAET mail for the original rejection.
+
+        '

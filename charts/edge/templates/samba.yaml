@@ -1,0 +1,79 @@
+{{- if .Values.samba.enabled }}
+{{- /*
+Optional SMB drop-box, for sites that hand files to the pipeline rather than
+C-STOREing them from a modality. Off by default.
+
+Two things to know before enabling:
+
+  * It binds hostPort 445 on the node, so it conflicts with any smbd already
+    running there.
+  * It exports .Values.samba.subPath ONLY — not the volume root. Sharing the
+    root would put orthanc-storage/ (DICOM), grouped/, assigned/ and LOGS/ on
+    the SMB share, which is a far larger exposure than a drop-box needs.
+
+Pairs with ingest.fileDrop, which watches the same directory. Note that path
+has no Orthanc copy and no facility backup behind it — see
+dataPolicy.originals.fileDrop.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-samba
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: samba
+spec:
+  replicas: 1
+  # hostPort 445 cannot be bound twice on one node.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: samba
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: samba
+        component: samba
+    spec:
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      containers:
+        - name: samba
+          image: "{{ .Values.samba.image.repository }}:{{ .Values.samba.image.tag }}"
+          imagePullPolicy: {{ .Values.samba.image.pullPolicy }}
+          env:
+            - name: NAME
+              value: {{ .Values.samba.shareName | quote }}
+            - name: USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.samba.existingSecret }}
+                  key: username
+            - name: PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.samba.existingSecret }}
+                  key: password
+          securityContext:
+            capabilities:
+              # Required to bind the privileged SMB port.
+              add: [NET_BIND_SERVICE]
+          ports:
+            - name: smb
+              containerPort: 445
+              hostPort: {{ .Values.samba.hostPort }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.samba.resources | nindent 12 }}
+          volumeMounts:
+            - name: pipeline
+              # dockurr/samba serves from /storage.
+              mountPath: /storage
+              subPath: {{ .Values.samba.subPath }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+{{- end }}

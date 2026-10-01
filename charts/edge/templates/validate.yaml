@@ -1,0 +1,35 @@
+{{/*
+=============================================================================
+The only job of this file is to run edge.validate.
+=============================================================================
+Every guard in `edge.validate` (charts/edge/templates/_helpers.tpl) catches a
+misconfiguration that produces NO error at runtime — data not moving, or PHI
+leaving the site with everything looking healthy. They are only worth anything
+if they run on every render.
+
+They used to be invoked from templates/storage.yaml. That worked, but it made
+the guards a side effect of one unrelated file: renaming it, wrapping it in an
+`if`, or splitting the PVCs out would have switched off EVERY guard in the
+chart at once, silently, with the render still succeeding.
+
+This file has no other content and no condition, so it renders on every
+`helm template`, `helm install` and `helm upgrade`. It exists to be dull.
+
+It deliberately emits NO Kubernetes object: `fail` aborts the render, and a
+template that produces only comments and whitespace is dropped by Helm, so
+this adds nothing to the cluster.
+
+TO PROVE THE GUARDS STILL FIRE (run after changing anything in this chart):
+
+  helm template edge charts/edge -f charts/edge/ci-values.yaml \
+      --set clusterLabel=""
+
+must fail, and the error must name THIS file:
+  Error: execution error at (ais-edge/templates/validate.yaml:...): clusterLabel
+  must be set: ...
+
+If it names some other template, the invocation has moved and this file is no
+longer what is running the guards.
+=============================================================================
+*/}}
+{{- include "edge.validate" . -}}
