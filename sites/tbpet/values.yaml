@@ -123,7 +123,7 @@ upload:
     provider: AWS
     endpoint: https://s3.ap-southeast-2.amazonaws.com
     bucket: ais-s3-tbp-s3bucket-1afz0bzdw5jd6
-    prefix: STAGING-202607
+    prefix: RNSH-TBPET
     region: ap-southeast-2
     existingSecret: s3-edge-credentials
     caBundleSecret: tbpet-egress-ca
