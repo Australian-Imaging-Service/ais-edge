@@ -287,6 +287,12 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # xnat-ingest and leaves no artefact this engine can observe, so the
             # engine reports the tree and never acts on it.
             return 1 ;;
+        onPackaged)
+            # NEVER TRUE HERE, for the same reason as onDeidentified: the
+            # package STAGE unlinks each de-identified session once it has
+            # written the packaged copy, and leaves nothing this engine can
+            # observe. The engine reports /data/deidentified and never acts on it.
+            return 1 ;;
         *)
             # AN UNKNOWN WORD IS NOT AN UNMET CONDITION, and until now both
             # returned 1. A typo behaved exactly like a correctly configured
