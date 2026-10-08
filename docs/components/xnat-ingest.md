@@ -29,9 +29,19 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
+- **`xnat-ingest package`** (`<release>-package`, `component=package`) — runs
+  after deidentify, under `deid.engine: ingest` only (`ingest.package.enabled`,
+  on by default). Reads `/data/deidentified` and writes `/data/packaged`. Each
+  `medimage/dicom-dir` scan resource is replaced by a `DICOM-zip` resource,
+  holding the whole series as an uncompressed zip, and one DICOM sample that
+  XNAT can read headers from. Each session is removed from `/data/deidentified`
+  once it has been packaged (`dataPolicy.derived.deidentified.reclaim:
+  onPackaged`). A session with no `dicom-dir` resource is skipped and never
+  reaches `/data/packaged`. Runs xnat-ingest `ingest.package.imageTag` (0.16.0,
+  the first release with `package`).
 - **`xnat-ingest upload`** (`<release>-upload`, `component=upload`) — reads
-  `/data/assigned`, or `/data/deidentified` when the deidentify stage is on, and
-  uploads sessions to XNAT
+  `/data/assigned`, `/data/deidentified` when the deidentify stage is on, or
+  `/data/packaged` when the package stage is on, and uploads sessions to XNAT
 
 All three run in ONE namespace — `namespace:` in `sites/<site>/values.yaml`,
 `xnat-ingest`. Tier-2 splits ingest (edge cluster) from upload (management

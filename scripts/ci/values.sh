@@ -298,6 +298,8 @@ EOF
 # compare. edge-direct-ingest-reclaim also renders the staged-reclaimer CronJob
 # that owns the terminal tree under direct upload; neg-edge-reclaim-deid-onuploaded
 # keeps the same declaration failing under Orthanc-deid, where nothing owns it.
+# ingest.package is turned OFF here so this stays the deidentified-is-terminal
+# layout; edge-deid-ingest-package below is the same with the package stage on.
 cat >"$V/edge-deid-ingest.yaml" <<'EOF'
 deid:
   engine: ingest
@@ -314,6 +316,27 @@ ingest:
     specs:
       "__default__/medimage/dicom-series": |
         FORMAT dicom
+  package:
+    enabled: false
+EOF
+
+# THE PACKAGE STAGE ON, as it is by default under deid.engine=ingest. The
+# uploader, the policy engine and the staged-reclaimer move to /data/packaged,
+# and /data/deidentified becomes an intermediate tree the package stage
+# retires (onPackaged). Layered on edge-deid-ingest.yaml.
+cat >"$V/edge-deid-ingest-package.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    deidentified:
+      reclaim: auto
+    packaged:
+      reclaim: onUploaded
+ingest:
+  package:
+    enabled: true
+  extraPipPackages:
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@f68a8ab"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@f68a8ab#subdirectory=extras"
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -811,6 +834,14 @@ printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x
 # tree would be kept for ever while the policy read as if it were being cleaned.
 printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
 
+# Under the package stage the uploader reads /data/packaged, so onUploaded can
+# never be satisfied for /data/deidentified.
+printf 'ingest:\n  package:\n    enabled: true\n' >"$V/neg-edge-reclaim-deid-onuploaded-package.yaml"
+# onPackaged is satisfied by the package stage unlinking its input, so it is
+# meaningless when that stage does not render.
+printf 'dataPolicy:\n  derived:\n    deidentified:\n      reclaim: onPackaged\n' >"$V/neg-edge-reclaim-onpackaged-no-stage.yaml"
+printf 'dataPolicy:\n  derived:\n    deidentified:\n      minAge: 1d\n' >"$V/neg-edge-reclaim-onpackaged-minage.yaml"
+
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
 cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
@@ -1171,6 +1202,8 @@ edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-direct-ingest-package	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
+edge-s3-ingest-package	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
 edge-reclaimer-six-hourly	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reclaimer-six-hourly.yaml
@@ -1265,6 +1298,9 @@ neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-recla
 neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-moved-assigned.yaml	while the uploader reads
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
+neg-edge-reclaim-deid-onuploaded-package	charts/edge	edge-base.yaml edge-deid-ingest.yaml neg-edge-reclaim-deid-onuploaded-package.yaml	with ingest.package enabled
+neg-edge-reclaim-onpackaged-no-stage	charts/edge	edge-base.yaml edge-deid-ingest.yaml neg-edge-reclaim-onpackaged-no-stage.yaml	but the package stage does not render
+neg-edge-reclaim-onpackaged-minage	charts/edge	edge-base.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml neg-edge-reclaim-onpackaged-minage.yaml	is set alongside reclaim=onPackaged
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
 neg-edge-deid-lua-tags	charts/edge	edge-base.yaml neg-edge-deid-lua-tags.yaml	still reads project=
 neg-edge-filedrop-reclaim	charts/edge	edge-base.yaml neg-edge-filedrop-reclaim.yaml	that directory is the only copy

@@ -6,6 +6,9 @@ The ingest pipeline: group -> assign.
     group (fs)      optional second source: a watched directory
     assign          derive project/subject/session and collate into
                     /data/assigned, ready for upload
+    deidentify      deid.engine=ingest only: /data/assigned -> /data/deidentified
+    package         deid.engine=ingest only: /data/deidentified ->
+                    /data/packaged (zipped series + DICOM sample per scan)
 
 Every stage mounts the SAME pipeline PVC at /data. That is required, not
 tidiness: the stages hardlink between orthanc-storage/, grouped/ and
@@ -228,6 +231,11 @@ spec:
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
             - "--session"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
+            {{- with .Values.ingest.assign.constantProjectId }}
+            # Overrides --project: every session goes to this XNAT project.
+            - "--constant-project-id"
+            - {{ . | quote }}
+            {{- end }}
             - "--copy-mode"
             - {{ .Values.ingest.assign.copyMode | quote }}
             {{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
@@ -388,6 +396,77 @@ spec:
               {{- end }}
             {{- end }}
             {{- end }}
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-package
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: package
+spec:
+  replicas: 1
+  # Two packagers over one tree would race each other's build directories.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: package
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: package
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.package.imageTag }}
+      {{- include "edge.extraPip.initContainers" (dict "root" $ "image" $pkgImage) | nindent 6 }}
+      containers:
+        - name: package
+          image: {{ $pkgImage }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["xnat-ingest", "package"]
+          args:
+            - "/data/deidentified"
+            - {{ include "edge.uploadSourceDir" . | quote }}
+            - {{ .Values.ingest.package.sourceDatatype | quote }}
+            {{- range .Values.ingest.package.outputResources }}
+            - "--output-resource"
+            - {{ .label | quote }}
+            - {{ .spec | quote }}
+            {{- end }}
+            - "--copy-mode"
+            - {{ .Values.ingest.package.copyMode | quote }}
+            {{- if eq (include "edge.deidentifiedReclaim" $) "onPackaged" }}
+            # dataPolicy.derived.deidentified.reclaim = onPackaged.
+            #
+            # Drop each de-identified session once the packaged copy has been
+            # written. Without this nothing empties /data/deidentified: the
+            # uploader reads /data/packaged, so its markers never describe this
+            # tree, and `package --loop` would re-package every session each
+            # pass. A session that fails to package is left in place to retry.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+            - "--loop"
+            - {{ .Values.ingest.package.interval | quote }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- include "edge.extraPip.env" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.extraPip.volumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.extraPip.volume" . | nindent 8 }}
 {{- end }}
 {{- if .Values.ingest.associate.enabled }}
 ---
