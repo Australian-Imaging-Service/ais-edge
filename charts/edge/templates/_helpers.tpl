@@ -967,3 +967,12 @@ before.
 {{- define "edge.uploadReclaim" -}}
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
 {{- end }}
+
+{{- /* The terminal tree as a dataPolicy.derived key: the tree the uploader
+     reads and, under direct upload, the staged-reclaimer CronJob owns.
+     GUIDING: data-policy's hand-off (EXTERNAL_RECLAIM_STAGE) and the age the
+     CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
+     different trees. */}}
+{{- define "edge.uploadTreeKey" -}}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- end }}

@@ -334,6 +334,22 @@ case "$MIN_AGE_S" in
         unavailable minage_unparseable "${_minage_key}=${MIN_AGE} is not a duration I can parse (expected at most 10 digits and an optional s/m/h/d/w, e.g. 0, 90m, 12h, 1d, 2w), so refusing to run rather than treating it as 0" ;;
 esac
 
+# THE TREE'S OWN minAge (edge chart only; the mgmt chart passes none).
+# data-policy hands this tree to us before its own age check, so without this
+# no deleter reads derived.<tree>.minAge. Wait for the LONGER of the two.
+TREE_MIN_AGE="${TREE_MIN_AGE:-}"
+TREE_MIN_AGE_KEY="${TREE_MIN_AGE_KEY:-TREE_MIN_AGE}"
+if [ -n "$TREE_MIN_AGE" ]; then
+    TREE_MIN_AGE_S=$(to_seconds "$TREE_MIN_AGE")
+    case "$TREE_MIN_AGE_S" in
+        ''|*[!0-9]*)
+            unavailable minage_unparseable "${TREE_MIN_AGE_KEY}=${TREE_MIN_AGE} is not a duration I can parse (expected at most 10 digits and an optional s/m/h/d/w, e.g. 0, 90m, 12h, 1d, 2w), so refusing to run rather than ignoring it" ;;
+    esac
+    if [ "$TREE_MIN_AGE_S" -gt "$MIN_AGE_S" ]; then
+        MIN_AGE="$TREE_MIN_AGE" MIN_AGE_S="$TREE_MIN_AGE_S" _minage_key="$TREE_MIN_AGE_KEY"
+    fi
+fi
+
 # The per-run removal cap is the blast-radius bound, and a non-numeric value
 # does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer
 # expression expected" and exits 2, which `if` reads as false, so the check at
@@ -491,7 +507,7 @@ if [ "$STORAGE" = "filesystem" ]; then
 else
     _origin="bucket=${S3_BUCKET} prefix=${S3_PREFIX}"
 fi
-jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} minAge=${MIN_AGE} verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
+jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
 
 # -----------------------------------------------------------------------------
 # S3 helpers. Each returns ERR on ANY doubt — a non-zero exit, an empty
@@ -1078,7 +1094,7 @@ while IFS= read -r session; do
     fi
     age=$(( now - newest ))
     if [ "$age" -lt "$MIN_AGE_S" ]; then
-        jlog reclaim_skipped "$session" "last written ${age}s ago, minAge is ${MIN_AGE} (${MIN_AGE_S}s)" \
+        jlog reclaim_skipped "$session" "last written ${age}s ago, minAge is ${MIN_AGE} (${MIN_AGE_S}s) from ${_minage_key}" \
             ",\"objects\":${count},\"age_s\":${age}"
         skipped=$((skipped + 1)); continue
     fi

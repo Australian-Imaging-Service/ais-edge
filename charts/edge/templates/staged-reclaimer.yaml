@@ -110,6 +110,13 @@ spec:
                   value: "onXnatConfirmed"
                 - name: MIN_AGE
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.minAge | quote }}
+                # The recovery window of the tree this CronJob owns. data-policy
+                # hands the tree over before its own age check, so this is the
+                # only reader. The script waits for the LONGER of the two.
+                - name: TREE_MIN_AGE
+                  value: {{ if eq (include "edge.uploadTreeKey" .) "deidentified" }}{{ .Values.dataPolicy.derived.deidentified.minAge | quote }}{{ else }}{{ .Values.dataPolicy.derived.assigned.minAge | quote }}{{ end }}
+                - name: TREE_MIN_AGE_KEY
+                  value: {{ printf "dataPolicy.derived.%s.minAge" (include "edge.uploadTreeKey" .) | quote }}
                 - name: VERIFY_XNAT
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.verifyAgainstXnat | quote }}
                 - name: MAX_REMOVALS

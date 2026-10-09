@@ -270,6 +270,7 @@ def env(c):
     return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
 
 problems, checked, delegated, layouts = [], 0, 0, set()
+reclaimers, windowed = 0, 0
 rules_renders, reporter_off, reclaimers = 0, 0, 0
 interval_case_seen = False
 for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
@@ -355,6 +356,28 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
             problems.append("%s: EXTERNAL_RECLAIM_STAGE=%r is not a row in stages.tsv, so the engine never recognises the CronJob's tree" % (case, ext))
     if not re.fullmatch(r"[0-9]+", dp.get("STUCK_AFTER_S") or ""):
         problems.append("%s: STUCK_AFTER_S=%r is not a number of seconds" % (case, dp.get("STUCK_AFTER_S")))
+    # The staged-reclaimer CronJob is the only deleter of the tree data-policy
+    # hands it, so it must read THAT tree, and that tree's minAge.
+    for d in docs:
+        if d.get("kind") != "CronJob" or not d["metadata"]["name"].endswith("-staged-reclaimer"):
+            continue
+        job = ((d.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}
+        for c in ((job.get("template") or {}).get("spec") or {}).get("containers") or []:
+            cj = env(c)
+            reclaimers += 1
+            if ext not in rows:
+                problems.append("%s: the staged-reclaimer renders but data-policy hands it no tree (EXTERNAL_RECLAIM_STAGE=%r)" % (case, ext))
+                continue
+            if cj.get("STAGED_ROOT") != rows[ext][2]:
+                problems.append("%s: the staged-reclaimer reads %r but %s is at %r" % (case, cj.get("STAGED_ROOT"), ext, rows[ext][2]))
+            if cj.get("TREE_MIN_AGE_KEY") != "dataPolicy.%s.minAge" % ext:
+                problems.append("%s: TREE_MIN_AGE_KEY=%r but data-policy hands over %s" % (case, cj.get("TREE_MIN_AGE_KEY"), ext))
+            m = re.fullmatch(r"([0-9]{1,10})([smhdw]?)", cj.get("TREE_MIN_AGE") or "")
+            got = int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)] if m else None
+            if got is None or str(got) != rows[ext][6]:
+                problems.append("%s: TREE_MIN_AGE=%r but %s has minAge %ss in stages.tsv" % (case, cj.get("TREE_MIN_AGE"), ext, rows[ext][6]))
+            elif got:
+                windowed += 1
 
 if checked == 0:
     problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
@@ -369,10 +392,12 @@ if rules_renders and not reporter_off:
     problems.append("no render has the Loki rules without a reporter, so the reporter-off gating goes unchecked")
 if checked and not delegated:
     problems.append("no render sets EXTERNAL_RECLAIM_STAGE, so the delegation wiring goes unchecked")
+if checked and not windowed:
+    problems.append("no staged-reclaimer render carries a non-zero TREE_MIN_AGE, so the tree's minAge wiring goes unchecked")
 if problems:
     raise SystemExit("; ".join(problems))
-print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s; %d delegate a stage)"
-      % (checked, ", ".join(sorted(layouts)), delegated))
+print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s; %d delegate a stage; %d staged-reclaimer(s) read the delegated tree and its minAge)"
+      % (checked, ", ".join(sorted(layouts)), delegated, reclaimers))
 PY
 )" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
 
