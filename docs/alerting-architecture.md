@@ -97,6 +97,8 @@ with `.Files.Get` and Helm never templates it.
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
 | `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage raises one alert rather than two (a firing mail and its resolve, one pair per logged reason). |
 | `CPUThrottlingHigh` | Prometheus | kube-prometheus-stack's rule, unmodified. The data-policy reporter carries no CPU limit (`dataPolicy.reporter.resources`), so it has no CFS quota, cAdvisor exports no `container_cpu_cfs_*` series for it, and the rule cannot see it. Under the old 1-core limit its sub-second, multi-process sweep was throttled in about 61% of the few CFS periods it ran in, at 0.0014 cores average, and the rule fired and cleared several times a day, each re-fire a new mail. Every container with a CPU limit is still covered. The reporter's real failure, going quiet, is `DataPolicyReporterSilent`. `scripts/ci/runtime-templates.sh` fails if the reporter renders a CPU limit again. |
 
@@ -122,7 +124,8 @@ that content comes from:
   `files/prometheus-rules/*.yaml` and emits one object per severity file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
   `ais-edge-warning` (`IngestPodCrashLoop`, `ReclaimerNotSucceeding`, and
-  `KubeJobFailed` in place of the upstream copy) and `ais-edge-info`
+  `KubeJobFailed` in place of the upstream copy), `ais-edge-uploader`
+  (`XNATUploaderRestarted`, `XNATUploaderMemoryGrowing`, only in direct-upload mode) and `ais-edge-info`
   (`NodeCountChanged`; `CPUThrottlingHigh` is upstream's own copy, unmodified). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`

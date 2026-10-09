@@ -145,6 +145,24 @@ route:
     - matchers:
         - alertname =~ "Watchdog|InfoInhibitor"
       receiver: "null-meta"
+    # Restart history is an event; expiry of its 15m window is not recovery.
+    # Separate uploader pods so another edge cannot change this notification group.
+    - matchers:
+        - alertname = "XNATUploaderRestarted"
+      receiver: email-no-resolved
+      group_by: ["alertname", "cluster", "uploader_release", "namespace", "pod", "container"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+      continue: false
+    - matchers:
+        - alertname = "XNATUploaderMemoryGrowing"
+      receiver: email-primary
+      group_by: ["alertname", "cluster", "uploader_release", "namespace", "pod", "container"]
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 24h
+      continue: false
     # Per-alert override: XNATUploadSuccess is severity=info (so the
     # default routing tree below would send it to Slack), but operators
     # want an email confirmation for every successful XNAT push for

@@ -1145,6 +1145,12 @@ ingest:
       session: AccessionNumber
 EOF
 
+# Exercise the local alert stack with its direct uploader, including overrides.
+cat >"$V/edge-upload-custom.yaml" <<'EOF'
+fullnameOverride: custom
+namespace: upload-custom
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1161,6 +1167,8 @@ mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-da
 edge-defaults	charts/edge	edge-base.yaml
 edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
+edge-upload-alerts	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml
+edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml edge-upload-custom.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
