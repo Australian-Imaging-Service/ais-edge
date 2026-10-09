@@ -830,6 +830,16 @@ ingest:
         FORMAT dicom
 EOF
 
+# A recovery window longer than the CronJob's own minAge. data-policy hands the
+# deidentified tree to the staged-reclaimer, so TREE_MIN_AGE must carry 7d to it
+# (runtime-templates.sh checks the value against stages.tsv).
+cat >"$V/edge-tree-minage.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    deidentified:
+      minAge: 7d
+EOF
+
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
 storage:
   facilityBackup:
@@ -1178,6 +1188,7 @@ edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
