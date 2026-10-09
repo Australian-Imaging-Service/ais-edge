@@ -38,6 +38,9 @@ RULES_SRC="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
 # __RELEASE_NAMESPACE__ is not listed: it sits inside a label string, parses,
 # and the tests match it literally.
 RULE_TEST_VALUES=(
+  "__UPLOADER_NAMESPACE__=xnat-upload"
+  "__UPLOADER_RELEASE__=ais-mgmt\\/mgmt"
+  "__UPLOADER_DEPLOYMENT_REGEX__=(mgmt-upload-edge-a|mgmt-upload-edge-b)"
   "__RECLAIMER_ALERT_AFTER_S__=10800"   # 3h, the chart default today
 )
 RULES_DIR="$CI_WORK_DIR/prometheus-rules-src"
@@ -860,5 +863,12 @@ PY
     *)     ci_fail "these rules select the whole namespace, which on one node also matches Loki/Grafana/Prometheus logs: ${out#FAIL }" ;;
   esac
 done
+
+ci_heading "uploader alerts match rendered workloads and routes"
+if out="$(python3 "$HERE/uploader-alerts.py" "$CI_RENDER_DIR" 2>&1)"; then
+  ci_pass "$out"
+else
+  ci_fail "$out"
+fi
 
 ci_summary "promtool"
