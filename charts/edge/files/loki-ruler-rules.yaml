@@ -135,7 +135,7 @@ groups:
   # The line is excluded rather than the threshold raised: a genuine storm looks
   # different (tracebacks, auth failures, connection errors) and those still count.
   #
-  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. On the pinned 0.15.6
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.16.1)
   # the re-offer is answered from a file-set comparison rather than a label one,
   # so a session that really was delivered is skipped silently and the emitter
   # quoted above is gone. What the exclusion now buys is separation of concerns:
@@ -240,6 +240,7 @@ groups:
     # CORRECTION: an earlier version of this note said the "please delete on
     # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
     # become a no-op. BOTH WERE WRONG. It is still at helpers/remotes.py:861-866
+    # (0.15.6; :949 in 0.16.1)
     # and carries no "Missing paths" line; the grep that produced the claim
     # missed it because the phrase is split across two adjacent string literals.
     # Dropping the matcher is therefore NOT cosmetic -- it genuinely widens the
@@ -282,7 +283,7 @@ groups:
     # case from a genuinely stuck resource, because they are the same rate; the
     # matcher separated them.
     #
-    # ON THE PINNED 0.15.6 NEITHER SHOULD REACH THIS RULE. The name-only
+    # FROM 0.15.6 ON (PINNED 0.16.1) NEITHER SHOULD REACH THIS RULE. The name-only
     # comparison removes the second case at source, and the first now presents
     # as MISSING files, which the uploader repairs rather than reporting here.
     # The floor below is kept sized against the bounded burst anyway: it costs
@@ -334,7 +335,8 @@ groups:
              kubectl -n xnat-ingest logs deploy/edge-upload --since=60m \
                | grep "already exists on XNAT with different checksums"
         2. delete those resources on XNAT so the uploader can recreate them
-        3. NO RESTART IS NEEDED ON THE PINNED 0.15.6: the deletion is picked up
+        3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.16.1 clears the cache every
+           pass, upload_api.py:157): the deletion is picked up
            within one --loop interval. ON 0.15.0 AND EARLIER IT WAS, so do this
            step if a site is still on one of those. Those versions hold one XNAT
            connection for the pod lifetime and never invalidate the cached
@@ -496,7 +498,7 @@ groups:
     # attempt. A failed repair logs ERROR lines: XNATUploadRetryStorm.
     # $value is the number of scan resources (max, not sum: a retried repair
     # must not count twice).
-    # CAUTION: matches xnat-ingest's own wording (0.15.6); a reword silences it.
+    # CAUTION: matches xnat-ingest's own wording (0.15.6, unchanged in 0.16.1); a reword silences it.
     expr: |
       max by (cluster, session) (
         max_over_time(
