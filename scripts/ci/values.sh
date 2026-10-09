@@ -1234,9 +1234,17 @@ ingest:
       session: AccessionNumber
 EOF
 
+# Uploader alert selectors must follow supported name and namespace overrides.
+cat >"$V/mgmt-upload-custom.yaml" <<'EOF'
+fullnameOverride: custom
+xnatUpload:
+  namespace: upload-custom
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
+mgmt-upload-custom	charts/mgmt	mgmt-base.yaml mgmt-upload-custom.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml

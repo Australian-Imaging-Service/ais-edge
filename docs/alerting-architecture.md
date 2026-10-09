@@ -8,7 +8,7 @@ evaluated by **Loki's built-in ruler** running LogQL queries against the JSON
 event stream. XNAT *backlog* is deliberately NOT among them: `XNATBacklogGrowing`
 was measured and deleted, because the log string it matched could not
 distinguish a new arrival from a static backlog. See "What lives where" below
-for the current inventory — 13 Loki-ruler alerts and 9 Prometheus alerts — and
+for the current inventory — 13 Loki-ruler alerts and 13 Prometheus alerts — and
 "What we removed" for the four that went. K8s/cert-manager-derived alerts
 (node NotReady, certificate expiry, cert-sync staleness, SeaweedFS down) stay in
 **Prometheus** as `PrometheusRule` objects. Both fire into the existing
@@ -49,7 +49,7 @@ expressions sit close to the dashboard queries that operators already trust.
 ## What lives where
 
 This table is the full shipped inventory, not a sample: **13** alerts in
-`charts/mgmt/files/loki-ruler-rules.yaml` and **9** across the four files in
+`charts/mgmt/files/loki-ruler-rules.yaml` and **13** across the six files in
 `charts/mgmt/files/prometheus-rules/`. If you add one, add a row — an alert
 missing from here reads as coverage nobody knows about, and an alert listed
 here that no longer ships reads as coverage that does not exist.
@@ -61,6 +61,8 @@ here that no longer ships reads as coverage that does not exist.
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
 | `SessionStagedNotConfirmedInXNAT` | Loki ruler | The absence alert: an `event=~"reclaim_.*"` for a session in a 24h window `offset 48h`, with no `reclaim_confirmed` since. Its staged half is why the reclaimer must keep speaking through an outage — see the last section. |
 | `ReclaimerRunUnavailable` | Loki ruler | `event="reclaim_unavailable"` with `session=""` (the run-level line) and no `reclaim_finished` in the last 70m. This is what an operator acts on. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for each edge's `<release>-reclaim-<edge>` CronJob: no successful run for `dataPolicy.derived.s3Staged.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot. `cluster=<edge>` is taken from the CronJob name, and an inhibit rule with `equal: [cluster]` holds it back while `ReclaimerRunUnavailable` fires for the same edge, so one outage raises one alert per edge rather than two. |
 | `KubeStateMetricsDown` | Prometheus | `absent(up{job="kube-state-metrics"} == 1)` for 15m. Every CronJob alert here (`CertSyncStale`, `CertSyncNeverSucceeded`, `ReclaimerNotSucceeding`) reads kube-state-metrics, so without it they have nothing to evaluate and stay quiet; `defaultRules` is off, so nothing upstream covers it. |
 | `DICOMValidationFailureSpike` | Loki ruler | Pattern match on assign-pod log lines (`component="assign"`). |
@@ -86,7 +88,7 @@ here that no longer ships reads as coverage that does not exist.
 
 `kube-prometheus-stack`'s own rule pack is **not** part of that count:
 `defaultRules.create: false` (`charts/mgmt/values.yaml`), so every Prometheus
-alert in this stack is one of the nine above. There is no `KubePodCrashLooping`
+alert in this stack is one of the thirteen above. There is no `KubePodCrashLooping`
 or `KubeletDown` quietly backing us up.
 
 Four alerts that used to be in this table are not, all removed after

@@ -774,10 +774,18 @@ annotations are Prometheus's templates, not Helm's.
     {{- fail (printf "dataPolicy.derived.s3Staged.alertAfter must be longer than %ds, got %q. That is 2 x the period of schedule %q plus deadlineSeconds (%ds), or deadlineSeconds alone when the period cannot be read from the schedule: one failed run followed by a slow success already goes that long without a success, so ReclaimerNotSucceeding would mail for a single failure. forever/never/empty are refused as well; to stop the alert, silence it in Alertmanager." $reclaimerFloorS (toString .Values.dataPolicy.derived.s3Staged.alertAfter) $sched $reclaimerDeadlineS) }}
   {{- end }}
 {{- end }}
+{{- $uploaderDeployments := list }}
+{{- if .Values.xnatUpload.enabled }}
+  {{- range $edge := .Values.edges }}
+    {{- $uploaderDeployments = append $uploaderDeployments (regexQuoteMeta (printf "%s-upload-%s" (include "mgmt.fullname" $) $edge.name)) }}
+  {{- end }}
+{{- end }}
+{{- $uploaderDeploymentRegex := printf "(%s)" (join "|" $uploaderDeployments) | replace "\\" "\\\\" }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+{{- if or (ne (base $path) "uploader.yaml") (gt (len $uploaderDeployments) 0) }}
 {{- /* No reclaimer CronJob renders under reclaim: never, so neither does its rule. */ -}}
 {{- if not (and (eq (base $path) "reclaimer.yaml") (eq (toString $s3staged.reclaim) "never")) }}
-{{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
+{{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) }}
 {{- /* A surviving sentinel is SILENT here: PromQL reads a bare __NAME__ as a
        metric name, so the rule loads, looks healthy and never fires. */ -}}
 {{- if regexMatch "__[A-Z0-9_-]+__" $promRules }}
@@ -794,6 +802,7 @@ metadata:
 spec:
   {{- $promRules | nindent 2 }}
 ---
+{{- end }}
 {{- end }}
 {{- end }}
 
