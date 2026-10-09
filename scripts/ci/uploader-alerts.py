@@ -111,8 +111,14 @@ for path in sorted(Path(sys.argv[1]).glob('*.yaml')):
         continue
     am = configs[0]
     receivers = {r['name']: r for r in am['receivers']}
+    routes = am['route']['routes']
+    if (not routes or routes[0].get('matchers') != ['alertname =~ "Watchdog|InfoInhibitor"']
+            or routes[0].get('receiver') != 'null-meta' or routes[0].get('continue', False)):
+        problems.append(f'{path.name}: meta-alert null route must come first')
+    for index, alert in enumerate(('XNATUploaderRestarted', 'XNATUploaderMemoryGrowing'), start=1):
+        if len(routes) <= index or routes[index].get('matchers') != [f'alertname = "{alert}"']:
+            problems.append(f'{path.name}: {alert} route must immediately follow the meta-alert route in uploader order')
     for alert in sorted(expected_alerts):
-        routes = am['route']['routes']
         matches = [r for r in routes if f'alertname = "{alert}"' in r.get('matchers', [])]
         if len(matches) != 1:
             problems.append(f'{path.name}: {alert} lacks one explicit route')
