@@ -455,7 +455,20 @@ dataPolicy:
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
-      reclaim: auto             # never | onUploaded
+      # never | onUploaded | onPackaged
+      #
+      # auto resolves to onPackaged when ingest.package renders: the package
+      # stage then reads this tree and removes each session itself once it has
+      # written the packaged copy, so the uploader's markers describe
+      # /data/packaged, not this tree. Otherwise onUploaded.
+      reclaim: auto
+      minAge: 0
+    # Where the package stage writes, and what `upload` reads when
+    # ingest.package renders. Rendered as a stage only then.
+    packaged:
+      # No `location` key, for the same reason as `deidentified` above: the
+      # path is derived from edge.uploadSourceDir.
+      reclaim: auto             # never | onUploaded  (auto = onUploaded)
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -677,6 +690,26 @@ ingest:
   # fields directly; turning this off breaks monitoring, not just formatting.
   logFormat: json
 
+  # Extra Python packages, as pip requirement specs, for the pods that load
+  # packaged sessions: package, and the direct-mode upload. Use it for
+  # fileformats types the image does not ship, such as package's dicom-sample
+  # output, which lives in fileformats-vendor-australianimagingservice
+  # (+ -extras). Upload needs them as well because the packaged manifests name
+  # that type, and loading a session resolves every manifest's type.
+  #
+  # An init container pip-installs them (--no-deps, so they must need only what
+  # the image already has) into an emptyDir on PYTHONPATH. fileformats is a
+  # namespace package, so they merge with the image's copy.
+  #
+  # CAUTION: the install runs on EVERY pod start, so the edge must reach the
+  # index or git host each time; if it can't, the pod stays in Init. Pin git
+  # refs to a commit, not a branch, or a restart can pick up different code.
+  #
+  #   extraPipPackages:
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@<sha>"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@<sha>#subdirectory=extras"
+  extraPipPackages: []
+
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
     enabled: true
@@ -706,6 +739,11 @@ ingest:
   assign:
     interval: 60
     copyMode: hardlink_or_copy
+    # OPTION: file every session under this one XNAT project, whatever the
+    # project tag says (assign --constant-project-id; the tagMapping project tag
+    # is then ignored). For an edge that only ever feeds one project. Empty:
+    # the project comes from tagMapping.project.
+    constantProjectId: ""
     # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
     # modify instances, so nothing writes the ClinicalTrial* tags and assign must
     # read tags the modality itself populates. The chart refuses to render if
@@ -846,6 +884,40 @@ ingest:
     # <session>.json.enc and are unreadable without it. Unset, they are plain
     # JSON on the same volume as the data they de-identify.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
+
+  # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`
+  # between deidentify and upload: reads /data/deidentified, writes
+  # /data/packaged, and the uploader follows it to /data/packaged.
+  #
+  # Each SOURCE resource is replaced by every outputResources entry, and each
+  # conversion receives the original series. The defaults produce the XNAT
+  # layout: the whole series as an uncompressed zip under DICOM-zip, plus one
+  # DICOM sample that XNAT can read headers from. `auto` names the sample's
+  # resource from its SOP class (DICOM, secondary, ...).
+  #
+  # ONLY RENDERS UNDER deid.engine=ingest. The input is the deidentify stage's
+  # output, which exists only under that engine. Under any other engine this
+  # block is ignored and the uploader reads /data/assigned as before.
+  #
+  # CAUTION: a session with NO resource of sourceDatatype is skipped and never
+  # copied to /data/packaged, so it is never uploaded. It stays in
+  # /data/deidentified, where the data-policy stage report shows it ageing.
+  package:
+    enabled: true
+    # `package` first ships in xnat-ingest 0.16.0. Only this stage runs it;
+    # the other stages stay on ingest.image.tag. Drop this override once
+    # ingest.image.tag is 0.16.0 or later.
+    imageTag: "0.16.0"
+    interval: 60
+    copyMode: hardlink_or_copy
+    sourceDatatype: medimage/dicom-dir
+    # label: resource name in XNAT, or `auto` for a DICOM sample.
+    # spec:  target datatype, with converter options after ':'.
+    outputResources:
+      - label: DICOM-zip
+        spec: "medimage/dicom-dir+zip:compression=ZIP_STORED"
+      - label: auto
+        spec: medimage/vnd.australianimagingservice.dicom-sample
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.

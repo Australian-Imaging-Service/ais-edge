@@ -91,8 +91,9 @@ spec:
                 {{- include "edge.logEnv" . | nindent 16 }}
                 - name: STORAGE
                   value: "filesystem"
-                # Follows the deid engine: /data/deidentified under ais-deid,
-                # /data/assigned under Orthanc-deid. Same helper the uploader
+                # Follows the deid engine: /data/packaged under ais-deid with
+                # the package stage, /data/deidentified under ais-deid without
+                # it, /data/assigned under Orthanc-deid. Same helper the uploader
                 # reads, so the reclaimer can never watch a different tree than
                 # the one the uploader drains.
                 - name: STAGED_ROOT

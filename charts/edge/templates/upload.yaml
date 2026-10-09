@@ -182,9 +182,12 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      {{- $uploadImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
+      {{- /* The packaged manifests can name types only these packages define. */}}
+      {{- include "edge.extraPip.initContainers" (dict "root" $ "image" $uploadImage) | nindent 6 }}
       containers:
         - name: upload
-          image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
+          image: {{ $uploadImage | quote }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
           # xnat-ingest loops internally via --loop; no bash wrapper needed.
           command: ["xnat-ingest", "upload"]
@@ -222,10 +225,13 @@ spec:
                   key: password
             - name: XINGEST_TEMPDIR
               value: {{ .Values.upload.direct.tempDir | quote }}
+            {{- include "edge.extraPip.env" . | nindent 12 }}
           resources:
             {{- toYaml .Values.upload.direct.resources | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.extraPip.volumeMount" . | nindent 12 }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.extraPip.volume" . | nindent 8 }}
 {{- end }}

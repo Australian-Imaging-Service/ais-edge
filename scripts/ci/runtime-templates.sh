@@ -232,7 +232,9 @@ fi
 #
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
-# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
+# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR),
+# and the package layout (the package stage reads /data/deidentified and writes
+# the tree the uploader drains).
 #
 # EXTERNAL_RECLAIM_STAGE must name a row of stages.tsv, and at least one render
 # must set it. The engine compares it against field 1 of that table, and it is
@@ -279,7 +281,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     except yaml.YAMLError as e:
         problems.append("%s: %s" % (case, " ".join(str(e).split())))
         continue
-    dp = up = dp_cpu = None
+    dp = up = dp_cpu = pkg = None
     rows = {}
     for d in docs:
         for c in containers(d):
@@ -288,6 +290,8 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                 dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
             if d.get("kind") == "Deployment" and c.get("name") == "uploader":
                 up = env(c)
+            if d.get("kind") == "Deployment" and c.get("name") == "package":
+                pkg = c.get("args") or []
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
     for d in docs:
@@ -332,7 +336,17 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                         "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
                         "CPUThrottlingHigh flaps on it. Keep only the memory limit" % (case, dp_cpu))
     src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
-    layouts.add("ingest" if src != adir else "orthanc")
+    layouts.add("package" if pkg is not None else "ingest" if src != adir else "orthanc")
+    # The package stage writes the tree the uploader drains, and must retire
+    # its input itself: nothing else can satisfy a reclaim on /data/deidentified.
+    if pkg is not None:
+        if pkg[1:2] != [src]:
+            problems.append("%s: the package stage writes %r but the uploader reads %r" % (case, pkg[1:2], src))
+        if pkg[:1] != ["/data/deidentified"]:
+            problems.append("%s: the package stage reads %r, not the deidentify stage's /data/deidentified" % (case, pkg[:1]))
+        dword = rows.get("derived.deidentified", [""] * 6)[5]
+        if dword == "onPackaged" and "--unlink-source" not in pkg:
+            problems.append("%s: derived.deidentified is onPackaged but the package stage does not unlink its input" % case)
     if not src.startswith("/"):
         problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
     if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
@@ -358,7 +372,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
 
 if checked == 0:
     problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
-for want in ("orthanc", "ingest"):
+for want in ("orthanc", "ingest", "package"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
 if checked and not interval_case_seen:

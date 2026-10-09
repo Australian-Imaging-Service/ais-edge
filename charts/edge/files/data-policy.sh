@@ -300,6 +300,12 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # present under this word is one the stage has not finished with,
             # and keeping it is the correct answer.
             return 1 ;;
+        onPackaged)
+            # NEVER TRUE HERE, for the same reason as onDeidentified: the
+            # package STAGE unlinks each de-identified session once it has
+            # written the packaged copy, and leaves nothing this engine can
+            # observe. The engine reports /data/deidentified and never acts on it.
+            return 1 ;;
         *)
             # AN UNKNOWN WORD IS NOT AN UNMET CONDITION, and until now both
             # returned 1. A typo -- onDeidentifed, onUpladed -- behaved exactly
@@ -307,7 +313,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # true: nothing reclaimed, for ever, logged as normal operation. The
             # reclaim words are validated nowhere else; the enum in values.yaml
             # is a comment with no schema behind it.
-            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned or onDeidentified" \
+            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned, onDeidentified or onPackaged" \
                  ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"$(jsan "$1")\""
             return 1 ;;
     esac
