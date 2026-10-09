@@ -347,6 +347,8 @@ dataPolicy:
       location: /data/assigned
       reclaim: auto        # never | onUploaded
       # As above: a recovery window after upload, not a delay before it.
+      # CAUTION: under direct upload the stagedReclaimer CronJob below applies
+      # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
 
@@ -377,6 +379,8 @@ dataPolicy:
       # terminal tree is /data/assigned and the chart fails the render rather than
       # let this read as though something were watching this one.
       reclaim: auto             # never | onUploaded
+      # The recovery window after upload. Under direct upload the stagedReclaimer
+      # CronJob applies it (the longer of this and its own minAge).
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -397,11 +401,14 @@ dataPolicy:
     # with assigned.reclaim / deidentified.reclaim above, whichever the deid
     # engine makes terminal. Set that one to `never` and this does not render.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is
-      # the slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by
       # the XNAT check regardless, so this is about noise, not safety.
+      # GUIDING: the CronJob waits for the LONGER of this and the minAge of the
+      # tree it reclaims (assigned or deidentified, by deid engine). Set the
+      # recovery window there; it is logged as the deciding key when it wins.
       minAge: 1d
       # Ask XNAT whether it holds the session, complete, before deleting the
       # only remaining copy. Off means trusting local state alone.

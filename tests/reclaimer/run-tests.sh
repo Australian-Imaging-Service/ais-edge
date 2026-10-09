@@ -445,6 +445,34 @@ run_fs_case fs_build_dir_ignored  yes reclaim_removed
 run_fs_case fs_undeclared_file    no  reclaim_kept
 run_fs_case fs_min_age_blocks     no  reclaim_skipped      MIN_AGE=1d
 
+# THE TREE'S OWN minAge. data-policy hands this tree to the CronJob before its
+# own age check, so the tree's minAge must reach the CronJob or no deleter reads
+# it. The edge chart passes it as TREE_MIN_AGE; the script waits for the LONGER
+# of the two and names the key that decided.
+fs_age() {   # <root> <date>: re-date the whole session
+    find "$1/$SESS" -exec touch -d "$2" {} +
+}
+setup_fs_tree_min_age_blocks()  { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; fs_age "$1" '3 days ago'; }
+assert_fs_tree_min_age_blocks() {
+    grep -q 'minAge is 7d (604800s) from dataPolicy.derived.deidentified.minAge' "$1" \
+        || { echo "the skip does not name the tree's minAge as the deciding key"; return 1; }
+}
+setup_fs_tree_min_age_elapsed() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; fs_age "$1" '8 days ago'; }
+setup_fs_tree_min_age_shorter() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; fs_age "$1" '3 hours ago'; }
+assert_fs_tree_min_age_shorter() {
+    grep -q 'minAge is 1d (86400s) from dataPolicy.derived.stagedReclaimer.minAge' "$1" \
+        || { echo "the skip does not name stagedReclaimer.minAge as the deciding key"; return 1; }
+}
+setup_fs_tree_min_age_bad()     { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+setup_fs_tree_min_age_010d()    { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; fs_age "$1" '9 days ago'; }
+
+TREE_KEY="TREE_MIN_AGE_KEY=dataPolicy.derived.deidentified.minAge"
+run_fs_case fs_tree_min_age_blocks   no  reclaim_skipped      MIN_AGE=1d TREE_MIN_AGE=7d   "$TREE_KEY"
+run_fs_case fs_tree_min_age_elapsed  yes reclaim_removed      MIN_AGE=1d TREE_MIN_AGE=7d   "$TREE_KEY"
+run_fs_case fs_tree_min_age_shorter  no  reclaim_skipped      MIN_AGE=1d TREE_MIN_AGE=0    "$TREE_KEY"
+run_fs_case fs_tree_min_age_bad      no  reclaim_unavailable  MIN_AGE=1d TREE_MIN_AGE=7days "$TREE_KEY"
+run_fs_case fs_tree_min_age_010d     no  reclaim_skipped      MIN_AGE=1d TREE_MIN_AGE=010d "$TREE_KEY"
+
 # REFUSALS. Each of these must abort the whole run rather than examine anything:
 # a reclaimer that cannot trust its own configuration must not delete under it.
 # The session is staged normally in every case, so "still there" is a real
