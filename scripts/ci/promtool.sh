@@ -31,6 +31,9 @@ RULES_SRC="$REPO_ROOT/charts/mgmt/files/prometheus-rules"
 # Sentinels the chart fills at render. Passes (a) and (b) run on a copy with
 # fixed test values; the unit tests are written against these.
 RULE_TEST_VALUES=(
+  "__UPLOADER_NAMESPACE__=xnat-upload"
+  "__UPLOADER_RELEASE__=ais-mgmt\\/mgmt"
+  "__UPLOADER_DEPLOYMENT_REGEX__=(mgmt-upload-edge-a|mgmt-upload-edge-b)"
   "__RECLAIMER_ALERT_AFTER_S__=10800"     # 3h, the chart default
   "__RECLAIMER_NAMESPACE__=xnat-upload"   # xnatUpload.namespace default
   "__RECLAIMER_CRONJOB_PREFIX__=mgmt"     # the release name render.sh uses
@@ -551,6 +554,13 @@ else
       *)       ci_fail "reclaimer silence check error: $line" ;;
     esac
   done < "$CI_WORK_DIR/reclaimer-silence.txt"
+fi
+
+ci_heading "uploader alerts match rendered workloads and routes"
+if out="$(python3 "$HERE/uploader-alerts.py" "$CI_RENDER_DIR" 2>&1)"; then
+  ci_pass "$out"
+else
+  ci_fail "$out"
 fi
 
 ci_summary "promtool"
