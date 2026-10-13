@@ -274,8 +274,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
          It is a RUNTIME raise, so the pod renders, schedules, starts and then
          CrashLoops, and the message says nothing about which value caused it.
-         RE-VERIFIED against the pinned 0.15.6; the same raise is in 0.13.1,
-         so this is not a version regression, it is a long-standing footgun
+         RE-VERIFIED against the pinned 0.16.1 (api/group_api.py:268); the same
+         raise is in 0.13.1 and 0.15.6, so this is not a version regression, it
+         is a long-standing footgun
          with no guard.
          The other stages accept the full set, which is why this key looks safe
          to change and is not. */ -}}
