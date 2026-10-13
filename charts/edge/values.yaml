@@ -707,9 +707,11 @@ ingest:
   # Extra Python packages, as pip requirement specs, for the pods that load
   # packaged sessions: package, and the direct-mode upload. Use it for
   # fileformats types the image does not ship, such as package's dicom-sample
-  # output, which lives in fileformats-vendor-australianimagingservice
-  # (+ -extras). Upload needs them as well because the packaged manifests name
-  # that type, and loading a session resolves every manifest's type.
+  # output and DicomSeries archive converters, which live in
+  # fileformats-vendor-australianimagingservice (+ -extras). Pin a vendor
+  # revision that provides both DicomSeries converters. Upload needs the type
+  # as well because packaged manifests name it, and loading a session resolves
+  # every manifest's type.
   #
   # An init container pip-installs them (--no-deps, so they must need only what
   # the image already has) into an emptyDir on PYTHONPATH. fileformats is a
@@ -909,32 +911,33 @@ ingest:
   # /data/packaged, and the uploader follows it to /data/packaged.
   #
   # Each SOURCE resource is replaced by every outputResources entry, and each
-  # conversion receives the original series. The defaults produce the XNAT
-  # layout: the whole series as an uncompressed zip under DICOM-zip, plus one
-  # DICOM sample that XNAT can read headers from. `auto` names the sample's
-  # resource from its SOP class (DICOM, secondary, ...).
+  # conversion receives the original series. The vendor extras convert that
+  # series into a DICOM directory ZIP and a representative image. The defaults
+  # produce the XNAT layout: the whole series as an uncompressed zip under
+  # DICOM-zip, plus one DICOM sample that XNAT can read headers from. `auto`
+  # names the sample's resource from its SOP class (DICOM, secondary, ...).
   #
   # ONLY RENDERS UNDER deid.engine=ingest. The input is the deidentify stage's
   # output, which exists only under that engine. Under any other engine this
   # block is ignored and the uploader reads /data/assigned as before.
   #
-  # CAUTION: a session with NO resource of sourceDatatype is skipped and never
-  # copied to /data/packaged, so it is never uploaded. It stays in
-  # /data/deidentified, where the data-policy stage report shows it ageing.
+  # The packager fails if sessions exist but none has a sourceDatatype scan
+  # resource. An empty input directory is normal while waiting for new work.
   package:
-    enabled: true
+    enabled: false
     # `package` first ships in xnat-ingest 0.16.0. Only this stage runs it;
-    # the other stages stay on ingest.image.tag. Drop this override once
-    # ingest.image.tag is 0.16.0 or later.
-    imageTag: "0.16.0"
+    # use a build containing the DicomSeries compatibility and empty-input
+    # fixes before enabling it. The other stages stay on ingest.image.tag.
+    # Drop this override once ingest.image.tag includes those fixes.
+    imageTag: "0.16.1"
     interval: 60
     copyMode: hardlink_or_copy
-    sourceDatatype: medimage/dicom-dir
+    sourceDatatype: medimage/dicom-series
     # label: resource name in XNAT, or `auto` for a DICOM sample.
     # spec:  target datatype, with converter options after ':'.
     outputResources:
       - label: DICOM-zip
-        spec: "medimage/dicom-dir+zip:compression=ZIP_STORED"
+        spec: "medimage/dicom-dir+zip:compression=0"
       - label: auto
         spec: medimage/vnd.australianimagingservice.dicom-sample
 
