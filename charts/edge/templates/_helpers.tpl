@@ -275,8 +275,8 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against the pinned 0.15.6; the same raise is in
-               0.13.1, so this is a long-standing footgun rather than a version
+               it. RE-VERIFIED against the pinned 0.16.1 (api/group_api.py:268); the
+               same raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
         {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
