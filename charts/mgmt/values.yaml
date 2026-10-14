@@ -439,7 +439,14 @@ xnatUpload:
   waitPeriod: 180
 
   alwaysInclude: "all"
-  requireManifest: false
+  # true: upload a resource only when its manifest is present and every file
+  # in it matches. A resource that the edge has sent in part waits for the
+  # next pass (the partial upload measured above). This does not wait for a
+  # whole session: a resource that has not arrived yet goes up on a later
+  # pass. Edge sessions carry manifests: xnat-ingest writes one in each
+  # resource and the edge copies it with the files.
+  # false: upload the objects that are there.
+  requireManifest: true
   verifySsl: false
 
   # CAUTION: Recreate, not RollingUpdate — two uploaders running --loop
