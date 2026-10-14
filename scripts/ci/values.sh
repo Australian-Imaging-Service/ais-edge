@@ -287,6 +287,13 @@ observability:
   enabled: false
 EOF
 
+# A site that turns the manifest check off still gets --dont-require-manifest.
+cat >"$V/edge-upload-direct-no-manifest.yaml" <<'EOF'
+upload:
+  direct:
+    requireManifest: false
+EOF
+
 cat >"$V/edge-observability-on.yaml" <<'EOF'
 observability:
   enabled: true
@@ -1245,10 +1252,12 @@ ingest:
 EOF
 
 # Uploader alert selectors must follow supported name and namespace overrides.
+# The manifest check is off here, so CI also covers the site opt-out.
 cat >"$V/mgmt-upload-custom.yaml" <<'EOF'
 fullnameOverride: custom
 xnatUpload:
   namespace: upload-custom
+  requireManifest: false
 EOF
 
 ci_positive_cases() {
@@ -1278,6 +1287,7 @@ mgmt-s3-mtls-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-s3-mt
 edge-defaults	charts/edge	edge-base.yaml
 edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
+edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml

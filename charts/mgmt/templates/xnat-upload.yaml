@@ -129,9 +129,12 @@ spec:
             # the edge is still writing it into the bucket. See values.yaml.
             - "--wait-period"
             - {{ $root.Values.xnatUpload.waitPeriod | quote }}
-            {{- if not $root.Values.xnatUpload.requireManifest }}
-            # Edge-staged sessions carry no manifest: the s3-uploader syncs the
-            # assigned directory as-is. Requiring one skips every session.
+            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # does not require a manifest (its option default is unset).
+            # See values.yaml.
+            {{- if $root.Values.xnatUpload.requireManifest }}
+            - "--require-manifest"
+            {{- else }}
             - "--dont-require-manifest"
             {{- end }}
             {{- if not $root.Values.xnatUpload.verifySsl }}
