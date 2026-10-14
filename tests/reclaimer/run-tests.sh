@@ -33,6 +33,23 @@ WORK="${TMPDIR:-/tmp}/reclaimer-tests"
 PASS=0; FAIL=0; FAILED=()
 _R=$'\033[31m'; _G=$'\033[32m'; _B=$'\033[1m'; _O=$'\033[0m'
 
+# XNAT SESSIONS, checked after EVERY case. stub-curl keeps them as the real
+# server does. A run logs in once, uses that session for every call and logs
+# out, however it ends; any other session stays open on XNAT until it times
+# out (the live server showed 83, and later 9, before this check). Skipped when
+# the run says it fell back to per-request logins: that fallback is deliberate.
+session_leak() {   # <output> <case dir>: prints the leak and returns 0, else 1
+    local opened closed
+    printf '%s' "$1" | grep -q '"event":"xnat_session_fallback"' && return 1
+    opened=$(cat "$2/xnat-sessions.log" 2>/dev/null | grep -c '^SESSION-OPENED')
+    closed=$(cat "$2/xnat-sessions.log" 2>/dev/null | grep -c '^SESSION-CLOSED')
+    [ "$opened" -gt 1 ] && { echo "the run opened $opened XNAT sessions, not 1"; return 0; }
+    # A logout that failed is a leak the run reported itself, not a hidden one.
+    printf '%s' "$1" | grep -q '"event":"xnat_session_close_failed"' && return 1
+    [ "$opened" != "$closed" ] && { echo "the run left an XNAT session open ($opened opened, $closed closed)"; return 0; }
+    return 1
+}
+
 # run_case <name> <expect_deleted: yes|no> <expect_event> [env assignments...]
 #
 # A case may also define `assert_<name>`, called with the path to the captured
@@ -79,6 +96,8 @@ run_case() {
         [ -s "$S/deletes.log" ] && why="$why (deleted: $(tr '\n' ' ' < "$S/deletes.log"))"
     elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
         ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+    elif why=$(session_leak "$out" "$S"); then
+        ok=0
     elif declare -F "assert_$name" >/dev/null 2>&1; then
         local extra
         if ! extra=$("assert_$name" "$S/out.log" 2>&1); then
@@ -389,6 +408,8 @@ run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
         ok=0; why="expected session-gone=$expect_gone but got $gone"
     elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
         ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+    elif why=$(session_leak "$out" "$S"); then
+        ok=0
     elif declare -F "assert_$name" >/dev/null 2>&1; then
         local extra
         if ! extra=$("assert_$name" "$S/out.log" "$root" 2>&1); then ok=0; why="$extra"; fi
@@ -414,6 +435,28 @@ setup_fs_dry_run()      { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2;
 
 # __build__ is the uploader's half-written tree. Reclaiming it would delete a
 # session mid-write, and it carries no manifest, so it must never be listed.
+# XNAT SESSIONS by name. XNAT_VERIFY_SSL=false, as on the test edge, where the
+# certificate does not verify: one login, used by every call, and one logout.
+setup_fs_one_xnat_session() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; }
+assert_fs_one_xnat_session() {
+    local log="$CASE_DIR/xnat-sessions.log"
+    [ "$(grep -c '^SESSION-OPENED' "$log")" = 1 ] && [ "$(grep -c '^SESSION-CLOSED' "$log")" = 1 ] \
+        || { echo "want 1 session opened and closed, got: $(tr '\n' ' ' < "$log")"; return 1; }
+    ! grep -q '"event":"xnat_session_close_failed"' "$1" || { echo "the logout failed"; return 1; }
+}
+# The login fails: the run still decides, with a login per request, and says so.
+setup_fs_session_fallback() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-jsession.fail"; }
+assert_fs_session_fallback() { grep -q '"event":"xnat_session_fallback"' "$1" || { echo "no xnat_session_fallback event"; return 1; }; }
+# Verification on: no XNAT call may turn it off with -k.
+setup_fs_xnat_tls_verified() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-cert-trusted"; }
+# The logout fails (HTTP 500): the run says so, and its decision is unchanged.
+setup_fs_session_close_failed() { fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-logout.fail"; }
+assert_fs_session_close_failed() { grep -q '"event":"xnat_session_close_failed"' "$1" || { echo "no xnat_session_close_failed event"; return 1; }; }
+assert_fs_xnat_tls_verified() {
+    ! grep -q 'xnat\.example\.org.* insecure$' "$CASE_DIR/calls.log" \
+        || { echo "an XNAT call used -k with XNAT_VERIFY_SSL=true: $(grep -m1 ' insecure$' "$CASE_DIR/calls.log")"; return 1; }
+}
+
 setup_fs_build_dir_ignored() {
     fs_session "$1" "$SESS" 2; xnat_has subj EXP1 visit 2
     mkdir -p "$1/__build__/1.scan/DICOM"; : > "$1/__build__/1.scan/DICOM/partial.dcm"
@@ -458,6 +501,10 @@ run_fs_case fs_xnat_absent        no  reclaim_kept
 run_fs_case fs_xnat_has_more      no  reclaim_kept
 run_fs_case fs_dry_run            no  reclaim_skipped      DRY_RUN=true
 run_fs_case fs_build_dir_ignored  yes reclaim_removed
+run_fs_case fs_one_xnat_session   yes reclaim_removed
+run_fs_case fs_session_fallback   yes reclaim_removed
+run_fs_case fs_xnat_tls_verified  yes reclaim_removed      XNAT_VERIFY_SSL=true
+run_fs_case fs_session_close_failed yes reclaim_removed
 run_fs_case fs_undeclared_file    no  reclaim_kept
 run_fs_case fs_min_age_blocks     no  reclaim_skipped      MIN_AGE=1d
 
