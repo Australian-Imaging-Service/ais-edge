@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers
+FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -111,6 +111,11 @@ pvc-retention: $(RENDER_DEP)
 
 reclaimer:
 	@tests/reclaimer/run-tests.sh
+
+# scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
+# error as "no cleanup Job runs", and never resume without a wrapped writer.
+reclaimer-fence:
+	@tests/reclaimer-fence/run-tests.sh
 
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,

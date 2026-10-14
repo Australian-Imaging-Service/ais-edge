@@ -80,6 +80,8 @@ else
 fi
 
 S3_PREFIX="${S3_PREFIX:-staged}"
+# The filesystem backend's decision and delete (see "FILESYSTEM BACKEND" below).
+FILES_HELPER="${FILES_HELPER:-$(dirname "$0")/reclaim-files.py}"
 
 # Where the two-consecutive-runs markers live. DELIBERATELY OUTSIDE S3_PREFIX.
 #
@@ -295,6 +297,13 @@ if [ "$STORAGE" = "filesystem" ]; then
     case "$STAGED_ROOT" in
         /|/data|/data/|"") unavailable staged_root_unsafe "STAGED_ROOT=${STAGED_ROOT} is too broad to delete within — point it at one stage directory" ;;
     esac
+    [ -f "$FILES_HELPER" ] || \
+        unavailable missing_tool "the filesystem backend needs ${FILES_HELPER}; nothing was examined"
+    # Armed: every delete happens inside the upload-tree writer lock. Without its
+    # paths there is no safe delete, so refuse the run, loudly.
+    if [ "$DRY_RUN" != "true" ] && { [ -z "${WRITER_LOCK:-}" ] || [ -z "${WRITER_ALIVE:-}" ]; }; then
+        unavailable writer_lock_unset "WRITER_LOCK and WRITER_ALIVE must be set to delete on the filesystem; nothing was examined"
+    fi
 fi
 
 # minAge -> seconds. An unparseable value must NOT collapse to 0: that would
@@ -832,157 +841,24 @@ filer_rm() {
 # =============================================================================
 
 # =============================================================================
-# FILESYSTEM BACKEND — the same questions, asked of a directory tree
+# FILESYSTEM BACKEND: reclaim-files.py
 # =============================================================================
-# Each of these answers exactly what its s3_ counterpart answers, in the same
-# format, including the ERR-versus-empty distinction that the whole script
-# depends on: "I could not find out" must never be readable as "there is
-# nothing there".
-#
-# Everything here is confined to STAGED_ROOT. The caller has already refused
-# any session name that is not a plain [A-Za-z0-9._-] token, and nothing else
-# is ever interpolated into a path.
-
-fs_safe_name() {
-    # THE DELETE PATH DOES NOT INHERIT TRUST. The caller already refuses a
-    # session name outside [A-Za-z0-9._-], but ".." is inside that class: a
-    # textual prefix check on the assembled path would then pass while the path
-    # escaped the root. Names come from a maxdepth-1 directory listing, which
-    # never yields "." or "..", so this cannot currently be reached -- which is
-    # exactly when a guard is cheap and worth having.
-    case "$1" in
-        ''|.|..|*/*|*..*) return 1 ;;
-    esac
-    return 0
-}
-
-fs_session_dir() { printf '%s/%s' "${STAGED_ROOT%/}" "$1"; }
-
-# THE TWO-CONSECUTIVE-RUNS MARKER, on disk. Under S3 this lives in the bucket
-# beside the data; here it lives in a __-prefixed directory INSIDE the staged
-# root, which fs_list_prefixes already skips, so it can never be mistaken for a
-# session. Keeping it inside the root also keeps it on the one volume the
-# CronJob is guaranteed to have mounted read-write.
-fs_state_dir() { printf '%s/__reclaim_state__' "${STAGED_ROOT%/}"; }
-
-fs_marker_seen()  { fs_safe_name "$1" || return 1; [ -f "$(fs_state_dir)/${1}.empty" ]; }
-fs_marker_set()   {
-    fs_safe_name "$1" || return 0
-    mkdir -p "$(fs_state_dir)" 2>/dev/null || return 0
-    printf 'seen-empty %s\n' "$(date -Iseconds)" > "$(fs_state_dir)/${1}.empty" 2>/dev/null || true
-}
-fs_marker_clear() { fs_safe_name "$1" || return 0; rm -f "$(fs_state_dir)/${1}.empty" 2>/dev/null || true; }
-
-fs_object_count() {
-    local d; d=$(fs_session_dir "$1")
-    [ -d "$d" ] || { echo 0; return; }
-    find -L "$d" -type f 2>/dev/null | wc -l | tr -d ' '
-}
-
-fs_multipart_count() {
-    # No such concept on a filesystem. A partially written session is caught by
-    # the settle window and by the manifest agreement check instead, not here.
-    echo 0
-}
-
-fs_newest_epoch() {
-    local d newest; d=$(fs_session_dir "$1")
-    [ -d "$d" ] || { echo ERR; return; }
-    newest=$(find -L "$d" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | tail -n1)
-    case "${newest:-}" in ''|*[!0-9]*) echo ERR; return ;; esac
-    printf '%s' "$newest"
-}
-
-fs_staged_totals() {
-    local d; d=$(fs_session_dir "$1")
-    [ -d "$d" ] || { echo ERR; return; }
-    python3 - "$d" <<'PY' 2>/dev/null || echo ERR
-import os, sys
-SIDECARS = ("__MANIFEST__.json", "MANIFEST.json", "__METADATA__.json")
-MANIFESTS = ("__MANIFEST__.json", "MANIFEST.json")
-root = sys.argv[1]
-data, manifest_dirs, count, size = {}, set(), 0, 0
-for dirpath, _dirnames, filenames in os.walk(root):
-    for base in filenames:
-        full = os.path.join(dirpath, base)
-        if base in MANIFESTS:
-            manifest_dirs.add(dirpath); continue
-        if base in SIDECARS:
-            continue
-        try:
-            sz = os.path.getsize(full)
-        except OSError:
-            print("ERR"); sys.exit()
-        data.setdefault(dirpath, []).append(base)
-        count += 1; size += sz
-undeclared = sorted(set(data) - manifest_dirs)
-if undeclared:
-    n = sum(len(data[x]) for x in undeclared)
-    print("UNDECLARED %d file(s) in %d resource director(ies) are named by no manifest (e.g. %s) - they were never checked against XNAT, so this session cannot be confirmed"
-          % (n, len(undeclared), undeclared[0]))
-    sys.exit()
-print("TOTALS\t%d\t%d" % (count, size))
-for dirname in sorted(data):
-    print("DIR\t%s\t%d" % (dirname, len(data[dirname])))
-PY
-}
-
-fs_manifest_agrees() {
-    local dir="$1" ndata="$2" f
-    for f in "${dir}/__MANIFEST__.json" "${dir}/MANIFEST.json"; do
-        [ -f "$f" ] || continue
-        python3 - "$f" <<'PY' 2>/dev/null | {
-import sys, json
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    print("ERR"); sys.exit()
-c = d.get("checksums")
-if not isinstance(c, dict):
-    print("ERR"); sys.exit()
-print(len(c))
-PY
-            read -r declared
-            case "${declared:-ERR}" in
-                ERR|'') echo ERR; return ;;
-                *) [ "$declared" = "$ndata" ] && echo OK || echo "SHORT ${declared}" ;;
-            esac
-        }
-        return
-    done
-    echo ERR
-}
-
-fs_rm() {
-    local session="$1" d
-    fs_safe_name "$session" || { printf 'refusing: %s is not a plain session name' "$session"; return 1; }
-    d=$(fs_session_dir "$session")
-    # Belt and braces. The caller validated the name; this refuses anything that
-    # is not a direct child of the configured root, so a bug above cannot turn
-    # into an rm outside it.
-    case "$d" in
-        "${STAGED_ROOT%/}"/*) : ;;
-        *) printf 'refusing: %s is not under %s' "$d" "$STAGED_ROOT"; return 1 ;;
-    esac
-    [ -d "$d" ] || { printf 'already gone'; return 0; }
-    rm -rf "$d" 2>&1 || { printf 'rm failed'; return 1; }
-    [ -d "$d" ] && { printf 'rm returned but the directory is still present'; return 1; }
-    printf 'removed %s' "$d"
-    return 0
-}
+# The filesystem backend decides per resource in reclaim-files.py, next to this
+# script: a HEAD per file against XNAT, then an exact-file delete inside the
+# upload-tree writer lock. The main pass hands it each session BEFORE any path
+# below, so no filesystem delete happens in this script.
 
 # --- the seam -----------------------------------------------------------------
-# The main loop calls these; each dispatches on STORAGE. Adding a third medium
-# means adding one implementation and one line here, and nothing above changes.
-st_object_count()   { case "$STORAGE" in filesystem) fs_object_count "$1" ;;   *) s3_object_count "$1" ;; esac; }
-st_multipart_count(){ case "$STORAGE" in filesystem) fs_multipart_count "$1" ;;*) s3_multipart_count "$1" ;; esac; }
-st_newest_epoch()   { case "$STORAGE" in filesystem) fs_newest_epoch "$1" ;;   *) s3_newest_epoch "$1" ;; esac; }
-st_staged_totals()  { case "$STORAGE" in filesystem) fs_staged_totals "$1" ;;  *) staged_totals "$1" ;; esac; }
-st_manifest_agrees(){ case "$STORAGE" in filesystem) fs_manifest_agrees "$1" "$2" ;; *) staged_manifest_agrees "$1" "$2" ;; esac; }
-st_rm()             { case "$STORAGE" in filesystem) fs_rm "$1" ;;             *) filer_rm "$1" ;; esac; }
-st_marker_seen()  { case "$STORAGE" in filesystem) fs_marker_seen "$1" ;;  *) aws s3api head-object --bucket "$S3_BUCKET" --key "${STATE_PREFIX}/${1}.empty" >/dev/null 2>&1 ;; esac; }
-st_marker_set()   { case "$STORAGE" in filesystem) fs_marker_set "$1" ;;   *) printf 'seen-empty %s\n' "$(date -Iseconds)" | aws s3 cp - "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors 2>/dev/null || true ;; esac; }
-st_marker_clear() { case "$STORAGE" in filesystem) fs_marker_clear "$1" ;; *) aws s3 rm "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors >/dev/null 2>&1 || true ;; esac; }
+# Only the S3 backend reaches these now.
+st_object_count()   { s3_object_count "$1"; }
+st_multipart_count(){ s3_multipart_count "$1"; }
+st_newest_epoch()   { s3_newest_epoch "$1"; }
+st_staged_totals()  { staged_totals "$1"; }
+st_manifest_agrees(){ staged_manifest_agrees "$1" "$2"; }
+st_rm()             { filer_rm "$1"; }
+st_marker_seen()  { aws s3api head-object --bucket "$S3_BUCKET" --key "${STATE_PREFIX}/${1}.empty" >/dev/null 2>&1; }
+st_marker_set()   { printf 'seen-empty %s\n' "$(date -Iseconds)" | aws s3 cp - "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors 2>/dev/null || true; }
+st_marker_clear() { aws s3 rm "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors >/dev/null 2>&1 || true; }
 
 if ! prefixes=$(st_list_prefixes); then
     # The one abort where the fan-out probably cannot help: we could not list
@@ -1027,6 +903,23 @@ while IFS= read -r session; do
     if [ "$removed" -ge "$MAX_REMOVALS" ]; then
         jlog reclaim_skipped "" "per-run removal cap of ${MAX_REMOVALS} reached — remaining sessions left for the next run"
         break
+    fi
+
+    # THE FILESYSTEM BACKEND DECIDES IN reclaim-files.py, and nothing below runs
+    # for it: the empty-prefix path and the count-and-bytes check are S3 only.
+    if [ "$STORAGE" = "filesystem" ]; then
+        rc=0
+        MIN_AGE="$MIN_AGE" MIN_AGE_S="$MIN_AGE_S" MIN_AGE_KEY="$_minage_key" DRY_RUN="$DRY_RUN" \
+            VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
+            HTTP_TIMEOUT="$HTTP_TIMEOUT" python3 "$FILES_HELPER" "$session" || rc=$?
+        case "$rc" in
+            0)  removed=$((removed + 1)) ;;
+            10) kept=$((kept + 1)) ;;
+            11) skipped=$((skipped + 1)) ;;
+            *)  jlog reclaim_failed "$session" "reclaim-files.py stopped with exit ${rc}; nothing more was done for this session"
+                kept=$((kept + 1)) ;;
+        esac
+        continue
     fi
 
     count=$(st_object_count "$session")

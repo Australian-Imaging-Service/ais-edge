@@ -280,6 +280,20 @@ either way; step 7 is where you would see it.)
 **A fresh install expires nothing.** Run with `dryRun` for a week, read the
 decisions in the logs, then enable.
 
+**Under `upload.mode: direct` a `staged-reclaimer` CronJob retires the upload
+tree** (`/data/assigned` under `deid.engine: orthanc`, `/data/deidentified`
+under `ingest`). For each resource of a session it finds every local file in
+XNAT's file listing and checks it with a HEAD request: present, with the same
+size (no download, so content is not compared). It removes only the files it
+proved, inside the upload-tree writer lock, and keeps everything it cannot
+prove. The first upgrade to this check, and any rollback to a release without
+the lock, need the drain in
+[xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
+`dataPolicy.derived.stagedReclaimer` in the site file controls its schedule,
+its minimum age (counted from when the newest file reached the tree), whether
+it verifies against XNAT (with `false` it removes nothing), and how many
+sessions one run may remove.
+
 ---
 
 ## 3. Secrets
