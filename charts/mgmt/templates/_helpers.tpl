@@ -363,10 +363,16 @@ SeaweedFS FILER HTTP endpoint (port 8888), as opposed to the S3 gateway
 endpoint (8333) above.
 
 These are genuinely different services on the same pod and they are not
-interchangeable: the S3 gateway cannot remove a directory ENTRY, which is the
-whole reason the reclaimer needs the filer. Measured on SeaweedFS 3.99:
+interchangeable. The reclaimer READS the filer: the bucket attributes of its
+cleaner gate (Seaweed-X-Amz-Allow-Empty-Folders, Seaweed-X-Ais-Cleaner-Drained)
+live only there, and the bucket Job writes them there. Nothing deletes through
+it any more. Measured on SeaweedFS 3.99:
   DELETE /buckets/<bucket>/<prefix>/<session>?recursive=true  -> 204, entry gone
   aws s3 rm --recursive <same>                                -> "PRE <session>/" remains
+and on 4.34: that filer delete checks the folder, then removes it, and a child
+written between the two goes with it. So the reclaimer deletes objects with
+If-Match and leaves the folder entry, which the current uploader does not list
+as a session (docs/components/seaweedfs.md, "Deleting staged objects").
 */}}
 {{- define "mgmt.filerInternalEndpoint" -}}
 http://{{ include "mgmt.fullname" . }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8888

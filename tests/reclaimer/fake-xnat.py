@@ -73,6 +73,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.close()
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         parts = path.strip("/").split("/")
+        # The shell's own calls, with the real curl: the login answers the new
+        # session id; the pre-flight probe answers an empty project list.
+        if self.command == "GET" and path == "/data/JSESSION":
+            return self.answer(200, (self.new_session or cookie).encode())
+        if self.command == "GET" and path == "/data/projects":
+            code = fx.get("status", {}).get("projects", 200)
+            return self.answer(code, json.dumps({"ResultSet": {"Result": []}}).encode())
         if self.command == "GET" and parts[-1] == "experiments" and len(parts) == 6:
             code = fx.get("status", {}).get("experiments", 200)
             rows = fx.get("experiments", {}).get(f"{parts[2]}/{parts[4]}", [])

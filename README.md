@@ -100,7 +100,7 @@ chart is not needed.
 | **Vector** | edge | Ships pod logs to Loki on the management node over TLS. |
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
-| **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**. The only component that deletes patient data. |
+| **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**: one object at a time, each delete conditional on the ETag it listed (`If-Match`), never a folder. The only component that deletes patient data. |
 | **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory. Renders **only under `upload.mode: direct`**, where there is no bucket and no s3-uploader to write an `uploaded` marker, so `onUploaded` would otherwise be unsatisfiable and the tree would grow unbounded. Also deletes patient data, under the same XNAT confirmation. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
@@ -151,8 +151,9 @@ server on the management node means:
         │
 12.  mgmt-upload-<edge>  ──▶ XNAT
         │
-13.  mgmt-reclaim-<edge>  re-queries XNAT, compares filenames AND checksums
-                          against the manifest, and only then deletes
+13.  mgmt-reclaim-<edge>  re-queries XNAT, proves each manifest file by its
+                          row in the mapped resource AND a HEAD of the same
+                          size, and only then deletes, object by object
 ```
 
 **Every hop is idempotent and fails safe.** If the S3 endpoint is unreachable,
@@ -565,12 +566,20 @@ Three properties worth understanding:
 rule would expire a session that never reached XNAT because a credential was
 wrong. A pure condition rule frees nothing once the signal breaks.
 
-**`onXnatConfirmed` verifies content, not existence.** XNAT creates the
+**`onXnatConfirmed` verifies each file, not existence.** XNAT creates the
 experiment on the first resource POST, so "the experiment exists" is true even
-for a partial upload. The reclaimer sums every `__MANIFEST__.json` into a set of
-`filename → MD5`, lists what XNAT actually holds, and deletes only when
-`missing == 0 AND mismatched == 0`. Every uncertainty — an unreadable manifest,
-a 500 from XNAT, an unparseable listing — resolves to **keep**.
+for a partial upload. The reclaimer reads every `__MANIFEST__.json` for the
+file names of a resource, finds each name's row in the one XNAT resource the
+uploader maps that folder to (the same scan id, the label xnat-ingest derives
+from the SOP class), and sends a HEAD for the file: only a 200 with a
+Content-Length equal to the staged size counts. Per-resource totals are not
+trusted; on xnat-test they stayed correct after XNAT had lost the files. Every
+uncertainty (an unreadable manifest, a 500 from XNAT, an unmapped resource, an
+object that changed after the listing) resolves to **keep** for that resource.
+An upload batch folder, an entry the reclaimer does not recognise, and the
+sidecars that still describe something are never touched; the resources proven
+next to them are reclaimed one at a time, so a session empties as its resources
+are proven.
 
 **`maxRemovals` bounds a bug.** A run that decided "delete everything" is capped
 per run, leaving the rest for somebody to notice. At the hourly schedule this
@@ -722,7 +731,9 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | `pvc-retention` | nothing holding data can be auto-deleted |
 | `runtime-templates` | scripts survive Helm rendering |
 | `duplicate-names` | no two objects collide |
-| `reclaimer` | 45 cases, asserting on **what was deleted**, not on log text. 34 drive the S3 backend through stub `aws`/`curl` binaries; 11 drive the filesystem backend against a real directory tree, where the assertion is that the session directory is gone |
+| `reclaimer` | 100 cases, asserting on **what was deleted**, not on log text. 32 drive the S3 backend through the real helper against a fake S3 (`If-Match` honoured, 412 on a stale ETag), a fake XNAT and a fake filer over HTTP, and assert which keys were deleted, that every DELETE carried `If-Match` and that none named a folder; 68 drive the filesystem backend against a real directory tree with real lock files, where the assertion is what is left on disk |
+| `reclaimer-fence` | 27 cases against a stub kubectl: the drain and resume around an upgrade of the edge's staged-reclaimer fail closed, a failed read is never "no Job runs" |
+| `cleaner-activation` | 23 cases against a stub kubectl and a stub curl: the order of the steps that opt a bucket out of the SeaweedFS cleaner, and that a failed query (a pod listing, the multipart check, a scale) is never read as "nothing runs": a failure attests and resumes nothing beyond that point, what it changed stays marked on the object, and a rerun puts it back |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
 | `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |

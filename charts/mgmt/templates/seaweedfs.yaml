@@ -836,13 +836,34 @@ spec:
                 sleep 5
               done
 
+              # The empty-folder cleaner removes a folder on its own soon after its
+              # last object goes, with a window in which a child written meanwhile
+              # is dropped. Every bucket opts out, new and existing (the policy is
+              # cached about 5 minutes). The attestation that the drain and the
+              # SeaweedFS restart happened is written only for a bucket created
+              # here, which has no history; for an existing bucket it comes from
+              # scripts/cleaner-activation.sh. The reclaimer deletes nothing
+              # without both. A failed write or readback fails this Job, loudly.
+              attribute() {   # <bucket> <name> <value>
+                code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT -H "$2: $3" "$FILER_ENDPOINT/buckets/$1?tagging") \
+                  || { echo "FATAL: cannot set $2 on bucket $1" >&2; exit 1; }
+                case "$code" in 2*) : ;; *) echo "FATAL: the filer answered HTTP $code to $2 on bucket $1" >&2; exit 1 ;; esac
+                # One line of python on purpose: a block scalar indents every line,
+                # and an indented continuation line is a Python IndentationError.
+                got=$(curl -sS -H 'Accept: application/json' "$FILER_ENDPOINT/buckets/?limit=1000" \
+                  | python3 -c 'import base64, json, sys; ext = next((e.get("Extended") or {} for e in json.load(sys.stdin).get("Entries") or [] if e.get("FullPath", "").rstrip("/").endswith("/" + sys.argv[1])), {}); print(base64.b64decode(ext.get(sys.argv[2]) or "").decode(errors="replace"))' "$1" "$2")
+                [ "$got" = "$3" ] || { echo "FATAL: $2 on bucket $1 reads back as '$got', not '$3'" >&2; exit 1; }
+                echo "bucket $1: $2 = $3"
+              }
               create_only() {
                 if aws s3api head-bucket --bucket "$1" >/dev/null 2>&1; then
                   echo "bucket $1 already exists — left untouched"
                 else
                   aws s3api create-bucket --bucket "$1"
                   echo "bucket $1 created"
+                  attribute "$1" Seaweed-X-Ais-Cleaner-Drained "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
                 fi
+                attribute "$1" Seaweed-X-Amz-Allow-Empty-Folders true
               }
 
               # Every distinct staging bucket in use, derived from the same
@@ -861,6 +882,8 @@ spec:
           env:
             - name: AWS_ENDPOINT_URL
               value: {{ include "mgmt.s3InternalEndpoint" . | quote }}
+            - name: FILER_ENDPOINT
+              value: {{ include "mgmt.filerInternalEndpoint" . | quote }}
             # SeaweedFS ignores the region entirely; the AWS CLI refuses to
             # make any call without one being set.
             - name: AWS_DEFAULT_REGION

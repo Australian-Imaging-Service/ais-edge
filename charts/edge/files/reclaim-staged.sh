@@ -20,10 +20,11 @@
 #     resource POST, so a 3-of-400-scans upload leaves a correctly-labelled
 #     but empty experiment. Confirmation means COUNTING every file the
 #     staged __MANIFEST__.json says it contains against XNAT.
-#   * CAUTION: deletion goes through the FILER's HTTP DELETE, never
-#     `aws s3 rm` — see docs/components/seaweedfs.md, "Deletion must go
-#     through the filer", for why. HTTP rather than `weed shell` over
-#     kubectl exec also means this job needs no pods/exec RBAC.
+#   * CAUTION: an object is deleted one by one, with If-Match set to the ETag
+#     this run listed before the proof, so a rewritten object stays (412).
+#     Folders are NEVER deleted: a filer folder delete can drop a child
+#     written after its check, and the uploader's listing skips empty
+#     folders. See docs/components/seaweedfs.md, "Deleting staged objects".
 #   * CAUTION: never decide from `weed shell` TEXT — its inline prompt
 #     ("> FIRST_ENTRY") once made a session that held data look empty.
 #     Every decision here comes from the S3 API or from XNAT.
@@ -41,9 +42,9 @@
 #
 #     reclaim_skipped    not eligible yet (too young), or dry-run
 #     reclaim_confirmed  XNAT positively reported holding this session
-#     reclaim_removed    fs.rm -r returned 0 for this prefix
+#     reclaim_removed    every object (or file) of this session was deleted
 #     reclaim_kept       deliberately NOT removed — undelivered, or uncertain
-#     reclaim_failed     removal ran but the prefix is still listed
+#     reclaim_failed     reclaim-files.py stopped with an exit code it does not define
 #     reclaim_unavailable  pre-flight failed; nothing was DECIDED. Emitted once
 #                        with session="" for the run, then once per staged
 #                        session — see the pre-flight note below for why the
@@ -68,8 +69,8 @@ if [ "$STORAGE" = "s3" ]; then
     : "${S3_BUCKET:?S3_BUCKET required}"
     # Base URL of the SeaweedFS FILER HTTP API (port 8888), e.g.
     #   http://mgmt-seaweedfs.seaweedfs.svc.cluster.local:8888
-    # This is the only way a directory ENTRY can be removed; the S3 gateway
-    # cannot do it. In-cluster and plain http on purpose.
+    # Read only: the pre-flight gate reads the bucket's attributes from it
+    # (the empty-folder cleaner opted out, and the activation attested).
     : "${FILER_ENDPOINT:?FILER_ENDPOINT required}"
 else
     # The filesystem backend removes directories with rm -r on a mounted volume,
@@ -83,15 +84,6 @@ S3_PREFIX="${S3_PREFIX:-staged}"
 # The filesystem backend's decision and delete (see "FILESYSTEM BACKEND" below).
 FILES_HELPER="${FILES_HELPER:-$(dirname "$0")/reclaim-files.py}"
 
-# Where the two-consecutive-runs markers live. DELIBERATELY OUTSIDE S3_PREFIX.
-#
-# `xnat-ingest upload` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
-# it finds as a session. A state directory under staged/ would therefore be
-# picked up as a session, "uploaded" with zero resources, and would re-fire
-# XNATUploadSuccess every loop — recreating precisely the bug this reclaimer
-# exists to fix, using the mechanism built to prevent it. Keep it as a sibling
-# of staged/, never a child.
-STATE_PREFIX="${STATE_PREFIX:-.reclaim-state}"
 # dataPolicy.derived.s3Staged.reclaim. `never` should never reach this script
 # (the template renders nothing at all in that case); the check is defence in
 # depth against a CronJob left behind by a partial upgrade.
@@ -133,22 +125,6 @@ jlog() {
 # $1=session $2=reason $3=message $4=extra JSON (leading comma, optional)
 keep() { jlog reclaim_kept "$1" "$3" ",\"reason\":\"$2\"${4:-}"; }
 
-# Session prefixes, exactly as the uploader sees them: one delimited listing of
-# staging. This includes 0-byte ghost entries, which is the point.
-#
-# Defined UP HERE, above the pre-flight, rather than with the other S3 helpers
-# further down: `unavailable` below calls it, and a bash function must exist by
-# the time it is called, not merely somewhere in the file.
-s3_list_prefixes() {
-    local raw
-    raw=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/" \
-            --delimiter / --query 'CommonPrefixes[].Prefix' --output text 2>/dev/null) || return 1
-    # No prefixes at all: the CLI prints "None" for a null JMESPath result.
-    [ "$raw" = "None" ] && return 0
-    printf '%s' "$raw" | tr '\t' '\n' | sed "s#^${S3_PREFIX}/##; s#/\$##" | grep -v '^$'
-    return 0
-}
-
 fs_list_prefixes() {
     [ -d "$STAGED_ROOT" ] || return 1
     # -mindepth/-maxdepth 1: sessions are the immediate children, and a name
@@ -166,7 +142,7 @@ fs_list_prefixes() {
 # had in fact been removed correctly. A false failure on the delete path is worse
 # than a real one, because it sends someone looking for data that is gone on
 # purpose.
-st_list_prefixes()  { case "$STORAGE" in filesystem) fs_list_prefixes ;;  *) s3_list_prefixes ;; esac; }
+st_list_prefixes()  { case "$STORAGE" in filesystem) fs_list_prefixes ;;  *) python3 "$FILES_HELPER" --list ;; esac; }
 
 # -----------------------------------------------------------------------------
 # Aborting the run: emits run-level AND per-session reclaim_unavailable, never
@@ -197,11 +173,10 @@ unavailable() {
             # literal `.reclaim-state` only (its charset guard catches any
             # other dot-prefix and logs a reclaim_kept for it); this path has
             # no charset guard because it names rather than deletes, so it
-            # matches $STATE_PREFIX too and is deliberately the stricter of
             # the two. Erring towards naming one prefix too few here costs a
             # missing alert on a directory that is not a session anyway.
             case "$session" in
-                "$STATE_PREFIX"|.reclaim-state) continue ;;
+                .reclaim-state) continue ;;   # the old two-run marker folder of earlier releases
             esac
             if [ "$n" -ge "$UNAVAILABLE_SESSION_CAP" ]; then
                 jlog reclaim_unavailable "" "reported ${n} staged sessions and stopped at the cap — staging holds more than are named above" \
@@ -256,19 +231,19 @@ if [ "$RECLAIM" != "onXnatConfirmed" ]; then
     unavailable reclaim_disabled "reclaim=${RECLAIM} is not onXnatConfirmed — refusing to remove anything"
 fi
 
-# python3 is in this list on purpose. It parses the object-count JSON, and it
-# is present in amazon/aws-cli:2.31.19 (3.9.23, verified) — but if a future
-# base image drops it, every count would return ERR and the reclaimer would
-# quietly keep everything forever. That is safe, and it is also indis-
-# tinguishable from "there was nothing to reclaim". Fail loudly instead.
+# python3 is in this list on purpose. It runs reclaim-files.py (the listing,
+# the proof and every delete), and the xnat-ingest image, the pin the uploader
+# uses, has it with boto3. If a future base image dropped it, nothing would be
+# examined and the reclaimer would quietly keep everything forever. That is
+# safe, and it is also indistinguishable from "there was nothing to reclaim".
+# Fail loudly instead.
 REQUIRED_TOOLS="curl date timeout python3"
-[ "$STORAGE" = "s3" ] && REQUIRED_TOOLS="aws $REQUIRED_TOOLS"
 for tool in $REQUIRED_TOOLS; do
     command -v "$tool" >/dev/null 2>&1 || {
-        # If `aws` itself is what is missing, the fan-out inside `unavailable`
+        # If python3 itself is what is missing, the fan-out inside `unavailable`
         # finds nothing to list and the run-level line stands alone. Nothing to
         # do about that from in here; it is why the run-level line exists.
-        unavailable missing_tool "required tool '${tool}' is not in this image — the reclaimer needs aws-cli (S3 listings), curl (XNAT REST + the filer delete) and python3 (parsing object counts); nothing was examined and nothing was removed"
+        unavailable missing_tool "required tool '${tool}' is not in this image — the reclaimer needs curl (the XNAT probe and session, the filer health check), python3 with boto3 (reclaim-files.py: the S3 listing, the proof, every delete), date and timeout; nothing was examined and nothing was removed"
     }
 done
 
@@ -297,8 +272,6 @@ if [ "$STORAGE" = "filesystem" ]; then
     case "$STAGED_ROOT" in
         /|/data|/data/|"") unavailable staged_root_unsafe "STAGED_ROOT=${STAGED_ROOT} is too broad to delete within — point it at one stage directory" ;;
     esac
-    [ -f "$FILES_HELPER" ] || \
-        unavailable missing_tool "the filesystem backend needs ${FILES_HELPER}; nothing was examined"
     # Armed: every delete happens inside the upload-tree writer lock. Without its
     # paths there is no safe delete, so refuse the run, loudly.
     if [ "$DRY_RUN" != "true" ] && { [ -z "${WRITER_LOCK:-}" ] || [ -z "${WRITER_ALIVE:-}" ]; }; then
@@ -377,9 +350,20 @@ case "$MAX_REMOVALS" in
         ;;
 esac
 
+[ -f "$FILES_HELPER" ] || \
+    unavailable missing_tool "this reclaimer needs ${FILES_HELPER}; nothing was examined"
 if [ "$STORAGE" = "s3" ]; then
-    if ! err=$(aws s3api head-bucket --bucket "$S3_BUCKET" 2>&1); then
-        unavailable bucket_unreachable "head-bucket ${S3_BUCKET} failed: ${err}"
+    python3 -c 'import boto3' 2>/dev/null || \
+        unavailable missing_tool "python3 in this image has no boto3 module; reclaim-files.py needs it for the S3 listing, the sidecar reads and every delete; nothing was examined"
+    if ! err=$(python3 "$FILES_HELPER" --probe 2>&1); then
+        unavailable bucket_unreachable "cannot reach bucket ${S3_BUCKET}: $(jsan "$err")"
+    fi
+    # THE GATE. SeaweedFS removes an empty folder on its own soon after its last
+    # object goes, with a window in which a child written meanwhile is dropped.
+    # No delete here until the bucket says the cleaner is opted out AND the
+    # activation procedure (drain, restart) attested it: scripts/cleaner-activation.sh.
+    if ! gate=$(python3 "$FILES_HELPER" --gate 2>&1); then
+        unavailable "${gate%% *}" "$(jsan "${gate#* }")"
     fi
 fi
 
@@ -464,8 +448,6 @@ xnat_logout() {
 # exit early and would otherwise leak the very session this change exists to stop.
 trap xnat_logout EXIT
 
-xnat_get() { xnat_auth | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null; }
-
 if [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
         unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
@@ -542,323 +524,18 @@ numeric_or_err() {
 # down made an aborted run die with `st_list_prefixes: command not found`
 # instead of reporting why it aborted.
 
-# --output json, NOT --output text.
-#
-# With `--output text` the AWS CLI applies --query PER PAGE, so any session
-# over 1000 objects returns one number per page — a multi-line answer that
-# fails numeric_or_err and keeps the session forever as `listing_failed`.
-# Fail-safe, but it silently disables reclaiming for exactly the large
-# sessions that matter most for disk. `--output json` is fully buffered and
-# returns one document, and the count is parsed explicitly so that anything
-# unexpected is ERR rather than a plausible-looking number.
-s3_object_count() {
-    local out
-    out=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/${1}/" \
-            --output json 2>/dev/null) || { echo ERR; return; }
-    printf '%s' "$out" | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("ERR"); sys.exit()
-if d.get("IsTruncated"):
-    # Should not happen: list-objects-v2 through the CLI paginates for us and
-    # returns the assembled result. If it ever does, we do NOT know the true
-    # count, and guessing is how a session gets deleted early.
-    print("ERR"); sys.exit()
-c = d.get("Contents")
-print(len(c) if isinstance(c, list) else 0)
-' 2>/dev/null || echo ERR
-}
-
-# In-flight multipart uploads. A session whose first object is still being
-# assembled can present as a 0-object prefix; without this probe the
-# empty-prefix branch below would delete an upload in progress.
-s3_multipart_count() {
-    local out
-    out=$(aws s3api list-multipart-uploads --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/${1}/" \
-            --query 'length(Uploads || `[]`)' --output text 2>/dev/null) || { echo ERR; return; }
-    numeric_or_err "$out"
-}
-
-# Age is measured from the NEWEST object, not the oldest: a session that is
-# still being written into must never look old enough to reclaim.
-s3_newest_epoch() {
-    local iso e
-    iso=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/${1}/" \
-            --query 'sort_by(Contents || `[]`, &LastModified)[-1].LastModified' --output text 2>/dev/null) || { echo ERR; return; }
-    [ -n "$iso" ] && [ "$iso" != "None" ] || { echo ERR; return; }
-    e=$(date -d "$iso" +%s 2>/dev/null) || { echo ERR; return; }
-    numeric_or_err "$e"
-}
-
-
-# The set of files XNAT actually holds for this session, as
-# "<name>\t<digest>" lines. Echoes ERR on ANY doubt: a non-200, an HTML login
-# page, an unparseable body, an experiment that is absent, a session name that
-# does not decompose. The caller treats ERR as KEEP.
-#
-# `digest` is empty unless the XNAT catalog was built with checksums enabled —
-# it is empty on our server. It is carried through anyway so that a site which
-# does enable it gets checksum comparison for free rather than needing a code
-# change.
-staged_totals() {
-    # Emits "count<TAB>bytes" for the DATA objects staged under this session,
-    # or ERR, or "UNDECLARED <message>".
-    #
-    # Sidecars are excluded on purpose and on both sides: ImagingResource.load()
-    # in xnat-ingest drops __MANIFEST__.json, MANIFEST.json and
-    # __METADATA__.json from the fileset, so they are never uploaded and never
-    # appear in a manifest's checksums. Counting them here would guarantee a
-    # mismatch against XNAT for every session.
-    #
-    # EVERY data object must be named by the manifest in its OWN resource
-    # directory. A resource whose manifest never arrived would otherwise be
-    # invisible to the comparison and then deleted unchecked.
-    local session="$1" out
-    out=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "${S3_PREFIX}/${session}/" \
-            --output json 2>/dev/null) || { echo ERR; return; }
-    printf '%s' "$out" | python3 -c '
-import sys, json
-SIDECARS = ("__MANIFEST__.json", "MANIFEST.json", "__METADATA__.json")
-MANIFESTS = ("__MANIFEST__.json", "MANIFEST.json")
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("ERR"); sys.exit()
-if d.get("IsTruncated"):
-    print("ERR"); sys.exit()
-contents = d.get("Contents")
-if not isinstance(contents, list):
-    # No Contents is NOT zero objects: a listing that parsed but carries no
-    # Contents key is a listing we did not understand.
-    print("ERR"); sys.exit()
-data, manifest_dirs, count, size = {}, set(), 0, 0
-for o in contents:
-    k = o.get("Key")
-    if not k:
-        print("ERR"); sys.exit()
-    base = k.rsplit("/", 1)[-1]
-    dirname = k.rsplit("/", 1)[0]
-    if base in MANIFESTS:
-        manifest_dirs.add(dirname); continue
-    if base in SIDECARS:
-        continue
-    sz = o.get("Size")
-    if not isinstance(sz, int):
-        print("ERR"); sys.exit()
-    data.setdefault(dirname, []).append(base)
-    count += 1; size += sz
-undeclared = sorted(set(data) - manifest_dirs)
-if undeclared:
-    n = sum(len(data[d]) for d in undeclared)
-    print("UNDECLARED %d object(s) in %d resource director(ies) are named by no manifest (e.g. %s) - they were never checked against XNAT, so this session cannot be confirmed"
-          % (n, len(undeclared), undeclared[0]))
-    sys.exit()
-# TOTALS first, then one DIR line per resource so the caller can check each
-# manifest against the objects actually beside it.
-print("TOTALS\t%d\t%d" % (count, size))
-for dirname in sorted(data):
-    print("DIR\t%s\t%d" % (dirname, len(data[dirname])))
-' 2>/dev/null || echo ERR
-}
-
-staged_manifest_agrees() {
-    # Every manifest must parse, and must declare exactly as many files as are
-    # staged beside it. A manifest that names 10 where 5 objects are present
-    # means STAGING lost files: XNAT would then match the truncated copy, and
-    # confirming it would delete the evidence of the loss.
-    local dir="$1" ndata="$2" body key
-    for key in "${dir}/__MANIFEST__.json" "${dir}/MANIFEST.json"; do
-        body=$(aws s3 cp "s3://${S3_BUCKET}/${key}" - 2>/dev/null) || continue
-        printf '%s' "$body" | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("ERR"); sys.exit()
-c = d.get("checksums")
-if not isinstance(c, dict):
-    print("ERR"); sys.exit()
-print(len(c))
-' 2>/dev/null | {
-            read -r declared
-            case "${declared:-ERR}" in
-                ERR|'') echo ERR; return ;;
-                *) [ "$declared" = "$ndata" ] && echo OK || echo "SHORT ${declared}" ;;
-            esac
-        }
-        return
-    done
-    echo ERR
-}
-
-xnat_totals() {
-    # Emits "count<TAB>bytes" for everything XNAT holds under this session,
-    # or ABSENT (it resolved the experiment and there is nothing in it), or
-    # ERR (could not ask — never to be read as "nothing there").
-    #
-    # WHY COUNT AND BYTES, NOT NAMES. The file listing is not there when this
-    # runs. Measured against the live server on 2026-09-01, same query, four
-    # sessions of different ages:
-    #
-    #     experiment    age        /scans/ALL/files   /scans/ALL/resources
-    #     XNAT_E00078   minutes    3 rows             3 files
-    #     XNAT_E00074   days       0 rows             3 files
-    #     XNAT_E00069   days       0 rows             5 files
-    #     XNAT_E00068   days       0 rows             1 file
-    #
-    # So the listing IS populated immediately after upload and is empty on every
-    # older session, while the resource stats are correct at every age. Also
-    # measured empty on the older ones: /files, /scans/{id}/files, and
-    # /scans/{id}/resources/{label}/files, the last being the one xnat-ingest
-    # itself reads (it works around the same emptiness by POSTing
-    # /data/services/refresh/catalog when a scan reports no files).
-    #
-    # This matters because of WHEN the reclaimer looks. It only considers a
-    # session older than minAge, which defaults to 1d, so by construction it
-    # always arrives in the regime where the listing is empty. A name-based
-    # probe would confirm a session uploaded minutes ago and fail on every
-    # session it is actually asked about. A reclaimer must not write to XNAT to
-    # answer a question, so it uses the numbers that ARE reported at every age.
-    #
-    # /scans/{id}/resources gives file_count and file_size per resource, and
-    # both are exact: a 5-file session of 9548-byte instances reports
-    # file_count "5" and file_size "47740" = 5 x 9548 exactly.
-    #
-    # The guarantee is therefore "the same number of files, and the same total
-    # bytes" — not per-file checksums. It catches every partial or truncated
-    # delivery. It does not catch a file swapped for one of identical length.
-    # Say so in the log; do not imply more.
-    local session="$1" project subject visit body code expid
-    case "$session" in
-        *.*.*.*|*..*|.*|*.) echo ERR; return ;;
-        *.*.*) : ;;
-        *) echo ERR; return ;;
-    esac
-    project="${session%%.*}"
-    visit="${session##*.}"
-    subject="${session#*.}"; subject="${subject%.*}"
-    [ -n "$project" ] && [ -n "$subject" ] && [ -n "$visit" ] || { echo ERR; return; }
-
-    body=$(xnat_get "${XNAT_SERVER}/data/projects/${project}/subjects/${subject}/experiments?format=json")
-    code=$(printf '%s' "$body" | tail -n1)
-    [ "$code" = "200" ] || { echo ERR; return; }
-
-    expid=$(printf '%s' "$body" | sed '$d' | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-rows = (d.get("ResultSet") or {}).get("Result") or []
-want = set(sys.argv[1:])
-for r in rows:
-    if r.get("label") in want or r.get("ID") in want:
-        print(r.get("ID","")); break
-' "$visit" "${subject}_${visit}" 2>/dev/null) || { echo ERR; return; }
-    # No experiment for this session is an ANSWER, not a failure to ask: the
-    # subject listing came back 200 and this session was not in it.
-    [ -n "$expid" ] || { echo ABSENT; return; }
-
-    body=$(xnat_get "${XNAT_SERVER}/data/experiments/${expid}/scans?format=json")
-    code=$(printf '%s' "$body" | tail -n1)
-    [ "$code" = "200" ] || { echo ERR; return; }
-    scans=$(printf '%s' "$body" | sed '$d' | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-rows = (d.get("ResultSet") or {}).get("Result") or []
-for r in rows:
-    i = r.get("ID")
-    if i in (None, ""):
-        sys.exit(1)          # a row with no id: we cannot enumerate, so we cannot count
-    print(i)
-' 2>/dev/null) || { echo ERR; return; }
-    # An experiment with no scans holds nothing. That is an answer too.
-    [ -n "$scans" ] || { echo ABSENT; return; }
-
-    total_c=0; total_b=0
-    for sid in $scans; do
-        body=$(xnat_get "${XNAT_SERVER}/data/experiments/${expid}/scans/${sid}/resources?format=json")
-        code=$(printf '%s' "$body" | tail -n1)
-        [ "$code" = "200" ] || { echo ERR; return; }
-        pair=$(printf '%s' "$body" | sed '$d' | python3 -c '
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-rows = (d.get("ResultSet") or {}).get("Result") or []
-c = b = 0
-for r in rows:
-    # STRINGS, and empty when XNAT has not built the stats. Empty is "I do not
-    # know", NEVER zero — reading it as zero is how a probe reports a full
-    # session as empty and a reclaimer deletes it.
-    fc, fs = str(r.get("file_count") or "").strip(), str(r.get("file_size") or "").strip()
-    if not fc.isdigit() or not fs.isdigit():
-        sys.exit(1)
-    c += int(fc); b += int(fs)
-print("%d %d" % (c, b))
-' 2>/dev/null) || { echo ERR; return; }
-        set -- $pair
-        total_c=$(( total_c + $1 )); total_b=$(( total_b + $2 ))
-    done
-    printf '%s\t%s\n' "$total_c" "$total_b"
-}
-
-# -----------------------------------------------------------------------------
-# Removal. The filer, and only the filer — docs/components/seaweedfs.md.
-# -----------------------------------------------------------------------------
-#     DELETE /buckets/<bucket>/<prefix>/<session>?recursive=true   -> 204
-#
-# CAUTION: `recursive=true` descends into scan subdirectories.
-# `ignoreRecursiveError=false` (default) reports a partial failure rather
-# than swallowing it — the caller re-lists staging afterwards and trusts
-# only that, but a reported error is still better than a silent one.
-#
-# Echoes "HTTP <code>" plus any body, and returns non-zero on a non-2xx, so
-# the caller can log what actually happened rather than assuming success.
-filer_rm() {
-    local session="$1" url body code
-    url="${FILER_ENDPOINT%/}/buckets/${S3_BUCKET}/${S3_PREFIX}/${session}?recursive=true"
-    body=$(timeout "$HTTP_TIMEOUT" curl -sS -X DELETE -w '\n%{http_code}' "$url" 2>&1) || {
-        printf 'request failed: %s' "$(printf '%s' "$body" | tr '\n' ' ')"
-        return 1
-    }
-    code=$(printf '%s' "$body" | tail -n1)
-    printf 'HTTP %s %s' "$code" "$(printf '%s' "$body" | sed '$d' | tr '\n' ' ')"
-    case "$code" in
-        2*) return 0 ;;
-        *)  return 1 ;;
-    esac
-}
-
 # =============================================================================
 # Main pass
 # =============================================================================
 
 # =============================================================================
-# FILESYSTEM BACKEND: reclaim-files.py
+# BOTH BACKENDS: reclaim-files.py
 # =============================================================================
-# The filesystem backend decides per resource in reclaim-files.py, next to this
-# script: a HEAD per file against XNAT, then an exact-file delete inside the
-# upload-tree writer lock. The main pass hands it each session BEFORE any path
-# below, so no filesystem delete happens in this script.
-
-# --- the seam -----------------------------------------------------------------
-# Only the S3 backend reaches these now.
-st_object_count()   { s3_object_count "$1"; }
-st_multipart_count(){ s3_multipart_count "$1"; }
-st_newest_epoch()   { s3_newest_epoch "$1"; }
-st_staged_totals()  { staged_totals "$1"; }
-st_manifest_agrees(){ staged_manifest_agrees "$1" "$2"; }
-st_rm()             { filer_rm "$1"; }
-st_marker_seen()  { aws s3api head-object --bucket "$S3_BUCKET" --key "${STATE_PREFIX}/${1}.empty" >/dev/null 2>&1; }
-st_marker_set()   { printf 'seen-empty %s\n' "$(date -Iseconds)" | aws s3 cp - "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors 2>/dev/null || true; }
-st_marker_clear() { aws s3 rm "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors >/dev/null 2>&1 || true; }
+# reclaim-files.py, next to this script, decides per resource: a HEAD per file
+# against XNAT, then the delete. A session folder: exact files inside the
+# upload-tree writer lock. A session prefix: one DeleteObject per object with
+# If-Match, never a folder. This script lists the sessions, runs the pre-flight
+# and hands each session to it; no delete happens in this script.
 
 if ! prefixes=$(st_list_prefixes); then
     # The one abort where the fan-out probably cannot help: we could not list
@@ -869,8 +546,7 @@ if ! prefixes=$(st_list_prefixes); then
 fi
 
 now=$(date +%s)
-removed=0; kept=0; skipped=0; examined=0
-removed_list=""
+removed=0; kept=0; skipped=0; examined=0; empty=0
 
 # Read the listing LINE by line, never `for session in $prefixes`. Word
 # splitting on a prefix containing a space turns one unknown name into several
@@ -896,7 +572,7 @@ while IFS= read -r session; do
     # too, so a name can never be read as an option by anything downstream.
     case "$session" in
         *[!A-Za-z0-9._-]*|.*|-*|__*)
-            keep "$session" "unsafe_prefix_name" "prefix name is not a plain [A-Za-z0-9._-] session id — refusing to pass it to the filer"
+            keep "$session" "unsafe_prefix_name" "prefix name is not a plain [A-Za-z0-9._-] session id — refusing to pass it on"
             kept=$((kept + 1)); continue ;;
     esac
 
@@ -907,228 +583,24 @@ while IFS= read -r session; do
 
     # THE FILESYSTEM BACKEND DECIDES IN reclaim-files.py, and nothing below runs
     # for it: the empty-prefix path and the count-and-bytes check are S3 only.
-    if [ "$STORAGE" = "filesystem" ]; then
-        rc=0
+    rc=0
+    STORAGE="$STORAGE" S3_BUCKET="${S3_BUCKET:-}" S3_PREFIX="$S3_PREFIX" FILER_ENDPOINT="${FILER_ENDPOINT:-}" \
         MIN_AGE="$MIN_AGE" MIN_AGE_S="$MIN_AGE_S" MIN_AGE_KEY="$_minage_key" DRY_RUN="$DRY_RUN" \
-            VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
-            HTTP_TIMEOUT="$HTTP_TIMEOUT" python3 "$FILES_HELPER" "$session" || rc=$?
-        case "$rc" in
-            0)  removed=$((removed + 1)) ;;
-            10) kept=$((kept + 1)) ;;
-            11) skipped=$((skipped + 1)) ;;
-            *)  jlog reclaim_failed "$session" "reclaim-files.py stopped with exit ${rc}; nothing more was done for this session"
-                kept=$((kept + 1)) ;;
-        esac
-        continue
-    fi
-
-    count=$(st_object_count "$session")
-    if [ "$count" = "ERR" ]; then
-        keep "$session" "listing_failed" "could not count objects — never delete on uncertainty"
-        kept=$((kept + 1)); continue
-    fi
-
-    if [ "$count" = "0" ]; then
-        # Ghost prefix: a 0-byte directory entry left behind by an
-        # `aws s3 rm`/`mc rm` recursive delete. It holds NO data, so removing
-        # it cannot lose anything — and while it exists the uploader lists it
-        # as a session, "uploads" its zero resources and re-fires
-        # XNATUploadSuccess every loop. minAge does not apply: an entry with
-        # no objects has no timestamp to age from. The multipart probe below
-        # is what distinguishes it from an upload that has only just started.
-        mp=$(st_multipart_count "$session")
-        if [ "$mp" = "ERR" ]; then
-            keep "$session" "multipart_probe_failed" "0 objects, but could not rule out an in-flight multipart upload"
-            kept=$((kept + 1)); continue
-        fi
-        if [ "$mp" != "0" ]; then
-            keep "$session" "upload_in_flight" "0 objects but ${mp} multipart upload(s) in progress — an edge is writing this session now"
-            kept=$((kept + 1)); continue
-        fi
-        # TWO-CONSECUTIVE-RUNS RULE.
-        #
-        # `count == 0` and the delete are not atomic: a small single-part PUT
-        # can land in between, and the multipart probe above does not catch it
-        # because a small object is never multipart. Requiring the prefix to
-        # have been empty on the PREVIOUS run too closes that window without
-        # any locking — at an hourly schedule the object would have to arrive
-        # and be gone again inside the same hour to slip through, and an
-        # arriving object does not vanish.
-        #
-        # The marker lives in the bucket next to the data, so it survives pod
-        # restarts and needs no extra storage.
-        if st_marker_seen "$session"; then
-            : # seen empty before — safe to proceed
-        else
-            if [ "$DRY_RUN" != "true" ]; then
-                st_marker_set "$session"
-            fi
-            jlog reclaim_skipped "$session" "empty prefix seen for the FIRST time — deferring removal to the next run so a just-started upload cannot be deleted between the count and the delete" ",\"objects\":0"
-            skipped=$((skipped + 1)); continue
-        fi
-
-        if [ "$DRY_RUN" = "true" ]; then
-            jlog reclaim_skipped "$session" "dataPolicy dryRun/disabled — would have removed this empty prefix" ",\"objects\":0"
-            skipped=$((skipped + 1)); continue
-        fi
-        if out=$(st_rm "$session"); then
-            jlog reclaim_removed "$session" "empty prefix removed via filer: ${out}" ",\"objects\":0,\"empty\":true"
-            removed=$((removed + 1)); removed_list="${removed_list}${session}
-"
-        else
-            # Not counted as removed, so it is not added to the
-            # post-run verification list either — nothing was claimed.
-            jlog reclaim_failed "$session" "filer refused the delete of this empty prefix: ${out}" ",\"objects\":0,\"empty\":true"
-        fi
-        continue
-    fi
-
-    # This prefix has objects, so any "seen empty" marker for it is stale and
-    # must go — otherwise a session that was briefly empty and then filled
-    # would carry a marker that authorises deletion on a later run.
-    st_marker_clear "$session"
-
-    newest=$(st_newest_epoch "$session")
-    if [ "$newest" = "ERR" ]; then
-        keep "$session" "age_unknown" "${count} object(s) but no usable LastModified — cannot prove it is older than ${MIN_AGE}"
-        kept=$((kept + 1)); continue
-    fi
-    age=$(( now - newest ))
-    if [ "$age" -lt "$MIN_AGE_S" ]; then
-        jlog reclaim_skipped "$session" "last written ${age}s ago, minAge is ${MIN_AGE} (${MIN_AGE_S}s) from ${_minage_key}" \
-            ",\"objects\":${count},\"age_s\":${age}"
-        skipped=$((skipped + 1)); continue
-    fi
-
-    if [ "$VERIFY_XNAT" = "true" ]; then
-        # COUNT AND BYTES, not names. See xnat_totals for why: no file-listing
-        # endpoint on this XNAT returns rows, so there are no names to compare.
-        # What is compared is exact on both sides — the same number of files and
-        # the same total bytes.
-        staged=$(st_staged_totals "$session")
-        case "$staged" in
-            ERR) keep "$session" "manifest_unreadable" "could not read a manifest for this session, so there is nothing to check XNAT against" \
-                     ",\"objects\":${count},\"age_s\":${age}"
-                 kept=$((kept + 1)); continue ;;
-            UNDECLARED*)
-                 # Objects are staged that NO manifest names. Those files were
-                 # never part of any comparison, so confirming this session
-                 # would delete them unchecked. This is the hole that let a
-                 # 400-object session be removed on the strength of the 5 files
-                 # its one surviving manifest happened to declare.
-                 keep "$session" "manifest_incomplete" "${staged#UNDECLARED }" \
-                     ",\"objects\":${count},\"age_s\":${age}"
-                 kept=$((kept + 1)); continue ;;
-        esac
-        n_want=$(printf '%s' "$staged" | awk -F'\t' '$1=="TOTALS"{print $2}')
-        b_want=$(printf '%s' "$staged" | awk -F'\t' '$1=="TOTALS"{print $3}')
-        case "${n_want}:${b_want}" in
-            :*|*:) keep "$session" "manifest_unreadable" "could not determine what this session staged" \
-                       ",\"objects\":${count},\"age_s\":${age}"
-                   kept=$((kept + 1)); continue ;;
-        esac
-
-        # Each resource's manifest must agree with the objects beside it.
-        agree_fail=""
-        while IFS="$(printf '\t')" read -r tag dir ndata; do
-            [ "$tag" = "DIR" ] || continue
-            case "$(st_manifest_agrees "$dir" "$ndata")" in
-                OK) : ;;
-                SHORT*) agree_fail="${dir} declares more files than are staged beside it"; break ;;
-                *)      agree_fail="${dir} has no readable manifest"; break ;;
-            esac
-        done <<EOF
-${staged}
-EOF
-        if [ -n "$agree_fail" ]; then
-            keep "$session" "manifest_unreadable" "${agree_fail} — cannot prove what this session should contain" \
-                 ",\"objects\":${count},\"age_s\":${age}"
-            kept=$((kept + 1)); continue
-        fi
-
-        have=$(xnat_totals "$session")
-        if [ "$have" = "ERR" ]; then
-            # COULD NOT ASK. Unreachable, non-200, unparseable, or stats XNAT
-            # has not built. Never to be read as "not there".
-            keep "$session" "xnat_count_unavailable" "could not obtain a file count from XNAT for this session — this is the probe failing, not evidence about the data" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want}"
-            kept=$((kept + 1)); continue
-        fi
-        if [ "$have" = "ABSENT" ]; then
-            # ANSWERED, and the answer is no. Distinct from the above on
-            # purpose: this one is evidence, and the alert should say so.
-            keep "$session" "incomplete_in_xnat" "XNAT resolved this session and holds nothing under it — nothing was delivered" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":0"
-            kept=$((kept + 1)); continue
-        fi
-        n_have=$(printf '%s' "$have" | cut -f1)
-        b_have=$(printf '%s' "$have" | cut -f2)
-
-        if [ "$n_have" != "$n_want" ]; then
-            keep "$session" "incomplete_in_xnat" "XNAT holds ${n_have} file(s); this session staged ${n_want} — treating it as a partial upload" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":${n_have}"
-            kept=$((kept + 1)); continue
-        fi
-        if [ "$b_have" != "$b_want" ]; then
-            # Same number of files, different total size: something was
-            # truncated or replaced. The count alone would have passed this.
-            keep "$session" "size_mismatch" "XNAT holds ${n_have} file(s) as expected but ${b_have} bytes against ${b_want} staged — the counts agree and the bytes do not" \
-                 ",\"objects\":${count},\"age_s\":${age},\"want_bytes\":${b_want},\"have_bytes\":${b_have}"
-            kept=$((kept + 1)); continue
-        fi
-
-        jlog reclaim_confirmed "$session" "XNAT holds ${n_have} file(s) and ${b_have} bytes, matching what this session staged" \
-            ",\"objects\":${count},\"age_s\":${age},\"want\":${n_want},\"have\":${n_have},\"bytes\":${b_have}"
-    fi
-
-    if [ "$DRY_RUN" = "true" ]; then
-        jlog reclaim_skipped "$session" "dataPolicy dryRun/disabled — would have removed ${count} object(s)" \
-            ",\"objects\":${count},\"age_s\":${age}"
-        skipped=$((skipped + 1)); continue
-    fi
-
-    if out=$(st_rm "$session"); then
-        jlog reclaim_removed "$session" "removed via filer: ${out}" \
-            ",\"objects\":${count},\"age_s\":${age},\"verified\":${VERIFY_XNAT}"
-        removed=$((removed + 1)); removed_list="${removed_list}${session}
-"
-    else
-        # The session is confirmed in XNAT but still on disk. Not data loss —
-        # the copy that matters is in XNAT — but it will be re-listed,
-        # re-uploaded and re-alerted until someone looks.
-        jlog reclaim_failed "$session" "filer refused the delete: ${out}" \
-            ",\"objects\":${count},\"age_s\":${age}"
-    fi
+        VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
+        HTTP_TIMEOUT="$HTTP_TIMEOUT" python3 "$FILES_HELPER" "$session" || rc=$?
+    case "$rc" in
+        0)  removed=$((removed + 1)) ;;
+        10) kept=$((kept + 1)) ;;
+        11) skipped=$((skipped + 1)) ;;
+        12) empty=$((empty + 1)) ;;   # a prefix with no objects: the uploader skips it too
+        *)  jlog reclaim_failed "$session" "reclaim-files.py stopped with exit ${rc}; nothing more was done for this session"
+            kept=$((kept + 1)) ;;
+    esac
 # A heredoc, not `printf ... | while`: a piped while runs in a subshell and
 # every counter incremented above would be discarded at the `done`.
 done <<EOF
 ${prefixes}
 EOF
 
-# -----------------------------------------------------------------------------
-# Verify the entries are actually gone.
-# -----------------------------------------------------------------------------
-# The entire point of going through the filer is that the DIRECTORY ENTRY
-# disappears, and `weed shell`'s exit code does not tell us whether it did.
-# One more delimited listing settles it. A survivor means the uploader will
-# keep listing it and keep re-alerting, so it is reported as a failure rather
-# than left to be rediscovered from the inbox.
-if [ -n "$removed_list" ]; then
-    if after=$(st_list_prefixes); then
-        while IFS= read -r session; do
-            [ -n "$session" ] || continue
-            # -F -x: whole-line literal match. A substring or regex match here
-            # would report a survivor for `a.b.c` whenever `a.b.c2` exists.
-            if printf '%s\n' "$after" | grep -Fxq "$session"; then
-                jlog reclaim_failed "$session" "fs.rm -r ran but the prefix is STILL listed in staging — it will be re-processed and re-alerted; check the filer"
-            fi
-        done <<EOF
-${removed_list}
-EOF
-    else
-        jlog reclaim_failed "" "post-removal listing failed — could not verify that the removed prefixes are gone"
-    fi
-fi
-
-jlog reclaim_finished "" "examined=${examined} removed=${removed} kept=${kept} skipped=${skipped}" \
-    ",\"examined\":${examined},\"removed\":${removed},\"kept\":${kept},\"skipped\":${skipped}"
+jlog reclaim_finished "" "examined=${examined} removed=${removed} kept=${kept} skipped=${skipped} empty=${empty}" \
+    ",\"examined\":${examined},\"removed\":${removed},\"kept\":${kept},\"skipped\":${skipped},\"empty\":${empty}"

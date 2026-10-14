@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ci_heading "shared files identical across charts"
 
 # relative path under charts/<chart>/
-SHARED_FILES="files/reclaim-staged.sh"
+SHARED_FILES="files/reclaim-staged.sh files/reclaim-files.py"
 
 for rel in $SHARED_FILES; do
   a="$REPO_ROOT/charts/mgmt/$rel"

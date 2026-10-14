@@ -23,6 +23,10 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every case runs under `env -i`, with this PATH. It starts with the directory of the
+# python3 this suite was started with: on a CI runner the pinned boto3 lives in the
+# setup-python interpreter, not in /usr/bin/python3, and the helper must run with it.
+CASE_PATH="$(dirname "$(command -v python3)"):/usr/bin:/bin:/usr/local/bin"
 REPO="$(cd "$HERE/../.." && pwd)"
 # The same script ships in charts/edge as the terminal-stage reclaimer for
 # upload.mode=direct; scripts/ci/shared-files.sh keeps the two copies identical.
@@ -52,288 +56,7 @@ session_leak() {   # <output> <case dir>: prints the leak and returns 0, else 1
     return 1
 }
 
-# run_case <name> <expect_deleted: yes|no> <expect_event> [env assignments...]
-#
-# A case may also define `assert_<name>`, called with the path to the captured
-# output. It prints why it is unhappy and returns non-zero. That exists because
-# `deleted` plus one event name cannot express the property the pre-flight
-# cases are about: not "which event" but "which SESSIONS were named, and which
-# events were deliberately NOT emitted".
-run_case() {
-    local name="$1" expect_del="$2" expect_event="$3"; shift 3
-    local S="$WORK/$name"
-    rm -rf "$S"; mkdir -p "$S"
-    CASE_DIR="$S"
-    "setup_$name"
-
-    local out
-    out=$(cd "$S" && env -i \
-        PATH="$HERE:/usr/bin:/bin:/usr/local/bin" \
-        SCENARIO="$S" \
-        HOME="$S" \
-        S3_BUCKET=ingest-edge-dev \
-        CLUSTER_LABEL=edge-dev \
-        FILER_ENDPOINT=http://filer:8888 \
-        S3_PREFIX=staged \
-        RECLAIM=onXnatConfirmed \
-        MIN_AGE=0 \
-        VERIFY_XNAT=true \
-        DRY_RUN=false \
-        XNAT_VERIFY_SSL=false \
-        XNAT_SERVER=https://xnat.example.org \
-        XNAT_USER=u XNAT_PASS=p \
-        AWS_ENDPOINT_URL=http://s3:8333 \
-        AWS_DEFAULT_REGION=us-east-1 \
-        "$@" \
-        bash "$SCRIPT" 2>&1)
-
-    printf '%s\n' "$out" > "$S/out.log"
-
-    local deleted="no"
-    [ -s "$S/deletes.log" ] && deleted="yes"
-
-    local ok=1 why=""
-    if [ "$deleted" != "$expect_del" ]; then
-        ok=0; why="expected deleted=$expect_del but got $deleted"
-        [ -s "$S/deletes.log" ] && why="$why (deleted: $(tr '\n' ' ' < "$S/deletes.log"))"
-    elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
-        ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
-    elif why=$(session_leak "$out" "$S"); then
-        ok=0
-    elif declare -F "assert_$name" >/dev/null 2>&1; then
-        local extra
-        if ! extra=$("assert_$name" "$S/out.log" 2>&1); then
-            ok=0; why="$extra"
-        fi
-    fi
-
-    if [ "$ok" = "1" ]; then
-        printf '  %sPASS%s  %-34s deleted=%-3s %s\n' "$_G" "$_O" "$name" "$deleted" "$expect_event"
-        PASS=$((PASS+1))
-    else
-        printf '  %sFAIL%s  %-34s %s\n' "$_R" "$_O" "$name" "$why"
-        FAIL=$((FAIL+1)); FAILED+=("$name: $why")
-        printf '%s\n' "$out" | sed 's/^/          /' | head -12
-    fi
-}
-
-# --- fixture helpers ---------------------------------------------------------
-prefixes() { printf '%s\n' "$*" | tr ' ' '\t' > "$CASE_DIR/list-prefixes.json.raw"
-             printf '%s' "$(cat "$CASE_DIR/list-prefixes.json.raw")" > "$CASE_DIR/list-prefixes.json"; }
-
-# One object plus one manifest, timestamped long ago so minAge never blocks.
-# OPTION: a third argument sets LastModified, for the cases about minAge itself.
-session_with() {   # <session> <nfiles> [LastModified]
-    local s="$1" n="$2" lm="${3:-2020-01-01T00:00:00+00:00}" items="" i
-    for i in $(seq 1 "$n"); do
-        items="$items{\"Key\":\"staged/$s/scan/DICOM/f$i.dcm\",\"Size\":100,\"LastModified\":\"$lm\"},"
-    done
-    items="$items{\"Key\":\"staged/$s/scan/DICOM/__MANIFEST__.json\",\"Size\":42,\"LastModified\":\"$lm\"}"
-    printf '{"Contents":[%s]}' "$items" > "$CASE_DIR/objects.$s.json"
-    local cks="" i2
-    for i2 in $(seq 1 "$n"); do
-        cks="$cks\"f$i2.dcm\":\"abc\","
-    done
-    cks="${cks%,}"
-    printf '{"datatype":"medimage/dicom-series","checksums":{%s}}' "$cks" \
-        > "$CASE_DIR/get.staged_${s}_scan_DICOM___MANIFEST__.json"
-}
-
-# RECORDED SHAPES. The real server answers every file listing with an empty
-# Result, so what XNAT can tell us is the per-resource file_count and file_size,
-# and both arrive as STRINGS. Fixtures keep them strings for that reason.
-xnat_has() {   # <subject> <expid> <label> <nfiles> [total-bytes] [scan-id]
-    local sid="${6:-1}" bytes="${5:-$(( $4 * 100 ))}"
-    printf '{"ResultSet":{"Result":[{"ID":"%s","label":"%s"}]}}' "$2" "$3" \
-        > "$CASE_DIR/xnat-exp.$1.json"
-    printf '{"ResultSet":{"Result":[{"ID":"%s","type":"synthetic"}]}}' "$sid" \
-        > "$CASE_DIR/xnat-scans.$2.json"
-    printf '{"ResultSet":{"Result":[{"label":"DICOM","file_count":"%s","file_size":"%s"}]}}' "$4" "$bytes" \
-        > "$CASE_DIR/xnat-res.$2.${sid}.json"
-}
-
-# XNAT resolved the experiment but has not built its stats: file_count arrives
-# empty. That must read as "cannot check", never as zero.
-xnat_stats_unbuilt() {   # <subject> <expid> <label>
-    printf '{"ResultSet":{"Result":[{"ID":"%s","label":"%s"}]}}' "$2" "$3" \
-        > "$CASE_DIR/xnat-exp.$1.json"
-    printf '{"ResultSet":{"Result":[{"ID":"1","type":"synthetic"}]}}' \
-        > "$CASE_DIR/xnat-scans.$2.json"
-    printf '{"ResultSet":{"Result":[{"label":"DICOM","file_count":"","file_size":""}]}}' \
-        > "$CASE_DIR/xnat-res.$2.1.json"
-}
-
 SESS="proj.subj.visit"
-
-# =============================================================================
-# Cases. `deleted` is the assertion that matters.
-# =============================================================================
-
-setup_happy_path() { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
-setup_xnat_has_more() { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 5; }
-
-# THE ONE THAT MATTERS: partial upload. XNAT created the experiment on the
-# first resource POST, so it EXISTS — but holds fewer files than were staged.
-setup_partial_upload() { prefixes "staged/$SESS/"; session_with "$SESS" 400; xnat_has subj EXP1 visit 3; }
-
-setup_xnat_absent()      { prefixes "staged/$SESS/"; session_with "$SESS" 2; }
-
-# THE ACCEPTED GAP, asserted so it is visible rather than assumed. XNAT holds
-# the right number of files and the right total bytes, but they are different
-# files. Verification is count-and-bytes because no listing endpoint on the real
-# server returns names (measured 2026-09-01), so this session IS confirmed. A
-# swap that preserves both count and total length is not a delivery failure; it
-# is a substitution. If XNAT ever serves names again, tighten this and flip the
-# expectation back.
-setup_same_count_different_files() { prefixes "staged/$SESS/"; session_with "$SESS" 3
-                                     xnat_has subj EXP1 visit 3; }
-
-# One of three missing: the count differs, so it is kept.
-setup_one_file_missing()  { prefixes "staged/$SESS/"; session_with "$SESS" 3
-                            xnat_has subj EXP1 visit 2; }
-
-# Right count, WRONG total bytes — a file was truncated or replaced by a
-# shorter one. The count alone would have confirmed this.
-setup_size_mismatch()     { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                            xnat_has subj EXP1 visit 2 199; }
-
-# Right count and right bytes — must remove.
-setup_size_match()        { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                            xnat_has subj EXP1 visit 2 200; }
-
-# XNAT resolved the session but has not built its stats. file_count arrives
-# empty, which must be "cannot check", never zero. This is the exact shape that
-# left the old probe unable to confirm anything for weeks without saying so.
-setup_xnat_stats_unbuilt() { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                             xnat_stats_unbuilt subj EXP1 visit; }
-
-# Objects staged under a resource directory with no manifest beside them. They
-# were never declared, so they were never compared, and confirming would delete
-# them unchecked.
-setup_undeclared_objects() { prefixes "staged/$SESS/"; session_with "$SESS" 2
-    python3 - "$CASE_DIR/objects.$SESS.json" "$SESS" <<'PYEOF'
-import json, sys
-p, sess = sys.argv[1], sys.argv[2]
-d = json.load(open(p))
-for i in range(1, 300):
-    d["Contents"].append({"Key": "staged/%s/scan2/DICOM/g%d.dcm" % (sess, i),
-                          "Size": 100, "LastModified": "2020-01-01T00:00:00+00:00"})
-json.dump(d, open(p, "w"))
-PYEOF
-    xnat_has subj EXP1 visit 2; }
-
-setup_xnat_500()         { prefixes "staged/$SESS/"; session_with "$SESS" 2; : > "$CASE_DIR/xnat-exp.subj.fail"; }
-setup_xnat_res_500()     { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; : > "$CASE_DIR/xnat-res.EXP1.1.fail"; }
-setup_no_manifest()      { prefixes "staged/$SESS/"
-                           printf '{"Contents":[{"Key":"staged/%s/scan/DICOM/f1.dcm","LastModified":"2020-01-01T00:00:00+00:00"}]}' "$SESS" \
-                             > "$CASE_DIR/objects.$SESS.json"
-                           xnat_has subj EXP1 visit 1; }
-setup_manifest_unreadable() { prefixes "staged/$SESS/"; session_with "$SESS" 2
-                           rm -f "$CASE_DIR/get.staged_${SESS}_scan_DICOM___MANIFEST__.json"
-                           : > "$CASE_DIR/getfail.staged_${SESS}_scan_DICOM___MANIFEST__.json"
-                           xnat_has subj EXP1 visit 2; }
-setup_listing_fail()     { prefixes "staged/$SESS/"; : > "$CASE_DIR/objects.$SESS.fail"; }
-setup_unsafe_name()      { prefixes 'staged/evil; rm -rf ..$/'; }
-setup_unsafe_dotdot()    { prefixes 'staged/../etc/'; }
-
-# Empty prefix: first sighting must DEFER, second may remove.
-setup_empty_first_run()  { prefixes "staged/$SESS/"; printf '{"Contents":[]}' > "$CASE_DIR/objects.$SESS.json"; }
-setup_empty_second_run() { prefixes "staged/$SESS/"; printf '{"Contents":[]}' > "$CASE_DIR/objects.$SESS.json"
-                           : > "$CASE_DIR/marker.$SESS"; }
-setup_empty_but_multipart() { prefixes "staged/$SESS/"; printf '{"Contents":[]}' > "$CASE_DIR/objects.$SESS.json"
-                           : > "$CASE_DIR/marker.$SESS"
-                           printf '{"Uploads":[{"Key":"x"}]}' > "$CASE_DIR/multipart.$SESS.json"; }
-setup_empty_multipart_err() { prefixes "staged/$SESS/"; printf '{"Contents":[]}' > "$CASE_DIR/objects.$SESS.json"
-                           : > "$CASE_DIR/marker.$SESS"
-                           : > "$CASE_DIR/multipart.$SESS.fail"; }
-
-setup_filer_down()       { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2
-                           : > "$CASE_DIR/filer-down.fail"; }
-setup_headbucket_fail()  { prefixes "staged/$SESS/"; : > "$CASE_DIR/head-bucket.fail"; }
-setup_xnat_auth_fail()   { prefixes "staged/$SESS/"; : > "$CASE_DIR/xnat-auth.fail"; }
-setup_list_prefixes_fail() { : > "$CASE_DIR/list-prefixes.fail"; }
-setup_bad_minage()       { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
-setup_bad_maxremovals()  { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
-setup_dry_run()          { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
-setup_wrong_reclaim()    { prefixes "staged/$SESS/"; }
-setup_filer_refuses()    { prefixes "staged/$SESS/"; session_with "$SESS" 2; xnat_has subj EXP1 visit 2
-                           : > "$CASE_DIR/filer-delete.fail"; }
-setup_state_dir_skipped() { prefixes "staged/.reclaim-state/ staged/$SESS/"
-                            session_with "$SESS" 2; xnat_has subj EXP1 visit 2; }
-
-# =============================================================================
-# Silence cases: a run that COULD NOT DECIDE vs a run that decided there was
-# nothing to do.
-# =============================================================================
-# Every case above asserts on deletes. These three assert on the opposite —
-# what the run SAID — because the defect they pin down produced no delete and
-# no error, only silence.
-#
-# The reclaimer aborted its pre-flight on 2026-08-05T18:17:11Z and again on
-# 2026-08-06T01:17:11Z (XNAT auth probe, HTTP 000). Each run logged one
-# reclaim_unavailable with session="" and exited, and nothing alerted.
-# SessionStagedNotConfirmedInXNAT builds its "staged" half from
-# `event=~"reclaim_.*" | session != ""`, so those lines contributed nothing to
-# it. Two isolated aborts were absorbed by that alert's 24h count window — the
-# case that is NOT absorbed, and that the fan-out asserted below exists for, is
-# a pre-flight that stays broken across a whole window.
-#
-# `deleted=no` was already true of that run, and always will be — which is why
-# it needed an assertion of a different kind.
-
-# grep on the event AND the session together. "a reclaim_unavailable was
-# logged" and "a reclaim_unavailable was logged FOR THIS SESSION" are different
-# claims, and only the second is what the alert consumes. jlog emits `event`
-# immediately before `session`, so they are adjacent.
-ev_for() { grep -q "\"event\":\"$2\",\"session\":\"$3\"" "$1"; }
-
-# Pre-flight fails, two sessions are staged: both must be named.
-setup_preflight_xnat_fanout() { prefixes "staged/$SESS/ staged/proj.subj2.visit/"
-                                : > "$CASE_DIR/xnat-auth.fail"; }
-assert_preflight_xnat_fanout() {
-    local log="$1" why="" s
-    grep '"event":"reclaim_unavailable","session":""' "$log" | grep -q '"reason":"xnat_probe_failed"' \
-        || why="$why no run-level reclaim_unavailable carrying reason=xnat_probe_failed (ReclaimerRunUnavailable keys on it);"
-    for s in "$SESS" proj.subj2.visit; do
-        ev_for "$log" reclaim_unavailable "$s" \
-            || why="$why no per-session reclaim_unavailable for $s — the staged half of SessionStagedNotConfirmedInXNAT would see nothing for it;"
-    done
-    grep -q '"event":"reclaim_finished"' "$log" \
-        && why="$why logged reclaim_finished on an aborted run — that is what a nothing-to-do run logs, and the two must stay distinguishable;"
-    grep -q '"event":"reclaim_confirmed"' "$log" \
-        && why="$why logged reclaim_confirmed without a positive answer from XNAT;"
-    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
-}
-
-# The other side of the invariant: a healthy run over empty staging must NOT
-# look like an aborted one. `None` is what the real CLI prints for a null
-# JMESPath result, so this is also the only case that walks that branch.
-setup_nothing_to_do() { printf 'None' > "$CASE_DIR/list-prefixes.json"; }
-assert_nothing_to_do() {
-    local log="$1" why=""
-    grep -q '"examined":0' "$log" \
-        || why="$why reclaim_finished did not report examined=0;"
-    grep -q '"event":"reclaim_unavailable"' "$log" \
-        && why="$why a healthy run over empty staging logged reclaim_unavailable — that is the abort signal and it would raise ReclaimerRunUnavailable;"
-    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
-}
-
-# The fan-out is BEST-EFFORT. When the bucket itself is what is broken there is
-# nothing to enumerate, and the run must degrade to the run-level line rather
-# than hang, retry forever, or invent session names.
-setup_preflight_no_listing() { prefixes "staged/$SESS/"
-                               : > "$CASE_DIR/head-bucket.fail"
-                               : > "$CASE_DIR/list-prefixes.fail"; }
-assert_preflight_no_listing() {
-    local log="$1" why=""
-    grep '"event":"reclaim_unavailable","session":""' "$log" | grep -q '"reason":"bucket_unreachable"' \
-        || why="$why no run-level reclaim_unavailable carrying reason=bucket_unreachable;"
-    ev_for "$log" reclaim_unavailable "$SESS" \
-        && why="$why named a session it could not have listed;"
-    grep -q '"event":"reclaim_finished"' "$log" \
-        && why="$why logged reclaim_finished on an aborted run;"
-    [ -z "$why" ] || { printf '%s' "$why"; return 1; }
-}
 
 # =============================================================================
 # FILESYSTEM BACKEND (STORAGE=filesystem, tier-1): reclaim-files.py
@@ -461,7 +184,7 @@ run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
 
     local out
     out=$(cd "$S" && env -i \
-        PATH="$HERE:/usr/bin:/bin:/usr/local/bin" \
+        PATH="$HERE:$CASE_PATH" \
         SCENARIO="$S" \
         HOME="$S" \
         STORAGE=filesystem \
@@ -872,62 +595,6 @@ else
     FAIL=$((FAIL+1)); FAILED+=("fs_flock_error_is_not_contention")
 fi
 
-printf '\n%s== reclaimer decision paths ==%s\n' "$_B" "$_O"
-run_case happy_path            yes reclaim_removed
-run_case xnat_has_more         no  reclaim_kept
-run_case partial_upload        no  reclaim_kept
-run_case xnat_absent           no  reclaim_kept
-run_case same_count_different_files yes reclaim_removed
-run_case one_file_missing      no  reclaim_kept
-run_case size_mismatch         no  reclaim_kept
-run_case size_match            yes reclaim_removed
-run_case xnat_stats_unbuilt    no  reclaim_kept
-run_case undeclared_objects    no  reclaim_kept
-run_case xnat_500              no  reclaim_kept
-run_case xnat_res_500          no  reclaim_kept
-run_case no_manifest           no  reclaim_kept
-run_case manifest_unreadable   no  reclaim_kept
-run_case listing_fail          no  reclaim_kept
-run_case unsafe_name           no  reclaim_kept
-run_case unsafe_dotdot         no  reclaim_kept
-run_case empty_first_run       no  reclaim_skipped
-run_case empty_second_run      yes reclaim_removed
-run_case empty_but_multipart   no  reclaim_kept
-run_case empty_multipart_err   no  reclaim_kept
-run_case filer_down            no  reclaim_unavailable
-run_case headbucket_fail       no  reclaim_unavailable
-run_case xnat_auth_fail        no  reclaim_unavailable
-run_case list_prefixes_fail    no  reclaim_unavailable
-run_case bad_minage            no  reclaim_unavailable MIN_AGE=notaduration
-run_case bad_maxremovals       no  reclaim_unavailable MAX_REMOVALS=unlimited
-run_case dry_run               no  reclaim_skipped     DRY_RUN=true
-run_case wrong_reclaim         no  reclaim_unavailable RECLAIM=never
-run_case filer_refuses         no  reclaim_failed
-run_case state_dir_skipped     yes reclaim_removed
-
-printf '\n%s== could-not-decide vs nothing-to-do ==%s\n' "$_B" "$_O"
-run_case preflight_xnat_fanout no  reclaim_unavailable
-run_case nothing_to_do         no  reclaim_finished
-run_case preflight_no_listing  no  reclaim_unavailable
-
-# =============================================================================
-# minAge on the S3 backend: read in base 10, at most 10 digits
-# =============================================================================
-# to_seconds used plain bash arithmetic, which reads a leading zero as octal.
-#   "010d"  was 8 days.
-#   "08d"   was an arithmetic error. MIN_AGE_S came back empty, the age test
-#           errored, `if` read that as false, and the session went straight on
-#           to the XNAT check and removal.
-#   "999999999999999d" wrapped negative, with the same result.
-# Every session here is too young to go, so a delete is the failure.
-# This is the mgmt chart's s3Staged.minAge; the fs_min_age cases above are the
-# edge's stagedReclaimer.minAge.
-ago() { date -u -d "$1 ago" +%Y-%m-%dT%H:%M:%S+00:00; }
-setup_minage_08d()       { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
-setup_minage_010d()      { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '9 days')"; xnat_has subj EXP1 visit 2; }
-setup_minage_11_digits() { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
-setup_minage_overflow()  { prefixes "staged/$SESS/"; session_with "$SESS" 2 "$(ago '1 hour')"; xnat_has subj EXP1 visit 2; }
-
 # The skip line carries the parsed number. Assert it, not only the skip.
 minage_read_as() {   # <log> <minAge> <seconds>
     grep -qF "minAge is $2 ($3s)" "$1" && return 0
@@ -935,16 +602,306 @@ minage_read_as() {   # <log> <minAge> <seconds>
         "$(grep -o 'minAge is [^"]*' "$1" | head -1)"
     return 1
 }
-assert_minage_08d()       { minage_read_as "$1" 08d 691200; }
-assert_minage_010d()      { minage_read_as "$1" 010d 864000; }
-assert_minage_11_digits() { minage_refused "$1"; }
-assert_minage_overflow()  { minage_refused "$1"; }
 
+# =============================================================================
+# S3 BACKEND (STORAGE=s3, the mgmt reclaimer)
+# =============================================================================
+# The same helper over a session prefix. The objects come from fake-s3.py (real
+# HTTP; boto3 in the helper), the XNAT answers from fake-xnat.py, and the bucket
+# attributes the gate reads from fake-filer.py. The shell's own XNAT calls (the
+# login, the probe, the logout) go to fake-xnat.py too, with the real curl: this
+# runner puts no stub on the PATH. A delete is a DeleteObject with If-Match, in
+# s3-requests.log; "gone" means no object of the session is left in s3.json.
+# Every case fails on a DELETE of a folder key, a DELETE without If-Match, a
+# request to S3 that is not GET, HEAD or DELETE, or an XNAT session left open.
+
+S3B=ingest-edge-dev
+s3_put() {   # <key> <size> [body]: one object; the ETag is the MD5 of the body
+    python3 - "$CASE_DIR/s3.json" "$@" <<'PY'
+import hashlib, json, os, sys
+path, key, size, *rest = sys.argv[1:]
+body = rest[0] if rest else ("x" * int(size))
+d = json.load(open(path)) if os.path.exists(path) else {"objects": {}}
+d["objects"][key] = {"size": len(body.encode()), "etag": hashlib.md5(body.encode()).hexdigest(),
+                     "modified": "2020-01-01T00:00:00.000Z", "body": body}
+json.dump(d, open(path, "w"))
+PY
+}
+s3_set() {   # <python statement on the fixture d>
+    python3 - "$CASE_DIR/s3.json" "$1" <<'PY'
+import json, sys
+path, stmt = sys.argv[1:3]
+d = json.load(open(path))
+exec(stmt, {"d": d})
+json.dump(d, open(path, "w"))
+PY
+}
+# staged/<session>/<scan>/<resource>/{f1..fN}.dcm, the manifest, the resource
+# metadata (the SOP class) and the session metadata, as the edge copies them.
+s3_session() {   # <session> <nfiles> [scan folder] [resource folder] [SOP class|-|none] [datatype]
+    local s="$1" n="$2" p="staged/$1/${3:-1.scan}/${4:-DICOM}" i cks=""
+    for i in $(seq 1 "$n"); do s3_put "$p/f$i.dcm" 100; cks="$cks\"f$i.dcm\":\"abc\","; done
+    s3_put "$p/__MANIFEST__.json" 0 "{\"datatype\":\"${6:-medimage/dicom-series}\",\"checksums\":{${cks%,}}}"
+    case "${5:-$MR}" in
+        -)    s3_put "$p/__METADATA__.json" 0 '{"Modality":"MR"}' ;;
+        none) : ;;
+        *)    s3_put "$p/__METADATA__.json" 0 "{\"SOPClassUID\":\"${5:-$MR}\",\"Modality\":\"MR\"}" ;;
+    esac
+    s3_put "staged/$s/__METADATA__.json" 0 '{}'
+}
+s3_modified() { s3_set "import datetime; t=(datetime.datetime.utcnow()-datetime.timedelta(seconds=$1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+for o in d['objects'].values(): o['modified']=t"; }
+s3_left()    { python3 -c 'import json,sys; print(sum(1 for k in json.load(open(sys.argv[1]))["objects"] if k.startswith("staged/"+sys.argv[2]+"/")))' "$CASE_DIR/s3.json" "$1"; }
+s3_deletes() { local n; n=$(grep -c '^DELETE ' "$CASE_DIR/s3-requests.log" 2>/dev/null); echo "${n:-0}"; }
+s3_has()     { python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["objects"] else 1)' "$CASE_DIR/s3.json" "$1"; }
+no_deletes() { [ "$(s3_deletes)" = 0 ] || { echo "$(s3_deletes) object(s) were deleted: $(grep '^DELETE' "$CASE_DIR/s3-requests.log" | head -1)"; return 1; }; }
+ev_for()     { grep -q "\"event\":\"$2\",\"session\":\"$3\"" "$1"; }
+
+# boto3 for the helper: the pinned image's version, installed on the runner by
+# the CI workflow or by hand (python3 -m pip install --user boto3==1.43.108).
+# The case runs with an empty environment, so the user site-packages go in by path.
+PYUSER=$(python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null)
+env -i PATH="$CASE_PATH" PYTHONPATH="$PYUSER" python3 -c 'import sys, boto3, botocore
+print(f"S3 cases run with {sys.executable} ({sys.version.split()[0]}), boto3 {boto3.__version__} from {boto3.__file__}, botocore {botocore.__version__}")
+print("DeleteObject accepts IfMatch:", "IfMatch" in boto3.client("s3", region_name="us-east-1", aws_access_key_id="a", aws_secret_access_key="b").meta.service_model.operation_model("DeleteObject").input_shape.members)' 2>&1 | sed "s/^/  /"
+run_s3_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
+    local name="$1" expect_gone="$2" expect_event="$3"; shift 3
+    local S="$WORK/$name"
+    rm -rf "$S"; mkdir -p "$S"
+    CASE_DIR="$S"
+    printf '{"objects":{}}' > "$S/s3.json"
+    printf '{}' > "$S/xnat.json"
+    S3UP=yes; FILERUP=yes; CASE_SESS="$SESS"
+    "setup_$name"
+    local pids=""
+    python3 "$HERE/fake-xnat.py" "$S" & pids="$pids $!"
+    [ "$S3UP" = yes ] && { python3 "$HERE/fake-s3.py" "$S" & pids="$pids $!"; }
+    [ "$FILERUP" = yes ] && { python3 "$HERE/fake-filer.py" "$S" & pids="$pids $!"; }
+    for i in $(seq 50); do
+        [ -s "$S/xnat-port" ] && { [ "$S3UP" != yes ] || [ -s "$S/s3-port" ]; } && { [ "$FILERUP" != yes ] || [ -s "$S/filer-port" ]; } && break
+        sleep 0.1
+    done
+    local s3port=1 filerport=1
+    [ "$S3UP" = yes ] && s3port=$(cat "$S/s3-port")
+    [ "$FILERUP" = yes ] && filerport=$(cat "$S/filer-port")
+    local out
+    out=$(cd "$S" && env -i \
+        PATH="$CASE_PATH" \
+        HOME="$S" \
+        STORAGE=s3 \
+        S3_BUCKET="$S3B" S3_PREFIX=staged \
+        AWS_ENDPOINT_URL="http://127.0.0.1:$s3port" AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s AWS_DEFAULT_REGION=us-east-1 \
+        FILER_ENDPOINT="http://127.0.0.1:$filerport" \
+        CLUSTER_LABEL=mgmt \
+        RECLAIM=onXnatConfirmed \
+        MIN_AGE=0 \
+        VERIFY_XNAT=true \
+        DRY_RUN=false \
+        XNAT_VERIFY_SSL=true \
+        XNAT_SERVER="http://127.0.0.1:$(cat "$S/xnat-port")" \
+        XNAT_USER=u XNAT_PASS=p \
+        PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$FS_PYMOD:$PYUSER" \
+        "$@" \
+        bash "$SCRIPT" 2>&1)
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null; wait $pids 2>/dev/null
+    printf '%s\n' "$out" > "$S/out.log"
+
+    local gone="no"
+    [ "$(s3_left "$CASE_SESS")" = 0 ] && gone="yes"
+    local ok=1 why=""
+    if printf '%s' "$out" | grep -qE "unbound variable|command not found|: line [0-9]+:|Traceback"; then
+        ok=0; why="shell or python error: $(printf '%s' "$out" | grep -oE '[^ ]*: line [0-9]+: .*|.*unbound variable|Traceback.*' | head -1)"
+    elif printf '%s' "$out" | grep -q '"event":"reclaim_failed"' && [ "$expect_event" != "reclaim_failed" ]; then
+        ok=0; why="reclaim_failed was emitted but not expected"
+    elif [ "$gone" != "$expect_gone" ]; then
+        ok=0; why="expected session-gone=$expect_gone but got $gone ($(s3_left "$CASE_SESS") object(s) left)"
+    elif ! printf '%s' "$out" | grep -q "\"event\":\"$expect_event\""; then
+        ok=0; why="expected event $expect_event; got: $(printf '%s' "$out" | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+    elif grep -qE '^DELETE [^ ]*/( |$)' "$S/s3-requests.log" 2>/dev/null; then
+        ok=0; why="a folder key was deleted: $(grep -E '^DELETE [^ ]*/( |$)' "$S/s3-requests.log" | head -1)"
+    elif grep '^DELETE ' "$S/s3-requests.log" 2>/dev/null | grep -qv 'if-match='; then
+        ok=0; why="an object was deleted without If-Match: $(grep '^DELETE ' "$S/s3-requests.log" | grep -v 'if-match=' | head -1)"
+    elif [ -s "$S/s3-requests.log" ] && grep -qvE '^(GET|HEAD|DELETE) ' "$S/s3-requests.log"; then
+        ok=0; why="an S3 request that is not GET, HEAD or DELETE: $(grep -vE '^(GET|HEAD|DELETE) ' "$S/s3-requests.log" | head -1)"
+    elif [ -s "$S/xnat-requests.log" ] && grep -qvE '^(GET|HEAD) |^DELETE /data/JSESSION$|^SESSION-(OPENED|CLOSED) ' "$S/xnat-requests.log"; then
+        ok=0; why="the reclaimer sent XNAT a request that is not GET, HEAD or the logout"
+    elif [ "$(cat "$S/xnat-requests.log" 2>/dev/null | grep -c '^SESSION-OPENED')" -gt 1 ]; then
+        ok=0; why="the run opened $(grep -c '^SESSION-OPENED' "$S/xnat-requests.log") XNAT sessions in one run"
+    elif [ "$(cat "$S/xnat-requests.log" 2>/dev/null | grep -c '^SESSION-OPENED')" != "$(cat "$S/xnat-requests.log" 2>/dev/null | grep -c '^SESSION-CLOSED')" ]; then
+        ok=0; why="the run left an XNAT session open"
+    elif declare -F "assert_$name" >/dev/null 2>&1; then
+        local extra
+        if ! extra=$("assert_$name" "$S/out.log" 2>&1); then ok=0; why="$extra"; fi
+    fi
+    if [ "$ok" = "1" ]; then
+        printf '  %sPASS%s  %-34s gone=%-3s %s\n' "$_G" "$_O" "$name" "$gone" "$expect_event"
+        PASS=$((PASS+1))
+    else
+        printf '  %sFAIL%s  %-34s %s\n' "$_R" "$_O" "$name" "$why"
+        # what the fake S3 saw and what the helper decided: the only way to read a failure on a CI runner
+        sed 's/^/          s3: /' "$S/s3-requests.log" 2>/dev/null | tail -14
+        grep -o '"event":"reclaim_[a-z_]*".\{0,320\}' "$S/out.log" 2>/dev/null | tail -6 | sed 's/^/          helper: /'
+        grep -v '^{' "$S/out.log" 2>/dev/null | tail -4 | sed 's/^/          stderr: /'
+        FAIL=$((FAIL+1)); FAILED+=("$name: $why")
+        printf '%s\n' "$out" | sed 's/^/          /' | head -12
+    fi
+}
+
+SR="staged/$SESS/1.scan/DICOM"
+# Every object deleted with the ETag the run listed, data before the manifest.
+setup_s3_happy_path()      { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; }
+assert_s3_happy_path() {
+    local log="$CASE_DIR/s3-requests.log" f1 m
+    [ "$(s3_deletes)" = 5 ] || { echo "want 5 deletes, got $(s3_deletes)"; return 1; }
+    grep -q "^DELETE $SR/f1.dcm if-match=$(python3 -c 'import hashlib; print(hashlib.md5(b"x"*100).hexdigest())')$" "$log" \
+        || { echo "f1.dcm was not deleted with its listed ETag"; return 1; }
+    f1=$(grep -n "^DELETE $SR/f1.dcm" "$log" | cut -d: -f1); m=$(grep -n "^DELETE $SR/__MANIFEST__.json" "$log" | cut -d: -f1)
+    [ "$f1" -lt "$m" ] || { echo "the manifest went before the data"; return 1; }
+    grep -q '"event":"reclaim_confirmed"' "$1" || { echo "no reclaim_confirmed"; return 1; }
+}
+setup_s3_partial_upload()  { s3_session "$SESS" 400; xnat_files subj EXP1 visit 3; }
+assert_s3_partial_upload() { reason "$1" incomplete_in_xnat && no_deletes; }
+setup_s3_xnat_absent()     { s3_session "$SESS" 2; }
+assert_s3_xnat_absent()    { reason "$1" incomplete_in_xnat && no_deletes; }
+setup_s3_size_mismatch()   { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2 50; }
+assert_s3_size_mismatch()  { reason "$1" size_mismatch && no_deletes; }
+setup_s3_xnat_500()        { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; xnat_set "d['status']={'experiments':500}"; }
+assert_s3_xnat_500()       { reason "$1" xnat_check_failed && no_deletes; }
+setup_s3_no_manifest()     { s3_session "$SESS" 2; s3_set "d['objects'].pop('$SR/__MANIFEST__.json')"; }
+assert_s3_no_manifest()    { reason "$1" manifest_unreadable && no_deletes; }
+# A refused delete (412: the object changed after the listing) ends every delete
+# of this session for the run: f1 went, f2 was refused, nothing else was tried.
+setup_s3_etag_changed()    { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2
+                             s3_set "k='$SR/f2.dcm'; d['after_list']={k: dict(d['objects'][k], etag='0'*32)}"; }
+assert_s3_etag_changed() {
+    reason "$1" object_changed || return 1
+    [ "$(s3_deletes)" = 2 ] || { echo "want 2 delete attempts (f1 done, f2 refused), got $(s3_deletes)"; return 1; }
+    s3_has "$SR/__MANIFEST__.json" && s3_has "staged/$SESS/__METADATA__.json" || { echo "a sidecar was deleted after the refusal"; return 1; }
+    ! grep -q '"event":"reclaim_resource_removed"' "$1" || { echo "a resource was reported removed"; return 1; }
+}
+setup_s3_delete_error()    { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['fail_delete']={'$SR/f1.dcm': 500}"; }
+# boto3 retries a 500 (five attempts of the same key); no OTHER object is tried.
+assert_s3_delete_error()   { reason "$1" delete_failed && [ "$(grep '^DELETE' "$CASE_DIR/s3-requests.log" | awk '{print $2}' | sort -u | wc -l)" = 1 ] || { echo "another object was tried after the failure"; return 1; }; }
+# The resource metadata was rewritten after the listing: its GET is refused, and
+# no data object of the session is deleted.
+setup_s3_sidecar_changed() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2
+                             s3_set "k='$SR/__METADATA__.json'; d['after_list']={k: dict(d['objects'][k], etag='1'*32, body='{\"SOPClassUID\":\"$SC\"}')}"; }
+assert_s3_sidecar_changed(){ reason "$1" object_changed && no_deletes; }
+# A resource that arrives after the snapshot: the proven resource goes, the
+# session metadata stays, and the session is kept with the reason.
+setup_s3_late_arrival()    { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2
+                             s3_set "d['after_list']={'staged/$SESS/2.late/DICOM/f1.dcm': {'size':100,'etag':'a'*32,'modified':'2020-01-01T00:00:00.000Z','body':'x'*100}}"; }
+assert_s3_late_arrival() {
+    reason "$1" late_arrival || return 1
+    s3_has "staged/$SESS/__METADATA__.json" || { echo "the session metadata was deleted although a resource arrived late"; return 1; }
+    ! s3_has "$SR/f1.dcm" || { echo "the proven resource was not removed"; return 1; }
+    ! grep -q '"event":"reclaim_removed"' "$1" || { echo "the session was reported removed"; return 1; }
+}
+# A nested object named like a sidecar is data: named by the manifest, not in
+# XNAT, so the resource is kept and NOTHING is deleted.
+setup_s3_nested_sidecar_name() {
+    s3_session "$SESS" 1; xnat_files subj EXP1 visit 1
+    s3_put "$SR/nested/__METADATA__.json" 0 '{"x":1}'
+    s3_set "k='$SR/__MANIFEST__.json'; import json as j; m=j.loads(d['objects'][k]['body']); m['checksums']['nested/__METADATA__.json']='abc'; b=j.dumps(m); import hashlib; d['objects'][k].update(body=b, size=len(b), etag=hashlib.md5(b.encode()).hexdigest())"
+}
+assert_s3_nested_sidecar_name() { reason "$1" incomplete_in_xnat && no_deletes; }
+# Sidecar-named objects under an unknown session child, a hidden child or an
+# upload batch folder: no XNAT proof, and NOTHING is deleted.
+setup_s3_unknown_child_sidecar() { s3_session "$SESS" 2; s3_put "staged/$SESS/attachments/nested/__METADATA__.json" 0 '{}'; }
+assert_s3_unknown_child_sidecar(){ reason "$1" incomplete_in_xnat && no_deletes; }
+setup_s3_batch_sidecar()         { s3_session "$SESS" 2; s3_put "staged/$SESS/1.scan/.DICOM-upload-active/__METADATA__.json" 0 '{}'; }
+assert_s3_batch_sidecar()        { reason "$1" incomplete_in_xnat && no_deletes; }
+setup_s3_hidden_child_sidecar()  { s3_session "$SESS" 2; s3_put "staged/$SESS/.hidden/nested/__MANIFEST__.json" 0 '{}'; }
+assert_s3_hidden_child_sidecar() { reason "$1" incomplete_in_xnat && no_deletes; }
+# The same with the resource proven: its data goes, the excluded entries and the
+# session metadata stay, and the session is reported kept.
+setup_s3_batch_keeps_session()   { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_put "staged/$SESS/1.scan/.DICOM-upload-active/__METADATA__.json" 0 '{}'; }
+assert_s3_batch_keeps_session()  { reason "$1" upload_batch_present && s3_has "staged/$SESS/1.scan/.DICOM-upload-active/__METADATA__.json" \
+                                   && s3_has "staged/$SESS/__METADATA__.json" && ! s3_has "$SR/f1.dcm" \
+                                   || { echo "the batch or the session metadata went, or the proven data stayed"; return 1; }; }
+# A crash after the data objects went: the sidecars are retired on the next run.
+setup_s3_crash_retry()     { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "[d['objects'].pop(k) for k in ['$SR/f1.dcm','$SR/f2.dcm']]"; }
+assert_s3_crash_retry()    { [ "$(s3_deletes)" = 3 ] || { echo "want the 3 sidecars deleted, got $(s3_deletes)"; return 1; }; }
+# A prefix with no objects (an empty folder entry): nothing to do, no per-session
+# event, counted as empty in the summary.
+setup_s3_empty_prefix()    { s3_set "d['folders']=['staged/$SESS/']"; }
+assert_s3_empty_prefix()   { ! grep -q "\"session\":\"$SESS\"" "$1" || { echo "an event names the empty session"; return 1; }
+                             grep -q '"empty":1' "$1" || { echo "the summary does not count it as empty"; return 1; }; }
+setup_s3_dry_run()         { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; }
+assert_s3_dry_run()        { no_deletes; }
+setup_s3_too_young()       { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_modified 3600; }
+assert_s3_too_young()      { no_deletes; }
+setup_s3_listing_error()   { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['status']={'list':500}"; }
+assert_s3_listing_error()  { no_deletes; }
+setup_s3_pagination()      { s3_session "$SESS" 3; xnat_files subj EXP1 visit 3; s3_set "d['page']=2"; }
+assert_s3_pagination()     { [ "$(s3_deletes)" = 6 ] || { echo "want 6 deletes over 3 pages, got $(s3_deletes)"; return 1; }; }
+# The gate: both bucket attributes, or nothing is examined.
+setup_s3_gate_not_disabled() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2
+                               printf '{"buckets":{"%s":{"Seaweed-X-Ais-Cleaner-Drained":"2026-10-14T00:00:00Z"}}}' "$S3B" > "$CASE_DIR/filer.json"; }
+assert_s3_gate_not_disabled(){ grep -q '"reason":"cleaner_not_disabled"' "$1" && no_deletes; }
+setup_s3_gate_not_drained()  { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2
+                               printf '{"buckets":{"%s":{"Seaweed-X-Amz-Allow-Empty-Folders":"true"}}}' "$S3B" > "$CASE_DIR/filer.json"; }
+assert_s3_gate_not_drained() { grep -q '"reason":"cleaner_not_drained"' "$1" && no_deletes; }
+setup_s3_filer_down()      { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; FILERUP=no; }
+assert_s3_filer_down()     { grep -q '"reason":"filer_unreachable"' "$1" && no_deletes; }
+setup_s3_bucket_unreachable() { s3_session "$SESS" 2; S3UP=no; }
+assert_s3_bucket_unreachable(){ grep -q '"reason":"bucket_unreachable"' "$1"; }
+# The pre-flight XNAT probe fails: a run-level event, and one per staged session.
+setup_s3_xnat_auth_fail()  { s3_session "$SESS" 2; s3_session proj.subj2.visit 2; }
+assert_s3_xnat_auth_fail() {
+    grep '"event":"reclaim_unavailable","session":""' "$1" | grep -q '"reason":"xnat_probe_failed"' || { echo "no run-level xnat_probe_failed"; return 1; }
+    ev_for "$1" reclaim_unavailable "$SESS" && ev_for "$1" reclaim_unavailable proj.subj2.visit || { echo "the fan-out did not name both sessions"; return 1; }
+    no_deletes
+}
+setup_s3_unsafe_name()     { s3_put 'staged/evil; rm -rf x/1.scan/DICOM/f1.dcm' 100; CASE_SESS='evil; rm -rf x'; }
+assert_s3_unsafe_name()    { reason "$1" unsafe_prefix_name && no_deletes; }
+setup_s3_cap()             { s3_session "$SESS" 2; s3_session proj.subj2.visit 2; xnat_files subj EXP1 visit 2; xnat_files subj2 EXP2 visit 2; }
+assert_s3_cap()            { grep -q 'removal cap of 1 reached' "$1" && s3_has staged/proj.subj2.visit/1.scan/DICOM/f1.dcm; }
+# minAge on this backend is read by the same code: base 10, at most 10 digits.
+setup_s3_minage_08d()      { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_modified 3600; }
+assert_s3_minage_08d()     { minage_read_as "$1" 08d 691200 && no_deletes; }
+setup_s3_minage_010d()     { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_modified $((9 * 86400)); }
+assert_s3_minage_010d()    { minage_read_as "$1" 010d 864000 && no_deletes; }
+setup_s3_minage_11_digits(){ s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; }
+assert_s3_minage_11_digits(){ minage_refused "$1" && no_deletes; }
+setup_s3_minage_overflow() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; }
+assert_s3_minage_overflow(){ minage_refused "$1" && no_deletes; }
+
+printf '\n%s== reclaimer decision paths, S3 backend ==%s\n' "$_B" "$_O"
+run_s3_case s3_happy_path          yes reclaim_removed
+run_s3_case s3_partial_upload      no  reclaim_kept
+run_s3_case s3_xnat_absent         no  reclaim_kept
+run_s3_case s3_size_mismatch       no  reclaim_kept
+run_s3_case s3_xnat_500            no  reclaim_kept
+run_s3_case s3_no_manifest         no  reclaim_kept
+run_s3_case s3_etag_changed        no  reclaim_kept
+run_s3_case s3_delete_error        no  reclaim_kept
+run_s3_case s3_sidecar_changed     no  reclaim_kept
+run_s3_case s3_late_arrival        no  reclaim_kept
+run_s3_case s3_nested_sidecar_name no  reclaim_kept
+run_s3_case s3_unknown_child_sidecar no reclaim_kept
+run_s3_case s3_batch_sidecar       no  reclaim_kept
+run_s3_case s3_hidden_child_sidecar no reclaim_kept
+run_s3_case s3_batch_keeps_session no  reclaim_kept
+run_s3_case s3_crash_retry         yes reclaim_removed
+run_s3_case s3_empty_prefix        yes reclaim_finished
+run_s3_case s3_dry_run             no  reclaim_skipped      DRY_RUN=true
+run_s3_case s3_too_young           no  reclaim_skipped      MIN_AGE=1d
+run_s3_case s3_listing_error       no  reclaim_unavailable
+run_s3_case s3_pagination          yes reclaim_removed
+run_s3_case s3_gate_not_disabled   no  reclaim_unavailable
+run_s3_case s3_gate_not_drained    no  reclaim_unavailable
+run_s3_case s3_filer_down          no  reclaim_unavailable
+run_s3_case s3_bucket_unreachable  no  reclaim_unavailable
+run_s3_case s3_xnat_auth_fail      no  reclaim_unavailable  XNAT_PASS=wrong
+run_s3_case s3_unsafe_name         no  reclaim_kept
+run_s3_case s3_cap                 yes reclaim_skipped      MAX_REMOVALS=1
 printf '\n%s== minAge is read in base 10, at most 10 digits ==%s\n' "$_B" "$_O"
-run_case    minage_08d         no  reclaim_skipped      MIN_AGE=08d
-run_case    minage_010d        no  reclaim_skipped      MIN_AGE=010d
-run_case    minage_11_digits   no  reclaim_unavailable  MIN_AGE=10000000000d
-run_case    minage_overflow    no  reclaim_unavailable  MIN_AGE=999999999999999d
+run_s3_case s3_minage_08d          no  reclaim_skipped      MIN_AGE=08d
+run_s3_case s3_minage_010d         no  reclaim_skipped      MIN_AGE=010d
+run_s3_case s3_minage_11_digits    no  reclaim_unavailable  MIN_AGE=10000000000d
+run_s3_case s3_minage_overflow     no  reclaim_unavailable  MIN_AGE=999999999999999d
 
 printf '\n%sreclaimer: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then

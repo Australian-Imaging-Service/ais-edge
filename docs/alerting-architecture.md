@@ -167,6 +167,17 @@ on), and then discovers the filer and both uploaders **by label**
 (`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
 rather than by hardcoded name.
 
+> **What changed since.** The uploader pinned today (xnat-ingest 0.16.1)
+> builds its session list from the object keys and skips a key that ends in
+> `/`, so an empty folder is not a session to it, and `mgmt-reclaim-<edge>`
+> leaves the session folder behind on purpose: it deletes the objects one by
+> one with `If-Match`, because a filer folder delete can drop a child written
+> meanwhile (measured on 4.34; `docs/components/seaweedfs.md`, "Deleting
+> staged objects"). The 0-byte prefixes this script removes are therefore
+> harmless to delivery now. The script still deletes them through the filer,
+> so run it only while the edge's `s3-uploader` is scaled to zero, never
+> against a bucket that is being written.
+
 > It used to take no arguments and address `seaweedfs/seaweedfs`,
 > `xnat-ingest-upload` and a fleet-wide `ingest-bucket` — all pre-consolidation
 > names — while counting objects with `mc`, which the current uploader image

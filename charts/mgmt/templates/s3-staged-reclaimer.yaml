@@ -24,22 +24,15 @@ the cluster that could later be resumed by accident.
   {{- fail "dataPolicy.derived.s3Staged.reclaim is set but xnatUpload.enabled=false. The reclaimer lives in the uploader's namespace and uses its xnatSecretRef/s3SecretRef; with the uploader off there is nothing delivering the staged sessions it would be reclaiming. Set reclaim: never." }}
 {{- end }}
 {{- if not .Values.seaweedfs.enabled }}
-  {{- fail "dataPolicy.derived.s3Staged.reclaim is set but seaweedfs.enabled=false. Removal goes through the SeaweedFS filer HTTP API in this release's own namespace; with SeaweedFS off there is no filer to call. Set reclaim: never." }}
+  {{- fail "dataPolicy.derived.s3Staged.reclaim is set but seaweedfs.enabled=false. The gate reads the SeaweedFS filer HTTP API in this release's own namespace; with SeaweedFS off there is no filer to call. Set reclaim: never." }}
 {{- end }}
 
-{{- /* One image, and it is one we already pin. The reclaimer needs an
-       authoritative S3 listing (aws), the XNAT REST confirmation (curl) and
-       the filer delete (curl) — amazon/aws-cli ships all of it, so there is
-       no custom image to build and nothing extra to keep patched.
-
-       This used to need kubectl too, because the only known way to remove a
-       SeaweedFS directory ENTRY was `weed shell fs.rm -r` inside the
-       SeaweedFS pod. The filer's HTTP API does the same thing
-       (DELETE ...?recursive=true, measured: 204 and the entry is gone), which
-       removed the kubectl dependency, the custom image AND the pods/exec RBAC
-       this job used to require. A CronJob that can open a shell in any pod in
-       the namespace is a much larger blast radius than one that can call a
-       single HTTP verb. */ -}}
+{{- /* The xnat-ingest image, the pin the uploader already uses. The
+       reclaimer runs reclaim-files.py, the same deleter as the edge's
+       staged-reclaimer: python3 and boto3 for the S3 listing, the conditional
+       deletes and the sidecar reads, the uploader's own label rule for the
+       XNAT mapping, curl for the XNAT probe and the filer gate. No kubectl,
+       no pods/exec RBAC: the filer is read, never asked to delete. */ -}}
 {{- $root := . }}
 {{- range $edge := .Values.edges }}
 {{- $bucket := include "mgmt.edgeBucket" (list $root $edge) }}
@@ -57,6 +50,8 @@ data:
          in CI and lets it be run against mocks. */}}
   reclaim-staged.sh: |
     {{- $root.Files.Get "files/reclaim-staged.sh" | nindent 4 }}
+  reclaim-files.py: |
+    {{- $root.Files.Get "files/reclaim-files.py" | nindent 4 }}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -71,8 +66,8 @@ spec:
   schedule: {{ $root.Values.dataPolicy.derived.s3Staged.schedule | quote }}
   # Two reclaimers listing and deleting the same prefix concurrently would
   # each confirm a session the other is mid-way through removing. Forbid, not
-  # Replace: killing a run between `fs.rm -r` and the verification listing
-  # would lose the record of what was deleted.
+  # Replace: killing a run between a DeleteObject and its
+  # reclaim_resource_removed line would lose the record of what was deleted.
   concurrencyPolicy: Forbid
   # If the controller was down at the scheduled minute, run late rather than
   # skipping — but do not let a queue of missed runs pile up.
@@ -108,6 +103,7 @@ spec:
             # Hash the script FILE, so a change to the reclaim logic is
             # visible in `helm diff` even though a CronJob has no rollout.
             checksum/script: {{ $root.Files.Get "files/reclaim-staged.sh" | sha256sum }}
+            checksum/helper: {{ $root.Files.Get "files/reclaim-files.py" | sha256sum }}
             {{- with $root.Values.podAnnotations }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -152,14 +148,20 @@ spec:
                 - name: DRY_RUN
                   value: {{ or (not $root.Values.dataPolicy.enabled) $root.Values.dataPolicy.dryRun | quote }}
 
-                # --- where the filer lives ------------------------------------
-                # Only the FILER can remove a directory ENTRY.
-                # `aws s3 rm --recursive` deletes the objects and leaves a
-                # 0-byte prefix that the uploader still lists as a session —
-                # measured on SeaweedFS 3.99, and the cause of two days of
-                # duplicate XNATUploadSuccess mail. The filer's HTTP API on
-                # :8888 removes it properly, over plain http inside the
-                # cluster, with no kubectl and no RBAC.
+                # --- the filer: read, never asked to delete -------------------
+                # The cleaner gate reads the bucket's attributes from the
+                # filer's HTTP API on :8888, over plain http inside the
+                # cluster, with no kubectl and no RBAC:
+                # Seaweed-X-Amz-Allow-Empty-Folders and the activation
+                # attestation (docs/components/seaweedfs.md). Earlier releases
+                # deleted a session prefix through this endpoint, because the
+                # S3 gateway leaves a 0-byte folder entry behind (measured on
+                # 3.99: two days of duplicate XNATUploadSuccess mail from the
+                # uploader of the time). A filer folder delete can drop a
+                # child written meanwhile (measured on 4.34), so nothing
+                # deletes a folder any more: the objects go one by one with
+                # If-Match, and the empty folder stays, invisible to the
+                # current uploader's listing.
                 - name: FILER_ENDPOINT
                   value: {{ include "mgmt.filerInternalEndpoint" $root | quote }}
 

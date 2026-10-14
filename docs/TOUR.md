@@ -948,8 +948,9 @@ lives in it.
        + __MANIFEST__.json  (filenames + MD5 per resource)
  7. s3-uploader waits settleMinutes, then uploads to s3://ingest-<edge>/staged/
  8. mgmt-upload-<edge> writes it into XNAT
- 9. mgmt-reclaim-<edge> re-queries XNAT, compares names AND checksums,
-       and only then deletes the staged copy
+ 9. mgmt-reclaim-<edge> re-queries XNAT, proves each manifest file by its
+       row in the mapped resource and a HEAD of the same size, and only
+       then deletes the staged copy, object by object
 ```
 
 **Order matters at step 2.** The original is written to the facility backup
@@ -965,16 +966,26 @@ paranoid:
 
 * XNAT creates the experiment on the *first* resource POST, so "the experiment
   exists" is **true for a partial upload**. Existence is not evidence.
-* So the reclaimer sums every `__MANIFEST__.json` into a set of
-  `filename → MD5`, lists what XNAT actually holds, and deletes only when
-  `missing == 0 AND mismatched == 0`.
-* Every uncertainty — unreadable manifest, HTTP 500, unparseable listing —
-  resolves to **keep**.
+* So the reclaimer reads every `__MANIFEST__.json` for the file names, finds
+  each name's row in the one XNAT resource the uploader maps that folder to,
+  and sends a HEAD: only a 200 with the staged size counts. Per-resource
+  totals are not trusted (xnat-test kept them correct after it had lost the
+  files).
+* Every uncertainty (unreadable manifest, HTTP 500, an unmapped resource, an
+  object changed after the listing) resolves to **keep** for that resource. An
+  upload batch folder, an unrecognised entry and the sidecars that still
+  describe something are never touched; the proven resources next to them are
+  reclaimed one at a time.
+* Each delete is one S3 `DeleteObject` with `If-Match` set to the ETag listed
+  before the proof. Folders are never deleted, and the run deletes nothing
+  until the bucket carries the SeaweedFS cleaner opt-out and its attestation
+  (`docs/components/seaweedfs.md`, "Deleting staged objects").
 * `maxRemovals: 50` bounds a bug: a run that decided "delete everything" is
   capped, leaving the rest for someone to notice.
 
 **Files:** `charts/edge/files/deidentify-and-forward.lua`,
-`charts/edge/files/s3-uploader.sh`, `charts/mgmt/files/reclaim-staged.sh`
+`charts/edge/files/s3-uploader.sh`, `charts/mgmt/files/reclaim-staged.sh`,
+`charts/mgmt/files/reclaim-files.py`
 
 ---
 
@@ -1608,9 +1619,11 @@ GET /data/experiments/XNAT_E00065/scans/ALL/files?format=json -> HTTP 200, "Resu
 ```
 
 XNAT reports the resource holds one 1400-byte file and then lists none.
-`reclaim-staged.sh` reads exactly that endpoint, correctly treats an empty
-`Result` as "cannot tell", and logs `reclaim_kept` / `xnat_count_unavailable`
-rather than deleting — the fail-safe direction, working as designed. This is
+`reclaim-staged.sh` of that release read exactly that endpoint, correctly
+treated an empty `Result` as "cannot tell", and logged `reclaim_kept` /
+`xnat_count_unavailable` rather than deleting (today `reclaim-files.py` reads
+the same listing per resource, and a file without a row keeps the session with
+`reclaim_kept` / `incomplete_in_xnat`) — the fail-safe direction, working as designed. This is
 an XNAT-side regression, not a fault in this repo: it worked until
 2026-08-09 11:17:50Z, whose `reclaim_confirmed` carried `"have":1`.
 
@@ -1629,5 +1642,5 @@ The absence alert is doing its job; the input it depends on has gone bad.
 Check whether it is still happening before assuming the 08-12 pages are real:
 
 ```bash
-kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50 | grep -c xnat_count_unavailable
+kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50 | grep -c -E 'xnat_count_unavailable|incomplete_in_xnat'
 ```
