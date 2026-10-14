@@ -577,4 +577,55 @@ edge-upload-direct	--require-manifest
 edge-upload-direct-no-manifest	--dont-require-manifest
 EOF
 
+# =============================================================================
+# The stage that writes the upload tree runs under the writer lock
+# =============================================================================
+# A deleter of the upload tree takes /data/.locks/<tree>.lock. So the stage that
+# writes that tree must hold the same lock for each pass (edge.lockedStage).
+# This fails when that stage is not wrapped, when it still passes --loop (two
+# loops), or when a stage that does not write the upload tree is wrapped.
+ci_heading "the upload-tree writer runs under the writer lock"
+
+while IFS=$'\t' read -r case_name locked plain; do
+  render="$CI_RENDER_DIR/$case_name.yaml"
+  if [ ! -s "$render" ]; then
+    ci_fail "no render at $render — run scripts/ci/render.sh first"
+    continue
+  fi
+  lock_out="$(python3 - "$render" "$locked" "$plain" 2>&1 <<'PY2'
+import sys, yaml
+
+path, locked, plain = sys.argv[1:4]
+tree = {"assign": "assigned", "deidentify": "deidentified"}
+stages = {}
+for doc in yaml.safe_load_all(open(path)):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if c["name"] in tree:
+            stages[c["name"]] = (c.get("command") or [], c.get("args") or [])
+
+cmd, args = stages.get(locked, ([], []))
+if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
+    raise SystemExit(f"{locked} is not wrapped: command={cmd}")
+if f"flock /data/.locks/{tree[locked]}.lock " not in cmd[2]:
+    raise SystemExit(f"{locked} does not take /data/.locks/{tree[locked]}.lock: {cmd[2]}")
+if "--loop" in args:
+    raise SystemExit(f"{locked} is wrapped and still passes --loop")
+if plain != "-":
+    cmd, args = stages.get(plain, ([], []))
+    if cmd != ["xnat-ingest", plain] or "--loop" not in args:
+        raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
+print(f"{locked} under {tree[locked]}.lock" + ("" if plain == "-" else f", {plain} loops on its own"))
+PY2
+  )" && ci_pass "$case_name: $lock_out" \
+     || ci_fail "$case_name: $lock_out"
+done <<'EOF'
+edge-defaults	assign	-
+edge-deid-off	assign	-
+edge-upload-direct	assign	-
+edge-upload-alerts	deidentify	assign
+edge-direct-ingest-reclaim	deidentify	assign
+EOF
+
 ci_summary "runtime-templates"
