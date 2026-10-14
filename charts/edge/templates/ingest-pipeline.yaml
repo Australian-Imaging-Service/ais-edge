@@ -148,6 +148,11 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            # The glob matches directories too. Without this, group reads a matched
+            # directory as a file and the stage dies with FormatRecognitionError.
+            # With it, group descends into directories and skips the ones it
+            # matched. Checked on 0.16.1 with the default glob.
+            - "--recursive"
             # EXPLICIT, because 0.15.0 changed the default from "avoid" to none at all.
             # In 0.13.1 `group` defaulted to --on-resource-clash=avoid and a repeated
             # resource name was silently suffixed _2/_3. In 0.15.0 the option takes a

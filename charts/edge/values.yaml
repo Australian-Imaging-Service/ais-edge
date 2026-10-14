@@ -672,6 +672,7 @@ ingest:
   fileDrop:
     enabled: false
     interval: 300
+    # Files in subfolders are read too: group runs with --recursive.
     inputGlob: "/data/incoming/**/*"
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
