@@ -67,7 +67,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: PyYAML
-        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2' 'boto3==1.43.108'
 
       # Keyed on ci/lib.sh because that is where the version pins and their
       # sha256s live, so changing a pin misses the cache by construction and
@@ -168,6 +168,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: make reclaimer-fence
 
+      - name: Cleaner activation (the S3 delete opt-in fails closed)
+        if: ${{ !cancelled() }}
+        run: make cleaner-activation
+
       # The engine that deletes patient-derived data on the edge. Asserts on
       # what SURVIVED a real run over real trees, not on what was logged.
       - name: data-policy engine tests (what actually got deleted)
@@ -212,7 +216,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: PyYAML
-        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2' 'boto3==1.43.108'
 
       - name: Cache pinned tools
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

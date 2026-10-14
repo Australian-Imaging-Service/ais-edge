@@ -649,4 +649,48 @@ edge-s3-ingest	deidentify	assign
 edge-direct-ingest-reclaim	deidentify	assign
 EOF
 
+# -----------------------------------------------------------------------------
+# Inline Python in rendered scripts compiles. A script written INLINE in a
+# template sits in a YAML block scalar, which indents every line: a Python
+# snippet continued on a second line arrives indented and fails with
+# IndentationError at RUN time, in the one container nothing else tests.
+# Measured: the bucket Job's attribute readback failed six times on a real
+# install and the Helm hook with it. Files from files/ are not affected (the
+# block scalar strips their common indentation), so this checks what the
+# container will actually execute: every `python3 -c '...'` and every
+# `python3 - <<'PY' ... PY` heredoc in a rendered command or args string.
+# -----------------------------------------------------------------------------
+ci_heading "inline python in rendered scripts compiles"
+py_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, re, sys, yaml
+
+def strings(doc):
+    for c in ((doc.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers", []) \
+             + ((((doc.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}).get("template") or {}).get("spec", {}).get("containers", []):
+        for s in (c.get("command") or []) + (c.get("args") or []):
+            yield c.get("name"), s
+
+snippets, problems = 0, []
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    case = os.path.basename(path)[:-5]
+    try:
+        docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    except yaml.YAMLError:
+        continue
+    for d in docs:
+        for cname, text in strings(d):
+            found = [m.group(1) for m in re.finditer(r"python3 -c '([^']*)'", text)]
+            found += [m.group(1) for m in re.finditer(r"python3 -[^\n]*<<-?'?PY'?\n(.*?)\nPY\b", text, re.S)]
+            for code in found:
+                snippets += 1
+                try:
+                    compile(code, f"{case}/{d.get('kind')}/{d['metadata']['name']}/{cname}", "exec")
+                except SyntaxError as e:
+                    problems.append(f"{case} {d.get('kind')} {d['metadata']['name']} ({cname}): {e.msg} at line {e.lineno}: {(e.text or '').strip()[:60]}")
+if problems:
+    raise SystemExit("\n".join(problems))
+print(f"{snippets} snippets compile")
+PY
+)" && ci_pass "inline python: $py_out" || ci_fail "inline python: $py_out"
+
 ci_summary "runtime-templates"

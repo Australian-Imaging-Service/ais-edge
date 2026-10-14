@@ -118,6 +118,11 @@ dataPolicy:
     # re-alerted forever without this reclaimer.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
+      # CAUTION: a run deletes nothing from a bucket that does not carry the
+      # SeaweedFS cleaner opt-out and the activation attestation; it logs
+      # reclaim_unavailable (cleaner_not_disabled / cleaner_not_drained). The
+      # bucket Job writes both for a bucket it creates. For an existing bucket
+      # run scripts/cleaner-activation.sh once (docs/components/seaweedfs.md).
       minAge: 1d
       # GUIDING: re-queries XNAT before deleting anything — an uploader exit
       # code only means the call returned, not that the data landed.
@@ -135,11 +140,12 @@ dataPolicy:
       # Cap per run. CAUTION: bounds a "delete everything" bug to this many
       # sessions; at hourly this still drains ~1200/day if truly needed.
       maxRemovals: 50
-      # Needs `aws` (S3 listing) and `curl` (XNAT + filer delete) in one
-      # image. Pinned — an unpinned tag is worst on the job that deletes data.
+      # The xnat-ingest image, the same pin as xnatUpload.image: reclaim-files.py
+      # needs its python3 and boto3, and the uploader's own label rule. Pinned:
+      # an unpinned tag is worst on the job that deletes data.
       image:
-        repository: amazon/aws-cli
-        tag: "2.31.19"
+        repository: ghcr.io/australian-imaging-service/xnat-ingest
+        tag: "0.16.1"
         pullPolicy: IfNotPresent
 
   telemetry:

@@ -195,22 +195,51 @@ kubectl rollout restart deploy/mgmt-seaweedfs -n ais-mgmt
 The `S3_CONFIG_HASH` annotation the shell installer used to recompute for
 this is gone, along with the installer.
 
-### Deletion must go through the filer, never `aws s3 rm`
+### Deleting staged objects
 
 Measured on SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it)
 removes the objects but leaves a 0-byte directory entry, which `aws s3 ls`
-still reports as `PRE <session>/`. An empty prefix is exactly what makes the
-uploader log a bogus success every cycle — switching S3 client does not fix
-it, only the filer can remove a directory entry:
+still reports as `PRE <session>/`. That entry made the uploader of the time
+log a bogus success every cycle, so the reclaimer then deleted through the
+filer's HTTP API (`DELETE ...?recursive=true`), which removes the entry.
 
-```
-DELETE http://<filer>:8888/buckets/<bucket>/<prefix>/<session>?recursive=true
-```
+That is no longer how it works, for two reasons measured on 4.34:
 
-Measured: returns 204 and the entry is genuinely gone, where the same session
-deleted with `aws s3 rm --recursive` still lists. This is why
-`charts/mgmt/files/reclaim-staged.sh` deletes through the filer HTTP API and
-never shells out to `aws s3 rm`.
+- A filer folder delete is not atomic. Even without `recursive=true` the
+  filer checks the folder, then removes it, and a child written between the
+  two is dropped with it (`filer_delete_entry.go`). The reclaimer therefore
+  never deletes a folder. It deletes each object on its own with S3
+  `DeleteObject` and `If-Match` set to the ETag it listed before its proof, so
+  an object rewritten after the listing answers 412 and stays. Empty folders
+  are left behind: the current uploader lists objects and skips a key that
+  ends in `/`, so an empty folder is not a session to it.
+- SeaweedFS removes an empty folder on its own about 90 seconds after its
+  last object goes (the empty-folder cleaner; `-s3.allowEmptyFolder` is
+  deprecated and ignored), with the same window. A bucket opts out through
+  the filer attribute `Seaweed-X-Amz-Allow-Empty-Folders: true`, set with
+  `PUT /buckets/<bucket>?tagging` and that header, and the policy is cached
+  for about 5 minutes. The reclaimer deletes nothing from a bucket until it
+  reads two attributes back from the filer: that one, and
+  `Seaweed-X-Ais-Cleaner-Drained: <time>`, the attestation that the opt-out
+  was activated in order. `charts/mgmt` writes both for a bucket it creates
+  (no history) and only the first for an existing bucket; for an existing
+  deployment run `scripts/cleaner-activation.sh <release> -- <edge>...`: it
+  suspends and drains the mgmt reclaimers, scales the edge uploaders to zero
+  and waits until no multipart upload is in flight, sets the attribute and
+  reads it back, restarts SeaweedFS (no cached policy and no pending cleanup
+  survives that), reads it back again, writes the attestation and resumes.
+  What it suspends or scales it marks on the object (an annotation with the
+  state before), so the resume puts back the replicas the uploader had and
+  resumes only the CronJobs the script suspended; one an operator suspended,
+  unmarked, stays suspended. A failure leaves nothing attested beyond that
+  point; what was changed stays changed and marked, and a rerun after the
+  repair puts it back. A query that fails is never read as "nothing runs".
+  Measured on 4.34: a folder emptied just before that procedure survived it; without the
+  attribute the folder was gone within 3 minutes.
+
+Deletion of a local upload tree (the edge's staged-reclaimer) is in
+[xnat-ingest.md](xnat-ingest.md); both deleters run the same
+`reclaim-files.py`.
 
 ## Benefits
 

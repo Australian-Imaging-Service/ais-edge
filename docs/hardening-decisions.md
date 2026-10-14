@@ -20,8 +20,8 @@ section:
 | 1 | mTLS on the Loki push path | shipped; see the status banner on §1 |
 | 2 | Per-edge hostnames, SNI | shipped in the amended both-modes form — `edges[].exposure: sni` |
 | 3 | Two-tier CA, root offline | optional per R5: `certManager.ca.mode: intermediate` + `docs/ca-ceremony.md`; the `certManager.enabled` conflation is fixed ("Independent of `enabled` on purpose") |
-| 4 | Reclaimer completeness | revised by R1 and implemented as the manifest-vs-XNAT check in `charts/mgmt/files/reclaim-staged.sh` |
-| 5 | Counting objects | `--output json, NOT --output text` in `reclaim-staged.sh` — `--output text` applies `--query` per page and silently truncates |
+| 4 | Reclaimer completeness | revised by R1; implemented as the manifest-vs-XNAT totals check in `reclaim-staged.sh`, then replaced by the per-file proof in `charts/mgmt/files/reclaim-files.py`: each manifest file's row in the XNAT resource the uploader maps the folder to, plus a HEAD with the same size. Totals were not enough: on xnat-test they stayed correct after XNAT had lost the files |
+| 5 | Counting objects | was `--output json, NOT --output text` in `reclaim-staged.sh` (`--output text` applies `--query` per page and silently truncates). The AWS CLI is gone from the reclaimer: `reclaim-files.py` walks every page of `list_objects_v2` through boto3's paginator, once, and binds each later read and delete to the ETag of that listing |
 | 6 | Alerting correctness | split by R6 into rule-input checking (`scripts/check-alert-inputs.sh`) and rule-logic tests (`promtool` + the Loki rule tests in CI) |
 | 7 | Data-retention guarantees | `enableStatefulSetAutoDeletePVC: false` plus the `scripts/ci/pvc-retention.sh` assertion |
 | 8 | Adopting the existing cluster | `scripts/adopt-existing.sh`, dry-run by default — "`--apply` is the only thing that writes" |

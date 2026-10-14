@@ -518,6 +518,11 @@ groups:
                  bucket_unreachable / staging_list_failed     → S3 gateway or creds
                  minage_unparseable / reclaim_disabled        → dataPolicy values
                  missing_tool                                 → the job image
+                 filer_unreadable / cleaner_not_disabled /
+                 cleaner_not_drained                          → the cleaner gate: the bucket
+                                                                 lacks the SeaweedFS attributes;
+                                                                 run scripts/cleaner-activation.sh
+                                                                 (docs/components/seaweedfs.md)
               3. Sessions staged while this was firing are still tracked:
                  the reclaimer logs reclaim_unavailable per session, so
                  SessionStagedNotConfirmedInXNAT will fire on them in ~48h if
