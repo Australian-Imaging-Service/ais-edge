@@ -408,13 +408,29 @@ curl_esc() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 # working with per-request Basic Auth rather than refusing to run: leaking
 # sessions is untidy, but a reclaimer that will not start is the failure mode
 # that leaves staging to grow unbounded.
+#
+# EVERY XNAT CALL USES xnat_auth AND CURL_OPTS. Until 2026-10-14 the pre-flight
+# probe sent the credentials itself: one extra session per run, on every site.
+# The logout had its own curl options without -k: where the certificate does
+# not verify (XNAT_VERIFY_SSL=false, as on the test edge) it failed in silence,
+# a second session per run. There, XNAT showed 9 open on a 4-minute schedule.
 # -----------------------------------------------------------------------------
 XNAT_JSESSION=""
 
+# The curl config line that authenticates one XNAT request: the run's session
+# when it has one, else the credentials (each such request is a new session).
+xnat_auth() {
+    if [ -n "$XNAT_JSESSION" ]; then
+        printf 'header = "Cookie: JSESSIONID=%s"\n' "$(curl_esc "$XNAT_JSESSION")"
+    else
+        printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")"
+    fi
+}
+
 xnat_login() {
     local out code
-    out=$(printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
-          | curl "${CURL_OPTS[@]}" -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null)
+    # XNAT_JSESSION is empty here: this is the one credential login of the run.
+    out=$(xnat_auth | curl "${CURL_OPTS[@]}" -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null)
     code=$(printf '%s' "$out" | tail -n1)
     if [ "$code" = "200" ]; then
         # Body is the token; strip the trailing http_code line the -w added.
@@ -429,24 +445,17 @@ xnat_login() {
 
 xnat_logout() {
     [ -n "$XNAT_JSESSION" ] || return 0
-    printf 'header = "Cookie: JSESSIONID=%s"\n' "$(curl_esc "$XNAT_JSESSION")" \
-        | curl -sS --max-time "$HTTP_TIMEOUT" ${XNAT_VERIFY_SSL:+} -o /dev/null \
-               -X DELETE -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null
+    local code
+    code=$(xnat_auth | curl "${CURL_OPTS[@]}" -X DELETE -K - "${XNAT_SERVER}/data/JSESSION" 2>/dev/null | tail -n1)
+    [ "$code" = "200" ] \
+        || jlog xnat_session_close_failed "" "the XNAT logout returned HTTP ${code:-000}; XNAT keeps this session until it times out"
     XNAT_JSESSION=""
 }
 # Released however the run ends — including the `unavailable`/`die` paths, which
 # exit early and would otherwise leak the very session this change exists to stop.
 trap xnat_logout EXIT
 
-xnat_get() {
-    if [ -n "$XNAT_JSESSION" ]; then
-        printf 'header = "Cookie: JSESSIONID=%s"\n' "$(curl_esc "$XNAT_JSESSION")" \
-            | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null
-    else
-        printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
-            | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null
-    fi
-}
+xnat_get() { xnat_auth | curl "${CURL_OPTS[@]}" -K - "$1" 2>/dev/null; }
 
 if [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
@@ -475,8 +484,7 @@ if [ "$VERIFY_XNAT" = "true" ]; then
     # one-JSON-object-per-line contract.
     probe_err="${TMPDIR:-/tmp}/reclaim-xnat-probe-$$.err"
     probe_rc=0
-    probe=$(printf 'user = "%s:%s"\n' "$(curl_esc "${XNAT_USER:-}")" "$(curl_esc "${XNAT_PASS:-}")" \
-            | curl "${CURL_OPTS[@]}" \
+    probe=$(xnat_auth | curl "${CURL_OPTS[@]}" \
                    -w '\n%{time_namelookup} %{time_connect} %{time_appconnect}\n%{http_code}' \
                    -K - "${XNAT_SERVER}/data/projects?format=json" 2>"$probe_err") || probe_rc=$?
     # curl uses the LAST -w, so the tail is: <body>\n<timings>\n<http_code>.
