@@ -90,10 +90,11 @@ The DICOM ingest engine downstream of Orthanc.
 - **The upload-tree writer lock, `/data/.locks/assigned.lock`**: `assign`
   writes the tree the uploader reads (deid.engine orthanc or none), so it runs
   one pass at a time and holds this lock for each pass (`edge.lockedStage` in
-  `charts/edge/templates/_helpers.tpl`). A deleter of that tree must take the
-  same lock before it deletes. No deleter takes it yet, so this does not yet
-  protect the existing delete paths, and it does not change how a stage removes
-  its own input (`--unlink-source`). Under deid.engine
+  `charts/edge/templates/_helpers.tpl`). The staged-reclaimer takes the same
+  lock around each delete, and deletes only while the writer holds
+  `/data/.locks/assigned.alive`, a shared lock the writer keeps for its whole
+  life. This does not change how a stage removes its own input
+  (`--unlink-source`). Under deid.engine
   ingest, `deidentify` writes the upload tree and takes
   `/data/.locks/deidentified.lock` instead
 
@@ -271,6 +272,44 @@ sudo mv /data/xnat-ingest/assigned/__invalid__/<dir> \
 # Re-render what the release will run, without installing
 helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 ```
+
+### Upgrade or roll back while the cleanup can delete
+
+The staged-reclaimer deletes only inside the upload-tree writer lock, and only
+while a writer that takes the lock is running (it holds `<tree>.alive`). That
+check is safe for an upgrade, because Recreate stops the old writer before the
+new one starts. Two moves need a drain first, on a site where
+`dataPolicy.enabled: true` and `dataPolicy.dryRun: false`:
+
+- the FIRST upgrade to a release in which the staged-reclaimer takes the lock.
+  Before it, the cleanup ran `rm -rf` without the lock, and a Job that has
+  started keeps its old behaviour after its CronJob changes. That includes the
+  release that added only the writer lock: its deleter does not take the lock;
+- a rollback to a release in which the writer or the deleter does not take the
+  lock. This rollback is not supported without the drain, and the cleanup then
+  stays suspended.
+
+`suspend` does not stop a Job that has started. `scripts/reclaimer-fence.sh`
+waits for it, and fails on any API error instead of reading it as "nothing
+runs". Give it the upgrade or rollback command:
+
+```bash
+scripts/reclaimer-fence.sh around <release> -- \
+    helm upgrade <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
+```
+
+It suspends the CronJob and waits until no cleanup Job or pod is active (also a
+pod whose Job is already deleted), runs the command, and resumes only if the
+command succeeded and the checks below pass. At the first failure it stops,
+exits non-zero, and the CronJob stays suspended. Do not run the steps as
+separate shell lines: a failed step does not stop the next one. (`drain` and
+`resume` exist on their own for an operator who checks each exit status.)
+
+The resume step refuses, and leaves the CronJob suspended, when the CronJob's
+deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
+complete, or when any writer pod (`assign` or `deidentify`, from the lock path)
+lacks the wrapper or is still terminating. An upgrade or a rollback between two releases
+in which BOTH the writer and the staged-reclaimer take the lock needs no drain.
 
 ## Benefits
 

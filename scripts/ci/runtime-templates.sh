@@ -581,9 +581,11 @@ EOF
 # The stage that writes the upload tree runs under the writer lock
 # =============================================================================
 # A deleter of the upload tree takes /data/.locks/<tree>.lock. So the stage that
-# writes that tree must hold the same lock for each pass (edge.lockedStage).
-# This fails when that stage is not wrapped, when it still passes --loop (two
-# loops), or when a stage that does not write the upload tree is wrapped.
+# writes that tree must hold the same lock for each pass (edge.lockedStage), and a
+# shared lock on <tree>.alive for its life. This fails when that stage is not
+# wrapped, when it still passes --loop (two loops), when a stage that does not
+# write the upload tree is wrapped, when the writer is not Recreate (the deleter's
+# .alive check relies on it), or when the staged-reclaimer gets other lock paths.
 ci_heading "the upload-tree writer runs under the writer lock"
 
 while IFS=$'\t' read -r case_name locked plain; do
@@ -597,26 +599,40 @@ import sys, yaml
 
 path, locked, plain = sys.argv[1:4]
 tree = {"assign": "assigned", "deidentify": "deidentified"}
-stages = {}
+stages, strategy, reclaimer = {}, {}, None
 for doc in yaml.safe_load_all(open(path)):
-    if not doc or doc.get("kind") != "Deployment":
+    if not doc:
+        continue
+    if doc.get("kind") == "CronJob" and doc["metadata"]["name"].endswith("-staged-reclaimer"):
+        c = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        reclaimer = {e["name"]: e.get("value") for e in c.get("env", [])}
+    if doc.get("kind") != "Deployment":
         continue
     for c in doc["spec"]["template"]["spec"].get("containers", []):
         if c["name"] in tree:
             stages[c["name"]] = (c.get("command") or [], c.get("args") or [])
+            strategy[c["name"]] = (doc["spec"].get("strategy") or {}).get("type")
 
 cmd, args = stages.get(locked, ([], []))
 if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
     raise SystemExit(f"{locked} is not wrapped: command={cmd}")
-if f"flock /data/.locks/{tree[locked]}.lock " not in cmd[2]:
-    raise SystemExit(f"{locked} does not take /data/.locks/{tree[locked]}.lock: {cmd[2]}")
+lock, alive = f"/data/.locks/{tree[locked]}.lock", f"/data/.locks/{tree[locked]}.alive"
+if f"flock {lock} " not in cmd[2]:
+    raise SystemExit(f"{locked} does not take {lock}: {cmd[2]}")
+if f"exec 9>>{alive} && flock -s 9 && " not in cmd[2]:
+    raise SystemExit(f"{locked} does not hold {alive} for its life: {cmd[2]}")
+if strategy.get(locked) != "Recreate":
+    raise SystemExit(f"{locked} is not strategy Recreate: {strategy.get(locked)}")
+if reclaimer is not None and (reclaimer.get("WRITER_LOCK"), reclaimer.get("WRITER_ALIVE")) != (lock, alive):
+    raise SystemExit(f"the staged-reclaimer locks {reclaimer.get('WRITER_LOCK')}, {reclaimer.get('WRITER_ALIVE')}, not {lock}, {alive}")
 if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
     if cmd != ["xnat-ingest", plain] or "--loop" not in args:
         raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
-print(f"{locked} under {tree[locked]}.lock" + ("" if plain == "-" else f", {plain} loops on its own"))
+print(f"{locked} under {tree[locked]}.lock" + (", reclaimer on the same locks" if reclaimer else "")
+      + ("" if plain == "-" else f", {plain} loops on its own"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
      || ci_fail "$case_name: $lock_out"

@@ -323,8 +323,10 @@ has no s3-uploader**, so nothing would ever write it, and for a long time nothin
 did: the condition could not come true, the tree was kept for ever, and the
 uploader re-sent the same session every loop while XNAT answered *"already exists
 with different checksums"*. A `staged-reclaimer` CronJob now closes that. It runs
-hourly, asks XNAT whether the session is really there and complete, and only then
-removes it.
+hourly. For each resource of a session it finds every local file in XNAT's file
+listing and checks it with a HEAD request: present, with the same size (no
+download, so content is not compared). It removes only the files it proved, inside
+the upload-tree writer lock, and keeps everything it cannot prove.
 
 Two consequences worth knowing before you change anything here:
 
@@ -337,10 +339,16 @@ Two consequences worth knowing before you change anything here:
   with `DRY_RUN` set: it reports what it would remove and removes nothing. A site
   that never turns the data policy on will fill up, and the alert for it fires
   long after the uploader has started looping.
+- **It deletes only inside the writer lock.** The stage that writes the tree
+  holds `/data/.locks/<tree>.lock` for each pass, and the CronJob takes the same
+  lock to delete. The first upgrade to this check, and any rollback to a release
+  without the lock, need the drain in
+  [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
 
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
-minimum age, whether it verifies against XNAT, and how many sessions one run may
-remove.
+minimum age (counted from when the newest file reached the tree), whether it
+verifies against XNAT (with `false` it removes nothing), and how many sessions one
+run may remove.
 
 `minFreeDiskPercent: 10` and `quarantine.alertAfter: 24h` are read by the
 alerting rules as well as the policy engine, so changing them changes when you
