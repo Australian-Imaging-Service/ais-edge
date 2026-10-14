@@ -66,6 +66,16 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   default). If they disagree with the user in that Secret's
   `users.json`, Orthanc answers 401 and the pipeline stalls silently
 - **No XNAT credentials** — neither edge stage talks to XNAT
+- **The upload-tree writer lock, `/data/.locks/<tree>.lock`**: the
+  stage that writes the tree the uploader reads (`assign` under the
+  Orthanc engine or none, `deidentify` under the ingest engine) runs one
+  pass at a time, and holds this lock for each pass (`edge.lockedStage`
+  in `charts/edge/templates/_helpers.tpl`). A deleter of that tree must
+  take the same lock before it deletes. No deleter takes it yet, so this
+  does not yet protect the existing delete paths, and it does not change
+  how a stage removes its own input (`--unlink-source`). The chart runs each pass from a shell loop with the same full-interval
+  sleep as `--loop`, so that stage has no `--loop` argument. A pass that
+  fails stops the container, as an exception out of `--loop` did
 
 ### s3-uploader pod (edge)
 - **The same pipeline PVC** — reads `assigned/`, and removes each
@@ -299,6 +309,7 @@ there is never uploaded — that is what makes the rename a promotion.
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
+| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.15.0` keeps starting pods with no registry at all. There is deliberately no image-import step in `install.sh` — a genuinely air-gapped site has to seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 

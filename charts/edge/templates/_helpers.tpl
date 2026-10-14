@@ -857,3 +857,30 @@ before.
 {{- define "edge.uploadTreeKey" -}}
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
 {{- end }}
+
+{{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
+     stage folder, so no deleter lists it.
+     GUIDING: the stage that writes the upload tree holds it for each pass
+     (edge.lockedStage). A deleter of that tree must take the same lock before
+     it deletes. No deleter takes it yet: this is the writer side only.
+     CAUTION: keep the path stable. Two paths are two locks, and two locks
+     exclude nothing. */}}
+{{- define "edge.uploadTreeLock" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.lock
+{{- end }}
+
+{{- /* The command of a stage that writes the upload tree.
+     Argument: (list $ "<stage>" <interval seconds>).
+     One pass at a time, each inside the lock, then a sleep. The sleep is the
+     same full interval that --loop sleeps, so the stage args must not have
+     --loop.
+     `flock <file> <cmd>` for each pass, not one fd for the whole loop: the pass
+     and any child it leaves keep the lock until they stop.
+     A pass that fails stops the container, as an exception out of --loop did. */}}
+{{- define "edge.lockedStage" -}}
+- /bin/sh
+- -c
+- {{ printf "mkdir -p /data/.locks && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- xnat-ingest
+- {{ index . 1 | quote }}
+{{- end }}
