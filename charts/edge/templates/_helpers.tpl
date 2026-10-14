@@ -980,8 +980,8 @@ before.
 {{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
      stage folder, so no deleter lists it.
      GUIDING: the stage that writes the upload tree holds it for each pass
-     (edge.lockedStage). A deleter of that tree takes the same lock, so it never
-     deletes a file that a pass is writing.
+     (edge.lockedStage). A deleter of that tree must take the same lock before
+     it deletes. No deleter takes it yet: this is the writer side only.
      CAUTION: keep the path stable. Two paths are two locks, and two locks
      exclude nothing. */}}
 {{- define "edge.uploadTreeLock" -}}

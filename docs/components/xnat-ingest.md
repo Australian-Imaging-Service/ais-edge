@@ -90,8 +90,10 @@ The DICOM ingest engine downstream of Orthanc.
 - **The upload-tree writer lock, `/data/.locks/assigned.lock`**: `assign`
   writes the tree the uploader reads (deid.engine orthanc or none), so it runs
   one pass at a time and holds this lock for each pass (`edge.lockedStage` in
-  `charts/edge/templates/_helpers.tpl`). A deleter of that tree takes the same
-  lock, so it cannot delete a file while a pass writes it. Under deid.engine
+  `charts/edge/templates/_helpers.tpl`). A deleter of that tree must take the
+  same lock before it deletes. No deleter takes it yet, so this does not yet
+  protect the existing delete paths, and it does not change how a stage removes
+  its own input (`--unlink-source`). Under deid.engine
   ingest, `deidentify` writes the upload tree and takes
   `/data/.locks/deidentified.lock` instead
 
@@ -290,7 +292,7 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
-| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass or a deleter can take it. A child process that a pass leaves keeps the lock until that child stops |
+| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
 | `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
 
