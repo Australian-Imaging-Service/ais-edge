@@ -2,7 +2,9 @@
 # Stub `curl` for the reclaimer harness.
 #
 # Handles the three things the reclaimer uses curl for: the filer readiness
-# probe, the filer DELETE, and the XNAT REST queries.
+# probe, the filer DELETE, and the XNAT REST queries. For XNAT it also keeps
+# sessions and certificate checks the way the real server and real curl do, so
+# a case can count the sessions a run leaves open.
 #
 # THE DELETE IS RECORDED, and that recording is the point of the whole
 # harness. Almost every assertion is ultimately "did a DELETE happen for this
@@ -13,7 +15,7 @@ S="${SCENARIO:?SCENARIO required}"
 CALLS="${S}/calls.log"
 DELETES="${S}/deletes.log"
 
-url=""; method="GET"
+url=""; method="GET"; insecure=0; has_w=0
 args=("$@")
 i=0
 while [ $i -lt ${#args[@]} ]; do
@@ -27,12 +29,15 @@ while [ $i -lt ${#args[@]} ]; do
         # printf finishes before the stub exits and nothing is printed, which is why
         # this passed locally and only failed on a CI runner. Drain it, as curl would.
         -K) i=$((i+1)); [ "${args[$i]}" = "-" ] && drain_stdin=1 ;;
+        -k|--insecure) insecure=1 ;;
+        -w) i=$((i+1)); has_w=1 ;;
         http://*|https://*) url="$a" ;;
     esac
     i=$((i+1))
 done
-[ "${drain_stdin:-0}" = "1" ] && cat >/dev/null 2>&1
-echo "curl $method $url" >> "$CALLS"
+conf=""
+[ "${drain_stdin:-0}" = "1" ] && conf=$(cat 2>/dev/null)
+echo "curl $method $url$([ "$insecure" = 1 ] && echo ' insecure')" >> "$CALLS"
 
 emit() { printf '%s' "$1"; printf '\n%s' "$2"; }   # body then \n<code>, matching -w
 
@@ -52,6 +57,46 @@ case "$url" in
 esac
 
 # ---- XNAT ------------------------------------------------------------------
+# XNAT's certificate does not verify here, as on the tier-1 test edge: that is
+# why every case runs with XNAT_VERIFY_SSL=false. Real curl then refuses an
+# https call without -k (exit 60, and -w still prints 000). xnat-cert-trusted
+# lifts this, for a case that runs with verification on.
+case "$url" in https://*)
+    if [ "$insecure" = 0 ] && [ ! -f "$S/xnat-cert-trusted" ]; then
+        echo "curl: (60) SSL certificate problem: self-signed certificate in certificate chain" >&2
+        [ "$has_w" = 1 ] && printf '\n000'
+        exit 60
+    fi ;;
+esac
+
+# SESSIONS, as the real server keeps them (checked on xnat-test 2026-10-14): a
+# request with the credentials (`user = ...`) opens a NEW session whatever its
+# URL, and XNAT keeps it until it times out; a JSESSIONID cookie reuses an open
+# one; DELETE /data/JSESSION closes it, and the cookie then gets 401.
+SESSIONS="$S/xnat-sessions.log"
+cookie=$(printf '%s\n' "$conf" | sed -n 's/^header = "Cookie: JSESSIONID=\(.*\)"$/\1/p')
+if printf '%s\n' "$conf" | grep -q '^user = '; then
+    [ -f "$S/xnat-auth.fail" ] && { emit '<html>401</html>' '401'; exit 0; }
+    case "$method $url" in "GET "*/data/JSESSION)
+        [ -f "$S/xnat-jsession.fail" ] && { emit '<html>500</html>' '500'; exit 0; } ;;
+    esac
+    sid="S$(( $(cat "$SESSIONS" 2>/dev/null | grep -c '^SESSION-OPENED') + 1 ))"
+    echo "SESSION-OPENED $sid" >> "$SESSIONS"
+elif [ -n "$cookie" ] && grep -qx "SESSION-OPENED $cookie" "$SESSIONS" 2>/dev/null \
+        && ! grep -qx "SESSION-CLOSED $cookie" "$SESSIONS"; then
+    sid="$cookie"
+else
+    emit '<html>401</html>' '401'; exit 0
+fi
+# The token goes to xnat-shared-session too: the Python helper borrows the run's
+# session, and fake-xnat.py accepts that token. xnat-logout.fail makes the logout
+# answer 500 and keep the session, as a server fault would.
+case "$method $url" in
+"GET "*/data/JSESSION)    printf '%s' "$sid" > "$S/xnat-shared-session"; emit "$sid" '200'; exit 0 ;;
+"DELETE "*/data/JSESSION) [ -f "$S/xnat-logout.fail" ] && { emit '<html>500</html>' '500'; exit 0; }
+                          echo "SESSION-CLOSED $sid" >> "$SESSIONS"; rm -f "$S/xnat-shared-session"; emit '' '200'; exit 0 ;;
+esac
+
 case "$url" in
 */data/projects\?format=json*)
     [ -f "$S/xnat-auth.fail" ] && { emit '<html>401</html>' '401'; exit 0; }
