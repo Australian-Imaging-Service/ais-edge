@@ -26,6 +26,16 @@ the cluster that could later be resumed by accident.
 {{- if not .Values.seaweedfs.enabled }}
   {{- fail "dataPolicy.derived.s3Staged.reclaim is set but seaweedfs.enabled=false. The gate reads the SeaweedFS filer HTTP API in this release's own namespace; with SeaweedFS off there is no filer to call. Set reclaim: never." }}
 {{- end }}
+{{- /* THE PROOF RUNS ONLY AFTER minAge, and SessionStagedNotConfirmedInXNAT
+       counts a session unconfirmed 48h after the reclaimer first logged it
+       (reclaim_skipped counts as "seen"). A minAge of 48h or more would page
+       for every healthy session; 36h leaves the schedule interval and the
+       rule's `for` their room. The two clocks (charts/edge/values.yaml,
+       s3Staged) want it above the edge's day. */ -}}
+{{- $minAgeS := include "mgmt.durationSeconds" .Values.dataPolicy.derived.s3Staged.minAge }}
+{{- if and (ne $minAgeS "-") (gt (int64 $minAgeS) 129600) }}
+  {{- fail (printf "dataPolicy.derived.s3Staged.minAge=%v is longer than 36h. The reclaimer proves a session in XNAT only after minAge, and SessionStagedNotConfirmedInXNAT counts a session unconfirmed 48h after the reclaimer first saw it, so every healthy session would page. Keep it at most 36h (and above the edge's dataPolicy.derived.stagedReclaimer.minAge: the two clocks)." .Values.dataPolicy.derived.s3Staged.minAge) }}
+{{- end }}
 
 {{- /* The xnat-ingest image, the pin the uploader already uses. The
        reclaimer runs reclaim-files.py, the same deleter as the edge's

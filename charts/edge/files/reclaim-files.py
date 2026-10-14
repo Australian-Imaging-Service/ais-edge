@@ -22,6 +22,17 @@
 # CAUTION: the listing alone is not proof. XNAT keeps a row for a file it lost.
 # CAUTION: this proves presence and size, NOT content.
 #
+# PROOF=s3 (the edge in S3 mode, STORAGE=filesystem): the bucket is the next copy,
+# so each local file is proven by its object: the session prefix is listed once,
+# and the file passes when the object with its key has the file's size and an
+# ETag equal to the MD5 of the bytes read now, or the multipart form of it for
+# S3_CHUNK_SIZE or rclone's 5 MiB default. The identity of the file (inode, size,
+# times) is taken before the hash and checked after it. A resource is removed only
+# when its data files and its sidecars pass; the session metadata must pass too
+# when anything is removed. A file that fails gets a repair request for the
+# uploader (a file named for the session under RECOPY_DIR; not in a dry run) and
+# the session is kept; XNAT is not consulted.
+#
 # DELETE, per session. A folder: inside the upload-tree writer lock, while a
 # wrapped writer holds <tree>.alive, and only if names and file identities did not
 # change; data first, the manifest last, empty folders after. A prefix: one
@@ -47,6 +58,7 @@ from datetime import datetime
 
 E = os.environ
 STORAGE = E.get("STORAGE", "filesystem")
+PROOF = E.get("PROOF", "xnat")   # xnat: the row and HEAD in XNAT; s3: the object and MD5 in S3 (edge, S3 mode)
 ROOT = E.get("STAGED_ROOT", "").rstrip("/")
 DRY_RUN = E.get("DRY_RUN", "true") == "true"
 MIN_AGE_S = int(E.get("MIN_AGE_S", "0"))
@@ -74,8 +86,10 @@ REMOVED, KEPT, SKIPPED, EMPTY = 0, 10, 11, 12
 
 def jlog(event, session, message, **extra):
     """One JSON line, the same shape as jlog() in reclaim-staged.sh."""
+    # proof: what a decision rests on (xnat or s3). SessionStagedNotConfirmedInXNAT
+    # counts only an XNAT proof as delivery; the edge's bucket proof is not one.
     rec = {"ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-           "component": "s3-reclaimer", "cluster": E.get("CLUSTER_LABEL", ""),
+           "component": "s3-reclaimer", "cluster": E.get("CLUSTER_LABEL", ""), "proof": PROOF,
            "event": event, "session": session, "message": message[:400], **extra}
     print(json.dumps(rec, separators=(",", ":")), flush=True)
 
@@ -104,6 +118,111 @@ def walk(top):
             else:
                 raise Keep("unknown_entry", f"{path} is not a regular file or folder")
     return out
+
+
+def parse_size(text):
+    """A Kubernetes-style quantity (64Mi, 5M, 1048576) in bytes."""
+    m = re.fullmatch(r"\s*(\d+)\s*([KMGT]i?)?\s*", text or "")
+    if not m:
+        raise Keep("bad_chunk_size", f"S3_CHUNK_SIZE={text!r} is not a size")
+    unit = {"": 1, "K": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9, "T": 10 ** 12,
+            "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40}[m.group(2) or ""]
+    return int(m.group(1)) * unit
+
+
+def identity(path):
+    """The file identity the delete path rechecks: a regular file, or Keep."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise Keep("unknown_entry", f"{path} is not a regular file")
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def hashes(path, part_sizes):
+    """One pass over the file: the MD5 of the whole, and for each part size the
+    multipart ETag form, md5(part md5s)-<parts>, as S3 lists a multipart upload."""
+    import hashlib, math
+    block = math.gcd(*part_sizes)
+    whole, parts = hashlib.md5(), {p: ([], hashlib.md5(), 0) for p in part_sizes}
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(block), b""):
+            whole.update(chunk)
+            for p, (done, cur, filled) in parts.items():
+                cur.update(chunk)
+                filled += len(chunk)
+                if filled >= p:
+                    done.append(cur.digest()); cur, filled = hashlib.md5(), 0
+                parts[p] = (done, cur, filled)
+    forms = {}
+    for p, (done, cur, filled) in parts.items():
+        if filled:
+            done.append(cur.digest())
+        forms[p] = f"{hashlib.md5(b''.join(done)).hexdigest()}-{len(done)}"
+    return whole.hexdigest(), forms
+
+
+class S3Proof:
+    """PROOF=s3: the local files of one session, proven by their objects in the
+    staging bucket (see the header). The prefix is listed once; a file that fails
+    gets a repair request, and the Keep says so."""
+
+    def __init__(self, session):
+        import boto3
+        from botocore.config import Config
+        cert = E.get("S3_CLIENT_CERT")   # mTLS on the upload path: the same pair the uploader uses
+        self.s3 = boto3.client("s3", config=Config(client_cert=(cert, E["S3_CLIENT_KEY"])) if cert else None)
+        self.bucket, self.session = E["S3_BUCKET"], session
+        self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
+        self.parts = sorted({parse_size(E.get("S3_CHUNK_SIZE", "64Mi")), 5 << 20})
+        self.objects, self.requested = {}, False
+        try:
+            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
+                for o in page.get("Contents") or []:
+                    rel = o["Key"][len(self.prefix):]
+                    if rel and not rel.endswith("/"):
+                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]))
+        except Exception as e:
+            raise Keep("listing_failed", f"cannot list {self.prefix}: {e}")
+
+    def prove(self, path, rel):
+        """The local file at path, whose key is <session>/<rel>: Keep unless its
+        object has its size and the MD5 of its bytes."""
+        before = identity(path)
+        whole, forms = hashes(path, self.parts)
+        if identity(path) != before:
+            raise Keep("changed_during_check", f"{rel} changed while it was hashed")
+        obj = self.objects.get(rel)
+        if obj is None:
+            raise self.repair("not_in_s3", f"{rel}: no object in the bucket")
+        etag, size = obj
+        if size != before[2]:
+            raise self.repair("s3_mismatch", f"{rel}: the object has {size} bytes, the file {before[2]}")
+        if etag == whole or etag in forms.values():
+            return
+        if "-" in etag and etag.rsplit("-", 1)[1].isdigit():
+            raise Keep("unknown_layout", f"{rel}: a multipart object in parts of a size this run does not compute ({etag}); an operator must check it")
+        raise self.repair("s3_mismatch", f"{rel}: the object's ETag is not the MD5 of the file")
+
+    def repair(self, reason, message):
+        """A request for the uploader to copy the session again, once per run and
+        session, never in a dry run. Returns the Keep to raise."""
+        d = E.get("RECOPY_DIR")
+        if DRY_RUN or not d or self.requested:
+            return Keep(reason, message)
+        self.requested = True
+        try:
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, f".{self.session}.tmp")
+            with open(tmp, "w") as f:
+                f.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {reason} {message}\n")
+            if os.path.exists(os.path.join(d, self.session)):
+                os.unlink(tmp)   # an earlier request stands; the uploader serves it
+            else:
+                os.rename(tmp, os.path.join(d, self.session))
+            jlog("recopy_requested", self.session, f"asked the uploader to copy the session again: {message}", reason=reason)
+        except OSError as e:
+            return Keep("recopy_request_failed", f"{message}; and the repair request could not be written: {e}")
+        return Keep(reason, f"{message}; re-copy requested")
 
 
 def newest_ctime(top):
@@ -376,6 +495,12 @@ class Resource:
             raise Keep("unmapped_resource", f"{self.rel}: DICOM datatype {datatype} is not mapped")
         return name   # not DICOM: the uploader keeps the folder name
 
+    def prove_s3(self, proof):
+        """Raise Keep unless every file of this folder (data and sidecars) is in the
+        bucket with its size and the MD5 of its bytes."""
+        for rel in sorted(self.data) + sorted(self.sidecars):
+            proof.prove(os.path.join(self.store.path, self.rel, rel), f"{self.rel}/{rel}")
+
     def prove(self, xnat, index):
         """Raise Keep unless XNAT holds every file that the manifest names, all in
         the one resource that the uploader maps this folder to."""
@@ -555,7 +680,7 @@ def reclaim(session):
              f"last written {age}s ago, minAge is {E.get('MIN_AGE')} ({MIN_AGE_S}s) from {E.get('MIN_AGE_KEY')}",
              age_s=age)
         return SKIPPED
-    if E.get("VERIFY_XNAT", "true") != "true":
+    if PROOF == "xnat" and E.get("VERIFY_XNAT", "true") != "true":
         raise Keep("verify_disabled", "verifyAgainstXnat=false: this deleter removes only what XNAT proves")
 
     # Snapshot. A scan folder is <id>.<type>. Its dot entries are the uploader's
@@ -583,7 +708,26 @@ def reclaim(session):
                 kept_rels.append(rel)
 
     # Proof, outside the lock.
-    if resources:
+    if resources and PROOF == "s3":
+        try:
+            proof = S3Proof(session)
+            for res in list(resources):
+                try:
+                    res.prove_s3(proof)
+                except Keep as k:
+                    kept.append(k)
+                    kept_rels.append(res.rel)
+                    resources.remove(res)
+            # the session metadata goes with the last resource (tidy): it must be in
+            # the bucket before any data of the session is removed
+            for name in sorted(n for n, k in store.names().items() if n in SIDECARS and k == "file"):
+                if resources:
+                    proof.prove(os.path.join(store.path, name), name)
+        except Keep as k:   # the listing, or the session metadata: nothing of the session is removed
+            kept.append(k)
+            kept_rels += [r.rel for r in resources]
+            resources = []
+    elif resources:
         xnat = Xnat()
         try:
             index = xnat.file_index(*parts)
@@ -598,9 +742,14 @@ def reclaim(session):
             xnat.close()
     nfiles = sum(len(r.data) for r in resources)
     if resources and not kept and not unknown:
-        jlog("reclaim_confirmed", session,
-             f"XNAT holds each of the {nfiles} file(s) of this session with the same size (HEAD); content is not verified",
-             resources=len(resources), have=nfiles)
+        if PROOF == "s3":
+            jlog("reclaim_confirmed", session,
+                 f"the bucket holds each of the {nfiles} file(s) of this session with the MD5 of its bytes (ETag) and its size",
+                 resources=len(resources), have=nfiles)
+        else:
+            jlog("reclaim_confirmed", session,
+                 f"XNAT holds each of the {nfiles} file(s) of this session with the same size (HEAD); content is not verified",
+                 resources=len(resources), have=nfiles)
     seen = [r.rel for r in resources] + kept_rels
     if not resources and not store.tidy(seen, kept_rels, batches, unknown, act=False):
         return report_kept(session, kept, unknown, batches, 0)
@@ -622,7 +771,8 @@ def reclaim(session):
                 stopped = True
                 break
             removed += 1
-            jlog("reclaim_resource_removed", session, f"removed {res.rel}: {len(res.data)} file(s) proved in XNAT",
+            jlog("reclaim_resource_removed", session,
+                 f"removed {res.rel}: {len(res.data)} file(s) proved in {'the bucket' if PROOF == 's3' else 'XNAT'}",
                  files=len(res.data))
         if not stopped:
             try:
@@ -635,7 +785,8 @@ def reclaim(session):
         report_kept(session, kept, unknown, batches, removed)
         return REMOVED if removed else KEPT
     if not nfiles and not removed:
-        # No data files are left to deliver. Say so, or SessionStagedNotConfirmedInXNAT
+        # No data files are left to deliver (leftover sidecars, retired without a
+        # proof: they describe nothing). Say so, or SessionStagedNotConfirmedInXNAT
         # fires 48h later for a session that is gone on purpose.
         jlog("reclaim_confirmed", session, "the session holds no data files: nothing left to deliver",
              resources=0, have=0, empty=True)

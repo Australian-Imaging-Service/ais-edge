@@ -931,10 +931,19 @@ printf 'dataPolicy:\n  derived:\n    assigned:\n      reclaim: onAssigned\n' >"$
 printf 'dataPolicy:\n  derived:\n    grouped:\n      reclaim: onUploaded\n      location: /data/custom\n' >"$V/neg-edge-reclaim-onuploaded-on-grouped.yaml"
 printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x\n' >"$V/neg-edge-reclaim-onuploaded-moved-assigned.yaml"
 
-# onUploaded needs a marker that only the s3-uploader writes, and upload.mode
-# =direct renders no s3-uploader. The condition could never come true, so the
-# tree would be kept for ever while the policy read as if it were being cleaned.
+# onUploaded needs the staged reclaimer to prove the tree, and it proves only
+# the tree the uploader reads: under Orthanc-deid that is /data/assigned, so
+# /data/deidentified is unwatched in either upload mode. The condition could
+# never come true, so the tree would be kept for ever while the policy read as
+# if it were being cleaned. One case per mode: the guard used to apply only
+# under direct, when the s3-uploader's own delete stood in for a proof.
 printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
+printf 'upload:\n  mode: s3\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded-s3.yaml"
+
+# The mgmt reclaimer proves a session in XNAT only after s3Staged.minAge, and
+# SessionStagedNotConfirmedInXNAT counts a session unconfirmed 48h after the
+# reclaimer first saw it: two days would page for every healthy session.
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      minAge: 2d\n' >"$V/neg-mgmt-s3staged-minage-over-36h.yaml"
 
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
@@ -1399,6 +1408,8 @@ neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-recla
 neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-moved-assigned.yaml	while the uploader reads
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
+neg-edge-reclaim-deid-onuploaded-s3	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded-s3.yaml	with upload.mode=s3
+neg-mgmt-s3staged-minage-over-36h	charts/mgmt	mgmt-base.yaml neg-mgmt-s3staged-minage-over-36h.yaml	is longer than 36h
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
 neg-edge-ingest-no-authsecret	charts/edge	edge-base.yaml neg-edge-ingest-no-authsecret.yaml	orthanc.auth.existingSecret is empty
 neg-edge-ingest-no-salt	charts/edge	edge-base.yaml neg-edge-ingest-no-salt.yaml	existingSaltSecret is empty

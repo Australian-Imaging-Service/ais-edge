@@ -343,7 +343,7 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
         # holding matching S3 markers, had this engine delete the terminal tree
         # itself, without the CronJob's confirmation against XNAT.
         if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
-            jlog reclaim_kept "$r_name" "the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
+            jlog reclaim_kept "$r_name" "the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once its proof passes (XNAT under direct upload, the bucket under s3)" \
                  ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
             continue
         fi

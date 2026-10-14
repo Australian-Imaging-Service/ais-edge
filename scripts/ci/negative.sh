@@ -75,7 +75,7 @@ charts/mgmt/templates/cert-issuers.yaml	8
 charts/mgmt/templates/cert-sync.yaml	15
 charts/mgmt/templates/edge-clusters.yaml	11
 charts/mgmt/templates/observability.yaml	14
-charts/mgmt/templates/s3-staged-reclaimer.yaml	2
+charts/mgmt/templates/s3-staged-reclaimer.yaml	3
 charts/mgmt/templates/seaweedfs.yaml	2
 charts/edge/templates/_helpers.tpl	34
 EOF

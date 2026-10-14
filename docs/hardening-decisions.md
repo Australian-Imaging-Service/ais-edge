@@ -738,3 +738,39 @@ The dependencies are tighter than the original order implied:
 * §2 (SNI) needs a konnectivity passthrough test before it is committed to.
 
 Revised order: **§6-promtool → §0 → §3 → cert-sync → §1 → §4 → §2 → §5/§7/§8/§9 → §10**.
+
+## R1 revisited (2026-10): the edge half of §4 is implementable, and done
+
+R1 was about the management side, where the uploader is an upstream binary.
+The edge side is ours: `s3-uploader.sh` is a shell loop around `rclone copy`.
+It used to delete the local session after a zero exit when
+`dataPolicy.derived.assigned.reclaim: onUploaded`, which is "the component
+with the knowledge deletes" with the wrong knowledge: an exit code is not
+evidence that the bucket holds the bytes.
+
+What ships now, in `upload.mode: s3`:
+
+* **The uploader copies only.** Each copy runs inside the upload-tree writer
+  lock, so a session is never copied and deleted at the same time. `RECLAIM`
+  and `DRY_RUN` are gone from the script.
+* **The staged-reclaimer deletes, after a proof from the bucket**
+  (`PROOF=s3`): the object must be listed with the file's size and an ETag
+  equal to the MD5 of the bytes read from disk now, or its multipart form for
+  `upload.s3.chunkSize` and rclone's 5 MiB default. The same CronJob already
+  did this under `direct` with XNAT as the proof: one script, one lock, two
+  proofs.
+* **A failed proof leaves a repair request** that the uploader claims by a
+  rename and answers with a copy, so a lost or changed object is re-sent
+  without an operator, and a session is never re-sent twice for one run.
+* **Two clocks.** The management reclaimer must remove the bucket copy after
+  the edge has proved against it: `s3Staged.minAge` (36 hours) against
+  `stagedReclaimer.minAge` (a day). Neither chart can read the other's value,
+  so a `RecopyLoop` alert watches for the crossing. The longer clock also has
+  a ceiling: the XNAT proof runs only after it, and the absence alert
+  (`SessionStagedNotConfirmedInXNAT`) counts a session unconfirmed after 48
+  hours, so the management chart refuses more than 36h (a week, the first
+  draft, would have paged for every healthy session: found by Codex).
+
+What did not change: the management reclaimer and its proof against XNAT (R1
+stands), the upstream issue for S3 retention, and the rule that every
+uncertainty keeps the data.

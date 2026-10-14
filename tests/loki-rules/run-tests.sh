@@ -137,6 +137,9 @@ cat <<EOF
 90	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 30	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-ok"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 10	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-ok"}	{"component":"s3-reclaimer","event":"reclaim_finished","session":"","message":"examined=2 removed=0"}
+30	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-two"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed","proof":"xnat"}
+90	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"rec-two"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed","proof":"xnat"}
+10	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-two"}	{"component":"s3-reclaimer","event":"reclaim_finished","session":"","message":"examined=2 removed=1","proof":"s3"}
 2	{"namespace":"xnat-upload","cluster":"auth-once"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
 1	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
 3	{"namespace":"xnat-upload","cluster":"auth-many"}	{"level":"ERROR","message":"Invalid status for response from XNATSession (status 401, accepted status: [200, 201])"}
@@ -151,6 +154,11 @@ cat <<EOF
 3600	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-lost"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.SUBJ.SESS","message":"too young"}
 3600	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-ok"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.SUBJ.SESS","message":"too young"}
 60	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-ok"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"have=1"}
+3600	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"stage-s3proof"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"the bucket holds each of the 2 file(s)","proof":"s3"}
+3600	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"stage-s3proof-ok"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"the bucket holds each of the 2 file(s)","proof":"s3"}
+3000	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-s3proof-ok"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"have=2","proof":"xnat"}
+3600	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-retained"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.SUBJ.SESS","message":"age 1h < minAge 36h","proof":"xnat"}
+1380	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-retained"}	{"component":"s3-reclaimer","event":"reclaim_confirmed","session":"proj.SUBJ.SESS","message":"have=2","proof":"xnat"}
 60	{"namespace":"xnat-upload","component":"s3-reclaimer","cluster":"stage-new"}	{"component":"s3-reclaimer","event":"reclaim_skipped","session":"proj.NEW.SESS","message":"too young"}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"disk-low"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":4,"min_free_pct":10,"entries":9,"oldest_age_s":50}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"disk-ok"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"min_free_pct":10,"entries":9,"oldest_age_s":50}
@@ -182,6 +190,16 @@ cat <<EOF
 45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
 3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
 45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-unlisted"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+90	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+150	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+210	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-once"}	{"component":"s3-uploader","edge":"recopy-once","event":"recopy_claimed","session":"proj.S2.E2","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S3.E3","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S4.E4","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S5.E5","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S6.E6","message":"x"}
+60	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-done-only"}	{"component":"s3-uploader","edge":"recopy-done-only","event":"recopy_done","session":"proj.S7.E7","message":"x"}
 EOF
 }
 
@@ -190,17 +208,25 @@ cases() {
 cat <<'EOF'
 reclaimer_stuck	ReclaimerRunUnavailable	rec-stuck	fire	aborted twice, never recovered
 reclaimer_recovered	ReclaimerRunUnavailable	rec-ok	nofire	aborted, then a run finished — must not page
+reclaimer_other_ns_finished	ReclaimerRunUnavailable	rec-two	fire	the mgmt reclaimer aborted twice; the edge's reclaimer finishing is another reclaimer
 auth_single_401	XNATAuthFailure	auth-once	nofire	one self-healing session expiry
 auth_persistent_401	XNATAuthFailure	auth-many	fire	5 rejections in 15m — credential really broken
 auth_progress_bar	XNATAuthFailure	auth-tqdm	nofire	tqdm "401.71it/s" must never match
 staged_unconfirmed	SessionStagedNotConfirmedInXNAT	stage-lost	fire	seen 60h ago, never confirmed
 staged_confirmed	SessionStagedNotConfirmedInXNAT	stage-ok	nofire	confirmed inside the 72h window
 staged_too_recent	SessionStagedNotConfirmedInXNAT	stage-new	nofire	only 1h old — outside the offset window
+staged_s3proof_only	SessionStagedNotConfirmedInXNAT	stage-s3proof	fire	the edge proved it in the bucket 60h ago (proof=s3); XNAT never confirmed
+staged_s3proof_then_xnat	SessionStagedNotConfirmedInXNAT	stage-s3proof-ok	nofire	the edge's bucket proof, then the mgmt XNAT proof (proof=xnat) 50h ago
+staged_retained_36h	SessionStagedNotConfirmedInXNAT	stage-retained	nofire	skipped for minAge 60h ago, proved in XNAT 23h ago (minAge 36h plus a run): retention is not absence
 disk_below_threshold	EdgeDiskLow	disk-low	fire	4% free vs minFreeDiskPercent 10
 disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above the limit
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+recopy_loop	RecopyLoop	recopy-loop	fire	one session copied again 4 times in 24h: the two clocks crossing
+recopy_once	RecopyLoop	recopy-once	nofire	one repair is a repair, not a loop
+recopy_spread	RecopyLoop	recopy-spread	nofire	4 requests over 4 sessions: no session loops
+recopy_done_only	RecopyLoop	recopy-done-only	nofire	a completed copy is not a request
 stage_age_forever_quiet	StageBacklogAgeing	age-forever	nofire	facility backup kept forever by policy: 49-day-old originals are the point (cai-lfs3, 2026-09-30)
 stage_age_stuck	StageBacklogAgeing	age-stuck	fire	a stage with a reclaim policy whose oldest entry is 49 days old
 stage_age_fresh	StageBacklogAgeing	age-fresh	nofire	oldest entry 1h old, under the 7d limit

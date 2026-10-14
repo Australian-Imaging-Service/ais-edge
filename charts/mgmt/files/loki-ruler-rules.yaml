@@ -196,11 +196,23 @@ groups:
         # is the same failure caught within the hour; both are wanted, because
         # a pre-flight that recovers on its own leaves this one to notice the
         # sessions that went unconfirmed while it was down.
+        # THE PROOF RUNS ONLY AFTER minAge. A session younger than
+        # dataPolicy.derived.s3Staged.minAge is logged as reclaim_skipped (which
+        # counts as "seen" in the first half) and XNAT is not asked, so the
+        # confirmation arrives minAge plus one schedule interval after the first
+        # sighting. The mgmt chart therefore refuses a minAge over 36h: with 48h
+        # or more every healthy session would fire this.
         # BOTH NAMESPACES ON PURPOSE. The same reclaimer runs in two places: on
         # mgmt (xnat-upload) against the S3 staging prefix for tier-2, and on an
-        # edge (xnat-ingest) against the terminal stage directory for tier-1.
-        # Same script, same events, same component label, so one rule covers
-        # both and the cluster label says which site fired.
+        # edge (xnat-ingest) against the terminal stage directory. Same script,
+        # same events, same component label, so one rule covers both and the
+        # cluster label says which site fired.
+        # ONLY AN XNAT PROOF CONFIRMS. Under upload.mode=s3 the edge's reclaimer
+        # proves its local copy against the BUCKET, not XNAT, and its lines
+        # carry proof=s3. Its reclaim_confirmed means "the bucket holds it", so
+        # it is kept out of the confirming half; a session the edge saw and
+        # XNAT never confirmed is exactly this alert. A line without the field
+        # (an older reclaimer) still confirms: a missing label reads as "".
         expr: |
           (sum by (cluster, session) (count_over_time(
             {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
@@ -208,7 +220,7 @@ groups:
           unless on (cluster, session)
           (sum by (cluster, session) (count_over_time(
             {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
-            | json | event="reclaim_confirmed" [72h])) > 0)
+            | json | event="reclaim_confirmed" | proof != "s3" [72h])) > 0)
         for: 30m
         labels:
           severity: critical
@@ -489,12 +501,17 @@ groups:
         # CronJob's last success. SessionStagedNotConfirmedInXNAT is NOT a
         # backstop for it: its staged half reads the reclaimer's own reclaim_.*
         # events, so it goes blind together with the reclaimer.
+        #
+        # GROUPED BY NAMESPACE AS WELL. Under upload.mode=s3 one cluster has
+        # two reclaimers: the edge's (xnat-ingest, proof: the bucket) and the
+        # management one (xnat-upload, proof: XNAT). One finishing must not
+        # hide the other's aborts, so each is judged against its own runs.
         expr: |
-          (sum by (cluster, reason) (count_over_time(
+          (sum by (cluster, namespace, reason) (count_over_time(
             {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_unavailable" | session = "" [3h])) > 0)
-          unless on (cluster)
-          (sum by (cluster) (count_over_time(
+          unless on (cluster, namespace)
+          (sum by (cluster, namespace) (count_over_time(
             {namespace=~"xnat-upload|xnat-ingest", component="s3-reclaimer"}
             | json | event="reclaim_finished" [70m])) > 0)
         for: 75m
@@ -512,6 +529,7 @@ groups:
               1. What did it say? (the pod of a FAILED job is usually already
                  garbage-collected, so prefer Loki over kubectl logs)
                  kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+                 (namespace xnat-ingest: the edge's own reclaimer, with the edge kubeconfig)
               2. reason={{ $labels.reason }} names the failed dependency:
                  xnat_probe_failed / xnat_credentials_missing → XNAT or its Secret
                  filer_unreachable / filer_unhealthy          → SeaweedFS filer
@@ -1116,3 +1134,37 @@ groups:
             cert (the AWS CLI reads it as a single file via
             AWS_CA_BUNDLE, not as a directory of PEMs).
 
+      - alert: RecopyLoop
+        # The edge's staged-reclaimer (PROOF=s3) asks the uploader to copy a
+        # session again when a local file is not in the bucket as it is on
+        # disk. One request is a repair. A session that keeps asking is the
+        # two clocks crossing: the mgmt reclaimer removes the bucket copy
+        # before the edge has proven its own against it, the edge requests,
+        # the uploader copies, mgmt removes again. Nothing is lost while it
+        # loops (both copies are kept until proven), but the edge never
+        # retires its copy and the bucket is written over and over.
+        # Fix: raise dataPolicy.derived.s3Staged.minAge on the management
+        # side well above the edge's stagedReclaimer.minAge plus its run
+        # interval, and keep it at most 36h (charts/edge/values.yaml,
+        # s3Staged: "the two clocks").
+        expr: |
+          sum by (cluster, session) (count_over_time({component="s3-uploader"} | json | event="recopy_claimed" [24h])) > 3
+        for: 10m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: pipeline-health
+        annotations:
+          summary: "Session {{ $labels.session }} on {{ $labels.cluster }} was copied again more than 3 times in 24h"
+          description: |
+            The edge's staged-reclaimer keeps asking the uploader to copy
+            {{ $labels.session }} again: a file it holds is not in the bucket as
+            it is on disk, and after each copy it is gone again. That is the
+            management reclaimer removing the bucket copy before the edge has
+            proven its local copy against it (the two clocks crossing).
+              1. Which file, and why?  Loki: {cluster="{{ $labels.cluster }}",component="s3-reclaimer"} |= "recopy_requested"
+              2. Compare dataPolicy.derived.s3Staged.minAge (management) with
+                 dataPolicy.derived.stagedReclaimer.minAge plus its schedule
+                 interval (edge): the first must be the longer, by a wide margin.
+              3. Nothing is lost while this fires: the edge keeps its copy
+                 until the proof passes, and XNAT already holds the session.

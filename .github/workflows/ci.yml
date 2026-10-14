@@ -172,6 +172,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: make cleaner-activation
 
+      - name: s3-uploader (copies under the lock, repairs, never deletes)
+        if: ${{ !cancelled() }}
+        run: make s3-uploader
+
       # The engine that deletes patient-derived data on the edge. Asserts on
       # what SURVIVED a real run over real trees, not on what was logged.
       - name: data-policy engine tests (what actually got deleted)

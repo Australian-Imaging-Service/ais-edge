@@ -45,6 +45,8 @@
 #     reclaim_removed    every object (or file) of this session was deleted
 #     reclaim_kept       deliberately NOT removed — undelivered, or uncertain
 #     reclaim_failed     reclaim-files.py stopped with an exit code it does not define
+#     recopy_requested   PROOF=s3: a local file is not in the bucket as it is here;
+#                        the uploader is asked to copy the session again
 #     reclaim_unavailable  pre-flight failed; nothing was DECIDED. Emitted once
 #                        with session="" for the run, then once per staged
 #                        session — see the pre-flight note below for why the
@@ -448,7 +450,17 @@ xnat_logout() {
 # exit early and would otherwise leak the very session this change exists to stop.
 trap xnat_logout EXIT
 
-if [ "$VERIFY_XNAT" = "true" ]; then
+# PROOF=s3 (the edge in S3 mode): the next copy is the bucket, and reclaim-files.py
+# proves each file there (the MD5 of its bytes against the object's ETag). XNAT is
+# not consulted and no XNAT credential is needed; verifyAgainstXnat has no effect.
+PROOF="${PROOF:-xnat}"
+case "$PROOF" in xnat|s3) : ;; *) unavailable bad_proof "PROOF=${PROOF} is not one of xnat, s3 — refusing to run" ;; esac
+if [ "$PROOF" = "s3" ]; then
+    [ "$STORAGE" = "filesystem" ] || unavailable bad_proof "PROOF=s3 proves a local tree against the bucket; STORAGE=${STORAGE} already is the bucket"
+    [ -n "${S3_BUCKET:-}" ] || unavailable bucket_unset "PROOF=s3 needs S3_BUCKET; nothing was examined"
+    python3 -c 'import boto3' 2>/dev/null || \
+        unavailable missing_tool "python3 in this image has no boto3 module; reclaim-files.py needs it to list the bucket for the proof; nothing was examined"
+elif [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
         unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
     fi
@@ -506,7 +518,7 @@ if [ "$STORAGE" = "filesystem" ]; then
 else
     _origin="bucket=${S3_BUCKET} prefix=${S3_PREFIX}"
 fi
-jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
+jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} proof=${PROOF} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
 
 # -----------------------------------------------------------------------------
 # S3 helpers. Each returns ERR on ANY doubt — a non-zero exit, an empty

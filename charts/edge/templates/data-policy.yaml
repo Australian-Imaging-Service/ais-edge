@@ -123,16 +123,16 @@ spec:
             # reported as stage_stuck rather than as another routine reclaim_kept.
             - name: STUCK_AFTER_S
               value: {{ include "edge.durationSeconds" .Values.dataPolicy.reporter.stuckAfter | quote }}
-            {{- /* Names the ONE stage this engine must not call stuck, and only
-                   in the mode where that is true. Under upload.mode=direct the
-                   staged-reclaimer CronJob owns the terminal tree's deletes, so
-                   onUploaded sitting unsatisfied there is the design, not a
-                   stall. Derived from the same helpers the CronJob and the
-                   uploader use, so the three cannot disagree about which tree
-                   that is. Empty under upload.mode=s3, where the s3-uploader
-                   writes the marker and an unsatisfied condition IS a stall. */}}
+            {{- /* Names the ONE stage this engine must not call stuck: the
+                   staged-reclaimer CronJob owns the terminal tree's deletes in
+                   both upload modes (the bucket proof under s3, the XNAT proof
+                   under direct), so onUploaded sitting unsatisfied there is the
+                   design, not a stall. Derived from the same helpers the
+                   CronJob and the uploader use, so the three cannot disagree
+                   about which tree that is. Empty only when that tree is never
+                   reclaimed. */}}
             - name: EXTERNAL_RECLAIM_STAGE
-              {{- if and (eq .Values.upload.mode "direct") (ne (include "edge.uploadReclaim" .) "never") }}
+              {{- if ne (include "edge.uploadReclaim" .) "never" }}
               value: {{ printf "derived.%s" (include "edge.uploadTreeKey" .) | quote }}
               {{- else }}
               value: ""

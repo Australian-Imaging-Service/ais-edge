@@ -118,12 +118,21 @@ dataPolicy:
     # re-alerted forever without this reclaimer.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
+      # THE TWO CLOCKS: this minAge must exceed the edge's
+      # dataPolicy.derived.stagedReclaimer.minAge by more than the edge's run
+      # interval, proof time, lock wait and any downtime, or the bucket copy goes
+      # before the edge has proven its local copy against it and the two
+      # ping-pong (see charts/edge/values.yaml, s3Staged). 36 hours against a day.
+      # CAUTION: at most 36h, and the chart refuses more. The XNAT proof runs only
+      # after this age, and SessionStagedNotConfirmedInXNAT counts a session
+      # unconfirmed 48 hours after the reclaimer first saw it: a longer minAge
+      # would page for every healthy session (found by Codex, 2026-10-14).
       # CAUTION: a run deletes nothing from a bucket that does not carry the
       # SeaweedFS cleaner opt-out and the activation attestation; it logs
       # reclaim_unavailable (cleaner_not_disabled / cleaner_not_drained). The
       # bucket Job writes both for a bucket it creates. For an existing bucket
       # run scripts/cleaner-activation.sh once (docs/components/seaweedfs.md).
-      minAge: 1d
+      minAge: 36h
       # GUIDING: re-queries XNAT before deleting anything — an uploader exit
       # code only means the call returned, not that the data landed.
       verifyAgainstXnat: true

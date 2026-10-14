@@ -347,7 +347,7 @@ dataPolicy:
       location: /data/assigned
       reclaim: auto        # never | onUploaded
       # As above: a recovery window after upload, not a delay before it.
-      # CAUTION: under direct upload the stagedReclaimer CronJob below applies
+      # CAUTION: in both upload modes the stagedReclaimer CronJob below applies
       # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
@@ -360,18 +360,18 @@ dataPolicy:
     # that grows once de-identification is on, so it was exactly the one disk
     # reporting could not see.
     #
-    # CAUTION: report only by default. In upload.mode=s3 the uploader's own
-    # rm -rf happens to clear it, and in direct mode nothing does, so a reclaim
-    # condition here would be either redundant or unsatisfiable.
+    # CAUTION: report only by default. Nothing clears this tree on its own: the
+    # uploader copies (s3) or uploads (direct) and never deletes, so only the
+    # stagedReclaimer CronJob below retires it, through `reclaim` here.
     deidentified:
       # No `location` key on purpose. The path is DERIVED from
       # edge.uploadSourceDir, the same helper upload.yaml uses for its argument,
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
-      # OPTION: onUploaded is satisfiable here under BOTH upload modes now. Under
-      # s3 the s3-uploader writes the marker; under direct the stagedReclaimer
-      # CronJob below confirms the session against XNAT instead. It stays `never`
+      # OPTION: onUploaded is satisfiable here under BOTH upload modes: the
+      # stagedReclaimer CronJob below proves each file in the bucket (s3) or in
+      # XNAT (direct) before it deletes. It stays `never`
       # by default because deleting the de-identified copy is a site policy call,
       # not a technical one: this is the last copy on the edge once the originals
       # have been reclaimed.
@@ -379,7 +379,7 @@ dataPolicy:
       # terminal tree is /data/assigned and the chart fails the render rather than
       # let this read as though something were watching this one.
       reclaim: auto             # never | onUploaded
-      # The recovery window after upload. Under direct upload the stagedReclaimer
+      # The recovery window after upload. In both upload modes the stagedReclaimer
       # CronJob applies it (the longer of this and its own minAge).
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
@@ -389,45 +389,64 @@ dataPolicy:
     # no S3 retention at all, which is why staged sessions accumulate and are
     # re-listed every loop. charts/mgmt implements the reclaimer.
     # -----------------------------------------------------------------
-    # TERMINAL-STAGE RECLAIMER (upload.mode=direct only)
+    # TERMINAL-STAGE RECLAIMER (both upload modes)
     # -----------------------------------------------------------------
-    # Under direct upload there is no bucket and no s3-uploader, so nothing
-    # writes the `uploaded` marker that onUploaded waits for. Without this the
-    # terminal tree (/data/assigned, or /data/deidentified under ais-deid)
-    # grows forever and no data policy can reach it.
+    # The ONLY deleter of the terminal tree (/data/assigned, or
+    # /data/deidentified under deid.engine=ingest). The uploader never deletes
+    # what it sent: under s3 it copies, under direct xnat-ingest upload only
+    # uploads. Without this the tree grows forever and no data policy can
+    # reach it.
     #
-    # Runs the same reclaim-staged.sh as the tier-2 bucket reclaimer, with
-    # STORAGE=filesystem. It does not re-decide WHETHER to reclaim: that stays
-    # with assigned.reclaim / deidentified.reclaim above, whichever the deid
-    # engine makes terminal. Set that one to `never` and this does not render.
+    # Runs the same reclaim-staged.sh as the mgmt bucket reclaimer, with
+    # STORAGE=filesystem. The proof follows the mode: under s3 each local file
+    # must be in the bucket with its size and the MD5 of its bytes (PROOF=s3;
+    # a file that is not gets a repair request for the uploader); under direct
+    # each file must be in XNAT (PROOF=xnat: the mapped row and a HEAD). It
+    # does not re-decide WHETHER to reclaim: that stays with assigned.reclaim /
+    # deidentified.reclaim above, whichever the deid engine makes terminal.
+    # Set that one to `never` and this does not render.
     stagedReclaimer:
-      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
-      # terminal tree: xnat-ingest upload never deletes what it sent.
+      # Hourly. This CronJob is the ONLY deleter of the terminal tree.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by
-      # the XNAT check regardless, so this is about noise, not safety.
+      # the proof regardless (the bucket under s3, XNAT under direct), so this
+      # is about noise, not safety.
+      # CAUTION (s3): keep this well below the management side's s3Staged.minAge
+      # (the two clocks, below).
       # GUIDING: the CronJob waits for the LONGER of this and the minAge of the
       # tree it reclaims (assigned or deidentified, by deid engine). Set the
       # recovery window there; it is logged as the deciding key when it wins.
       # The age counts from when the newest file reached the tree (its ctime),
       # not from the file's own mtime, which a hard link keeps from Orthanc.
       minAge: 1d
-      # Ask XNAT for each local file (a HEAD: present, same size) before deleting
-      # the only remaining copy.
+      # Direct upload only: ask XNAT for each local file (a HEAD: present, same
+      # size) before deleting the only remaining copy.
       # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
-      # XNAT proves, file by file.
+      # XNAT proves, file by file. No effect under upload.mode=s3, where the
+      # proof is the bucket.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes
       # this many and stops, leaving the rest to inspect.
       maxRemovals: 50
-      # Killed if a run hangs on an unreachable XNAT, before the next is due.
+      # Killed if a run hangs on an unreachable XNAT or bucket, before the next is due.
       deadlineSeconds: 3000
       resources:
         requests: {cpu: 20m, memory: 64Mi}
         limits: {memory: 256Mi}
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
-      minAge: 1d
+      # THE TWO CLOCKS. The edge retires its local copy after stagedReclaimer.minAge
+      # once the bucket holds every file; the mgmt reclaimer removes the bucket's
+      # copy after this minAge once XNAT holds every file. This one must be the
+      # longer, by more than the edge's run interval, its proof time, its lock
+      # wait and any edge downtime: if the bucket copy went first, the edge's
+      # proof would fail, request a re-copy, and the two would ping-pong until
+      # the edge won a window (RecopyLoop alerts on it). Neither chart can read
+      # the other's value, so keep this at 36 hours against a day on the edge.
+      # CAUTION: at most 36h (the mgmt chart refuses more): the XNAT proof runs
+      # only after this age, and SessionStagedNotConfirmedInXNAT counts a session
+      # unconfirmed 48 hours after the reclaimer first saw it.
+      minAge: 36h
       # Re-query XNAT for the session before removing the staged copy rather
       # than trusting the uploader's exit code. Slower, and correct.
       verifyAgainstXnat: true
@@ -867,6 +886,17 @@ upload:
     # values entry for it could only turn that off.
 
     existingSecret: s3-edge-credentials  # keys: access-key, secret-key
+    # Multipart part size for rclone (--s3-chunk-size). The staged-reclaimer's
+    # proof computes the multipart ETag form for THIS size and for rclone's
+    # 5 MiB default, so an object uploaded in parts of another size is kept as
+    # an unknown layout until an operator looks. rclone raises the part size on
+    # its own only above 10000 parts (--s3-max-upload-parts), i.e. files over
+    # 640 GiB at 64Mi: not a size this pipeline sees.
+    chunkSize: 64Mi
+    # Seconds the uploader waits for the upload-tree writer lock before it
+    # skips a session for this pass. The writer holds the lock per pass and the
+    # staged-reclaimer per delete, both short; the wait is for a slow pass.
+    lockWait: 600
 
     # PEM holding the CA that signed the SeaweedFS server certificate.
     # CAUTION, and it changed with the client: an EMPTY AWS_CA_BUNDLE did not

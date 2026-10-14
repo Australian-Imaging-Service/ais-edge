@@ -12,6 +12,15 @@ document [`mc`](https://min.io/docs/minio/linux/reference/minio-mc.html),
 the MinIO client, which was the uploader until the client migration.
 `mc` is gone from the deployment entirely — no chart, script or installer
 references it (`charts/edge/files/s3-uploader.sh:5-7` says so outright).
+
+**Status (2026-10).** The loop now runs `rclone copy` and copies only: it
+never deletes the local copy, and `RECLAIM` and `DRY_RUN` are gone from the
+script. The staged-reclaimer CronJob retires each session after it has proved
+every file in the bucket (same size, ETag = MD5 of the bytes on disk) and
+leaves a repair request the uploader answers when a file fails. Steps 5 and 6
+below, the `aws s3 sync` call and the `rm -rf` describe the AWS CLI
+generation and are kept as history; the current behaviour is in
+[xnat-ingest.md, "S3 mode: prove, then delete"](xnat-ingest.md).
 The S3 client is now the AWS CLI, so that edge, management and any future
 cloud target speak one client with one set of credential and endpoint
 conventions. Where behaviour differs from the `mc` era, this doc says so,
