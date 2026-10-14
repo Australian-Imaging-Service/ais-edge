@@ -532,4 +532,49 @@ print("both join paths deliver the one shared edge-join.sh")
 PY
 )" && ci_pass "$join_out" || ci_fail "join paths: $join_out"
 
+# =============================================================================
+# The uploader refuses a half-written resource by default
+# =============================================================================
+# Without a manifest check, a resource without its manifest is uploaded as it
+# is, and later passes see a partial resource as already uploaded. Measured
+# 2026-10-14 on the CLI: with neither flag, xnat-ingest does not require a
+# manifest (the option default is unset), so the chart must pass
+# --require-manifest explicitly. requireManifest is true by default. This
+# fails when a default render does not pass --require-manifest, or when a site
+# that sets requireManifest false does not get --dont-require-manifest.
+ci_heading "the uploader requires a manifest by default"
+
+while IFS=$'\t' read -r case_name expect; do
+  render="$CI_RENDER_DIR/$case_name.yaml"
+  if [ ! -s "$render" ]; then
+    ci_fail "no render at $render — run scripts/ci/render.sh first"
+    continue
+  fi
+  manifest_out="$(python3 - "$render" "$expect" 2>&1 <<'PY'
+import sys, yaml
+
+path, expect = sys.argv[1:3]
+found = []
+for doc in yaml.safe_load_all(open(path)):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if (c.get("command") or [])[:2] == ["xnat-ingest", "upload"]:
+            args = c.get("args") or []
+            found.append((doc["metadata"]["name"],
+                          [f for f in ("--require-manifest", "--dont-require-manifest") if f in args]))
+if not found:
+    raise SystemExit("no 'xnat-ingest upload' container in the render")
+wrong = [(name, flags) for name, flags in found if flags != [expect]]
+if wrong:
+    raise SystemExit(f"expected exactly {expect}, got {wrong}")
+print(", ".join(name for name, _ in found))
+PY
+  )" && ci_pass "$case_name: $expect ($manifest_out)" \
+     || ci_fail "$case_name: $manifest_out"
+done <<'EOF'
+edge-upload-direct	--require-manifest
+edge-upload-direct-no-manifest	--dont-require-manifest
+EOF
+
 ci_summary "runtime-templates"

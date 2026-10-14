@@ -937,7 +937,11 @@ upload:
     # that has quietly stopped watching the delivery path.
     alwaysInclude: "all"
     verifySsl: true
-    requireManifest: false
+    # true: upload a resource only when its manifest is present and every file
+    # in it matches. A half-written resource waits for the next pass.
+    # false: upload the files that are there. Use only for sessions staged
+    # without manifests.
+    requireManifest: true
     checkChecksums: false
     tempDir: /data/tmp
     resources:

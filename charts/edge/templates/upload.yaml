@@ -197,7 +197,11 @@ spec:
             - {{ .Values.upload.direct.loop | quote }}
             - "--wait-period"
             - {{ .Values.upload.direct.waitPeriod | quote }}
-            {{- if not .Values.upload.direct.requireManifest }}
+            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # does not require a manifest (its option default is unset).
+            {{- if .Values.upload.direct.requireManifest }}
+            - "--require-manifest"
+            {{- else }}
             - "--dont-require-manifest"
             {{- end }}
             {{- if not .Values.upload.direct.verifySsl }}

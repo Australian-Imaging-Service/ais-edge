@@ -354,7 +354,9 @@ upload:
     # Quiet period before a session is considered complete.
     waitPeriod: 60
     alwaysInclude: all
-    requireManifest: false
+    # true: a half-written resource waits for the next pass instead of being
+    # uploaded in part.
+    requireManifest: true
     # true unless your XNAT presents a private or self-signed certificate.
     verifySsl: true
 

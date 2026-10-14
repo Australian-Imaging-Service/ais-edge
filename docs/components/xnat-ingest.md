@@ -216,7 +216,9 @@ xnat-ingest upload /data/assigned $(XINGEST_HOST)   # LOCAL source dir (no s3://
   --always-include        all       # upload.direct.alwaysInclude
   --loop                  60        # upload.direct.loop
   --wait-period           60        # upload.direct.waitPeriod
-  --dont-require-manifest           # rendered when upload.direct.requireManifest = false
+  --require-manifest                # upload.direct.requireManifest = true (default):
+                                    #   a half-written resource waits for the next pass
+  --dont-require-manifest           # instead, when upload.direct.requireManifest = false
   --dont-verify-ssl                 # rendered when upload.direct.verifySsl = false
                                     #   (only for an XNAT with a private/self-signed cert)
 ```

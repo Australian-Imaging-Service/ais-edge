@@ -195,6 +195,13 @@ observability:
   enabled: false
 EOF
 
+# A site that turns the manifest check off still gets --dont-require-manifest.
+cat >"$V/edge-upload-direct-no-manifest.yaml" <<'EOF'
+upload:
+  direct:
+    requireManifest: false
+EOF
+
 # The reclaimer slowed to every 6h, alertAfter raised with it (floor 12h50m).
 # It must render, and promtool.sh checks its threshold is 13h in seconds, so a
 # template that hardcoded the default would be caught.
@@ -1177,6 +1184,7 @@ mgmt-two-edges-datapolicy	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-da
 edge-defaults	charts/edge	edge-base.yaml
 edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
+edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
 edge-upload-alerts	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml
 edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml edge-upload-custom.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
