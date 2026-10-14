@@ -373,7 +373,7 @@ k0s-k0smotron-mvp/
 │       ├── orthanc-deployment.yaml        ← Orthanc Deployment + Service
 │       ├── orthanc-config.yaml            ← orthanc.json, routing.json, deid profile
 │       ├── ingest-pipeline.yaml           ← group-orthanc + assign
-│       ├── upload.yaml                    ← direct upload to XNAT (tier-1) / s3 (tier-2)
+│       ├── upload.yaml                    ← direct upload to XNAT (the only mode on tier-1)
 │       ├── storage.yaml                   ← StorageClass + both hostPath PVs/PVCs
 │       ├── data-policy.yaml               ← the dataPolicy DaemonSet
 │       ├── vector.yaml                    ← hand-written Vector DaemonSet
@@ -399,10 +399,10 @@ configuration into manifests, so a value is stated once and read once.
 each of which otherwise fails *silently* at runtime — de-id enabled without
 `policyReviewed`, an empty `aetMap` (every modality quarantined), an empty
 `profile` (studies reach XNAT with PHI intact and nothing looks wrong), deid
-without `storage.facilityBackup.enabled`, and `upload.mode` set to both paths at
-once. `install.sh` adds one more: tier-1 requires `upload.mode: direct`, because
-`s3` would have the uploader retrying an endpoint that never answers while the
-disk quietly filled.
+without `storage.facilityBackup.enabled`, and any `upload.mode` other than
+`direct`. `install.sh` refuses the same: `s3` would have the uploader retrying
+an endpoint that never answers while the disk quietly filled. S3 staging needs
+the tier-2 management plane, which is on the main branch.
 
 ## Installing on an Existing Kubernetes Cluster
 

@@ -63,11 +63,7 @@ hostAliases:
   mgmtNodeIP: "198.51.100.10"
   hostnames: ["seaweedfs.ci.198-51-100-10.nip.io", "loki.ci.198-51-100-10.nip.io"]
 upload:
-  mode: s3
-  s3:
-    endpoint: "https://seaweedfs.ci.198-51-100-10.nip.io"
-    bucket: ingest-edge-alpha
-    caBundleSecret: ca-bundle
+  mode: direct
 deid:
   engine: orthanc
   policyReviewed: true
@@ -750,15 +746,14 @@ printf 'dataPolicy:\n  reporter:\n    interval: 5m\n'     >"$V/neg-edge-reporter
 # Numbers over a day, including ones toString would write in exponent form.
 printf 'dataPolicy:\n  reporter:\n    interval: 1000000\n' >"$V/neg-edge-reporter-interval-1e6.yaml"
 printf 'dataPolicy:\n  reporter:\n    interval: 1e20\n'    >"$V/neg-edge-reporter-interval-1e20.yaml"
-printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-endpoint.yaml"
 # perSiteBuckets derives <bucketPrefix>-<clusterLabel>, which is safe and is
 # now the normal path — so an empty bucket alone is no longer an error. What
 # must still be refused is the SHARED-bucket layout with no explicit name: a
 # defaulted shared bucket is the original isolation bug, because SeaweedFS
 # scopes identities per bucket with no prefix scoping, so every site sharing
 # one bucket can read and delete every other site's staged imaging.
-printf 'seaweedfs:\n  perSiteBuckets: false\nupload:\n  s3:\n    bucket: ""\n' >"$V/neg-edge-s3-no-bucket.yaml"
-printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no-ca.yaml"
+# S3 staging is the tier-2 chart (main branch). This branch refuses it by name.
+printf 'upload:\n  mode: s3\n'                            >"$V/neg-edge-mode-s3.yaml"
 # XNATResourceIncompleteAndStuck's threshold is derived from this value, so a
 # non-positive loop is a division by zero at render time rather than a slow
 # poll. Needs the observability stack on, since the guard lives beside the rules.
@@ -813,9 +808,9 @@ printf 'dataPolicy:\n  derived:\n    assigned:\n      reclaim: onAssigned\n' >"$
 printf 'dataPolicy:\n  derived:\n    grouped:\n      reclaim: onUploaded\n      location: /data/custom\n' >"$V/neg-edge-reclaim-onuploaded-on-grouped.yaml"
 printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x\n' >"$V/neg-edge-reclaim-onuploaded-moved-assigned.yaml"
 
-# onUploaded needs a marker that only the s3-uploader writes, and upload.mode
-# =direct renders no s3-uploader. The condition could never come true, so the
-# tree would be kept for ever while the policy read as if it were being cleaned.
+# onUploaded needs a marker that only an s3-uploader writes, and this branch has
+# no s3-uploader. The condition could never come true, so the tree would be kept
+# for ever while the policy read as if it were being cleaned.
 printf 'upload:\n  mode: direct\ndataPolicy:\n  derived:\n    deidentified:\n      reclaim: onUploaded\n' >"$V/neg-edge-reclaim-deid-onuploaded.yaml"
 
 # A recovery window on a tree the stage deletes at handoff can never elapse.
@@ -1197,7 +1192,6 @@ edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
-edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
 edge-reclaimer-six-hourly	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reclaimer-six-hourly.yaml
@@ -1264,9 +1258,7 @@ neg-edge-reporter-interval-0	charts/edge	edge-base.yaml neg-edge-reporter-interv
 neg-edge-reporter-interval-unit	charts/edge	edge-base.yaml neg-edge-reporter-interval-unit.yaml	dataPolicy.reporter.interval must be whole seconds
 neg-edge-reporter-interval-1e6	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e6.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
 neg-edge-reporter-interval-1e20	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e20.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
-neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
-neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
-neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
+neg-edge-mode-s3	charts/edge	edge-base.yaml neg-edge-mode-s3.yaml	use the main branch (tier-2)
 neg-edge-upload-loop-zero	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-upload-loop-zero.yaml	upload.direct.loop must be a positive number of seconds
 neg-edge-reclaimer-alert-after-forever	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-forever.yaml	stagedReclaimer.alertAfter must be longer than
 neg-edge-reclaimer-alert-after-never	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-never.yaml	stagedReclaimer.alertAfter must be longer than

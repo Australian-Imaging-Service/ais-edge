@@ -280,15 +280,13 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     except yaml.YAMLError as e:
         problems.append("%s: %s" % (case, " ".join(str(e).split())))
         continue
-    dp = up = dp_cpu = None
+    dp = dp_cpu = None
     rows = {}
     for d in docs:
         for c in containers(d):
             if d.get("kind") == "DaemonSet" and c.get("name") == "data-policy":
                 dp = env(c)
                 dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
-            if d.get("kind") == "Deployment" and c.get("name") == "uploader":
-                up = env(c)
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
     for d in docs:
@@ -338,11 +336,6 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
         problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
     if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
         problems.append("%s: ASSIGNED_DIR=%r but the assigned stage is at %r" % (case, adir, rows["derived.assigned"][2]))
-    if up is not None:
-        if src != up.get("ASSIGNED_DIR"):
-            problems.append("%s: UPLOAD_SOURCE_DIR=%r but the s3-uploader reads %r" % (case, src, up.get("ASSIGNED_DIR")))
-        if dp.get("UPLOAD_STATE_DIR") != up.get("STATE_DIR"):
-            problems.append("%s: UPLOAD_STATE_DIR=%r but the s3-uploader writes %r" % (case, dp.get("UPLOAD_STATE_DIR"), up.get("STATE_DIR")))
     for name, r in rows.items():
         word = r[5] if len(r) > 5 else ""
         if word == "onUploaded" and r[2] != src:
