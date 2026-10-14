@@ -93,6 +93,10 @@ def walk(o):
         for key in ('containers', 'initContainers'):
             for c in (o.get(key) or []):
                 cmd = c.get('command') or []
+                # A stage under the writer lock (edge.lockedStage) runs as
+                # /bin/sh -c <loop> xnat-ingest <stage>. Check its args too.
+                if cmd[:2] == ['/bin/sh', '-c'] and cmd[3:4] == ['xnat-ingest']:
+                    cmd = cmd[3:]
                 if cmd[:1] == ['xnat-ingest']:
                     sub = cmd[1] if len(cmd) > 1 else ''
                     argv = ' '.join(str(a) for a in (c.get('args') or []))
