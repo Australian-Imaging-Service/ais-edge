@@ -988,6 +988,15 @@ before.
 /data/.locks/{{ include "edge.uploadTreeKey" . }}.lock
 {{- end }}
 
+{{- /* WRITER ALIVE. The wrapped writer holds a SHARED lock on this file for its
+     whole life. The deleter deletes only while it cannot take it: then a wrapped
+     writer runs now, and Recreate means no older writer without the lock runs.
+     CAUTION: this guards an upgrade, not a rollback to a writer without the lock
+     (see docs/components/xnat-ingest.md). */}}
+{{- define "edge.uploadTreeAlive" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.alive
+{{- end }}
+
 {{- /* The command of a stage that writes the upload tree.
      Argument: (list $ "<stage>" <interval seconds>).
      One pass at a time, each inside the lock, then a sleep. The sleep is the
@@ -995,11 +1004,12 @@ before.
      --loop.
      `flock <file> <cmd>` for each pass, not one fd for the whole loop: the pass
      and any child it leaves keep the lock until they stop.
-     A pass that fails stops the container, as an exception out of --loop did. */}}
+     A pass that fails stops the container, as an exception out of --loop did.
+     fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
 {{- define "edge.lockedStage" -}}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" (index . 0)) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
 - xnat-ingest
 - {{ index . 1 | quote }}
 {{- end }}
