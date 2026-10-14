@@ -154,6 +154,20 @@ jobs:
           CI_REQUIRE_LOKI_TESTS: "1"
         run: make loki-rules
 
+      # The staged-reclaimer deletes the upload tree. Its tests ran only in
+      # `make ci`, never here. They copy the uploader's label rule out of the
+      # pinned xnat-ingest image (docker); without docker they would skip, so
+      # CI_REQUIRE_RECLAIMER_IMAGE=1 makes that a failure.
+      - name: Reclaimer tests (what survived, against a fake XNAT over HTTP)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_RECLAIMER_IMAGE: "1"
+        run: make reclaimer
+
+      - name: Reclaimer fence (drain and resume fail closed)
+        if: ${{ !cancelled() }}
+        run: make reclaimer-fence
+
       # The engine that deletes patient-derived data on the edge. Asserts on
       # what SURVIVED a real run over real trees, not on what was logged.
       - name: data-policy engine tests (what actually got deleted)

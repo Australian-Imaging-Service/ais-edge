@@ -64,3 +64,7 @@ adoption-records/
 # are source.
 /*-join.sh
 /join-token-*.expires
+
+# Python bytecode, e.g. from the reclaimer tests. Never in a chart.
+__pycache__/
+*.pyc
