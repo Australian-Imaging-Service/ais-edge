@@ -87,6 +87,15 @@ The DICOM ingest engine downstream of Orthanc.
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/grouped`,
   writes `/data/assigned`
 - **No Orthanc or XNAT access** — it only reshapes local directories
+- **The upload-tree writer lock, `/data/.locks/assigned.lock`**: `assign`
+  writes the tree the uploader reads (deid.engine orthanc or none), so it runs
+  one pass at a time and holds this lock for each pass (`edge.lockedStage` in
+  `charts/edge/templates/_helpers.tpl`). A deleter of that tree must take the
+  same lock before it deletes. No deleter takes it yet, so this does not yet
+  protect the existing delete paths, and it does not change how a stage removes
+  its own input (`--unlink-source`). Under deid.engine
+  ingest, `deidentify` writes the upload tree and takes
+  `/data/.locks/deidentified.lock` instead
 
 ### upload pod (`component=upload`)
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
@@ -191,12 +200,24 @@ xnat-ingest assign \
   --session  ClinicalTrialTimePointID    # ingest.assign.tagMapping.session
   --copy-mode      hardlink_or_copy      # ingest.assign.copyMode
   --unlink-source  all                   # only when dataPolicy.derived.grouped.reclaim = onAssigned
-  --loop           60                    # ingest.assign.interval
 ```
 
+The chart runs these arguments one pass at a time inside the upload-tree writer
+lock, with no `--loop`:
+
+```
+sh -c 'mkdir -p /data/.locks && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60; done' \
+  xnat-ingest assign <the arguments above>   # sleep: ingest.assign.interval
+```
+
+The sleep after each pass is the same full interval that `--loop` sleeps. A
+pass that fails stops the container, as an exception out of `--loop` did. Under
+deid.engine ingest, `assign` does not write the upload tree, so it keeps
+`--loop 60` and `deidentify` runs inside the lock.
+
 `--unlink-source all` drops each grouped session once it has been assigned, and
-it is not an optimisation. `assign --loop` rebuilds its work list from a live
-listing of `/data/grouped` every cycle, so without it the same sessions are
+it is not an optimisation. `assign` rebuilds its work list from a live
+listing of `/data/grouped` every pass, so without it the same sessions are
 re-assigned forever: `/data/assigned` is repopulated, the uploader re-stages, and
 the upload-success alert re-fires (that produced two days of duplicate mail). It
 deletes HARDLINKS, not data — the bytes remain in Orthanc storage and in the
@@ -271,6 +292,7 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
+| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
 | `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
 
