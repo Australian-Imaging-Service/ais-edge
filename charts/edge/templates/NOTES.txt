@@ -44,14 +44,8 @@ DE-IDENTIFICATION
 {{- end }}
 
 UPLOAD
-{{- if eq .Values.upload.mode "s3" }}
-  Mode s3 — sessions are staged to s3://{{ include "edge.s3Bucket" . }}/{{ .Values.upload.s3.prefix }}/
-  at {{ include "edge.s3Endpoint" . }}, and the management cluster pushes them
-  into XNAT. This edge never talks to XNAT directly.
-{{- else }}
   Mode direct — sessions are uploaded straight to XNAT. No management cluster
   and no staging bucket are involved.
-{{- end }}
 
 DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun }}DRY RUN{{ else }}ENFORCING{{ end }}{{ else }}NOT ENFORCED{{ end }}
 {{- if not .Values.dataPolicy.enabled }}
@@ -83,14 +77,7 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
 {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   {{ .Values.orthanc.deid.existingSaltSecret }}   key: AIS_DEID_HMAC_SALT
 {{- end }}
-{{- if eq .Values.upload.mode "s3" }}
-  {{ .Values.upload.s3.existingSecret }}   keys: access-key, secret-key
-  {{- if .Values.upload.s3.caBundleSecret }}
-  {{ .Values.upload.s3.caBundleSecret }}   key: {{ .Values.upload.s3.caBundleKey }}
-  {{- end }}
-{{- else }}
   {{ .Values.upload.direct.existingSecret }}   keys: server, username, password
-{{- end }}
 {{- if .Values.samba.enabled }}
   {{ .Values.samba.existingSecret }}   keys: username, password
 {{- end }}
@@ -117,11 +104,7 @@ CHECK IT IS WORKING
     kubectl -n {{ .Values.namespace }} get pods
   kubectl -n {{ .Values.namespace }} logs -l component=group     -f
   kubectl -n {{ .Values.namespace }} logs -l component=assign    -f
-{{- if eq .Values.upload.mode "s3" }}
-  kubectl -n {{ .Values.namespace }} logs -l component=s3-uploader -f
-{{- else }}
   kubectl -n {{ .Values.namespace }} logs -l component=upload    -f
-{{- end }}
 
   Send a test study:
     dcmsend <node-ip> {{ .Values.orthanc.dicomPort }} -aec {{ .Values.orthanc.aet }} /path/to/study/

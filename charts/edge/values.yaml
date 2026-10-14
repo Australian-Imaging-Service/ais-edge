@@ -1,10 +1,10 @@
 # =============================================================================
 # AIS Edge — edge-site chart
 # =============================================================================
-# One chart, one edge site. It runs in whichever cluster you point it at: a
-# k0smotron-hosted child cluster (tier-2, upload.mode=s3) or a plain
-# single-node k0s box (tier-1, upload.mode=direct). Nothing in here assumes a
-# management plane exists; that lives in charts/mgmt.
+# One chart, one edge site. On this branch (tier-1) it runs on a plain
+# single-node k0s box and uploads straight to XNAT (upload.mode=direct). The
+# tier-2 variant, which stages through S3 to a management cluster, is on the
+# main branch.
 #
 # HOW TO READ THIS FILE
 #   1. dataPolicy    — what is kept and for how long. Read this first.
@@ -134,10 +134,6 @@ hostnames:
   seaweedfs: ""
   grafana: ""
   loki: ""
-seaweedfs:
-  perSiteBuckets: true
-  bucketPrefix: ingest
-
 # Free-text label attached to every log line and metric from this site. It is
 # what Grafana's `cluster` variable filters on, so it must be unique per site.
 clusterLabel: ""
@@ -869,58 +865,13 @@ ingest:
 # =============================================================================
 # 5. upload — how sessions reach XNAT
 # =============================================================================
-# s3     edge -> central S3 (SeaweedFS) -> mgmt uploader -> XNAT.
-#        Central buffering and retry, one XNAT credential for the whole
-#        fleet, and the edge never needs to reach XNAT. Needs charts/mgmt.
-#
-# direct edge -> XNAT. No management plane, no S3, no CA plumbing. This is
-#        the tier-1 / standalone-site path.
-#
-# The two are mutually exclusive: both enabled means every session is
-# uploaded twice. The chart refuses to render if you set both.
+# direct edge -> XNAT. No management plane, no S3, no CA plumbing. On this
+#        branch (tier-1) it is the only mode: the chart refuses any other.
+#        Staging through S3 to a management cluster is the tier-2 chart on the
+#        main branch.
 # -----------------------------------------------------------------------------
 upload:
-  mode: s3
-
-  s3:
-    endpoint: ""                       # https://seaweedfs.<domain>
-    # THIS SITE'S OWN staging bucket. The management chart names them
-    # ingest-<edge name> by default, and scopes this edge's S3 identity to
-    # exactly this bucket — SeaweedFS enforces actions per BUCKET, with no
-    # prefix-level scoping, so a shared bucket means every site can read and
-    # delete every other site's staged imaging. Must match the name the
-    # management chart derived for this site.
-    bucket: ""   # e.g. ingest-edge-dev
-    prefix: staged
-    region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
-
-    # No addressing-style key here on purpose: AWS_ENDPOINT_URL alone makes
-    # botocore resolve with ForcePathStyle=True — measured against SeaweedFS
-    # 3.99, the request URL comes out path-style, which the single-SAN cert
-    # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not a botocore env
-    # var, so a values entry for it would be silently ignored.
-
-    existingSecret: s3-edge-credentials  # keys: access-key, secret-key
-
-    # PEM holding the CA that signed the SeaweedFS server certificate.
-    # CAUTION: an EMPTY AWS_CA_BUNDLE does not fall back to the system trust
-    # store — it disables certificate verification entirely, silently
-    # (measured: a request to a hostname the cert does not cover succeeded
-    # anyway). The chart refuses to render an https endpoint with no CA
-    # configured; never let this render empty.
-    caBundleSecret: ca-bundle
-    caBundleKey: ca.crt
-    image:
-      repository: amazon/aws-cli
-      tag: "2.31.19"
-      pullPolicy: IfNotPresent
-    interval: 60
-    # Don't touch a session until it has been quiet this long — assign may
-    # still be writing into it.
-    settleMinutes: 5
-    resources:
-      requests: {memory: 128Mi, cpu: 100m}
-      limits:   {memory: 512Mi, cpu: 500m}
+  mode: direct
 
   direct:
     replicas: 1

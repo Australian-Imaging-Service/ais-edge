@@ -42,9 +42,10 @@ Two further stages exist in the chart and are off by default: `group-fs`
 (`ingest.fileDrop.enabled` — a watched directory instead of a modality) and
 `associate` (`ingest.associate.enabled` — Siemens twix/rda/puls side files).
 
-There is **no S3 hop**: `upload.mode: direct`, and `install.sh` refuses anything
-else, because `s3` needs the tier-2 management plane (SeaweedFS, a staging
-bucket, a management-side reclaimer) that does not exist here. Every stage reads
+There is **no S3 hop**: `upload.mode: direct`, and the chart and `install.sh`
+both refuse anything else, because `s3` needs the tier-2 management plane
+(SeaweedFS, a staging bucket, a management-side reclaimer) that does not exist
+here. The chart no longer contains the S3 uploader. Every stage reads
 and writes directories on one shared volume; upload reads the same
 `/data/assigned` that `assign` wrote.
 
