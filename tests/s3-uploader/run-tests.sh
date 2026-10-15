@@ -25,17 +25,17 @@ run_case() {   # <name> [env...]: setup_<name> writes the fixtures, assert_<name
     CASE_DIR="$S"; : > "$S/calls.log"; : > "$S/observed"
     printf 'x' > "$S/data/deidentified/$SESS/1.scan/DICOM/f1.dcm"; printf '{}' > "$S/data/deidentified/$SESS/1.scan/DICOM/__MANIFEST__.json"
     find "$S/data/deidentified/$SESS" -exec touch -d '10 minutes ago' {} +   # settled: nothing written within SETTLE_MINUTES
-    HOLD=""
+    HOLD=""; EXPECT_RC=0   # a setup may expect the loop to stop (exit 1): a missing tool, a lock error
     "setup_$name"
     local out rc
     out=$(cd "$S" && env -i PATH="$HERE:/usr/bin:/bin" SCENARIO="$S" HOME="$S" \
           S3_BUCKET=bucket EDGE_NAME=edge-a S3_PREFIX=staged ASSIGNED_DIR="$S/data/deidentified" STATE_DIR="$S/state" \
           PIPELINE_ROOT="$S/data" INTERVAL=0 SETTLE_MINUTES=1 WRITER_LOCK="$S/locks/deidentified.lock" LOCK_WAIT=1 \
-          RECOPY_DIR="$S/state/recopy" PASSES=1 RCLONE_CONFIG_SW_ENDPOINT=http://stub "$@" bash "$SCRIPT" 2>&1); rc=$?
+          RECOPY_DIR="$S/state/recopy" PASSES=1 STOP_DELAY=0 RCLONE_CONFIG_SW_ENDPOINT=http://stub "$@" bash "$SCRIPT" 2>&1); rc=$?
     [ -n "$HOLD" ] && { kill "$HOLD" 2>/dev/null; wait "$HOLD" 2>/dev/null; }
     printf '%s\n' "$out" > "$S/out.log"
     local ok=1 why=""
-    if [ "$rc" != 0 ]; then ok=0; why="exit $rc: $(printf '%s' "$out" | tail -1 | cut -c1-120)"
+    if [ "$rc" != "$EXPECT_RC" ]; then ok=0; why="exit $rc, expected $EXPECT_RC: $(printf '%s' "$out" | tail -1 | cut -c1-120)"
     elif printf '%s' "$out" | grep -qE "unbound variable|command not found|: line [0-9]+:"; then ok=0; why="shell error: $(printf '%s' "$out" | grep -oE '.*(unbound variable|command not found|: line [0-9]+:.*)' | head -1)"
     elif [ ! -d "$S/data/deidentified/$SESS" ]; then ok=0; why="THE SESSION WAS DELETED by the uploader"
     elif declare -F "assert_$name" >/dev/null 2>&1; then
@@ -81,6 +81,33 @@ assert_unsettled() { [ "$(copies "$1")" = 0 ]; }
 setup_no_delete_in_script()  { :; }
 assert_no_delete_in_script() { ! grep -qE 'rm -rf? +"?\$session_dir' "$SCRIPT" || { echo "the script removes a session"; return 1; }; }
 
+# --- the tools, checked by use at startup; a lock error is never contention ----------------
+# A PATH with every tool but flock (what amazon/aws-cli:2.31.19 gave the loop): it stops
+# before its first session, names the tool, and never reads the gap as a busy lock.
+tools_without() {   # <tool>: $CASE_DIR/bin links every executable of /usr/bin and /bin except <tool>
+    local d="$CASE_DIR/bin" p f; mkdir -p "$d"
+    for p in /usr/bin /bin; do for f in "$p"/*; do [ -f "$f" ] && [ -x "$f" ] && [ "${f##*/}" != "$1" ] && ln -sf "$f" "$d/${f##*/}"; done; done
+}
+setup_tool_missing()  { tools_without flock; EXPECT_RC=1; }
+assert_tool_missing() { grep -q '"event":"dependency_missing".* flock.*refusing to start upload loop' "$2" && ! grep -q 'upload_' "$2" && [ ! -e "$CASE_DIR/state/$SESS" ]; }
+# busybox flock answers to the name and has no -w and no -E: caught by use, not by name.
+setup_tool_busybox_flock() {
+    mkdir -p "$CASE_DIR/bin"
+    printf '#!/usr/bin/env bash\ncase " $* " in *" -w "*|*" -E "*) echo "flock: unrecognized option" >&2; exit 1 ;; esac\nexec /usr/bin/flock "$@"\n' > "$CASE_DIR/bin/flock"
+    chmod +x "$CASE_DIR/bin/flock"; EXPECT_RC=1
+}
+assert_tool_busybox_flock() { grep -q '"event":"dependency_missing".*flock(-w,-E)' "$2" && ! grep -q 'upload_' "$2"; }
+# The lock file cannot be opened: lock_failed, the loop stops, the request goes back to pending.
+setup_lock_open_error()  { setup_recopy_done; EXPECT_RC=1; }
+assert_lock_open_error() { [ "$(copies "$1")" = 0 ] && grep -q '"event":"lock_failed".*cannot open' "$2" && ! grep -q '"event":"upload_skipped"' "$2" && [ -s "$CASE_DIR/state/recopy/$SESS" ] && [ ! -e "$CASE_DIR/state/recopy/$SESS.claimed" ]; }
+# flock fails after the startup probe passed, and not with the timeout exit: the same.
+setup_lock_exec_error() {
+    mkdir -p "$CASE_DIR/bin"
+    printf '#!/usr/bin/env bash\n[ -e "$SCENARIO/flock.probed" ] && exit 1\n: > "$SCENARIO/flock.probed"\nexec /usr/bin/flock "$@"\n' > "$CASE_DIR/bin/flock"
+    chmod +x "$CASE_DIR/bin/flock"; EXPECT_RC=1
+}
+assert_lock_exec_error() { [ "$(copies "$1")" = 0 ] && grep -q '"event":"lock_failed".*exit 1,' "$2" && ! grep -q '"event":"upload_skipped"' "$2" && [ ! -e "$CASE_DIR/state/$SESS" ]; }
+
 printf '%s== s3-uploader ==%s\n' "$_B" "$_O"
 run_case copies_once
 run_case unchanged_skipped
@@ -91,6 +118,10 @@ run_case request_during_copy
 run_case claimed_at_startup
 run_case unsettled
 run_case no_delete_in_script
+run_case tool_missing        PATH="$HERE:$WORK/tool_missing/bin"
+run_case tool_busybox_flock  PATH="$WORK/tool_busybox_flock/bin:$HERE:/usr/bin:/bin"
+run_case lock_open_error     WRITER_LOCK=/proc/no-such-dir/deidentified.lock
+run_case lock_exec_error     PATH="$WORK/lock_exec_error/bin:$HERE:/usr/bin:/bin"
 printf '\n%ss3-uploader: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '%sFAILURES:%s\n' "$_R" "$_O"; printf '  - %s\n' "${FAILED[@]}"; exit 1; fi
 exit 0

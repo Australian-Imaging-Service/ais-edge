@@ -418,6 +418,9 @@ dataPolicy:
       # recovery window there; it is logged as the deciding key when it wins.
       # The age counts from when the newest file reached the tree (its ctime),
       # not from the file's own mtime, which a hard link keeps from Orthanc.
+      # Under s3 it has a SECOND CLOCK: the newest object of the session in the
+      # bucket must be this old as well, so a backlog of old files copied today
+      # still waits its window before the edge retires it.
       minAge: 1d
       # Direct upload only: ask XNAT for each local file (a HEAD: present, same
       # size) before deleting the only remaining copy.
@@ -953,32 +956,39 @@ upload:
       tag: "1.75.0"
       pullPolicy: IfNotPresent
 
-    # THE USERLAND THE LOOP RUNS IN — not an S3 client, despite the name of the
-    # repository. files/s3-uploader.sh needs bash, GNU findutils (`find -L
-    # -printf`, `find -xtype l`) and GNU coreutils (`du -sb`, `md5sum`).
-    # rclone/rclone is Alpine and has none of them: MEASURED there, the pod
-    # cannot even start (no /bin/bash), and if it could, fingerprint() would
-    # return the md5 of an empty string for every session and the
+    # THE USERLAND THE LOOP RUNS IN — not an S3 client. files/s3-uploader.sh
+    # needs bash, GNU findutils (`find -L`, `find -xtype l`), GNU coreutils
+    # (`du -sb`, `stat -c`, `md5sum`, `sort`) and util-linux `flock` (`-w`,
+    # `-E`). rclone/rclone is Alpine and has none of them: MEASURED there, the
+    # pod cannot even start (no /bin/bash), and if it could, fingerprint()
+    # would return the md5 of an empty string for every session and the
     # dangling-symlink guard would never fire — both silent. The busybox
     # userland is what the migration off `minio/mc` was partly about
     # (docs/components/mc.md, "A full userland"); this is not a wall worth
     # walking into a second time.
     #
     # So upload.yaml runs the loop here and stages the rclone binary in from
-    # image above with an initContainer. rclone is a static Go binary, so it
-    # runs in this glibc image unchanged.
+    # the image above with an initContainer. rclone is a static Go binary, so
+    # it runs in this glibc image unchanged.
     #
-    # amazon/aws-cli:2.31.19 specifically, and NOT because anything still calls
-    # `aws`: it is the image this loop already ran in, so the userland the
-    # script is proven against does not change at all, and it is already
-    # present on every edge node and already pinned twice elsewhere in this
-    # repo — no new pull on upgrade, which matters on constrained sites. Any
-    # bash + GNU-coreutils image would do; swapping it is a userland change and
-    # deserves the same measurement the note above records.
+    # ubuntu, pinned to a dated noble (24.04 LTS) build, and NOT amazon/aws-cli
+    # any more. That image was kept after the move to rclone because it was
+    # already on every edge node, and it ships no `flock`. MEASURED on the test
+    # edge, 2026-10-14: with the writer lock in the loop, `flock: command not
+    # found` on every session was read as lock contention, 4,249 copies were
+    # skipped in five hours, nothing reached the bucket, and CI was green,
+    # because tests/s3-uploader/run-tests.sh runs with the host's own tools.
+    # Three things now hold this in place: the loop checks each tool BY USE at
+    # startup and stops the pod with the tool named (dependency_missing);
+    # a lock error is told apart from a timeout (lock_failed, the pod stops);
+    # and tests/s3-uploader/image-tests.sh runs one real copy inside this exact
+    # image, with the rclone binary lifted as the initContainer lifts it. Any
+    # bash + GNU coreutils + util-linux image would do; swapping it is a
+    # userland change and that test is where it is measured.
     shell:
       image:
-        repository: amazon/aws-cli
-        tag: "2.31.19"
+        repository: ubuntu
+        tag: "noble-20260917"
         pullPolicy: IfNotPresent
     interval: 60
     # Don't touch a session until it has been quiet this long — assign may

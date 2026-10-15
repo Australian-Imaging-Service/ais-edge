@@ -1486,7 +1486,9 @@ is absent, so **it does not upgrade the cluster that already runs v0.0.30.**
 Everything else that is behind upstream is behind for currency reasons, not
 CVE reasons. The gaps worth a diary entry: `amazon/aws-cli` 2.31.19 is from
 October 2025, so it carries ~9 months of unpatched Amazon Linux base layer in
-a pod that holds S3 credentials on both clusters; `timberio/vector` is 0.49.0
+the management bucket Job that holds S3 credentials (the edge uploader left
+that image for a dated `ubuntu:noble` build when the writer lock needed a
+`flock` the AWS CLI image does not ship); `timberio/vector` is 0.49.0
 on the edges against 0.57.0 on management, eight releases and about a year of
 skew inside one fleet; and Loki 3.6.8 carries CVE-2026-21729, a genuine
 unauthenticated DoS upstream that is not unauthenticated *here* because the

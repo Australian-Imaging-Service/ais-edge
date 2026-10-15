@@ -61,7 +61,7 @@ here that no longer ships reads as coverage that does not exist.
 | `SessionUploadStalled` | Loki ruler | `event="upload_started"` without matching `event="upload_completed"` per session. |
 | `SessionStagedNotConfirmedInXNAT` | Loki ruler | The absence alert: an `event=~"reclaim_.*"` for a session in a 24h window `offset 48h`, with no `reclaim_confirmed` since. Its staged half is why the reclaimer must keep speaking through an outage — see the last section. Under `upload.mode: s3` the edge's own reclaimer (namespace `xnat-ingest`) proves against the bucket, not XNAT: its lines carry `proof=s3` and its `reclaim_confirmed` is kept out of the confirming half, so a session the edge saw and XNAT never confirmed still fires. |
 | `ReclaimerRunUnavailable` | Loki ruler | `event="reclaim_unavailable"` with `session=""` (the run-level line) and no `reclaim_finished` in the last 70m, per cluster and namespace: under `upload.mode: s3` the edge's reclaimer (`xnat-ingest`) and the management one (`xnat-upload`) are judged apart, so one finishing cannot hide the other's aborts. This is what an operator acts on. |
-| `RecopyLoop` | Loki ruler | `event="recopy_claimed"` from the edge's s3-uploader, more than 3 for one session in 24h. The edge's staged-reclaimer keeps asking for the same session: a local file is not in the bucket as it is on disk, and after each copy it is gone again, which is the management reclaimer removing the bucket copy before the edge has proven its own against it (the two clocks crossing). Nothing is lost while it fires; fix the clocks: `dataPolicy.derived.s3Staged.minAge` must exceed `stagedReclaimer.minAge` plus its interval by a wide margin. |
+| `RecopyLoop` | Loki ruler | `event="recopy_done"` from the edge's s3-uploader, more than 3 for one session in 24h: completed re-copies, not claimed requests, because an uploader that cannot copy claims the same request on every pass and that failure is `SessionUploadStalled`'s and `S3UploaderRestartedRecently`'s. The edge's staged-reclaimer keeps asking for the same session: a local file is not in the bucket as it is on disk, and after each copy it is gone again, which is the management reclaimer removing the bucket copy before the edge has proven its own against it (the two clocks crossing). Nothing is lost while it fires; fix the clocks: `dataPolicy.derived.s3Staged.minAge` must exceed `stagedReclaimer.minAge` plus its interval by a wide margin. |
 | `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
 | `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for each edge's `<release>-reclaim-<edge>` CronJob: no successful run for `dataPolicy.derived.s3Staged.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot. `cluster=<edge>` is taken from the CronJob name, and an inhibit rule with `equal: [cluster]` holds it back while `ReclaimerRunUnavailable` fires for the same edge, so one outage raises one alert per edge rather than two. |
@@ -76,7 +76,7 @@ here that no longer ships reads as coverage that does not exist.
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log — the de-identification script failing open is a PHI risk, not a cosmetic one. |
 | `DeidentifyStageError` | Loki ruler | error or traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine the site runs |
-| `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` — the uploader's own pre-flight refusals, which otherwise look like silence. |
+| `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` / `dependency_missing` / `lock_failed` — the uploader's own refusals and stops (the pre-flight probe, a tool the image lacks, a writer lock that cannot be opened or taken), which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
@@ -211,19 +211,22 @@ rather than by hardcoded name.
 kubectl -n xnat-upload logs deploy/mgmt-upload-<edge> --since=3m \
   | grep -E 'Found [0-9]+ sessions'      # expect: Found 0 sessions
 
-# Edge side. Lists the staging prefix with the AWS CLI the uploader image
-# actually carries, against this site's own bucket (ingest-<edge>, the default
-# under seaweedfs.perSiteBuckets). AWS_ENDPOINT_URL is already set on the pod.
+# Edge side. Lists the staging prefix with the rclone binary the uploader pod
+# actually carries (the initContainer stages it in /opt/rclone; the `sw:`
+# remote comes from the pod's RCLONE_CONFIG_SW_* environment), against this
+# site's own bucket (ingest-<edge>, the default under seaweedfs.perSiteBuckets).
 kubectl --kubeconfig=kubeconfig-<edge> -n xnat-ingest exec deploy/edge-s3-uploader -- \
-  sh -c 'aws --endpoint-url "$AWS_ENDPOINT_URL" s3 ls s3://ingest-<edge>/staged/'
-                                         # expect: no output
+  /opt/rclone/rclone lsd sw:ingest-<edge>/staged/ --log-level ERROR
+                                         # expect: no output, exit 0
 ```
 
-> These names matter more than they look. `aws s3 ls` **exits 1 with no output
-> on an empty prefix**, so "no output" is the success case here — but so is a
-> wrong Deployment name, a wrong bucket, or a missing binary. `mc` is not in
-> the uploader image at all (it runs `amazon/aws-cli`), and a fleet-wide
-> `ingest-bucket` only exists when `seaweedfs.perSiteBuckets` is turned off.
+> These names matter more than they look. `rclone lsd` **prints nothing on an
+> empty prefix**, so "no output" is the success case here — but so is a wrong
+> Deployment name or a wrong bucket (those exit non-zero: read the exit code,
+> not only the output). Neither `mc` nor `aws` is in the uploader image at all
+> (it runs a plain Ubuntu, `upload.s3.shell.image`, with rclone staged in), and
+> a fleet-wide `ingest-bucket` only exists when `seaweedfs.perSiteBuckets` is
+> turned off.
 > Get any of them wrong and the check reports the same quiet nothing as a
 > healthy system — the identical failure mode the note above describes for the
 > script itself. `scripts/clear-staged-s3.sh` prints the exact management-side

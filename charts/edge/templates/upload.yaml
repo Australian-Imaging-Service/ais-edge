@@ -98,11 +98,14 @@ spec:
       containers:
         - name: uploader
           # NOT the S3 client — see upload.s3.shell.image in values.yaml. This
-          # image supplies bash + GNU coreutils/findutils; rclone arrives from
-          # the initContainer above.
+          # image supplies bash, GNU coreutils/findutils and util-linux flock;
+          # rclone arrives from the initContainer above. The loop checks each
+          # of them by use before it touches a session (check_tools in the
+          # script), and tests/s3-uploader/image-tests.sh runs one copy inside
+          # this image in CI.
           image: "{{ .Values.upload.s3.shell.image.repository }}:{{ .Values.upload.s3.shell.image.tag }}"
           imagePullPolicy: {{ .Values.upload.s3.shell.image.pullPolicy }}
-          # The image's entrypoint is `aws`; override it to run our loop.
+          # Whatever the image's own entrypoint is, the loop is the command.
           command: ["/bin/bash", "/scripts/s3-uploader.sh"]
           env:
             - name: EDGE_NAME

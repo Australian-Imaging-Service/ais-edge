@@ -176,6 +176,16 @@ jobs:
         if: ${{ !cancelled() }}
         run: make s3-uploader
 
+      # The same loop INSIDE the image the chart ships it in, with the rclone
+      # binary lifted as the initContainer lifts it. The stage above runs with
+      # the runner's own tools and was green while the pinned image had no
+      # flock (2026-10-14). Without docker it would skip; make that a failure.
+      - name: s3-uploader image (the loop inside upload.s3.shell.image)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_UPLOADER_IMAGE: "1"
+        run: make s3-uploader-image
+
       # The engine that deletes patient-derived data on the edge. Asserts on
       # what SURVIVED a real run over real trees, not on what was logged.
       - name: data-policy engine tests (what actually got deleted)

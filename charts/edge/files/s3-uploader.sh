@@ -16,8 +16,11 @@
 # busybox-based `minio/mc` fixed (docs/components/mc.md, "A full userland").
 # So charts/edge/templates/upload.yaml stages the rclone BINARY out of the
 # pinned rclone image with an initContainer and runs this loop in a GNU/bash
-# image. rclone is a static Go binary and runs there unchanged — verified
-# end to end against SeaweedFS 4.34.
+# image with util-linux flock (upload.s3.shell.image). rclone is a static Go
+# binary and runs there unchanged — verified end to end against SeaweedFS 4.34.
+# The image is checked BY USE at startup (check_tools below): amazon/aws-cli
+# 2.31.19 had the GNU tools and no flock, and every copy was skipped as lock
+# contention for five hours before anyone saw it (2026-10-14).
 #
 # THE LOG SCHEMA BELOW IS A PUBLIC INTERFACE. DO NOT CHANGE IT CASUALLY.
 #
@@ -31,7 +34,16 @@
 #     upload_started    SessionUploadStalled    (started with no completed)
 #     upload_completed  XNATUploadFailingForAllSessions, SessionUploadStalled
 #     upload_failed     XNATUploadFailingForAllSessions, S3UploaderRetryStorm
-#     recopy_claimed    RecopyLoop              (the same session more than 3 times in 24h)
+#     recopy_done       RecopyLoop              (the same session copied again more
+#                                               than 3 times in 24h; a claim that
+#                                               never completes is not counted)
+#
+# Two more stop the loop, so the pod restarts and S3UploaderRestartedRecently
+# names it (that rule also matches "refusing to start upload loop"):
+#
+#     dependency_missing  a tool the loop needs is not in the image (check_tools)
+#     lock_failed         the writer lock cannot be opened or taken, and not for
+#                         a timeout; a timeout is upload_skipped, as before
 #
 # The numeric fields (bytes, files, dicoms, duration_s) feed the dashboards.
 # `files` counts every object uploaded (DICOMs + __MANIFEST__.json + __METADATA__.json);
@@ -67,6 +79,7 @@ LOCK_WAIT="${LOCK_WAIT:-600}"                        # seconds to wait for it be
 RECOPY_DIR="${RECOPY_DIR:-${STATE_DIR}/recopy}"     # the reclaimer's repair requests, one file per session
 S3_CHUNK_SIZE="${S3_CHUNK_SIZE:-64Mi}"               # multipart part size; the reclaimer computes the same ETag form
 PASSES="${PASSES:-0}"                                # 0: loop for ever; N: stop after N passes (tests)
+STOP_DELAY="${STOP_DELAY:-15}"                       # seconds before an exit 1, so a restart loop is not a tight one (tests: 0)
 
 : "${S3_BUCKET:?S3_BUCKET required}"
 : "${EDGE_NAME:?EDGE_NAME required}"
@@ -79,6 +92,44 @@ jlog() {
     printf '{"ts":"%s","component":"s3-uploader","edge":"%s","event":"%s","session":"%s","message":"%s"%s}\n' \
         "$(date -Iseconds)" "${EDGE_NAME}" "$1" "${2:-}" "${3:-}" "${4:-}"
 }
+
+# -----------------------------------------------------------------------------
+# THE TOOLS, CHECKED BY USE, NOT BY NAME. busybox has a `find` and a `flock`
+# that answer to the name and lack the options this loop relies on (no -xtype,
+# no -w, no -E), and amazon/aws-cli:2.31.19 had no flock at all. MEASURED on
+# the test edge, 2026-10-14: `flock: command not found` on every session, read
+# as a busy lock, 4,249 copies skipped in five hours, nothing in the bucket, and
+# a green CI, because the unit tests run with the host's tools. A missing or
+# wrong tool now stops the pod here, with the tool named, before any session is
+# touched; tests/s3-uploader/image-tests.sh runs this inside the pinned image.
+# "refusing to start upload loop" is the phrase S3UploaderRestartedRecently
+# matches; keep it.
+# -----------------------------------------------------------------------------
+check_tools() {
+    local t probe="${TMPDIR:-/tmp}/s3-uploader-probe-$$" missing=""
+    for t in rclone find stat du md5sum sort flock date; do
+        command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    done
+    if [ -z "$missing" ]; then
+        rm -rf "$probe"
+        if mkdir -p "$probe/d" && printf 'x' > "$probe/d/f" && ln -s missing "$probe/d/l"; then
+            # a dangling link (the upload guard), the fingerprint pipeline, the byte count
+            [ "$(find "$probe/d" -xtype l 2>/dev/null | wc -l)" = 1 ] || missing="$missing find(-xtype)"
+            [ "$(find -L "$probe/d" -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null | wc -l)" = 1 ] || missing="$missing stat(-c)"
+            [ "$(du -sb "$probe/d/f" 2>/dev/null | cut -f1)" = 1 ] || missing="$missing du(-sb)"
+            # util-linux flock: a wait and a named timeout exit, the two the lock step uses
+            ( exec 9>>"$probe/lock" && flock -w 1 -E 3 9 ) >/dev/null 2>&1 || missing="$missing flock(-w,-E)"
+        else
+            missing="$missing tmpdir(${TMPDIR:-/tmp})"
+        fi
+        rm -rf "$probe"
+    fi
+    [ -z "$missing" ] && return 0
+    jlog dependency_missing "" "this image lacks:${missing}; refusing to start upload loop. The loop needs bash, GNU find (-L, -xtype), GNU stat -c, du -sb, md5sum, sort, date and util-linux flock (-w, -E) in upload.s3.shell.image, and the rclone binary the initContainer stages in /opt/rclone"
+    sleep "$STOP_DELAY"
+    exit 1
+}
+check_tools
 
 # Client-certificate state, worked out ONCE and reported in two places.
 #
@@ -191,7 +242,7 @@ until probe_endpoint; do
         # error itself goes to stderr from probe_endpoint; it can contain quotes
         # and newlines, so it must not be interpolated into this JSON.
         jlog endpoint_failed "" "bucket probe failed after 12 attempts (60s) — refusing to start upload loop. Endpoint mTLS: ${mtls_hint}. The rclone error for each attempt is on stderr above; an mTLS refusal arrives there as a 400/403 with an unparseable XML body, not as an auth error"
-        sleep 15
+        sleep "$STOP_DELAY"
         exit 1
     fi
     jlog endpoint_retrying "" "attempt ${attempt}/12 — endpoint not ready, retrying in 5s"
@@ -314,11 +365,30 @@ while true; do
         # The multipart flags are the contract with the reclaimer's proof: a part
         # size it knows (S3_CHUNK_SIZE, or rclone's 5 MiB default when rclone
         # raises it above --s3-max-upload-parts), and the multipart ETag kept.
-        if ! exec 8>>"$WRITER_LOCK" || ! flock -w "$LOCK_WAIT" 8; then
+        #
+        # ONLY A TIMEOUT IS CONTENTION. `flock -E 3` names the timeout exit, so
+        # any other exit (127: no flock in the image, as on 2026-10-14; a bad
+        # descriptor; a lock file that cannot be opened) is an error: the loop
+        # stops, the pod restarts and S3UploaderRestartedRecently names it,
+        # rather than skipping every session for ever as "lock not free".
+        if ! { exec 8>>"$WRITER_LOCK"; } 2>/dev/null; then
+            jlog lock_failed "$session_name" "cannot open the writer lock ${WRITER_LOCK}; refusing to copy without the lock, so the uploader stops"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
+            sleep "$STOP_DELAY"
+            exit 1
+        fi
+        flock -w "$LOCK_WAIT" -E 3 8; lock_rc=$?
+        if [ "$lock_rc" -eq 3 ]; then
             jlog upload_skipped "$session_name" "the upload-tree writer lock was not free within ${LOCK_WAIT}s; next pass"
             [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
             exec 8>&-
             continue
+        elif [ "$lock_rc" -ne 0 ]; then
+            jlog lock_failed "$session_name" "flock on ${WRITER_LOCK} failed with exit ${lock_rc}, which is not a timeout; refusing to copy without the lock, so the uploader stops"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
+            exec 8>&-
+            sleep "$STOP_DELAY"
+            exit 1
         fi
         if rclone copy "$session_dir" "sw:${S3_BUCKET}/${S3_PREFIX}/${session_name}/" \
              --copy-links --transfers 4 --checkers 8 --retries 3 --log-level ERROR \

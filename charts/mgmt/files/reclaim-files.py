@@ -28,10 +28,15 @@
 # ETag equal to the MD5 of the bytes read now, or the multipart form of it for
 # S3_CHUNK_SIZE or rclone's 5 MiB default. The identity of the file (inode, size,
 # times) is taken before the hash and checked after it. A resource is removed only
-# when its data files and its sidecars pass; the session metadata must pass too
-# when anything is removed. A file that fails gets a repair request for the
-# uploader (a file named for the session under RECOPY_DIR; not in a dry run) and
-# the session is kept; XNAT is not consulted.
+# when its data files and its sidecars pass; the session's and the scans' own
+# sidecars (the parent __METADATA__.json files) must pass too when anything is
+# removed, and their identities are checked again inside the lock, before any
+# data goes and before each is unlinked. The age has TWO clocks here: the newest
+# local ctime AND the newest object's LastModified in the bucket must both be
+# older than minAge, so a backlog of old files copied today still waits its
+# window. A file that fails gets a repair request for the uploader (a file named
+# for the session under RECOPY_DIR; not in a dry run) and the session is kept;
+# XNAT is not consulted.
 #
 # DELETE, per session. A folder: inside the upload-tree writer lock, while a
 # wrapped writer holds <tree>.alive, and only if names and file identities did not
@@ -174,15 +179,19 @@ class S3Proof:
         self.bucket, self.session = E["S3_BUCKET"], session
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
         self.parts = sorted({parse_size(E.get("S3_CHUNK_SIZE", "64Mi")), 5 << 20})
-        self.objects, self.requested = {}, False
+        self.objects, self.requested = {}, False   # rel: (etag, size, modified epoch)
         try:
             for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
                 for o in page.get("Contents") or []:
                     rel = o["Key"][len(self.prefix):]
                     if rel and not rel.endswith("/"):
-                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]))
+                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
         except Exception as e:
             raise Keep("listing_failed", f"cannot list {self.prefix}: {e}")
+
+    def newest(self):
+        """When the newest object of the session reached the bucket (None: no object)."""
+        return max((m for _, _, m in self.objects.values()), default=None)
 
     def prove(self, path, rel):
         """The local file at path, whose key is <session>/<rel>: Keep unless its
@@ -194,7 +203,7 @@ class S3Proof:
         obj = self.objects.get(rel)
         if obj is None:
             raise self.repair("not_in_s3", f"{rel}: no object in the bucket")
-        etag, size = obj
+        etag, size, _ = obj
         if size != before[2]:
             raise self.repair("s3_mismatch", f"{rel}: the object has {size} bytes, the file {before[2]}")
         if etag == whole or etag in forms.values():
@@ -276,18 +285,34 @@ class LocalStore:
         for rel in sorted(dirs, key=len, reverse=True) + ["."]:
             os.rmdir(os.path.normpath(os.path.join(top, rel)))   # refuses a non-empty folder
 
-    def tidy(self, resources, kept_rels, batches, unknown, act):
+    def parent_sidecars(self, scans):
+        """{rel: identity} of the sidecar FILES at the session root and at the root
+        of each scan folder named: the session's and the scans' own metadata, which
+        tidy() unlinks last. A sidecar that is not a regular file keeps the session."""
+        out = {}
+        for base in [""] + list(scans):
+            for n in sorted(os.listdir(os.path.join(self.path, base))):
+                if n in SIDECARS:
+                    rel = f"{base}/{n}" if base else n
+                    out[rel] = identity(os.path.join(self.path, rel))
+        return out
+
+    def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
         """Scan folders with only sidecars, then the session folder if it has only
         sidecars. With act=False only say whether there is something to remove. A
         kept resource or a batch is a folder with files, so its scopes are never
-        "only sidecars"; the lists are for the prefix store."""
+        "only sidecars"; the lists are for the prefix store. proven: the parent
+        sidecars this run snapshotted and proved ({rel: identity}); a sidecar not
+        in it, or whose identity changed, then keeps the session. None is the one
+        deliberate case: a leftover folder that held no data at the start of the
+        run, whose sidecars describe nothing."""
         found = False
         for scan in sorted(os.listdir(self.path)):
             spath = os.path.join(self.path, scan)
             if scan in SIDECARS or scan in unknown or os.path.islink(spath) or not os.path.isdir(spath):
                 continue
-            found = only_sidecars(spath, act) or found
-        return only_sidecars(self.path, act) or found
+            found = only_sidecars(spath, act, proven, scan) or found
+        return only_sidecars(self.path, act, proven, "") or found
 
     def gone(self):
         return not os.path.lexists(self.path)
@@ -386,8 +411,9 @@ class S3Store:
         except Exception as e:
             raise Keep("listing_failed", f"cannot list {self.prefix} again: {e}")
 
-    def tidy(self, resources, kept_rels, batches, unknown, act):
-        """Sidecars with nothing left to describe. A sidecar is recognised by where
+    def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
+        """Sidecars with nothing left to describe (proven is the folder store's; here
+        every delete is bound to the listing by If-Match). A sidecar is recognised by where
         it is, never by its name alone: at the root of a resource this run
         recognised, at the root of a scan folder, or at the session root. Every
         other object is data. Nothing under an unknown entry, a batch folder or a
@@ -428,12 +454,22 @@ class S3Store:
         return not (seen - self.deleted)
 
 
-def only_sidecars(path, act):
-    """True if the folder holds sidecars only. With act=True, also remove it."""
-    if not all(n in SIDECARS for n in os.listdir(path)):
+def only_sidecars(path, act, proven=None, base=""):
+    """True if the folder holds sidecars only. With act=True, also remove it: each
+    sidecar must then be one the run snapshotted and proved (in proven, keyed by
+    its path from the session root) with the same identity, unless proven is None."""
+    names = sorted(os.listdir(path))
+    if not all(n in SIDECARS for n in names):
         return False
     if act:
-        for n in os.listdir(path):
+        if proven is not None:
+            for n in names:
+                rel = f"{base}/{n}" if base else n
+                if rel not in proven:
+                    raise Keep("changed_during_check", f"{rel} appeared after the proof")
+                if identity(os.path.join(path, n)) != proven[rel]:
+                    raise Keep("changed_during_check", f"{rel} changed after the proof")
+        for n in names:
             os.unlink(os.path.join(path, n))
         os.rmdir(path)
     return True
@@ -682,16 +718,33 @@ def reclaim(session):
         return SKIPPED
     if PROOF == "xnat" and E.get("VERIFY_XNAT", "true") != "true":
         raise Keep("verify_disabled", "verifyAgainstXnat=false: this deleter removes only what XNAT proves")
+    proof = None
+    if PROOF == "s3":
+        # THE SECOND CLOCK. The files are proven against the bucket copy, and the
+        # mgmt reclaimer's clock starts when the objects reach it; this one must
+        # too, or a backlog of old files copied today is retired at once, with no
+        # window in which a fault in the copy can still be seen. The listing is
+        # this run's one snapshot of the prefix; a listing error keeps the session.
+        proof = S3Proof(session)
+        newest = proof.newest()
+        s3_age = None if newest is None else now - int(newest)
+        if s3_age is not None and s3_age < MIN_AGE_S:
+            jlog("reclaim_skipped", session,
+                 f"the newest object of this session reached the bucket {s3_age}s ago, minAge is {E.get('MIN_AGE')} "
+                 f"({MIN_AGE_S}s) from {E.get('MIN_AGE_KEY')}; the local copy was last written {age}s ago",
+                 age_s=age, s3_age_s=s3_age)
+            return SKIPPED
 
     # Snapshot. A scan folder is <id>.<type>. Its dot entries are the uploader's
     # batches: never deleted here, as one can hold the only link to unproved data.
-    resources, kept, kept_rels, unknown, batches = [], [], [], [], []
+    resources, kept, kept_rels, unknown, batches, scans = [], [], [], [], [], []
     for scan, kind in sorted(store.names().items()):
         if scan in SIDECARS:
             continue
         if scan.startswith(".") or "." not in scan or kind != "dir":
             unknown.append(scan)
             continue
+        scans.append(scan)
         for res, rkind in sorted(store.names(scan).items()):
             rel = f"{scan}/{res}"
             if res in SIDECARS:
@@ -706,11 +759,18 @@ def reclaim(session):
             except Keep as k:
                 kept.append(k)
                 kept_rels.append(rel)
+    # The parent sidecars (the session's and each scan's own metadata) as they are
+    # now. tidy() unlinks them last, so the same set with the same identities is
+    # required again inside the lock, before any data goes and before each is
+    # unlinked. Under PROOF=s3 each is proven in the bucket as well, below. A
+    # session that holds no data file at all is the one case without this bind:
+    # its sidecars describe nothing (an earlier run removed the data and stopped).
+    held_data = any(r.data for r in resources) or bool(kept_rels)
+    parents = store.parent_sidecars(scans) if STORAGE == "filesystem" else {}
 
     # Proof, outside the lock.
     if resources and PROOF == "s3":
         try:
-            proof = S3Proof(session)
             for res in list(resources):
                 try:
                     res.prove_s3(proof)
@@ -718,12 +778,14 @@ def reclaim(session):
                     kept.append(k)
                     kept_rels.append(res.rel)
                     resources.remove(res)
-            # the session metadata goes with the last resource (tidy): it must be in
-            # the bucket before any data of the session is removed
-            for name in sorted(n for n, k in store.names().items() if n in SIDECARS and k == "file"):
+            # the parent sidecars go with the last resource of their folder (tidy):
+            # each must be in the bucket before any data of the session is removed
+            for rel in sorted(parents):
                 if resources:
-                    proof.prove(os.path.join(store.path, name), name)
-        except Keep as k:   # the listing, or the session metadata: nothing of the session is removed
+                    proof.prove(os.path.join(store.path, rel), rel)
+                    if identity(os.path.join(store.path, rel)) != parents[rel]:
+                        raise Keep("changed_during_check", f"{rel} changed after the snapshot")
+        except Keep as k:   # a parent sidecar: nothing of the session is removed
             kept.append(k)
             kept_rels += [r.rel for r in resources]
             resources = []
@@ -751,7 +813,9 @@ def reclaim(session):
                  f"XNAT holds each of the {nfiles} file(s) of this session with the same size (HEAD); content is not verified",
                  resources=len(resources), have=nfiles)
     seen = [r.rel for r in resources] + kept_rels
-    if not resources and not store.tidy(seen, kept_rels, batches, unknown, act=False):
+    # Nothing proven: a session that still holds data is reported kept as it is; one
+    # that holds none may still have leftover sidecar folders to tidy.
+    if not resources and (held_data or not store.tidy(seen, kept_rels, batches, unknown, act=False)):
         return report_kept(session, kept, unknown, batches, 0)
     if DRY_RUN:
         jlog("reclaim_skipped", session, f"dataPolicy dryRun/disabled: would have removed {len(resources)} proven resource(s)",
@@ -762,6 +826,17 @@ def reclaim(session):
     # refused or failed delete ends every delete of this session for this run.
     removed, stopped = 0, False
     with store.lock():
+        # The parent sidecars first: the same set, with the same identities, as at
+        # the snapshot, or nothing goes. The resources are rechecked by remove().
+        if STORAGE == "filesystem" and held_data:
+            try:
+                if store.parent_sidecars(scans) != parents:
+                    raise Keep("changed_during_check", "the session's or a scan's metadata changed after the proof")
+            except Keep as k:
+                kept.append(k)
+                kept_rels += [r.rel for r in resources]
+                report_kept(session, kept, unknown, batches, 0)
+                return KEPT
         for res in resources:
             try:
                 store.remove(res)
@@ -776,7 +851,7 @@ def reclaim(session):
                  files=len(res.data))
         if not stopped:
             try:
-                store.tidy(seen, kept_rels, batches, unknown, act=True)
+                store.tidy(seen, kept_rels, batches, unknown, act=True, proven=parents if held_data else None)
             except Keep as k:
                 kept.append(k)
                 stopped = True

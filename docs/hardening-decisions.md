@@ -762,10 +762,31 @@ What ships now, in `upload.mode: s3`:
 * **A failed proof leaves a repair request** that the uploader claims by a
   rename and answers with a copy, so a lost or changed object is re-sent
   without an operator, and a session is never re-sent twice for one run.
+* **The parent sidecars are proven and bound too.** The session's and each
+  scan's `__METADATA__.json` must be in the bucket like any file, and the
+  identities taken at the snapshot are required again inside the lock before
+  any data goes and before each is unlinked; a sidecar rewritten or added
+  after the proof keeps the session (found by Codex, codex-178: the first
+  draft proved the session's metadata and then unlinked whatever was there,
+  and never proved a scan's).
+* **The uploader's image is checked by use.** The loop stops the pod when a
+  tool it needs is missing or is a busybox variant without the options it
+  uses (`dependency_missing`), tells a lock error from a lock timeout
+  (`lock_failed` stops the pod; a timeout skips the session), and runs in a
+  pinned Ubuntu with util-linux `flock` instead of `amazon/aws-cli`, which
+  had none. CI runs one real copy inside that image. Measured 2026-10-14:
+  the first live run of this change skipped every copy as lock contention
+  for five hours with a green CI, because the unit tests run with the
+  host's own tools.
 * **Two clocks.** The management reclaimer must remove the bucket copy after
   the edge has proved against it: `s3Staged.minAge` (36 hours) against
-  `stagedReclaimer.minAge` (a day). Neither chart can read the other's value,
-  so a `RecopyLoop` alert watches for the crossing. The longer clock also has
+  `stagedReclaimer.minAge` (a day). The edge's clock counts from the newest
+  local file AND from the newest object of the session in the bucket, so a
+  backlog of old files copied today waits its window too (found by Codex,
+  codex-178). Neither chart can read the other's value, so a `RecopyLoop`
+  alert watches for the crossing, counting completed re-copies, not claimed
+  requests (an uploader that cannot copy claims the same request on every
+  pass; measured 2026-10-14). The longer clock also has
   a ceiling: the XNAT proof runs only after it, and the absence alert
   (`SessionStagedNotConfirmedInXNAT`) counts a session unconfirmed after 48
   hours, so the management chart refuses more than 36h (a week, the first

@@ -120,6 +120,12 @@ exec(stmt, {"d": d})
 json.dump(d, open(path, "w"))
 PY
 }
+# Every object's LastModified: <seconds> ago (negative: in the future, for a run whose
+# RECLAIM_NOW is moved forward). Defined HERE, with s3_put: the FS cases use it first,
+# and a fixture helper defined below its first use is a silent no-op (the first draft's
+# s3_set was, and six cases passed on intact objects: codex-179).
+s3_modified() { s3_set "import datetime; t=(datetime.datetime.utcnow()-datetime.timedelta(seconds=$1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+for o in d['objects'].values(): o['modified']=t"; }
 s3_mirror() {   # <root> <session>: every file of the session as an object, key staged/<session>/<rel>, ETag = its MD5
     PROOF_S3=yes
     python3 - "$CASE_DIR/s3.json" "$1/$2" "staged/$2/" <<'PY'
@@ -206,6 +212,24 @@ time.sleep(600)' "$@" &
     local i; for i in $(seq 50); do [ -e "$1.held" ] && return 0; sleep 0.1; done
 }
 
+# A writer in a pass that WRITES a parent sidecar and then ends its pass: the pass
+# lock is held when the helper starts (its proof runs outside the lock), the file
+# is written 1.5 s later, the lock goes, and the helper's recheck inside the lock
+# must keep the session. .alive stays held, as a live writer holds it.
+hold_locks_rewrite() {   # <alive> <lock> <file> <content>
+    python3 -c '
+import fcntl, os, sys, time
+a = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(a, fcntl.LOCK_SH)
+l = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT, 0o644); fcntl.flock(l, fcntl.LOCK_EX)
+open(sys.argv[1] + ".held", "w").close()
+time.sleep(1.5)
+open(sys.argv[3], "w").write(sys.argv[4])
+os.close(l)
+time.sleep(600)' "$@" &
+    HOLDER=$!
+    local i; for i in $(seq 50); do [ -e "$1.held" ] && return 0; sleep 0.1; done
+}
+
 run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
     local name="$1" expect_gone="$2" expect_event="$3"; shift 3
     if [ -n "$FS_SKIP" ]; then
@@ -234,8 +258,9 @@ run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
     for i in $(seq 50); do [ -s "$S/xnat-port" ] && break; sleep 0.1; done
     HOLDER=""
     case "$WRITER" in
-        yes)  hold_locks "$S/locks/assigned.alive" ;;
-        pass) hold_locks "$S/locks/assigned.alive" "$S/locks/assigned.lock" ;;
+        yes)     hold_locks "$S/locks/assigned.alive" ;;
+        pass)    hold_locks "$S/locks/assigned.alive" "$S/locks/assigned.lock" ;;
+        rewrite) hold_locks_rewrite "$S/locks/assigned.alive" "$S/locks/assigned.lock" "$REWRITE_FILE" "$REWRITE_CONTENT" ;;
     esac
 
     local out
@@ -540,6 +565,30 @@ setup_fs_s3_request_once()      { fs_session "$1" "$SESS" 3; s3_mirror "$1" "$SE
 assert_fs_s3_request_once()     { requested && [ "$(grep -c '"event":"recopy_requested"' "$1")" = 1 ] && [ "$(ls "$CASE_DIR/recopy" | wc -l)" = 1 ]; }
 setup_fs_s3_leftover_sidecars() { mkdir -p "$1/$SESS/1.scan"; printf '{}' > "$1/$SESS/__METADATA__.json"; printf '{}' > "$1/$SESS/1.scan/__METADATA__.json"; PROOF_S3=yes; printf '{"objects":{}}' > "$CASE_DIR/s3.json"; }
 assert_fs_s3_leftover_sidecars(){ grep -q '"empty":true' "$1" && not_requested; }
+# THE PARENT SIDECARS. The session's and each scan's __METADATA__.json go last (tidy):
+# each must be in the bucket like any file, and keep its identity until it is unlinked.
+# A scan's metadata missing from the bucket: kept, a repair request, nothing removed.
+setup_fs_s3_scan_meta_missing() { fs_session "$1" "$SESS" 2; printf '{}' > "$1/$SESS/1.scan/__METADATA__.json"; s3_mirror "$1" "$SESS"
+                                  s3_set "d['objects'].pop('staged/$SESS/1.scan/__METADATA__.json')"; }
+assert_fs_s3_scan_meta_missing(){ reason "$1" not_in_s3 && requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" "$SESS/1.scan/__METADATA__.json" \
+                                  && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_scan_meta_proved()  { fs_session "$1" "$SESS" 2; printf '{}' > "$1/$SESS/1.scan/__METADATA__.json"; s3_mirror "$1" "$SESS"; }
+# The session metadata is rewritten by a writer between the proof and the lock: the
+# recheck inside the lock keeps the session, and no data goes. The same when a sidecar
+# APPEARS at the session root, and under the XNAT proof.
+setup_fs_s3_session_meta_rewritten() { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; WRITER=rewrite; REWRITE_FILE="$1/$SESS/__METADATA__.json"; REWRITE_CONTENT='{"rewritten":true}'; }
+assert_fs_s3_session_meta_rewritten(){ reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" "$SESS/__METADATA__.json" \
+                                       && grep -q rewritten "$2/$SESS/__METADATA__.json" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_session_meta_added()     { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; WRITER=rewrite; REWRITE_FILE="$1/$SESS/MANIFEST.json"; REWRITE_CONTENT='{}'; }
+assert_fs_s3_session_meta_added()    { reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$SESS/MANIFEST.json" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_session_meta_rewritten()    { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; WRITER=rewrite; REWRITE_FILE="$1/$SESS/__METADATA__.json"; REWRITE_CONTENT='{"rewritten":true}'; }
+assert_fs_session_meta_rewritten()   { reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+# THE SECOND CLOCK: the newest object's LastModified in the bucket must be older than
+# minAge too, however old the local files are: a backlog copied today waits. The
+# bucket clock is asserted in the skip line; the old-object control removes.
+setup_fs_s3_fresh_objects_skip()  { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_modified -$((2 * 86400 - 3600)); }
+assert_fs_s3_fresh_objects_skip() { grep -q '"event":"reclaim_skipped".*reached the bucket -\?[0-9]*s ago, minAge is 1d (86400s)' "$1" && not_requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm"; }
+setup_fs_s3_old_objects_removed() { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_modified 86400; }
 run_fs_case fs_s3_happy_path            yes reclaim_removed
 run_fs_case fs_s3_no_xnat               yes reclaim_removed  VERIFY_XNAT=false XNAT_SERVER=http://127.0.0.1:1
 run_fs_case fs_s3_rewritten             no  reclaim_kept
@@ -554,6 +603,11 @@ run_fs_case fs_s3_listing_error         no  reclaim_kept
 run_fs_case fs_s3_dry_run               no  reclaim_kept     DRY_RUN=true
 run_fs_case fs_s3_request_once          no  reclaim_kept
 run_fs_case fs_s3_leftover_sidecars     yes reclaim_removed
+run_fs_case fs_s3_scan_meta_missing     no  reclaim_kept
+run_fs_case fs_s3_scan_meta_proved      yes reclaim_removed
+run_fs_case fs_s3_session_meta_rewritten no reclaim_kept     LOCK_WAIT=10
+run_fs_case fs_s3_session_meta_added    no  reclaim_kept     LOCK_WAIT=10
+run_fs_case fs_session_meta_rewritten   no  reclaim_kept     LOCK_WAIT=10
 
 run_fs_case fs_happy_path              yes reclaim_removed
 run_fs_case fs_partial_upload          no  reclaim_kept
@@ -628,6 +682,8 @@ run_fs_case fs_min_age_010d       no  reclaim_skipped      MIN_AGE=010d RECLAIM_
 run_fs_case fs_min_age_08d        no  reclaim_skipped      MIN_AGE=08d
 run_fs_case fs_min_age_10_digits  no  reclaim_skipped      MIN_AGE=9999999999s
 run_fs_case fs_min_age_elapsed    yes reclaim_removed      MIN_AGE=1d RECLAIM_NOW=$((NOW + 2*86400))
+run_fs_case fs_s3_fresh_objects_skip  no  reclaim_skipped  MIN_AGE=1d RECLAIM_NOW=$((NOW + 2*86400))
+run_fs_case fs_s3_old_objects_removed yes reclaim_removed  MIN_AGE=1d RECLAIM_NOW=$((NOW + 2*86400))
 
 # THE TREE'S OWN minAge. data-policy hands this tree to the CronJob before its
 # own age check, so the tree's minAge must reach the CronJob or no deleter reads
@@ -740,8 +796,6 @@ s3_session() {   # <session> <nfiles> [scan folder] [resource folder] [SOP class
     esac
     s3_put "staged/$s/__METADATA__.json" 0 '{}'
 }
-s3_modified() { s3_set "import datetime; t=(datetime.datetime.utcnow()-datetime.timedelta(seconds=$1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-for o in d['objects'].values(): o['modified']=t"; }
 s3_left()    { python3 -c 'import json,sys; print(sum(1 for k in json.load(open(sys.argv[1]))["objects"] if k.startswith("staged/"+sys.argv[2]+"/")))' "$CASE_DIR/s3.json" "$1"; }
 s3_deletes() { local n; n=$(grep -c '^DELETE ' "$CASE_DIR/s3-requests.log" 2>/dev/null); echo "${n:-0}"; }
 s3_has()     { python3 -c 'import json,sys; sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1]))["objects"] else 1)' "$CASE_DIR/s3.json" "$1"; }

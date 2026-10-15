@@ -190,16 +190,22 @@ cat <<EOF
 45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
 3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
 45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-unlisted"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
-90	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
-150	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
-210	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_claimed","session":"proj.S1.E1","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-once"}	{"component":"s3-uploader","edge":"recopy-once","event":"recopy_claimed","session":"proj.S2.E2","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S3.E3","message":"x"}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S4.E4","message":"x"}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S5.E5","message":"x"}
-30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_claimed","session":"proj.S6.E6","message":"x"}
-60	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-done-only"}	{"component":"s3-uploader","edge":"recopy-done-only","event":"recopy_done","session":"proj.S7.E7","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_done","session":"proj.S1.E1","message":"copied again on the reclaimer's request","duration_s":9}
+90	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_done","session":"proj.S1.E1","message":"copied again on the reclaimer's request","duration_s":9}
+150	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_done","session":"proj.S1.E1","message":"copied again on the reclaimer's request","duration_s":9}
+210	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-loop"}	{"component":"s3-uploader","edge":"recopy-loop","event":"recopy_done","session":"proj.S1.E1","message":"copied again on the reclaimer's request","duration_s":9}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-once"}	{"component":"s3-uploader","edge":"recopy-once","event":"recopy_done","session":"proj.S2.E2","message":"copied again on the reclaimer's request","duration_s":9}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_done","session":"proj.S3.E3","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_done","session":"proj.S4.E4","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_done","session":"proj.S5.E5","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-spread"}	{"component":"s3-uploader","edge":"recopy-spread","event":"recopy_done","session":"proj.S6.E6","message":"x"}
+30	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-claimed-only"}	{"component":"s3-uploader","edge":"recopy-claimed-only","event":"recopy_claimed","session":"proj.S7.E7","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+90	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-claimed-only"}	{"component":"s3-uploader","edge":"recopy-claimed-only","event":"recopy_claimed","session":"proj.S7.E7","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+150	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-claimed-only"}	{"component":"s3-uploader","edge":"recopy-claimed-only","event":"recopy_claimed","session":"proj.S7.E7","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+210	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"recopy-claimed-only"}	{"component":"s3-uploader","edge":"recopy-claimed-only","event":"recopy_claimed","session":"proj.S7.E7","message":"not_in_s3 1.scan/DICOM/f1.dcm"}
+2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-tool"}	{"component":"s3-uploader","edge":"restart-tool","event":"dependency_missing","session":"","message":"this image lacks: flock; refusing to start upload loop. The loop needs bash, GNU find (-L, -xtype), GNU stat -c, du -sb, md5sum, sort, date and util-linux flock (-w, -E) in upload.s3.shell.image, and the rclone binary the initContainer stages in /opt/rclone"}
+2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-lock"}	{"component":"s3-uploader","edge":"restart-lock","event":"lock_failed","session":"proj.S9.E9","message":"flock on /data/.locks/deidentified.lock failed with exit 127, which is not a timeout; refusing to copy without the lock, so the uploader stops"}
+2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-busy"}	{"component":"s3-uploader","edge":"restart-busy","event":"upload_skipped","session":"proj.S9.E9","message":"the upload-tree writer lock was not free within 600s; next pass"}
 EOF
 }
 
@@ -225,8 +231,11 @@ quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago â€
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
 recopy_loop	RecopyLoop	recopy-loop	fire	one session copied again 4 times in 24h: the two clocks crossing
 recopy_once	RecopyLoop	recopy-once	nofire	one repair is a repair, not a loop
-recopy_spread	RecopyLoop	recopy-spread	nofire	4 requests over 4 sessions: no session loops
-recopy_done_only	RecopyLoop	recopy-done-only	nofire	a completed copy is not a request
+recopy_spread	RecopyLoop	recopy-spread	nofire	4 copies over 4 sessions: no session loops
+recopy_claimed_only	RecopyLoop	recopy-claimed-only	nofire	4 claims and no completed copy: an uploader that cannot copy, not the crossing (2026-10-14)
+restart_tool_missing	S3UploaderRestartedRecently	restart-tool	fire	the loop stopped: a tool the image lacks (dependency_missing)
+restart_lock_failed	S3UploaderRestartedRecently	restart-lock	fire	the loop stopped: the writer lock failed, not a timeout (lock_failed)
+restart_lock_busy	S3UploaderRestartedRecently	restart-busy	nofire	a busy lock is a skipped session, not a stop
 stage_age_forever_quiet	StageBacklogAgeing	age-forever	nofire	facility backup kept forever by policy: 49-day-old originals are the point (cai-lfs3, 2026-09-30)
 stage_age_stuck	StageBacklogAgeing	age-stuck	fire	a stage with a reclaim policy whose oldest entry is 49 days old
 stage_age_fresh	StageBacklogAgeing	age-fresh	nofire	oldest entry 1h old, under the 7d limit

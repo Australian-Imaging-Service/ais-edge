@@ -125,7 +125,7 @@ $(S3_SECRET_KEY)`. That is the only way to seed it.
 |---|---|---|---|
 | `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
 | `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
-| `edge-s3-uploader` | edge | `xnat-ingest` | `amazon/aws-cli:2.31.19` (NOT xnat-ingest) |
+| `edge-s3-uploader` | edge | `xnat-ingest` | `ubuntu:noble-20260917` (`upload.s3.shell.image`, NOT xnat-ingest), with rclone lifted from `rclone/rclone:1.75.0` by an initContainer |
 | `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
@@ -207,10 +207,11 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 }
 ```
 
-The twelve event names, and what each one means:
+The fourteen event names, and what each one means:
 
 | Event | Emitted when |
 |---|---|
+| `dependency_missing` | before anything else: a tool the loop needs is not in the image, or is a busybox variant without the options the loop uses (`find -xtype`, `stat -c`, `du -sb`, `flock -w -E`; each is checked by use, not by name). Names the tool, carries "refusing to start upload loop", and exits 1 |
 | `startup` | the loop starts; records endpoint, bucket, prefix, part size and client-certificate state, and says that it copies only |
 | `endpoint_ready` | the `head-bucket` probe succeeded |
 | `endpoint_retrying` | probe failed; retrying (12 attempts over 60s) |
@@ -218,18 +219,22 @@ The twelve event names, and what each one means:
 | `upload_started` | a settled session, changed since its last copy or named by a repair request, is about to be copied |
 | `upload_completed` | `rclone copy` exited zero; the state file records the fingerprint, and a claimed repair request is removed (`recopy_done` follows) |
 | `upload_failed` | `rclone copy` exited non-zero; retried next cycle (a claimed repair request goes back to pending) |
-| `upload_skipped` | dangling symlinks, the endpoint went away mid-loop, or the upload-tree writer lock was not free within `upload.s3.lockWait` seconds — the local copy is deliberately preserved rather than uploaded incomplete |
+| `upload_skipped` | dangling symlinks, the endpoint went away mid-loop, or the upload-tree writer lock was not free within `upload.s3.lockWait` seconds (a timeout, `flock -E 3`) — the local copy is deliberately preserved rather than uploaded incomplete |
+| `lock_failed` | the writer lock could not be opened, or `flock` failed with an exit that is not the timeout (127 with no `flock` in the image, a bad descriptor): never read as contention. A claimed repair request goes back to pending and the loop exits 1, so the pod restarts |
 | `recopy_requeued` | at startup, a repair request claimed by a previous container (`.claimed`) is returned to pending, so a crash mid-copy loses no request |
-| `recopy_claimed` | a repair request for this session was claimed (renamed to `.claimed`) and the copy runs with `--ignore-times`, so files that look unchanged are sent again; `RecopyLoop` counts these |
-| `recopy_done` | the copy that answered a repair request exited zero; the request is gone |
+| `recopy_claimed` | a repair request for this session was claimed (renamed to `.claimed`) and the copy runs with `--ignore-times`, so files that look unchanged are sent again; a request whose copy never completes is claimed again on every pass |
+| `recopy_done` | the copy that answered a repair request exited zero; the request is gone. `RecopyLoop` counts these: more than three for one session in 24 hours is the two clocks crossing |
 | `marker_retired` | a state file whose session no longer exists in any stage directory was dropped, so a later session of the same name cannot inherit its fingerprint |
 
 `reclaim_skipped` no longer exists: the uploader has no delete to skip. A
 dashboard or alert that selected it sees an empty series, not an error.
 
-Only **`upload_started`, `upload_completed`, `upload_failed` and
-`recopy_claimed`** are matched by Loki ruler alerts (`SessionUploadStalled`,
-`XNATUploadFailingForAllSessions`, `S3UploaderRetryStorm`, `RecopyLoop`). Renaming one of those disables
+Only **`upload_started`, `upload_completed`, `upload_failed`, `recopy_done`,
+`dependency_missing` and `lock_failed`** are matched by Loki ruler alerts
+(`SessionUploadStalled`, `XNATUploadFailingForAllSessions`,
+`S3UploaderRetryStorm`, `RecopyLoop`, `S3UploaderRestartedRecently`; the last
+also matches the phrase "refusing to start upload loop" in `endpoint_failed`
+and `dependency_missing`). Renaming one of those disables
 its alert *silently* — no error, just a rule that never fires again.
 The three `endpoint_*` events are operator diagnostics; they were called
 `alias_configured` / `alias_retrying` / `alias_failed` under the old
@@ -261,8 +266,13 @@ dicoms=$(find -L "$session_dir" -type f \( -iname '*.dcm' \) | wc -l)
 `orthanc-storage/`, and `-iname` because scanners emit both `.dcm` and
 `.DCM`. The `du -a | case`-pattern trick that used to be documented here
 was a workaround for `minio/mc`, whose busybox base had no
-`find`/`awk`/`grep`/`sed` at all; it went away with the client, since
-`amazon/aws-cli` ships full findutils.
+`find`/`awk`/`grep`/`sed` at all; it went away with the client, since the
+shell image the loop runs in (`upload.s3.shell.image`, a pinned Ubuntu) ships
+full findutils, GNU coreutils and util-linux `flock`. The loop checks each of
+them by use at startup and stops the pod with the tool named
+(`dependency_missing`): `amazon/aws-cli`, the image it ran in before, had
+every GNU tool and no `flock`, and every copy was skipped as lock contention
+for five hours before anyone saw it (2026-10-14).
 
 ## Operations
 
@@ -309,8 +319,13 @@ lock (`/data/.locks/<tree>.lock`, the one `assign` or `deidentify` holds for
 each pass) for each `rclone copy`, with `--s3-chunk-size upload.s3.chunkSize`
 and `--s3-use-multipart-etag=true`, and releases it when the copy ends. It
 waits `upload.s3.lockWait` seconds for the lock and then skips the session for
-that pass (`upload_skipped`). It has no `RECLAIM` or `DRY_RUN` variable any
-more.
+that pass (`upload_skipped`). Only a timeout is contention: `flock -E 3` names
+it, and any other failure to open or take the lock stops the loop
+(`lock_failed`, exit 1), so a pod that cannot lock restarts and
+`S3UploaderRestartedRecently` names it, instead of skipping every session for
+ever. The loop also checks each tool it needs by use before its first session
+(`dependency_missing`, see "Where it runs"). It has no `RECLAIM` or `DRY_RUN`
+variable any more.
 
 **The CronJob proves each file against the bucket** (`PROOF=s3`). It lists
 `staged/<session>/` once, then for each local file reads the file, computes
@@ -319,7 +334,17 @@ and for rclone's 5 MiB default, and compares size and ETag with the listing.
 It records the file's identity (inode, size, mtime, ctime) before and after
 the hash, so a file that changes during the check is kept. A proved resource
 is removed inside the writer lock, one resource at a time; the session's own
-sidecars go last. XNAT is never asked.
+sidecars go last. The parent sidecars (the session's `__METADATA__.json` and
+each scan folder's) are proven in the bucket like any file, and their
+identities, taken at the snapshot, are required again inside the lock before
+any data goes and before each is unlinked: a sidecar rewritten or added after
+the proof keeps the session (`changed_during_check`). The one folder tidied
+without that bind is a session that held no data file at all at the start of
+the run, whose leftover sidecars describe nothing. The age has two clocks on
+the edge: the newest local file (its ctime) and the newest object of the
+session in the bucket (its `LastModified`) must both be older than
+`stagedReclaimer.minAge`, so a backlog of old files copied today still waits
+its window (`reclaim_skipped` names which clock). XNAT is never asked.
 
 **A failed proof leaves a repair request.** A file that is not in the bucket,
 or is there with another size or ETag, keeps its session and writes
@@ -340,8 +365,11 @@ lock wait and any edge downtime. If the bucket copy went first, the edge's
 proof would fail and request a copy, the uploader would copy, management
 would remove again, and so on: nothing is lost while that loops (both copies
 are kept until proved, and XNAT already holds the session), but the edge
-never retires its copy. `RecopyLoop` fires on more than three claims for one
-session in 24 hours. Neither chart can read the other's value, so the
+never retires its copy. `RecopyLoop` fires on more than three completed
+re-copies (`recopy_done`) of one session in 24 hours; claimed requests are
+not counted, because an uploader that cannot copy claims the same request on
+every pass (measured on 2026-10-14: 21 sessions, five hours, nothing copied),
+and that failure has its own alerts. Neither chart can read the other's value, so the
 defaults are 36 hours against a day. The longer clock has a ceiling too: the
 management reclaimer proves a session in XNAT only after `s3Staged.minAge`,
 and `SessionStagedNotConfirmedInXNAT` counts a session unconfirmed 48 hours

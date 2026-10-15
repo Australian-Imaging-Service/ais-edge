@@ -1108,6 +1108,14 @@ groups:
         # is wrong. Often transient at install time; a sustained spike
         # means real config drift.
         #
+        # Two more exits since PR 57, both from charts/edge/files/s3-uploader.sh:
+        # `dependency_missing` (a tool the loop needs is not in the image; its
+        # message carries "refusing to start upload loop" as well) and
+        # `lock_failed` (the writer lock cannot be opened or taken, and not for
+        # a timeout). MEASURED 2026-10-14: an image without flock skipped
+        # every copy as lock contention for five hours and nothing restarted;
+        # now the loop stops, and this names it.
+        #
         # Matches BOTH event spellings on purpose. `alias_failed` was the
         # minio/mc-era name; the AWS CLI uploader emits `endpoint_failed`
         # ("alias" was an mc concept). Keeping both means this alert works
@@ -1118,26 +1126,29 @@ groups:
         expr: |
           sum by (cluster) (count_over_time(
             {namespace="xnat-ingest", component="s3-uploader"}
-            |~ "(?i)refusing to start upload loop|alias_failed|endpoint_failed" [5m])) > 0
+            |~ "(?i)refusing to start upload loop|alias_failed|endpoint_failed|dependency_missing|lock_failed" [5m])) > 0
         for: 2m
         labels:
           severity: warning
           source: loki-ruler
           category: s3-auth
         annotations:
-          summary: "s3-uploader on {{ $labels.cluster }} could not reach its S3 endpoint"
+          summary: "s3-uploader on {{ $labels.cluster }} stopped: its endpoint, its image or its lock"
           description: |
-            The s3-uploader pre-flight probe (head-bucket round-trip)
-            failed in the last 5 minutes. Check the SeaweedFS Ingress is
-            reachable, the edge S3 key matches the IAM identity for this
-            cluster, and the ca-bundle Secret contains the ais-edge-ca
-            cert (the AWS CLI reads it as a single file via
-            AWS_CA_BUNDLE, not as a directory of PEMs).
+            The s3-uploader stopped in the last 5 minutes. Its log says which:
+            endpoint_failed (the pre-flight bucket probe failed: check the
+            SeaweedFS Ingress is reachable, the edge S3 key matches the IAM
+            identity for this cluster, and the ca-bundle Secret contains the
+            ais-edge-ca cert, which rclone reads as a single file via
+            RCLONE_CA_CERT), dependency_missing (a tool the loop needs is not
+            in upload.s3.shell.image; the line names it) or lock_failed (the
+            upload-tree writer lock could not be opened or taken, and not for
+            a timeout; check the pipeline volume and /data/.locks).
 
       - alert: RecopyLoop
         # The edge's staged-reclaimer (PROOF=s3) asks the uploader to copy a
         # session again when a local file is not in the bucket as it is on
-        # disk. One request is a repair. A session that keeps asking is the
+        # disk. One copy is a repair. A session copied again and again is the
         # two clocks crossing: the mgmt reclaimer removes the bucket copy
         # before the edge has proven its own against it, the edge requests,
         # the uploader copies, mgmt removes again. Nothing is lost while it
@@ -1147,8 +1158,14 @@ groups:
         # side well above the edge's stagedReclaimer.minAge plus its run
         # interval, and keep it at most 36h (charts/edge/values.yaml,
         # s3Staged: "the two clocks").
+        #
+        # COMPLETED copies (recopy_done), not claimed requests. An uploader
+        # that cannot copy claims the same request on every pass: MEASURED
+        # 2026-10-14, 21 sessions fired this for five hours with nothing
+        # copied at all. That failure is SessionUploadStalled's and
+        # S3UploaderRestartedRecently's; this one names the crossing only.
         expr: |
-          sum by (cluster, session) (count_over_time({component="s3-uploader"} | json | event="recopy_claimed" [24h])) > 3
+          sum by (cluster, session) (count_over_time({component="s3-uploader"} | json | event="recopy_done" [24h])) > 3
         for: 10m
         labels:
           severity: warning
@@ -1157,8 +1174,8 @@ groups:
         annotations:
           summary: "Session {{ $labels.session }} on {{ $labels.cluster }} was copied again more than 3 times in 24h"
           description: |
-            The edge's staged-reclaimer keeps asking the uploader to copy
-            {{ $labels.session }} again: a file it holds is not in the bucket as
+            The uploader keeps copying {{ $labels.session }} again on the edge's
+            staged-reclaimer's request: a file it holds is not in the bucket as
             it is on disk, and after each copy it is gone again. That is the
             management reclaimer removing the bucket copy before the edge has
             proven its local copy against it (the two clocks crossing).
