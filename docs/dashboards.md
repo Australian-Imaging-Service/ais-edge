@@ -1,239 +1,346 @@
-# Grafana dashboards — what every panel measures
+# Grafana dashboards: what every panel measures
 
-There are four dashboards under the `AIS Edge` folder in Grafana, all loaded
-from ConfigMaps in `charts/mgmt/files/dashboards/` via
-the Grafana sidecar. This document is the authoritative reference for what
-each panel means, what query backs it, and how to interpret the value.
+The `AIS Edge` Grafana folder contains four dashboards and 26 panels. Their
+source is `charts/mgmt/files/dashboards/`. The management chart loads these
+files through ConfigMaps and the Grafana sidecar. Edit the source files so
+that a later deployment keeps the change.
 
-For each panel: the **title** is what the site admin reads; the **query** is
-what the panel actually computes; the **field semantics** are why those two
-match.
+This document defines each panel's inputs, units, scope, and limits. A zero
+count means that the query found no matching events. It does not establish
+that the pipeline or its log delivery is healthy. Check the data source and
+an expected activity signal before treating zero as good news.
+
+Orthanc receives and archives the DICOM instances. In the receiver-only
+configuration, de-identification runs in **xnat-ingest**. The dashboards do
+not require Orthanc de-identification.
+
+## Data sources, time ranges, and limits
+
+| Dashboard | Panels | Data sources | Default range | Refresh |
+|---|---:|---|---|---|
+| Pipeline Overview | 12 | Loki | Last 6 hours | 30 seconds |
+| Edge Site Drilldown | 6 | Loki | Last 6 hours | 30 seconds |
+| SeaweedFS Health | 7 | Prometheus and Loki | Last 6 hours | 30 seconds |
+| Session Timeline | 1 | Loki | Last 24 hours | 10 seconds |
+
+Refresh is the configured dashboard interval. It is not a promise that logs
+arrive within that time. Collection, forwarding, scraping, and query time
+can add delay. The Prometheus datasource uses a 30-second time interval.
+
+Counter lookbacks such as `[1h]` and `[10m]` are part of the query. A stat
+panel evaluates at the query end time; changing the dashboard start does
+not change a fixed counter lookback. Time-series panels use the selected
+dashboard range and evaluate their rolling window at each sample.
+
+Recent invalid sessions has a `1h` panel time override. Recent pipeline
+events has a `30m` override. Grafana applies these overrides with relative
+dashboard ranges; an absolute dashboard range takes precedence. The other
+log panels use the selected dashboard range.
+
+The configured Loki datasource has `maxLines: 5000`. A log panel can show
+only part of a busy interval. Ascending display order does not prove that a
+session trace is complete. Narrow the time range and use Explore to inspect
+adjacent intervals. Metric queries calculate over the matching logs rather
+than just the lines displayed by a log panel, but they can still fail on
+backend query limits. A query error must not be interpreted as zero.
+
+For a datasource check, use Grafana's connection test and then run a small
+query against the actual API. A plugin health endpoint alone is not enough:
+for example, the Alertmanager health endpoint can return `plugin.unavailable`
+while its proxied `/api/v2/status` request succeeds. These four dashboards
+use Loki and Prometheus, not the Alertmanager datasource.
 
 ## The s3-uploader event schema
 
-Every panel relies on the structured JSON events emitted by the edge
-s3-uploader (one line per pipeline state change). The shape is fixed by the
-bash script in `charts/edge/files/s3-uploader.sh`:
+The pipeline headline counters and uploader event charts read structured
+JSON emitted by `charts/edge/files/s3-uploader.sh`. Other panels read assign
+logs, Orthanc logs, management pipeline logs, or SeaweedFS metrics.
 
 ```jsonc
 {
   "ts":         "2026-05-14T07:16:50+00:00",
   "component":  "s3-uploader",
   "edge":       "edge-dev",
-  "event":      "upload_completed",    // one of twelve names — see the table below
+  "event":      "upload_completed",
   "session":    "test-project.subject-04.visit01",
-  "message":    "",                    // human-readable; can be empty
-  "bytes":       538740,               // total session size on disk via `du -sb`
-  "files":       2,                    // objects staged: DICOMs + __MANIFEST__.json per resource + any other metadata
-  "dicoms":      1,                    // subset of `files` matching *.dcm / *.DCM
-  "duration_s":  0                     // `rclone copy` wall time, only on upload_completed / upload_failed
+  "message":    "",
+  "bytes":       538740,  // pre-transfer session size from du -sb
+  "files":       2,       // pre-transfer regular-file count; follows symlinks
+  "dicoms":      1,       // pre-transfer files with case-insensitive .dcm suffix
+  "duration_s":  0        // transfer wall time on completion or failure
 }
 ```
 
-### Every event name the uploader emits
+### Event names
 
-The `sum by (event)` panels draw one series per name in this table and nothing
-filters the set, so a legend entry that is not listed here means the script
-grew an event and this page did not. All twelve come from `jlog` calls in
-`charts/edge/files/s3-uploader.sh`.
+The event charts include any non-empty `event` field. A future event can
+therefore appear without a dashboard edit. Unstructured output with no
+event field is excluded, rather than drawn as an unnamed event series.
 
-| Event | Emitted when | What it tells the operator |
+| Event | Emitted when | Operator meaning |
 |---|---|---|
-| `startup` | Once per container start, before the endpoint pre-flight. | Restart marker. A repeating sawtooth of these is a crashlooping uploader, not a busy one. |
-| `endpoint_ready` | The `aws s3api head-bucket` pre-flight succeeded. | Normal path, one per start. Its absence after a `startup` is the whole story. |
-| `endpoint_retrying` | A pre-flight attempt failed; retrying in 5s, up to 12 attempts. | Expected for a few seconds during a pod-startup or DNS race; alarming any later. |
-| `endpoint_failed` | All 12 attempts failed (60s); the script exits rather than entering the upload loop. | The pod crashloops **on purpose** — a broken endpoint or credential is made visible instead of quietly uploading nothing. Its `message` names the client-certificate state (`no client certificate is configured` / `configured and readable` / `MISSING OR UNREADABLE`), because with mTLS on the upload path this probe is the **first** thing a bad certificate breaks — and (measured) the endpoint answers HTTP 400/403 with an HTML body that rclone reports as an S3 XML parse failure, naming neither certificates nor auth, so it otherwise reads as an unreachable endpoint. The rclone error for each attempt is on stderr, not in this field. |
-| `upload_started` | A settled, changed session is about to transfer; carries `bytes`, `files`, `dicoms`. | Denominator of the failure-rate panel. |
-| `upload_completed` | `rclone copy` exited 0; adds `duration_s`. A claimed repair request is removed. | The success counter every headline panel sums. |
-| `upload_failed` | `rclone copy` exited non-zero; adds `duration_s`. Retried next cycle; a claimed repair request goes back to pending. | Numerator of the failure-rate panel. |
-| `upload_skipped` | The session has dangling symlinks, the re-probe immediately before the transfer failed, or the upload-tree writer lock was not free within `upload.s3.lockWait` seconds. | Neither success nor failure: the local copy is deliberately preserved for the next cycle. Sustained `upload_skipped` with no `upload_completed` is a stalled pipeline that the `upload_failed` panels will never show. |
-| `recopy_requeued` | At startup, a repair request claimed by a previous container was returned to pending. | A crash mid-copy; the next pass answers the request. |
-| `recopy_claimed` | A repair request from the staged-reclaimer was claimed and the session is copied again with `--ignore-times`. | One per repair attempt; a request whose copy never completes is claimed again on every pass. More than three completed copies (`recopy_done`) for one session in 24h is `RecopyLoop`: the management reclaimer is removing the bucket copy before the edge has proven its own against it. |
-| `recopy_done` | The copy that answered a repair request exited 0. | The repaired file should prove on the reclaimer's next run. More than three for one session in 24h is `RecopyLoop` (the two clocks crossing). |
-| `dependency_missing` | At startup, a tool the loop needs is not in the image, or is a busybox variant without the options used (checked by use); the pod exits 1. | `S3UploaderRestartedRecently`. The line names the tool; fix `upload.s3.shell.image`. |
-| `lock_failed` | The upload-tree writer lock could not be opened, or `flock` failed for a reason that is not a timeout; the pod exits 1 and a claimed repair request goes back to pending. | `S3UploaderRestartedRecently`. A timeout is `upload_skipped`, never this. |
-| `marker_retired` | A state file whose session is in no stage directory any more was dropped. | Housekeeping; a later session of the same name starts without an inherited fingerprint. |
+| `startup` | The container starts, before endpoint checks. | Repeated starts can indicate restarts; they are not upload activity. |
+| `endpoint_ready` | The `rclone lsd sw:<bucket>` probe succeeds. | The startup bucket probe passed. |
+| `endpoint_retrying` | A startup probe fails; it retries after 5 seconds, up to 12 attempts. | A short startup delay can be normal; sustained retries need inspection. |
+| `endpoint_failed` | All startup probe attempts fail and the script exits. | Read the message and rclone stderr for endpoint, credential, or certificate errors. |
+| `upload_started` | A settled, changed session is selected for transfer. | Carries the pre-transfer inventory. The later endpoint recheck can still skip this attempt. |
+| `upload_completed` | `rclone copy` returns zero; a claimed repair request is removed. | The command completed; it does not prove that XNAT has imported the session. |
+| `upload_failed` | `rclone copy` returns non-zero; a claimed repair request returns to pending. | The loop can retry on a later cycle. |
+| `upload_skipped` | Dangling links, a failed endpoint recheck, or a writer-lock timeout prevent a transfer. | Local data is kept. A skipped attempt is neither a completion nor an upload failure. Sustained skips can leave the pipeline stalled while the failure counter stays zero. |
+| `recopy_requeued` | Startup returns a previously claimed repair request to pending. | A later pass can retry a copy interrupted by a container exit. |
+| `recopy_claimed` | The uploader claims a staged-reclaimer repair request and copies with `--ignore-times`. | A repair attempt is starting. Inspect the later completion or failure event. |
+| `recopy_done` | The copy for a claimed repair request returns zero. | The reclaimer can check the repaired objects on its next run. More than three such events for one session in 24 hours trigger `RecopyLoop`; this historical count alone does not establish the current cause. |
+| `dependency_missing` | A required tool or required tool option is unavailable; the uploader exits. | Inspect the named dependency and `upload.s3.shell.image`. `S3UploaderRestartedRecently` selects this failure event. |
+| `lock_failed` | Opening the writer lock or acquiring it fails for a reason other than timeout; the uploader exits and returns a claimed repair request to pending. | Inspect lock permissions and the named error. A timeout emits `upload_skipped` instead. `S3UploaderRestartedRecently` selects the failure event. |
+| `marker_retired` | No pipeline stage directory retains the marked session. | The upload marker is removed. This is state housekeeping, not a new upload. |
 
-`reclaim_skipped` is gone: the uploader no longer deletes, so it has no
-delete to skip. A panel that still selects it draws an empty series.
+Earlier uploader versions emitted `reclaim_skipped`. The current uploader
+copies only; the staged-reclaimer owns local deletion after its S3 proof.
+The uploader no longer emits that event. A selector for it can stay empty
+even when the current upload and reclaim stages work correctly.
 
-An already-uploaded, unchanged session emits **nothing at all** — the
-fingerprint check `continue`s silently, because a per-cycle "still fine" event
-here is what once produced two days of duplicate upload-completed alert mail.
-Quiet panels during a quiet night are therefore correct, not broken.
+The endpoint failure message describes whether an mTLS client certificate
+is configured and readable. A server can return an HTML 400/403 page that
+rclone reports as an S3 XML error. Inspect the underlying stderr and the
+certificate state before concluding that this is a network failure.
 
-The `alias_*` names are gone. `alias_configured`, `alias_retrying` and
-`alias_failed` became `endpoint_ready`, `endpoint_retrying` and
-`endpoint_failed` when the uploader moved from `minio/mc` to the AWS CLI —
-"alias" was an `mc` concept with nothing behind it any more. No panel or alert
-matched the old names, so nothing broke silently; but a panel description that
-still legends `alias_configured` is naming a series that can never appear,
-while hiding the `endpoint_*` series that say the S3 endpoint is unreachable.
+An unchanged session with an upload fingerprint emits no repeated completion
+event. A changed or retried session can emit another completion. A quiet
+chart can therefore be correct during an idle period. The earlier `alias_*`
+events belonged to the former minio/mc client; the current client is rclone.
 
-**dicoms vs files** is the most important distinction:
-- **`dicoms`** counts only image files (`.dcm` / `.DCM`). One DICOM dropped
-  → `dicoms=1`.
-- **`files`** counts every S3 object written. The name is
-  `__MANIFEST__.json` (double underscores both sides — that is what
-  `charts/mgmt/files/reclaim-staged.sh` matches on), and xnat-ingest's assign
-  step generates one **per resource, not per session**; the uploader's own
-  schema note lists the objects as "DICOMs + `__MANIFEST__.json` +
-  `__METADATA__.json`". So `files - dicoms` is **not** a fixed 1: a
-  single-resource session sits near it, a multi-resource session carries a
-  manifest each. Do not reconcile the DICOMs and S3-objects tiles by assuming
-  "dicoms + 1" — the mismatch is the schema, not a lost object.
+### DICOMs, files, attempts, and delivery
 
-Dashboards expose both as separate panels so neither value is ever
-inflated for its title.
+`dicoms` counts files with a `.dcm` suffix, not every possible DICOM file.
+`files` includes those files, each resource's `__MANIFEST__.json`, and other
+staged metadata. A manifest is per resource, not per session. Consequently,
+`files - dicoms` is not a fixed one-object overhead.
 
----
+Both inventories are measured **before** the copy. Rclone can skip a file
+already present at the destination, and a later copy of a changed session
+can count an earlier file again. These fields are not counts of new objects
+written, distinct DICOM instances, or completed XNAT imports. Reconcile an
+individual transfer with its session and start/completion events. Use XNAT
+and management uploader evidence to establish final delivery.
+
+The numeric queries filter `__error__=""` after `unwrap`. Missing or invalid
+numeric fields are excluded. An excluded event is unknown inventory, not
+proof that it contained zero files. See the [Loki metric query reference](https://grafana.com/docs/loki/latest/query/metric_queries/)
+for numeric extraction and pipeline errors.
 
 ## Pipeline Overview (`ais-pipeline-overview`)
 
-Cross-cluster view across every edge that's ever pushed logs.
+The uploader and assign selectors use the edge pipeline namespace
+`xnat-ingest`. This dashboard reports edge stages. Use Session Timeline for
+the later management upload and reclaim stages.
 
-### Row 1 — Headline counters (last 1 hour)
+### Headline counters
 
-| Panel | Query | What it measures |
+| Panel | Query input and window | Meaning |
 |---|---|---|
-| **DICOMs uploaded (last 1h)** | `sum(sum_over_time(... event="upload_completed" \| unwrap dicoms [1h]))` | Sum of the `dicoms` field across every successful upload_completed event in the last hour. A single 1-DICOM session contributes 1. Events from before the `dicoms` field existed contribute 0 (the unwrap directive drops events missing the field). |
-| **S3 objects uploaded (last 1h)** | `sum(sum_over_time(... event="upload_completed" \| unwrap files [1h]))` | Same shape but uses `files`. Always ≥ DICOMs, because every session also ships at least one `__MANIFEST__.json` — one per resource — plus its metadata object. The gap between this tile and the DICOMs tile is that overhead, not a discrepancy. |
-| **Sessions uploaded (last 1h)** | `count_over_time(... event="upload_completed" [1h])` | Count of upload_completed log lines = count of sessions whose `aws s3 sync` exited 0. Each session contains 1 or more DICOMs plus a `__MANIFEST__.json` per resource. |
-| **Upload failures (last 1h)** | `count_over_time(... event="upload_failed" [1h])` | Count of upload_failed events. Should be a steady 0 in normal operation. Empty result renders as 0 via `noValue: "0"`. |
+| **DICOMs in completed S3 uploads (last 1h)** | Sum `dicoms` from `upload_completed`, with numeric error filtering, `[1h]`. | Pre-transfer DICOM file inventory on completed attempts. Repeated attempts can count a file again. |
+| **Files in completed S3 uploads (last 1h)** | Sum `files` from the same events, `[1h]`. | Pre-transfer regular-file inventory, including manifests and metadata. It is not a count of new S3 objects. |
+| **Completed S3 uploads (last 1h)** | Count `upload_completed`, `[1h]`. | Successful copy commands, not distinct sessions or XNAT imports. |
+| **Upload failures (last 1h)** | Count `upload_failed`, `[1h]`. | Failed copy commands, including failures that later recovered. Zero does not prove that an attempt ran. |
 
-### Row 2 — Pipeline-health counters
+The stat queries use `or vector(0)` to show zero when no matching events
+exist. That fallback cannot establish that the log collector is working.
 
-| Panel | Query | What it measures |
+### Pipeline-health counters
+
+| Panel | Query input and window | Meaning |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `count_over_time(... level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])` | Sessions xnat-ingest assign routed to `/data/staging/__invalid__/` because the DICOM metadata is missing required fields (typically AccessionNumber). Each invalid session contributes exactly 1 (we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line that repeats the same content). |
-| **Assign cycles with errors (last 1h)** | `count_over_time(... message =~ "(?s)^Staging completed with.*" [1h])` | Per-cycle counter: each xnat-ingest assign loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
-| **Active edge sites** | `count(count by (cluster) (count_over_time({cluster!="",cluster!="mgmt"}[1h])))` | Distinct non-mgmt cluster labels seen in Loki in the last hour. 1 when only edge-dev is shipping; grows by 1 per additional edge. |
+| **Invalid sessions (last 1h)** | Assign `level="ERROR"`, `message =~ "^Invalid IDs found.*"`, `[1h]`. | Invalid identifier reports. The summary error line is excluded, but a repeated attempt can report the same session again. |
+| **Assign cycles with errors (last 1h)** | Assign `message =~ "(?s)^Staging completed with.*"`, `[1h]`. | Cycle summary lines. The `(?s)` flag includes newlines in the summary. |
+| **Edge sites with assign logs (last 1h)** | Distinct non-empty, non-`mgmt` cluster labels on `component="assign"`, `[1h]`. | Recent assign log delivery. This excludes management reclaimers whose cluster label identifies the edge they serve. It is not a pod-health test. |
 
-### Logs panel — Recent invalid sessions
+### Recent invalid sessions
 
-LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{cluster} — {message}"`
+```logql
+{namespace="xnat-ingest",component="assign"}
+  | json | level="ERROR" | message =~ "^Invalid IDs found.*"
+```
 
-Each line is a session that assign placed in `__invalid__/`. Site-admin action: rename the dir to `PROJECT.SUBJECT.VISIT` and move it back to `/data/staging/`.
+The panel displays the cluster and message and has a one-hour relative
+time override. Inspect the error and the
+staged files before correcting identifiers and retrying. Renaming a folder
+alone is not a universal repair for missing or invalid DICOM identifiers.
 
 ### Time series
 
-- **Pipeline events per minute (by event type)** — `sum by (event) (count_over_time({namespace="xnat-ingest",component="s3-uploader"} | json [1m]))`. There is no event filter in that query, so the legend carries **every** name in the table above: `startup`, `endpoint_ready`, `endpoint_retrying`, `endpoint_failed`, `upload_started`, `upload_completed`, `upload_failed`, `upload_skipped`, `reclaim_skipped`. Helpful for spotting bursts of failures or stuck pipelines — and it is the only panel where the `endpoint_*` series appear, which is what a site sees when the S3 endpoint or its credential is broken rather than the pipeline itself.
-- **Per-edge upload throughput (events/min)** — `sum by (cluster) (count_over_time(... event="upload_completed" [1m]))`. One line per edge cluster.
-- **Failure rate (upload_failed / upload_started)** — Division of two 15-min counts, displayed as a percentage. Falls back to `clamp_min(..., 0.001)` to avoid divide-by-zero. Should be flat at 0% in steady state.
+| Panel | Query input | Meaning |
+|---|---|---|
+| **Pipeline events per minute (by event type)** | Uploader JSON with `event != ""`, counted over `[1m]`, grouped by event. | Includes startup, endpoint, copy, and marker events. Lines without an event field do not create a blank legend entry. |
+| **Per-edge upload throughput (events/min)** | `upload_completed` over `[1m]`, grouped by cluster. | Completed S3 attempt events per minute. |
+| **Failure rate (upload_failed / upload_started)** | Per-cluster failure and start counts over `[15m]`. | An event ratio displayed as a percentage. Starts without failures produce zero; no starts produce a gap. |
 
-### Logs panel — Recent pipeline events
+The failure ratio uses LogQL vector arithmetic:
+`(failures or (0 * starts)) / (starts > 0)`. It does not use PromQL-only
+`clamp_min`, which Loki rejects. A transfer can start and finish in different
+windows, so this ratio is not a matched-attempt failure probability. Also
+inspect `upload_skipped` and `endpoint_failed`: neither is `upload_failed`.
 
-LogQL: `{namespace="xnat-ingest"} | json | event != "" | line_format "[{cluster}/{component}] event={event} session={session} duration={duration_s}s files={files} bytes={bytes} — {message}"`
+### Recent pipeline events
 
-Last 30 minutes of every structured event from any edge, formatted for human reading.
-
----
+The query selects `{namespace="xnat-ingest"} | json | event != ""` and
+formats cluster, component, event, and optional session, duration, files,
+and bytes. Its relative time override is 30 minutes. The displayed `files`
+and `bytes` have the inventory meaning described above.
 
 ## Edge Site Drilldown (`ais-edge-drilldown`)
 
-Per-cluster view selected by the **cluster** and **node** dropdowns at the top of the dashboard.
+The **cluster** dropdown lists cluster labels seen on edge assign logs.
+The **Worker node** dropdown lists nodes in that cluster's `xnat-ingest`
+namespace. This avoids offering the management reclaimer's node merely
+because its logs carry the edge's cluster label. The `All` node value is
+`.+`, used by each `node=~"$node"` selector.
 
-- `$cluster` is a Loki query of `label_values(cluster)` — single-select; defaults to `edge-dev`.
-- `$node` is a Loki query of `label_values({cluster=$cluster}, node)` — single-select (`"multi": false`) with an `All` option whose `allValue` is the `.+` regex, so "All" matches any node rather than expanding to a list. Every panel selects it as `node=~"$node"`, which is why the regex form is required. Lets you scope to one worker within the selected cluster.
+Dropdown labels depend on retained logs. They are not a current inventory of
+healthy Kubernetes nodes. All panels use the selected edge and worker.
 
 ### Stat row
 
-| Panel | Query (with template vars expanded) | Meaning |
+| Panel | Query input | Meaning |
 |---|---|---|
-| **Completed uploads (last 10m, cluster=$cluster / node=$node)** | `count_over_time({cluster=X, node=~Y, component="s3-uploader"} | json | event="upload_completed" [10m])` | Last-10-min upload count for the selected cluster + node. Threshold: red below 1, green above. 0 with active scanners means the pipeline is stuck. |
-| **Assign errors (last 1h, cluster=$cluster / node=$node)** | Same shape as "Invalid sessions" but scoped to selected cluster + node | Per-edge view of DICOM validation failures. |
-| **Upload failures (last 1h, cluster=$cluster / node=$node)** | Same shape as Pipeline Overview's "Upload failures" but scoped | Per-edge upload_failed count. |
-| **DICOM rejected — unmapped AE title (last 1h, cluster=$cluster / node=$node)** | `sum(count_over_time({cluster=X, node=~Y, app="orthanc"} \|~ "REJECT: no project mapped for CalledAET" [1h])) or vector(0)` | **The silent-data-loss tile.** Orthanc's deid hook looks the calling AE title up in `routing.json`'s AETMap; if it is absent the instance is logged with this string and deleted, while the scanner still receives a DICOM-level C-STORE SUCCESS. So the modality believes the study was delivered and it never reaches XNAT. Anything above 0 means a newly commissioned scanner, a re-imaged console back on its default AE title, or a typo in the AET. Note the selector is `app="orthanc"`, not `component=`, and it is a line filter on Orthanc's raw output rather than a JSON `event` — this is the one drilldown panel that does not read the uploader's schema. Same signal as the `DICOMRejectedUnmappedAET` alert in `charts/mgmt/files/loki-ruler-rules.yaml`. |
-
-The previous "Pod restarts" and "Worker NotReady?" panels were querying
-Prometheus metrics that don't exist on this datasource — mgmt Prometheus
-can't scrape edge clusters across the konnectivity boundary, so those
-queries always returned empty. They were replaced with the Loki-derived
-equivalents above.
+| **Completed uploads (last 10m)** | Uploader `upload_completed`, `[10m]`. | Completed S3 attempts. A zero value is normal when idle; with expected scanner traffic, inspect the stages and log delivery. |
+| **Invalid session reports (last 1h)** | Assign `ERROR` messages beginning `Invalid IDs found`, `[1h]`. | Invalid identifier reports, not every assign error. |
+| **Upload failures (last 1h)** | Uploader `upload_failed`, `[1h]`. | Failed attempts, including failures followed by recovery. |
+| **Unmapped AE rejection logs (last 1h)** | Orthanc raw lines containing `REJECT: no project mapped for CalledAET`, `[1h]`. | Legacy AET-map rejection log lines. This does not count studies. In receiver-only mode it is expected to stay zero. |
 
 ### Time series + log tail
 
-- **Upload events per minute** — `sum by (event) (count_over_time({cluster=X, node=~Y, component="s3-uploader"} | json | event != "" [1m]))`. Per-event timeseries for the selected scope.
-- **Live log tail** — every line from any xnat-ingest pod on the selected cluster+node, formatted as `[{component}] event={event} session={session} {message}`.
+| Panel | Query input | Meaning |
+|---|---|---|
+| **Live log tail** | All selected edge `xnat-ingest` namespace lines. | Component, optional event/session, and message. The original line is shown when a JSON message is absent. |
+| **Upload events per minute** | Uploader non-empty event fields over `[1m]`. | One series per event type, not a unique-session count. |
 
----
+In receiver-only mode, `deidentify-and-forward.lua` returns before the
+legacy AET-map lookup. De-identification occurs in xnat-ingest, so the AE
+rejection tile does not test its routing or de-identification. The legacy
+rejection path preserves originals in the facility quarantine; a rejection
+log alone is not evidence that the source bytes were lost. The same raw
+log pattern is used by the `DICOMRejectedUnmappedAET` Loki rule.
+
+The former Pod restarts and Worker NotReady panels used edge Prometheus
+metrics unavailable to the management datasource across the konnectivity
+boundary. These Loki panels avoid that unsupported scrape assumption, but
+they do not replace Kubernetes node or pod health checks.
 
 ## Session Timeline (`ais-session-timeline`)
 
-Single-session trace. The dashboard variable `session` is a text input — paste a session name (e.g. `test-project.mrbrain.visit01`) and the dashboard shows every log line referencing it across edges and mgmt.
+Paste the full `PROJECT.SUBJECT.VISIT` session name into the text input.
+The query uses a substring filter, so a short name can match other sessions.
+An empty input matches every pipeline line and is likely to reach the log
+limit. The source query is:
 
-Query: `{namespace="xnat-ingest"} |= "$session" | json | line_format "{cluster} | {component} | {event} | {message}"`.
+```logql
+{app=~"xnat-ingest|data-policy|orthanc"} |= "$session" | json
+  | line_format "{{.namespace}} | {{.cluster}} | {{.component}} | {{if .event}}{{.event}} | {{end}}{{if .message}}{{.message}}{{else}}{{__line__}}{{end}}"
+```
 
-Sort order is Ascending so the trace reads top-to-bottom in time order.
+Both edge stages and management upload/reclaim pods carry `app=xnat-ingest`.
+The selector also retains `app=data-policy` decisions and matching
+`app=orthanc` receiver logs, without hard-coding namespaces. An instance
+receiver log that contains only a DICOM UID will not match a session name;
+use that UID separately when tracing reception. A selector
+limited to `namespace="xnat-ingest"` misses the management `xnat-upload`
+namespace and cannot show the whole route to XNAT.
 
-Used for forensics after a specific session reports a problem.
-
----
+The displayed namespace and component distinguish the stages. A management
+reclaimer can carry `cluster=edge-dev` because it serves that edge, while a
+management uploader carries `cluster=mgmt`. The cluster label alone does
+not identify where a process runs. The original line is retained when no
+JSON message exists. Ascending order makes the returned trace readable;
+use smaller time intervals if it reaches the 5,000-line limit.
 
 ## SeaweedFS Health (`ais-seaweedfs-health`)
 
-Storage-layer view from Prometheus metrics scraped from the
-`<release>-seaweedfs-metrics` Service on port 9324 (`charts/mgmt/templates/seaweedfs.yaml`,
-selected by the ServiceMonitor on `app: seaweedfs`). That half is correct and
-live.
+Prometheus scrapes the `<release>-seaweedfs-metrics` Service on port 9324.
+The ServiceMonitor selects `app: seaweedfs`; see
+`charts/mgmt/templates/seaweedfs.yaml`.
 
-> **The "SeaweedFS log tail" panel on this dashboard is empty on every current
-> install, and it is not your cluster's fault.** It selects
-> `{namespace="seaweedfs"}`, which was the *imperative installer's* layout. The
-> chart puts every SeaweedFS object in the release namespace —
-> `namespace: {{ .Release.Namespace }}` throughout `seaweedfs.yaml`, which
-> `install.sh` sets to `ais-mgmt` — so that stream label never exists and the
-> panel returns nothing rather than erroring. It is the same stale-namespace
-> class the chart comments call out elsewhere (a Loki selector that matches
-> nothing looks exactly like a component with nothing to say). Until the panel
-> is repointed, read SeaweedFS logs in Explore with
-> `{cluster="mgmt", app="seaweedfs"}` — mgmt Vector tags every pod with
-> `namespace`, `app` and `component` from its pod labels, and the SeaweedFS
-> pods carry `app: seaweedfs`, so that selector is release-namespace-independent.
+The **S3 bucket** dropdown discovers `bucket` labels from
+`SeaweedFS_s3_request_total`. It supports one or several buckets. `All` uses
+`.*`, so it includes requests with or without a bucket label. It works with
+per-site names such as `ingest-edge-dev` and with custom bucket prefixes.
+A bucket with no metric series does not appear until activity is recorded.
+
+The dropdown filters all four S3 request panels. It does not filter volume
+storage or service logs. Bucket values use `${bucket:regex}` to escape
+literal names and support multiple selection. The custom All expression
+is passed as a regex, as documented by [Grafana's variable reference](https://grafana.com/docs/grafana/latest/visualizations/dashboards/variables/variable-syntax/).
 
 | Panel | Query | Meaning |
 |---|---|---|
-| **S3 LIST requests — ingest-bucket (1h)** | `sum(increase(SeaweedFS_s3_request_total{bucket="ingest-bucket",type="LIST",code="200"}[1h]))` | Intended as an s3-uploader liveness proxy: LIST is how `aws s3 sync` works out what is already in the bucket, once per uploader cycle (`upload.s3.interval`, default **60s**). **As written it reads 0 forever.** `seaweedfs.perSiteBuckets` defaults to true and both shipped sites set it true, so buckets are named `<bucketPrefix>-<edge>` — `ingest-edge-dev`, not `ingest-bucket`. The literal `ingest-bucket` only exists when `perSiteBuckets` is false (`charts/mgmt/values.yaml`, `seaweedfs.buckets.ingest`). A label that matches nothing and a dead pipeline produce the same tile, which is the failure mode a liveness proxy exists to rule out — so treat this panel as unreadable until its matcher is `bucket=~"ingest-.*"` (or the per-site bucket name), and use Pipeline Overview's upload counters for liveness meanwhile. |
-| **Volume server disk used** | `sum(SeaweedFS_volumeServer_total_disk_size)` | Total bytes on disk across all SeaweedFS volume files. Grows as data lands; SeaweedFS allocates new 30 GiB volumes as needed. |
-| **S3 requests/min (last 5m)** | `sum(rate(SeaweedFS_s3_request_total[5m])) * 60` | Rolling 5-min average S3 request rate scaled to per-minute. |
-| **Volumes (across all buckets)** | `max(SeaweedFS_volumeServer_volumes{type="volume"})` | Count of SeaweedFS volume files currently allocated. |
-| **S3 request rate by HTTP code** | `sum by (code) (rate(SeaweedFS_s3_request_total[5m]))` | One series per response code. A spike in 4xx/5xx indicates client errors or SeaweedFS distress. |
-| **S3 request rate by operation type** | `sum by (type) (rate(SeaweedFS_s3_request_total[5m]))` | Same data sliced by request type: PUT (uploads), GET (reads), LIST (catalog), DELETE. Caveat on PUT: this counter was measured under the old `minio/mc` uploader and found not to increment for multipart PUT bodies, which bypass the S3-layer counter and reach the volume server directly — so PUT under-counted the DICOMs badly. The uploader is now `aws s3 sync`, whose multipart thresholds and request shape differ, and **nobody has re-measured it since**. Do not read this series as a DICOM count in either direction; for DICOM-arrival accounting use Loki's `dicoms` field, which is counted on the edge before the transfer and does not depend on how the S3 layer accounts for it. |
+| **Successful S3 LIST requests - $bucket (last 1h)** | `sum(increase(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}",type="LIST",code="200"}[1h])) or vector(0)` | Successful LIST activity from any S3 client. It is not proof that a particular uploader is alive. `increase` can return fractional estimates. |
+| **Volume data-file bytes (all collections)** | `sum(SeaweedFS_volumeServer_total_disk_size{type="normal"})` | Reported volume data-file bytes across all collections. Excludes the separate deleted-content gauge to avoid double-counting. |
+| **S3 requests/min - $bucket (last 5m)** | `sum(rate(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}"}[5m])) * 60` | Rolling request rate for selected buckets, scaled to per-minute. |
+| **Volumes (across all buckets)** | `max(SeaweedFS_volumeServer_volumes{type="volume"})` | Maximum reported volume count for the current single-volume-server deployment. |
+| **S3 request rate by HTTP code - $bucket** | `sum by (code) (rate(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}"}[5m]))` | Per-second rate by response code. Inspect 4xx and 5xx responses. |
+| **S3 request rate by operation type - $bucket** | `sum by (type) (rate(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}"}[5m]))` | Per-second operation rate. Multipart requests and retries do not map one-to-one to files. |
+| **SeaweedFS log tail** | `{cluster="mgmt",app="seaweedfs"} | json` with message/original-line formatting. | Service logs selected independently of the Helm release namespace. |
 
----
+The former LIST query fixed `bucket="ingest-bucket"`. That can show zero on
+a healthy per-site deployment because the actual bucket is named
+`<bucketPrefix>-<edge>`. The bucket dropdown removes this assumption.
+The former log selector fixed `namespace="seaweedfs"`, while the chart puts
+SeaweedFS in the management release namespace, normally `ais-mgmt`.
+
+SeaweedFS reports `normal` size and `deleted_bytes` as separate series.
+The latter describes deleted content already represented in the volume
+size, rather than extra disk usage. Adding them overstates usage. The
+[SeaweedFS 4.34 metric producer](https://github.com/seaweedfs/seaweedfs/blob/4.34/weed/storage/store.go)
+records these quantities separately. The panel is not a full filesystem
+usage measurement: indexes, filer storage, and filesystem overhead need
+separate disk telemetry. Confirm that this telemetry exists before relying
+on a filesystem panel; a volume-size gauge alone cannot establish free space.
+
+The volume-count metric repeats a server total under collection labels in
+the current deployment. Summing those series would overcount. The existing
+`max` query returns seven when three collection series each report seven.
+Revisit this query if the chart gains multiple volume servers; the maximum
+alone will not represent a fleet total.
+
+Do not infer DICOM counts from S3 operation rates. Multipart upload and
+request accounting depend on client and server behavior. The current client
+is rclone, and the uploader inventory counters have the limits stated above.
+XNAT delivery requires downstream evidence.
 
 ## How to validate a panel after changing it
 
-**There is no panel-audit script in this repo.** Earlier revisions of this page
-pointed at `/tmp/audit-panels.py` "rebuilt as needed"; nothing under `scripts/`
-generates it and no such file is tracked, so that instruction had nothing to
-run. Two real tools cover adjacent ground and neither covers panels:
+There is no tracked panel-audit script in this repository. Two existing
+checks cover related concerns:
 
-- `scripts/check-alert-inputs.sh` extracts every metric name the
-  PrometheusRules reference and asks the live Prometheus whether each has any
-  series — the "does this query have inputs at all" check, but for **alert
-  rules**, not dashboards. It is what would have caught the `ingest-bucket`
-  matcher above if dashboards were in scope.
-- `make ci`'s `runtime-templates` stage asserts that the `line_format`
-  templates in the pipeline-overview and edge-drilldown ConfigMaps survive
-  Helm rendering — it proves the `{{ }}` reached the cluster verbatim, not
-  that any query returns the right number.
+- `scripts/check-alert-inputs.sh` checks inputs to alert rules, not dashboard
+  selectors or panel arithmetic.
+- `make runtime-templates` checks that dashboard `line_format` templates
+  survive Helm rendering. It does not prove that a query returns correct data.
 
-So the workflow below is done by hand, against the panel's own datasource in
-Grafana **Explore** (paste the panel's query, expand the template variables
-yourself). It is unchanged in substance, because the method — predict, then
-measure — is what makes a panel trustworthy, not the tool:
+Use the panel's own datasource in Grafana Explore or its read-only API:
 
-1. Snapshot **before** the change: run every affected panel's query in Explore
-   over a fixed absolute time range and write the numbers down.
-2. Make the change. Drop a single test DICOM with a unique subject name.
-3. Predict the delta on every panel, including the ones you did not touch —
-   the `files` / `dicoms` split above is exactly where a confident wrong
-   prediction shows up.
-4. Snapshot **after** over the same absolute range plus the new window.
-5. For each panel, `delta == prediction` ⇒ panel is correct.
+1. Choose a fixed absolute start and end time. Record the query, variable
+   values, datasource, source revision, and expected result.
+2. Check the underlying labels and raw events or metric series. Confirm
+   that the selector matches the intended component, bucket, and location.
+3. Run the old and new queries against the same window. For a counter,
+   reconcile raw events; for a ratio, check numerator, denominator, zero
+   failures with starts, and an idle interval with no starts.
+4. Test missing data and an invalid selector separately. A fallback zero
+   can hide a wrong selector, while a query error is a different condition.
+5. Parse each dashboard as JSON. Render the chart and run
+   `make runtime-templates`. Compare the rendered dashboard JSON with its
+   source, including LogQL `{{ }}` and Grafana `${variable:regex}` syntax.
+6. Check dropdown expansion, panel time overrides, datasource limits, and
+   refresh settings. Browser rendering and scheduled refresh require a
+   separate UI check; API success alone does not prove those behaviors.
 
-Any mismatch is a bug — fix the query to match the title (or the title
-to match the query). Never accept "the dashboard looks roughly right".
-A panel whose selector matches nothing renders a confident `0`, so "no news"
-from a dashboard is only good news once you have proved the query can move.
+If a new synthetic transfer is needed, use a designated test environment
+and the agreed test ownership. Predict the file inventory and events first,
+then reconcile the result. A dashboard review does not require injecting
+new data or restarting a running test.
+
+A 2026-10-15 fixed-window review found 21 S3 completions with inventories of
+2,062 DICOMs and 2,215 files. A selected synthetic session had 14 edge log
+lines and 40 further management lines. Those are bounded observations from
+that test window, not baseline values for another installation. After a
+change, prove the selector and arithmetic again with that site's evidence.

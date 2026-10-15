@@ -7,35 +7,35 @@
   "panels": [
     {
       "type": "stat",
-      "title": "S3 LIST requests — ingest-bucket (1h)",
-      "description": "Count of S3 LIST requests against ingest-bucket in the last hour. Each uploader cycle on every edge runs a LIST to compare local against remote, so this is a reliable proxy for s3-uploader liveness. SeaweedFS does NOT increment its s3_request_total counter for the actual upload PUT bodies (those go through the volume server directly, bypassing the S3 layer counters), which is why we can't show a true 'PUTs to ingest-bucket' panel.",
+      "title": "Successful S3 LIST requests - $bucket (last 1h)",
+      "description": "Successful LIST requests for the selected buckets. Bucket names come from metric labels and support per-site and custom names. Requests can come from any S3 client, so this is activity, not proof that the edge uploader is healthy. Prometheus increase can return fractional estimates.",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(increase(SeaweedFS_s3_request_total{bucket=\"ingest-bucket\",type=\"LIST\",code=\"200\"}[1h])) or vector(0)", "refId": "A" }],
+      "targets": [{ "expr": "sum(increase(SeaweedFS_s3_request_total{bucket=~\"${bucket:regex}\",type=\"LIST\",code=\"200\"}[1h])) or vector(0)", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "short", "noValue": "0", "decimals": 0 } }
     },
     {
       "type": "stat",
-      "title": "Volume server disk used",
-      "description": "Total bytes occupied by SeaweedFS volume files on /data/seaweedfs (the hostPath PVC). Includes all buckets.",
+      "title": "Volume data-file bytes (all collections)",
+      "description": "Sum of the normal volume-size gauge across all collections. The deleted_bytes gauge describes deleted content already included in normal bytes, so adding it would double-count. This excludes filesystem overhead, indexes, and filer storage; total filesystem capacity needs separate disk telemetry, which may not be installed.",
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(SeaweedFS_volumeServer_total_disk_size)", "refId": "A" }],
+      "targets": [{ "expr": "sum(SeaweedFS_volumeServer_total_disk_size{type=\"normal\"})", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "bytes", "noValue": "0" } }
     },
     {
       "type": "stat",
-      "title": "S3 requests/min (last 5m)",
-      "description": "Rolling 5-minute average request rate against the S3 endpoint, scaled to per-minute. Drops to 0 during quiet periods.",
+      "title": "S3 requests/min - $bucket (last 5m)",
+      "description": "Rolling 5-minute average request rate for the selected buckets, scaled to per-minute. Request counts do not measure DICOM delivery.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum(rate(SeaweedFS_s3_request_total[5m])) * 60", "refId": "A" }],
+      "targets": [{ "expr": "sum(rate(SeaweedFS_s3_request_total{bucket=~\"${bucket:regex}\"}[5m])) * 60", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "short", "noValue": "0", "decimals": 2 } }
     },
     {
       "type": "stat",
       "title": "Volumes (across all buckets)",
-      "description": "Number of SeaweedFS volume files currently allocated. Grows in 30 GB increments as data lands.",
+      "description": "Maximum reported volume count for the current single-volume-server deployment. Collection label series repeat the server total, so summing them would overcount. This is an allocated volume count, not used bytes or a capacity guarantee.",
       "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{ "expr": "max(SeaweedFS_volumeServer_volumes{type=\"volume\"})", "refId": "A" }],
@@ -43,28 +43,29 @@
     },
     {
       "type": "timeseries",
-      "title": "S3 request rate by HTTP code",
-      "description": "Per-second request rate against the S3 endpoint, broken down by response code. A spike in 4xx/5xx indicates client errors or SeaweedFS distress.",
+      "title": "S3 request rate by HTTP code - $bucket",
+      "description": "Per-second request rate for the selected buckets, grouped by HTTP response code. Inspect 4xx/5xx responses for client or server failures.",
       "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum by (code) (rate(SeaweedFS_s3_request_total[5m]))", "legendFormat": "code={{code}}", "refId": "A" }],
+      "targets": [{ "expr": "sum by (code) (rate(SeaweedFS_s3_request_total{bucket=~\"${bucket:regex}\"}[5m]))", "legendFormat": "code={{code}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "reqps" } }
     },
     {
       "type": "timeseries",
-      "title": "S3 request rate by operation type",
-      "description": "Same source data sliced by request type: PUT (uploads), GET (reads), LIST (catalog), DELETE.",
+      "title": "S3 request rate by operation type - $bucket",
+      "description": "Per-second S3 request rate for the selected buckets, grouped by operation. Multipart requests and retries are not one-to-one with files; this is not a DICOM count.",
       "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{ "expr": "sum by (type) (rate(SeaweedFS_s3_request_total[5m]))", "legendFormat": "{{type}}", "refId": "A" }],
+      "targets": [{ "expr": "sum by (type) (rate(SeaweedFS_s3_request_total{bucket=~\"${bucket:regex}\"}[5m]))", "legendFormat": "{{type}}", "refId": "A" }],
       "fieldConfig": { "defaults": { "unit": "reqps" } }
     },
     {
       "type": "logs",
       "title": "SeaweedFS log tail",
+      "description": "Management SeaweedFS logs selected by the pod app label, independent of the Helm release namespace. The bucket dropdown does not filter these service logs.",
       "gridPos": { "h": 12, "w": 24, "x": 0, "y": 13 },
       "datasource": { "type": "loki", "uid": "loki" },
-      "targets": [{ "expr": "{namespace=\"seaweedfs\"} | json | line_format \"{{if .message}}{{.message}}{{else}}{{__line__}}{{end}}\"", "refId": "A" }],
+      "targets": [{ "expr": "{cluster=\"mgmt\",app=\"seaweedfs\"} | json | line_format \"{{if .message}}{{.message}}{{else}}{{__line__}}{{end}}\"", "refId": "A" }],
       "options": {
         "showTime": true,
         "showLabels": false,
@@ -79,7 +80,30 @@
   "refresh": "30s",
   "schemaVersion": 39,
   "tags": ["ais-edge", "seaweedfs"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "bucket",
+        "type": "query",
+        "label": "S3 bucket",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(SeaweedFS_s3_request_total, bucket)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": []
+      }
+    ]
+  },
   "time": { "from": "now-6h", "to": "now" },
   "title": "AIS Edge — SeaweedFS Health",
   "uid": "ais-seaweedfs-health",

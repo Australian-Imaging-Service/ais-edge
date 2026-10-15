@@ -7,10 +7,11 @@
     {
       "type": "logs",
       "title": "Timeline for session $session",
+      "description": "Pipeline logs containing the supplied session text, including edge stages, data-policy, matching receiver logs, and management upload/reclaim. Paste the full session name to reduce substring collisions. Namespace and component identify the stage; cluster can be the served edge even for a management reclaimer. Logs are bounded by the datasource line limit; narrow the time range for a long trace.",
       "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
-        { "expr": "{namespace=\"xnat-ingest\"} |= \"$session\" | json | line_format \"{{.cluster}} | {{.component}} | {{.event}} | {{.message}}\"", "refId": "A" }
+        { "expr": "{app=~\"xnat-ingest|data-policy|orthanc\"} |= \"$session\" | json | line_format \"{{.namespace}} | {{.cluster}} | {{.component}} | {{if .event}}{{.event}} | {{end}}{{if .message}}{{.message}}{{else}}{{__line__}}{{end}}\"", "refId": "A" }
       ],
       "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Ascending" }
     }
