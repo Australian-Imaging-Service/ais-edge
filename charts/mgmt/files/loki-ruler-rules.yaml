@@ -239,7 +239,7 @@ groups:
                  "Skipping ... all the resources already exist on XNAT" against an
                  empty XNAT meant the upstream all_uploaded() bug, which compared
                  resource LABELS and so called an empty resource uploaded. Fixed in
-                 0.15.3; from then on (pinned 0.16.1) that line means the file sets really
+                 0.15.3; from then on (pinned 0.16.2) that line means the file sets really
                  did match, so check XNAT itself before believing it.
               3. Does XNAT actually hold it?
               4. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
@@ -341,7 +341,7 @@ groups:
         # CORRECTION. An earlier version of this note said the "please delete on
         # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
         # therefore become a no-op. BOTH WERE WRONG. The emitter is still there,
-        # at helpers/remotes.py:861-866 (0.15.6; :949 in 0.16.1), and it carries
+        # at helpers/remotes.py:861-866 (0.15.6; :949 in 0.16.1; :1188 in 0.16.2), and it carries
         # no "Missing paths" line.
         # The grep that produced the claim missed it because the phrase is split
         # across two adjacent string literals, which is the documented trap with
@@ -412,7 +412,7 @@ groups:
 
             2. delete those resources on XNAT so the uploader can recreate them
 
-            3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.16.1 clears the cache
+            3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.16.2 clears the cache
                every pass, upload_api.py:157). The deletion is picked
                up within one --loop interval. MEASURED: deleted at 07:17,
                re-uploaded at 07:18:26 with the pod never restarting.
@@ -927,7 +927,7 @@ groups:
         # unconfirmed, which SessionStagedNotConfirmedInXNAT reports.
         # $value is the number of scan resources (max, not sum: a retried
         # repair must not count twice).
-        # CAUTION: matches xnat-ingest's own wording (0.15.6, unchanged in 0.16.1); a reword
+        # CAUTION: matches xnat-ingest's own wording (0.15.6, unchanged in 0.16.2); a reword
         # silences it.
         expr: |
           max by (cluster, session) (

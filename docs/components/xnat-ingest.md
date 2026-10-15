@@ -123,10 +123,10 @@ $(S3_SECRET_KEY)`. That is the only way to seed it.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
-| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
 | `edge-s3-uploader` | edge | `xnat-ingest` | `ubuntu:noble-20260917` (`upload.s3.shell.image`, NOT xnat-ingest), with rclone lifted from `rclone/rclone:1.75.0` by an initContainer |
-| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
 `install.sh` installs the edge chart as release `edge` and the management

@@ -168,7 +168,7 @@ on), and then discovers the filer and both uploaders **by label**
 (`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
 rather than by hardcoded name.
 
-> **What changed since.** The uploader pinned today (xnat-ingest 0.16.1)
+> **What changed since.** The uploader pinned today (xnat-ingest 0.16.2; the key rule is at helpers/remotes.py:581)
 > builds its session list from the object keys and skips a key that ends in
 > `/`, so an empty folder is not a session to it, and `mgmt-reclaim-<edge>`
 > leaves the session folder behind on purpose: it deletes the objects one by

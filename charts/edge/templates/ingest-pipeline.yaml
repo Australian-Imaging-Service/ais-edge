@@ -151,7 +151,8 @@ spec:
             # The glob matches directories too. Without this, group reads a matched
             # directory as a file and the stage dies with FormatRecognitionError.
             # With it, group descends into directories and skips the ones it
-            # matched. Checked on 0.16.1 with the default glob.
+            # matched. Checked on 0.16.1 with the default glob; api/group_api.py is
+            # unchanged in 0.16.2.
             - "--recursive"
             # EXPLICIT, because 0.15.0 changed the default from "avoid" to none at all.
             # In 0.13.1 `group` defaulted to --on-resource-clash=avoid and a repeated
