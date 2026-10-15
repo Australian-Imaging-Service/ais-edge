@@ -897,7 +897,6 @@ upload:
     # false: upload the files that are there. Use only for sessions staged
     # without manifests.
     requireManifest: true
-    checkChecksums: false
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
