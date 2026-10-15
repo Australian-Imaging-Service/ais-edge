@@ -944,6 +944,8 @@ printf 'upload:\n  mode: s3\ndataPolicy:\n  derived:\n    deidentified:\n      r
 # SessionStagedNotConfirmedInXNAT counts a session unconfirmed 48h after the
 # reclaimer first saw it: two days would page for every healthy session.
 printf 'dataPolicy:\n  derived:\n    s3Staged:\n      minAge: 2d\n' >"$V/neg-mgmt-s3staged-minage-over-36h.yaml"
+# The folder store's deleter rechecks identities with tick-granular file times: no age, no bind.
+printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      minAge: 30s\n' >"$V/neg-edge-stagedreclaimer-minage-under-1m.yaml"
 
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
@@ -1387,6 +1389,7 @@ neg-mgmt-s3-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-no-c
 neg-mgmt-s3-certsync-entry-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-certsync-entry-no-issue.yaml	but seaweedfs.ingress.clientCerts.issue=false
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
+neg-edge-stagedreclaimer-minage-under-1m	charts/edge	edge-base.yaml neg-edge-stagedreclaimer-minage-under-1m.yaml	is under 1m
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every upload would fail the TLS handshake
 neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty

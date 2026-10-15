@@ -35,6 +35,16 @@ proof runs only after it. See values.yaml, s3Staged.
 */}}
 {{- $reclaim := include "edge.uploadReclaim" . }}
 {{- if ne $reclaim "never" }}
+{{- /* A FOLDER STORE NEEDS A POSITIVE AGE. reclaim-files.py rechecks each file by
+       identity (inode, size, mtime, ctime) taken before the proof; file times have
+       tick granularity, so with a minAge of 0 a same-size rewrite within the tick of
+       the previous write keeps its identity and could pass the recheck (codex-193).
+       One minute keeps every identity the proof saw well ahead of any later write;
+       the script itself refuses under one second. */ -}}
+{{- $srMinAgeS := include "edge.durationSeconds" .Values.dataPolicy.derived.stagedReclaimer.minAge }}
+{{- if and (ne $srMinAgeS "-") (lt (int64 $srMinAgeS) 60) }}
+  {{- fail (printf "dataPolicy.derived.stagedReclaimer.minAge=%v is under 1m. The reclaimer rechecks each file by identity before it deletes, and file times have tick granularity: with no age a rewrite within the same tick as the previous write is invisible to it. Set at least 1m." .Values.dataPolicy.derived.stagedReclaimer.minAge) }}
+{{- end }}
 {{- $root := . }}
 {{- $stagedRoot := include "edge.uploadSourceDir" . }}
 {{- $armed := and .Values.dataPolicy.enabled (not .Values.dataPolicy.dryRun) }}

@@ -333,6 +333,16 @@ if [ -n "$TREE_MIN_AGE" ]; then
         MIN_AGE="$TREE_MIN_AGE" MIN_AGE_S="$TREE_MIN_AGE_S" _minage_key="$TREE_MIN_AGE_KEY"
     fi
 fi
+# A FOLDER STORE NEEDS A POSITIVE AGE. The delete rechecks each file by identity (inode,
+# size, mtime, ctime) taken before the proof; the kernel stamps file times at tick
+# granularity, so a rewrite within the tick of the previous write keeps its identity.
+# With minAge of at least a second every identity the proof saw is at least that much
+# older than any later write, which lands in a later tick. With 0, a same-size rewrite
+# right after a write can pass the recheck (codex-193). The chart refuses under 1m;
+# this is the deleter's own floor. The bucket store needs none: If-Match binds content.
+if [ "$STORAGE" = "filesystem" ] && [ "$MIN_AGE_S" -lt 1 ]; then
+    unavailable minage_zero "${_minage_key}=${MIN_AGE} is under one second: the file identities this deleter rechecks cannot tell a rewrite within the same clock tick from the original; set at least 1m. Nothing was examined"
+fi
 
 # The per-run removal cap is the blast-radius bound, and a non-numeric value
 # does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer

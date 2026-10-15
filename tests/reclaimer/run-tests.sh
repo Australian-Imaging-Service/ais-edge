@@ -59,6 +59,12 @@ session_leak() {   # <output> <case dir>: prints the leak and returns 0, else 1
 }
 
 SESS="proj.subj.visit"
+# The clock the minAge cases move forward with RECLAIM_NOW (read by reclaim-files.py for
+# tests only): ctime cannot be set back. The FS cases run with minAge 1s and the clock
+# 60 s ahead of the moment the case starts (not of the suite: a fixture made minutes
+# into the run must still be older than its minAge), since the folder store refuses a
+# minAge under one second (minage_zero).
+NOW=$(date +%s)
 
 # =============================================================================
 # FILESYSTEM BACKEND (STORAGE=filesystem, tier-1): reclaim-files.py
@@ -272,7 +278,7 @@ run_fs_case() {   # <name> <expect-gone yes|no> <expect-event> [env...]
         STAGED_ROOT="$root" \
         CLUSTER_LABEL=edge-dev \
         RECLAIM=onXnatConfirmed \
-        MIN_AGE=0 \
+        MIN_AGE=1s RECLAIM_NOW=$(( $(date +%s) + 60 )) \
         VERIFY_XNAT=true \
         DRY_RUN=false \
         XNAT_VERIFY_SSL=false \
@@ -607,6 +613,11 @@ setup_fs_s3_parent_recopied_after_proof()  { fs_session "$1" "$SESS" 2; s3_mirro
                                              s3_set "$FRESH; k='staged/$SESS/__METADATA__.json'; d['after_list']={k: dict(d['objects'][k], modified=t)}"; }
 assert_fs_s3_parent_recopied_after_proof() { reason "$1" s3_changed_after_proof && not_requested && kept_files "$2" "$R/f1.dcm" "$SESS/__METADATA__.json" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
 setup_fs_s3_relist_unchanged()    { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_set "k='staged/$SESS/1.scan/DICOM/f1.dcm'; d['after_list']={k: dict(d['objects'][k])}"; }
+# AN INCOMPLETE LISTING KEEPS (codex-193): the bucket's first page says truncated and carries no
+# continuation token, so the SDK stops; the objects on the page it never asked for are not
+# seen. The proof refuses the listing; nothing is removed and nothing is requested.
+setup_fs_s3_listing_truncated()   { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_set "d['truncate_no_token']=True"; }
+assert_fs_s3_listing_truncated()  { reason "$1" listing_incomplete && not_requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm"; }
 assert_fs_s3_relist_unchanged()   { [ "$(grep -c '^GET ' "$CASE_DIR/s3-requests.log")" -ge 2 ] || { echo "the bucket was listed once: no recheck inside the lock"; return 1; }; }
 # THE SECOND CLOCK: the newest object's LastModified in the bucket must be older than
 # minAge too, however old the local files are: a backlog copied today waits. The
@@ -639,6 +650,7 @@ run_fs_case fs_s3_gone_after_proof      no  reclaim_kept
 run_fs_case fs_s3_rewritten_after_proof no  reclaim_kept
 run_fs_case fs_s3_parent_recopied_after_proof no reclaim_kept
 run_fs_case fs_s3_relist_unchanged      yes reclaim_removed
+run_fs_case fs_s3_listing_truncated     no  reclaim_kept
 
 run_fs_case fs_happy_path              yes reclaim_removed
 run_fs_case fs_partial_upload          no  reclaim_kept
@@ -700,7 +712,6 @@ run_fs_case fs_undeclared_file         no  reclaim_kept
 # MIN_AGE IS BASE 10. $(( )) read a leading zero as octal: 010d was 8 days, 08d
 # a shell error that removed a session written seconds ago. The seconds are
 # asserted too, so skipping for another reason cannot pass.
-NOW=$(date +%s)
 setup_fs_min_age_blocks()     { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
 setup_fs_min_age_010d()       { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
 assert_fs_min_age_010d()      { grep -qF 'minAge is 010d (864000s)' "$1" || { echo "010d was not read as 864000s"; return 1; }; }
@@ -749,6 +760,11 @@ setup_fs_root_unsafe()   { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit
 setup_fs_root_missing()  { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
 setup_fs_bad_storage()   { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
 
+# A minAge under one second on the folder store: refused before anything is examined. The
+# identities the delete rechecks are file times of tick granularity (codex-193).
+setup_fs_min_age_zero()  { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
+assert_fs_min_age_zero() { grep '"event":"reclaim_unavailable","session":""' "$1" | grep -q '"reason":"minage_zero"' || { echo "no run-level minage_zero"; return 1; }; }
+run_fs_case fs_min_age_zero       no  reclaim_unavailable  MIN_AGE=0 TREE_MIN_AGE=0 "$TREE_KEY"
 run_fs_case fs_root_unsafe        no  reclaim_unavailable  STAGED_ROOT=/data
 run_fs_case fs_root_missing       no  reclaim_unavailable  STAGED_ROOT=/nonexistent-staged-root
 run_fs_case fs_bad_storage        no  reclaim_unavailable  STORAGE=nfs
@@ -1009,6 +1025,11 @@ setup_s3_too_young()       { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2;
 assert_s3_too_young()      { no_deletes; }
 setup_s3_listing_error()   { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['status']={'list':500}"; }
 assert_s3_listing_error()  { no_deletes; }
+# The first page of the session's object listing is truncated without a token (the
+# session-name listing uses a delimiter and is one page): the snapshot refuses it, the
+# session is kept with listing_incomplete, and nothing is deleted (codex-193).
+setup_s3_listing_truncated() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['truncate_no_token']=True"; }
+assert_s3_listing_truncated(){ reason "$1" listing_incomplete && no_deletes; }
 setup_s3_pagination()      { s3_session "$SESS" 3; xnat_files subj EXP1 visit 3; s3_set "d['page']=2"; }
 assert_s3_pagination()     { [ "$(s3_deletes)" = 6 ] || { echo "want 6 deletes over 3 pages, got $(s3_deletes)"; return 1; }; }
 # The gate: both bucket attributes, or nothing is examined.
@@ -1064,6 +1085,7 @@ run_s3_case s3_empty_prefix        yes reclaim_finished
 run_s3_case s3_dry_run             no  reclaim_skipped      DRY_RUN=true
 run_s3_case s3_too_young           no  reclaim_skipped      MIN_AGE=1d
 run_s3_case s3_listing_error       no  reclaim_unavailable
+run_s3_case s3_listing_truncated   no  reclaim_kept
 run_s3_case s3_pagination          yes reclaim_removed
 run_s3_case s3_gate_not_disabled   no  reclaim_unavailable
 run_s3_case s3_gate_not_drained    no  reclaim_unavailable

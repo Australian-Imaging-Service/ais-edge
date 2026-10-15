@@ -166,6 +166,46 @@ def hashes(path, part_sizes):
     return whole.hexdigest(), forms
 
 
+def list_prefix(s3, bucket, prefix, what):
+    """{rel: (ETag, size, LastModified epoch)} of the objects under prefix, from a
+    COMPLETE listing, or Keep. Every page must carry an explicit IsTruncated, every
+    truncated page a new continuation token, and the last page IsTruncated false:
+    botocore stops quietly on a truncated page that has no token (codex-191, codex-193),
+    and a listing that ended that way hides the objects of the pages it did not reach.
+    This run deletes on what it lists, so an incomplete listing keeps everything. A key
+    listed twice with different attributes, or outside the prefix, keeps as well."""
+    out, tokens, complete = {}, set(), False
+    try:
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            if complete or not isinstance(page.get("IsTruncated"), bool):
+                raise Keep("listing_incomplete", f"{what}: a page without a completion marker")
+            if page["IsTruncated"]:
+                token = page.get("NextContinuationToken")
+                if not isinstance(token, str) or not token or token in tokens:
+                    raise Keep("listing_incomplete", f"{what}: a truncated page without a new continuation token")
+                tokens.add(token)
+            else:
+                complete = True
+            for o in page.get("Contents") or []:
+                key = o["Key"]
+                if not key.startswith(prefix):
+                    raise Keep("listing_incomplete", f"{what}: {key} is outside the prefix asked for")
+                rel = key[len(prefix):]
+                if not rel or rel.endswith("/"):
+                    continue
+                rec = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
+                if rel in out and out[rel] != rec:
+                    raise Keep("listing_incomplete", f"{what}: {rel} listed twice with different attributes")
+                out[rel] = rec
+    except Keep:
+        raise
+    except Exception as e:
+        raise Keep("listing_failed", f"cannot list {prefix}: {e}")
+    if not complete:
+        raise Keep("listing_incomplete", f"{what}: the listing ended without its last page")
+    return out
+
+
 class S3Proof:
     """PROOF=s3: the local files of one session, proven by their objects in the
     staging bucket (see the header). The prefix is listed once; a file that fails
@@ -179,15 +219,8 @@ class S3Proof:
         self.bucket, self.session = E["S3_BUCKET"], session
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
         self.parts = sorted({parse_size(E.get("S3_CHUNK_SIZE", "64Mi")), 5 << 20})
-        self.objects, self.requested = {}, False   # rel: (etag, size, modified epoch)
-        try:
-            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
-                for o in page.get("Contents") or []:
-                    rel = o["Key"][len(self.prefix):]
-                    if rel and not rel.endswith("/"):
-                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
-        except Exception as e:
-            raise Keep("listing_failed", f"cannot list {self.prefix}: {e}")
+        self.requested = False
+        self.objects = list_prefix(self.s3, self.bucket, self.prefix, "the proof's listing")   # rel: (etag, size, modified epoch)
 
     def newest(self):
         """When the newest object of the session reached the bucket (None: no object)."""
@@ -204,15 +237,7 @@ class S3Proof:
         a fresh one is kept without a request (the next run proves it when it is old
         enough). The lock does not hold the bucket still; this makes the proof and
         the delete belong to the same observed generation of the objects, no more."""
-        live = {}
-        try:
-            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
-                for o in page.get("Contents") or []:
-                    rel = o["Key"][len(self.prefix):]
-                    if rel and not rel.endswith("/"):
-                        live[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
-        except Exception as e:
-            raise Keep("listing_failed", f"cannot list {self.prefix} again inside the lock: {e}")
+        live = list_prefix(self.s3, self.bucket, self.prefix, "the listing inside the lock")
         for rel in sorted(rels):
             was, now = self.objects.get(rel), live.get(rel)
             if now is None:
@@ -378,15 +403,7 @@ class S3Store:
         self.s3 = boto3.client("s3")
         self.bucket = E["S3_BUCKET"]
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
-        self.objects = {}   # rel: (etag, size, modified epoch)
-        try:
-            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
-                for o in page.get("Contents") or []:
-                    rel = o["Key"][len(self.prefix):]
-                    if rel and not rel.endswith("/"):
-                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
-        except Exception as e:
-            raise Keep("listing_failed", f"cannot list {self.prefix}: {e}")
+        self.objects = list_prefix(self.s3, self.bucket, self.prefix, "the snapshot")   # rel: (etag, size, modified epoch)
         self.deleted, self.live = set(), None
 
     def newest(self):
@@ -454,12 +471,16 @@ class S3Store:
             self.delete(f"{res.rel}/{rel}")
 
     def relist(self):
+        """Every key under the prefix now, folder entries included (a late folder is a
+        late arrival too), from a complete listing."""
+        listed = list_prefix(self.s3, self.bucket, self.prefix, "the listing before the sidecars go")
         try:
-            return {o["Key"][len(self.prefix):]
-                    for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix)
-                    for o in page.get("Contents") or []}
+            folders = {o["Key"][len(self.prefix):]
+                       for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix)
+                       for o in page.get("Contents") or [] if o["Key"].endswith("/")}
         except Exception as e:
             raise Keep("listing_failed", f"cannot list {self.prefix} again: {e}")
+        return set(listed) | folders
 
     def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
         """Sidecars with nothing left to describe (proven is the folder store's; here
@@ -946,13 +967,28 @@ def bucket_sessions():
     """The session names under the staging prefix, one per line (`--list`)."""
     import boto3
     s3, prefix = boto3.client("s3"), E.get("S3_PREFIX", "staged").strip("/") + "/"
+    names, tokens, complete = [], set(), False
     try:
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix, Delimiter="/"):
+            # the same complete-listing rule as list_prefix(): a run that misses a page misses sessions
+            if complete or not isinstance(page.get("IsTruncated"), bool):
+                raise ValueError("a page without a completion marker")
+            if page["IsTruncated"]:
+                token = page.get("NextContinuationToken")
+                if not isinstance(token, str) or not token or token in tokens:
+                    raise ValueError("a truncated page without a new continuation token")
+                tokens.add(token)
+            else:
+                complete = True
             for p in page.get("CommonPrefixes") or []:
-                print(p["Prefix"][len(prefix):].rstrip("/"))
+                names.append(p["Prefix"][len(prefix):].rstrip("/"))
+        if not complete:
+            raise ValueError("the listing ended without its last page")
     except Exception as e:
-        print(f"cannot list {prefix}: {e}", file=sys.stderr)
+        print(f"cannot list {prefix} completely: {e}", file=sys.stderr)
         return 1
+    for n in names:
+        print(n)
 
 
 def cleaner_gate():
