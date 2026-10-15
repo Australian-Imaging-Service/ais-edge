@@ -33,7 +33,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 RULES="${REPO_ROOT}/charts/mgmt/files/loki-ruler-rules.yaml"
 PORT="${LOKI_TEST_PORT:-33100}"
-NAME="loki-rule-test"
+NAME="${LOKI_TEST_NAME:-loki-rule-test}"
 WORK="$(mktemp -d)"
 
 _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
@@ -206,6 +206,33 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-tool"}	{"component":"s3-uploader","edge":"restart-tool","event":"dependency_missing","session":"","message":"this image lacks: flock; refusing to start upload loop. The loop needs bash, GNU find (-L, -xtype), GNU stat -c, du -sb, md5sum, sort, date and util-linux flock (-w, -E) in upload.s3.shell.image, and the rclone binary the initContainer stages in /opt/rclone"}
 2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-lock"}	{"component":"s3-uploader","edge":"restart-lock","event":"lock_failed","session":"proj.S9.E9","message":"flock on /data/.locks/deidentified.lock failed with exit 127, which is not a timeout; refusing to copy without the lock, so the uploader stops"}
 2	{"namespace":"xnat-ingest","component":"s3-uploader","cluster":"restart-busy"}	{"component":"s3-uploader","edge":"restart-busy","event":"upload_skipped","session":"proj.S9.E9","message":"the upload-tree writer lock was not free within 600s; next pass"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-group-error","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-fs-critical","level":"CRITICAL"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-assign-error","level":"ERROR"}	{"message":"Error assigning session example: Permission denied"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-traceback","level":"unknown"}	{"message":"Traceback (most recent call last):\\n  File \\"assign.py\\", line 1"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-no-level-traceback"}	{"message":"Traceback (most recent call last):"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-info-word","level":"INFO"}	{"message":"Processing filename ERROR_exception.dcm with no errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-info-traceback-word","level":"INFO"}	{"message":"Reading traceback_example.dcm"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-progress","level":"unknown"}	{"message":"Processing staged sessions: 100%|####| 401.71it/s"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"upload","cluster":"stage-wrong-component","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"other","component":"assign","cluster":"stage-wrong-app","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-upload","app":"xnat-ingest","component":"assign","cluster":"stage-wrong-namespace","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-message","level":"ERROR"}	{}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-severity"}	{"message":"ERROR appears only in this message"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed","level":"unknown"}	{malformed JSON
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-id","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-summary","level":"ERROR"}	{"message":"Assign completed with 1 errors"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-old","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-structured","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-critical","level":"CRITICAL"}	{"message":"Cannot open recipe directory"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-old","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-info-word","level":"INFO"}	{"message":"Reading ERROR.dcm successfully"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-body-error-only","level":"INFO"}	{"level":"ERROR","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-stream-error","level":"ERROR"}	{"level":"INFO","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-body-component","level":"ERROR"}	{"component":"upload","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed-error","level":"ERROR"}	{malformed JSON
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-error","level":"ERROR"}	{"message":"Permission denied","stage_message":"Assign completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-info","level":"INFO"}	{"message":"Reading file","stage_message":"Traceback (most recent call last):"}
 EOF
 }
 
@@ -256,6 +283,37 @@ reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	configured edge, l
 reporter_never	DataPolicyReporterSilent	reporter-never	fire	configured edge that never reported: keyed on the config, not on Loki
 reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but no stage_report: the disk alerts are still blind
 reporter_unlisted	DataPolicyReporterSilent	reporter-unlisted	nofire	not in edges: never watched, whatever it logs
+stage-group-error	IngestStageError	stage-group-error	fire	stage severity or traceback contract
+stage-fs-critical	IngestStageError	stage-fs-critical	fire	stage severity or traceback contract
+stage-assign-error	IngestStageError	stage-assign-error	fire	stage severity or traceback contract
+stage-traceback	IngestStageError	stage-traceback	fire	stage severity or traceback contract
+stage-no-level-traceback	IngestStageError	stage-no-level-traceback	fire	stage severity or traceback contract
+stage-info-word	IngestStageError	stage-info-word	nofire	stage severity or traceback contract
+stage-info-traceback-word	IngestStageError	stage-info-traceback-word	nofire	stage severity or traceback contract
+stage-progress	IngestStageError	stage-progress	nofire	stage severity or traceback contract
+stage-wrong-component	IngestStageError	stage-wrong-component	nofire	stage severity or traceback contract
+stage-wrong-app	IngestStageError	stage-wrong-app	nofire	stage severity or traceback contract
+stage-wrong-namespace	IngestStageError	stage-wrong-namespace	nofire	stage severity or traceback contract
+stage-missing-message	IngestStageError	stage-missing-message	fire	stage severity or traceback contract
+stage-missing-severity	IngestStageError	stage-missing-severity	nofire	stage severity or traceback contract
+stage-malformed	IngestStageError	stage-malformed	nofire	stage severity or traceback contract
+stage-invalid-id	IngestStageError	stage-invalid-id	nofire	stage severity or traceback contract
+stage-invalid-summary	IngestStageError	stage-invalid-summary	nofire	stage severity or traceback contract
+stage-old	IngestStageError	stage-old	nofire	stage severity or traceback contract
+deid-structured	DeidentifyStageError	deid-structured	fire	stage severity or traceback contract
+deid-critical	DeidentifyStageError	deid-critical	fire	stage severity or traceback contract
+deid-old	DeidentifyStageError	deid-old	nofire	stage severity or traceback contract
+deid-info-word	DeidentifyStageError	deid-info-word	nofire	stage severity or traceback contract
+stage-single-holds	IngestStageError	stage-group-error	fire	single event survives the one-minute hold	120
+stage-single-expires	IngestStageError	stage-group-error	nofire	single event leaves the ten-minute window	540
+deid-single-holds	DeidentifyStageError	deid-structured	fire	single event survives the one-minute hold	120
+deid-single-expires	DeidentifyStageError	deid-structured	nofire	single event leaves the ten-minute window	540
+stage-body-error-only	IngestStageError	stage-body-error-only	nofire	stream labels are authoritative; malformed envelopes are excluded
+stage-stream-error	IngestStageError	stage-stream-error	fire	stream labels are authoritative; malformed envelopes are excluded
+stage-body-component	IngestStageError	stage-body-component	fire	stream labels are authoritative; malformed envelopes are excluded
+stage-malformed-error	IngestStageError	stage-malformed-error	nofire	stream labels are authoritative; malformed envelopes are excluded
+stage-alias-error	IngestStageError	stage-alias-error	fire	decoded message alias must not use an unrelated body field
+stage-alias-info	IngestStageError	stage-alias-info	nofire	decoded message alias must not use an unrelated body field
 EOF
 }
 
@@ -325,7 +383,7 @@ fi
 printf '  %sPASS%s  %-38s all %s fixture lines queryable\n' "$_G" "$_O" "fixture_ingestion" "$expected"
 
 # --- evaluate -----------------------------------------------------------------
-while IFS=$'\t' read -r name alert cluster expect desc; do
+while IFS=$'\t' read -r name alert cluster expect desc offset_s; do
     [ -n "${name:-}" ] || continue
     expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/charts/mgmt/values.yaml" <<'PY'
 import sys, re, yaml
@@ -379,8 +437,9 @@ print(expr)
 PY
     )" || { fail "$name" "could not extract expression for $alert"; continue; }
 
+    eval_ns=$(( NOW_NS + ${offset_s:-0} * 1000000000 ))
     got="$(curl -sG "http://localhost:${PORT}/loki/api/v1/query" \
-             --data-urlencode "query=${expr}" --data-urlencode "time=${NOW_NS}" \
+             --data-urlencode "query=${expr}" --data-urlencode "time=${eval_ns}" \
            | python3 -c "
 import sys, json
 try: d = json.load(sys.stdin)
