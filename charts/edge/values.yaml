@@ -672,7 +672,7 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.16.1"
+    tag: "0.16.2"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -1018,7 +1018,7 @@ upload:
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
-      # CAUTION: xnat-ingest 0.16.1 holds up to 256 MiB in memory for each
+      # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
       # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
       # session with many large scans. Lower this only after the image
       # writes archives to disk (xnat-ingest PR #200).
