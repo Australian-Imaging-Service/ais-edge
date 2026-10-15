@@ -98,11 +98,14 @@ spec:
       containers:
         - name: uploader
           # NOT the S3 client — see upload.s3.shell.image in values.yaml. This
-          # image supplies bash + GNU coreutils/findutils; rclone arrives from
-          # the initContainer above.
+          # image supplies bash, GNU coreutils/findutils and util-linux flock;
+          # rclone arrives from the initContainer above. The loop checks each
+          # of them by use before it touches a session (check_tools in the
+          # script), and tests/s3-uploader/image-tests.sh runs one copy inside
+          # this image in CI.
           image: "{{ .Values.upload.s3.shell.image.repository }}:{{ .Values.upload.s3.shell.image.tag }}"
           imagePullPolicy: {{ .Values.upload.s3.shell.image.pullPolicy }}
-          # The image's entrypoint is `aws`; override it to run our loop.
+          # Whatever the image's own entrypoint is, the loop is the command.
           command: ["/bin/bash", "/scripts/s3-uploader.sh"]
           env:
             - name: EDGE_NAME
@@ -123,19 +126,22 @@ spec:
             # rather than how old the marker is. See s3-uploader.sh.
             - name: PIPELINE_ROOT
               value: /data
-            # Derived by the SAME condition as ASSIGNED_DIR above, so the
-            # uploader cannot take its permission to delete from the policy for
-            # a tree it is not reading. See edge.uploadReclaim.
-            - name: RECLAIM
-              value: {{ include "edge.uploadReclaim" . | quote }}
-            # dryRun OR disabled — either one means "upload, but do not
-            # reclaim the local copy". Was `and .enabled .dryRun`, which with
-            # the default dataPolicy.enabled=false yields DRY_RUN=false: a
-            # switched-off data policy that deletes anyway. Nothing that
-            # removes data should read a disabled policy as permission.
-            # Matches charts/mgmt s3-staged-reclaimer.yaml.
-            - name: DRY_RUN
-              value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
+            # THE UPLOADER DELETES NOTHING. The staged-reclaimer CronJob retires a
+            # local session after proving each file in the bucket, under the
+            # upload-tree writer lock; this copy holds the same lock, so a
+            # session is never copied while it is written or deleted.
+            - name: WRITER_LOCK
+              value: {{ include "edge.uploadTreeLock" . | quote }}
+            - name: LOCK_WAIT
+              value: {{ .Values.upload.s3.lockWait | quote }}
+            # The reclaimer's repair requests (an object missing or different):
+            # one file per session, claimed by a rename, copied again.
+            - name: RECOPY_DIR
+              value: {{ printf "%s/recopy" (include "edge.uploaderStateDir" .) | quote }}
+            # The multipart part size, the contract with the reclaimer's proof
+            # (it computes the multipart ETag for this size and for 5 MiB).
+            - name: S3_CHUNK_SIZE
+              value: {{ .Values.upload.s3.chunkSize | quote }}
 
             # --- rclone remote "sw" ----------------------------------------
             # rclone builds a remote entirely from RCLONE_CONFIG_<NAME>_* env,

@@ -313,29 +313,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
-  {{- /* onUploaded needs someone to establish that the session reached XNAT.
-         Under upload.mode=s3 that is the s3-uploader's marker. Under direct
-         there is no s3-uploader, so for a long time nothing could satisfy it.
-         The staged reclaimer CronJob now does, for ONE tree: the terminal one
-         the uploader actually drains, which it re-checks against XNAT itself.
-         So the guard is no longer "onUploaded is impossible under direct", it
-         is "onUploaded is impossible for a tree nothing watches". */ -}}
-  {{- if eq .Values.upload.mode "direct" }}
-    {{- $terminal := include "edge.uploadSourceDir" . }}
+  {{- /* onUploaded needs someone to establish that the session was delivered.
+         That is the staged reclaimer CronJob, in both upload modes, for ONE
+         tree: the terminal one the uploader reads, which it proves file by
+         file (against the bucket under s3, against XNAT under direct). The
+         uploader itself never deletes. So the guard is "onUploaded is
+         impossible for a tree nothing watches", whatever the mode. */ -}}
+  {{- $terminal := include "edge.uploadSourceDir" . }}
     {{- /* DELIBERATELY NOT `assigned` AS WELL when it is the terminal tree: the
            shipped tier-1 site files declare assigned.reclaim=onUploaded and the
            reclaimer now satisfies exactly that. Under deid.engine=ingest the
            assigned tree is NOT terminal, and the separate guard above already
            requires onDeidentified there. */ -}}
-    {{- if and (eq (include "edge.deidentifiedReclaim" .) "onUploaded") (ne $terminal "/data/deidentified") }}
-      {{- fail (printf "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=direct and deid.engine=%s. Under direct upload the only thing that can establish `uploaded` is the staged reclaimer CronJob, and it watches the tree the uploader drains, which under this engine is %s, not /data/deidentified. Nothing would ever satisfy the condition: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it, or deid.engine=ingest if it should be the tree that is uploaded." (include "edge.deidEngine" .) $terminal) }}
-    {{- end }}
+  {{- if and (eq (include "edge.deidentifiedReclaim" .) "onUploaded") (ne $terminal "/data/deidentified") }}
+    {{- fail (printf "dataPolicy.derived.deidentified.reclaim=onUploaded with upload.mode=%s and deid.engine=%s. The only thing that can establish `uploaded` is the staged reclaimer CronJob, and it watches the tree the uploader reads, which under this engine is %s, not /data/deidentified. Nothing would ever satisfy the condition: the tree would be kept for ever while the policy read as though it were being cleaned. Use never if you intend to keep it, or deid.engine=ingest if it should be the tree that is uploaded." .Values.upload.mode (include "edge.deidEngine" .) $terminal) }}
   {{- end }}
 
   {{- /* The reclaim word for /data/assigned depends on WHO reads that tree, and
          the engine decides that. */ -}}
   {{- if and (eq $engine "ingest") (eq (include "edge.assignedReclaim" .) "onUploaded") }}
-    {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned - every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
+    {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, and the staged reclaimer proves only that tree, so onUploaded can never be satisfied for /data/assigned - every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
   {{- end }}
 
   {{- /* EACH STAGE HAS ITS OWN RECLAIM WORDS, AND ANOTHER STAGE'S WORD IS NOT
@@ -352,11 +349,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       {{- fail (printf "dataPolicy.derived.%s.reclaim=%s is not a word this stage accepts. Allowed: %s. Another stage's word is not harmless here: onAssigned on assigned or deidentified is true of every settled session and would remove it before upload, and onUploaded is only provable on the tree the uploader reads." $stage $w (join ", " $allowed)) }}
     {{- end }}
   {{- end }}
-  {{- /* onUploaded REMOVES ONLY THE COPY THE UPLOADER FINGERPRINTED. assign
-         always writes /data/assigned, so moving this stage's location points it
-         at a tree whose sessions can never be verified. */ -}}
+  {{- /* onUploaded REMOVES ONLY THE TREE THE UPLOADER READS: the staged
+         reclaimer proves that tree and no other. assign always writes
+         /data/assigned, so moving this stage's location points it at a tree
+         whose sessions can never be verified. */ -}}
   {{- if and (eq (include "edge.assignedReclaim" .) "onUploaded") (ne (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .)) }}
-    {{- fail (printf "dataPolicy.derived.assigned.reclaim resolves to onUploaded, but the stage is at %s while the uploader reads %s. onUploaded removes only the copy the uploader fingerprinted, so nothing at %s could ever be verified and it would be kept for ever. assign writes /data/assigned: leave dataPolicy.derived.assigned.location at its default." (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .) (clean .Values.dataPolicy.derived.assigned.location)) }}
+    {{- fail (printf "dataPolicy.derived.assigned.reclaim resolves to onUploaded, but the stage is at %s while the uploader reads %s. the staged reclaimer proves only the tree the uploader reads, so nothing at %s could ever be verified and it would be kept for ever. assign writes /data/assigned: leave dataPolicy.derived.assigned.location at its default." (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .) (clean .Values.dataPolicy.derived.assigned.location)) }}
   {{- end }}
 
   {{- /* THE SECOND THING THE LUA HOOK SUPPLIES, and the one that is easy to

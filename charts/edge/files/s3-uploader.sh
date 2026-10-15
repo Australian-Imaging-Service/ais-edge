@@ -16,21 +16,34 @@
 # busybox-based `minio/mc` fixed (docs/components/mc.md, "A full userland").
 # So charts/edge/templates/upload.yaml stages the rclone BINARY out of the
 # pinned rclone image with an initContainer and runs this loop in a GNU/bash
-# image. rclone is a static Go binary and runs there unchanged — verified
-# end to end against SeaweedFS 4.34.
+# image with util-linux flock (upload.s3.shell.image). rclone is a static Go
+# binary and runs there unchanged — verified end to end against SeaweedFS 4.34.
+# The image is checked BY USE at startup (check_tools below): amazon/aws-cli
+# 2.31.19 had the GNU tools and no flock, and every copy was skipped as lock
+# contention for five hours before anyone saw it (2026-10-14).
 #
 # THE LOG SCHEMA BELOW IS A PUBLIC INTERFACE. DO NOT CHANGE IT CASUALLY.
 #
 # Each meaningful event is one line of JSON:
 #     {"ts", "component":"s3-uploader", "edge", "event", "session", "message", ...}
 #
-# These three event names are matched by Loki alert rules, and changing or
+# These four event names are matched by Loki alert rules, and changing or
 # dropping any of them disables the corresponding alert SILENTLY — no error,
 # just an alert that never fires again:
 #
-#     upload_started    EdgeUploadStalled       (started with no completed)
-#     upload_completed  EdgeUploadsFailing, EdgeUploadStalled, S3ToXNATBacklog
-#     upload_failed     EdgeUploadsFailing, EdgeUploadRetrying
+#     upload_started    SessionUploadStalled    (started with no completed)
+#     upload_completed  XNATUploadFailingForAllSessions, SessionUploadStalled
+#     upload_failed     XNATUploadFailingForAllSessions, S3UploaderRetryStorm
+#     recopy_done       RecopyLoop              (the same session copied again more
+#                                               than 3 times in 24h; a claim that
+#                                               never completes is not counted)
+#
+# Two more stop the loop, so the pod restarts and S3UploaderRestartedRecently
+# names it (that rule also matches "refusing to start upload loop"):
+#
+#     dependency_missing  a tool the loop needs is not in the image (check_tools)
+#     lock_failed         the writer lock cannot be opened or taken, and not for
+#                         a timeout; a timeout is upload_skipped, as before
 #
 # The numeric fields (bytes, files, dicoms, duration_s) feed the dashboards.
 # `files` counts every object uploaded (DICOMs + __MANIFEST__.json + __METADATA__.json);
@@ -57,10 +70,16 @@ STATE_DIR="${STATE_DIR:-/data/LOGS/s3-uploader-state}"
 PIPELINE_ROOT="${PIPELINE_ROOT:-/data}"
 INTERVAL="${INTERVAL:-60}"
 SETTLE_MINUTES="${SETTLE_MINUTES:-5}"
-# onUploaded -> remove the local copy after a verified upload.
-# never      -> keep it; the fingerprint state file stops re-uploading.
-RECLAIM="${RECLAIM:-onUploaded}"
-DRY_RUN="${DRY_RUN:-false}"
+# THIS SCRIPT COPIES. It deletes nothing: the staged-reclaimer CronJob retires a local
+# session after proving each file in the bucket (PROOF=s3), under the writer lock.
+# A file that fails the proof leaves a repair request in RECOPY_DIR, and the next
+# pass copies that session again (recopy_claimed / recopy_done below).
+WRITER_LOCK="${WRITER_LOCK:?WRITER_LOCK required}"   # the upload-tree writer lock: held for each rclone copy
+LOCK_WAIT="${LOCK_WAIT:-600}"                        # seconds to wait for it before the session is skipped this pass
+RECOPY_DIR="${RECOPY_DIR:-${STATE_DIR}/recopy}"     # the reclaimer's repair requests, one file per session
+S3_CHUNK_SIZE="${S3_CHUNK_SIZE:-64Mi}"               # multipart part size; the reclaimer computes the same ETag form
+PASSES="${PASSES:-0}"                                # 0: loop for ever; N: stop after N passes (tests)
+STOP_DELAY="${STOP_DELAY:-15}"                       # seconds before an exit 1, so a restart loop is not a tight one (tests: 0)
 
 : "${S3_BUCKET:?S3_BUCKET required}"
 : "${EDGE_NAME:?EDGE_NAME required}"
@@ -73,6 +92,44 @@ jlog() {
     printf '{"ts":"%s","component":"s3-uploader","edge":"%s","event":"%s","session":"%s","message":"%s"%s}\n' \
         "$(date -Iseconds)" "${EDGE_NAME}" "$1" "${2:-}" "${3:-}" "${4:-}"
 }
+
+# -----------------------------------------------------------------------------
+# THE TOOLS, CHECKED BY USE, NOT BY NAME. busybox has a `find` and a `flock`
+# that answer to the name and lack the options this loop relies on (no -xtype,
+# no -w, no -E), and amazon/aws-cli:2.31.19 had no flock at all. MEASURED on
+# the test edge, 2026-10-14: `flock: command not found` on every session, read
+# as a busy lock, 4,249 copies skipped in five hours, nothing in the bucket, and
+# a green CI, because the unit tests run with the host's tools. A missing or
+# wrong tool now stops the pod here, with the tool named, before any session is
+# touched; tests/s3-uploader/image-tests.sh runs this inside the pinned image.
+# "refusing to start upload loop" is the phrase S3UploaderRestartedRecently
+# matches; keep it.
+# -----------------------------------------------------------------------------
+check_tools() {
+    local t probe="${TMPDIR:-/tmp}/s3-uploader-probe-$$" missing=""
+    for t in rclone find stat du md5sum sort flock date; do
+        command -v "$t" >/dev/null 2>&1 || missing="$missing $t"
+    done
+    if [ -z "$missing" ]; then
+        rm -rf "$probe"
+        if mkdir -p "$probe/d" && printf 'x' > "$probe/d/f" && ln -s missing "$probe/d/l"; then
+            # a dangling link (the upload guard), the fingerprint pipeline, the byte count
+            [ "$(find "$probe/d" -xtype l 2>/dev/null | wc -l)" = 1 ] || missing="$missing find(-xtype)"
+            [ "$(find -L "$probe/d" -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null | wc -l)" = 1 ] || missing="$missing stat(-c)"
+            [ "$(du -sb "$probe/d/f" 2>/dev/null | cut -f1)" = 1 ] || missing="$missing du(-sb)"
+            # util-linux flock: a wait and a named timeout exit, the two the lock step uses
+            ( exec 9>>"$probe/lock" && flock -w 1 -E 3 9 ) >/dev/null 2>&1 || missing="$missing flock(-w,-E)"
+        else
+            missing="$missing tmpdir(${TMPDIR:-/tmp})"
+        fi
+        rm -rf "$probe"
+    fi
+    [ -z "$missing" ] && return 0
+    jlog dependency_missing "" "this image lacks:${missing}; refusing to start upload loop. The loop needs bash, GNU find (-L, -xtype), GNU stat -c, du -sb, md5sum, sort, date and util-linux flock (-w, -E) in upload.s3.shell.image, and the rclone binary the initContainer stages in /opt/rclone"
+    sleep "$STOP_DELAY"
+    exit 1
+}
+check_tools
 
 # Client-certificate state, worked out ONCE and reported in two places.
 #
@@ -120,7 +177,14 @@ else
     mtls_hint="no client certificate is configured (RCLONE_CLIENT_CERT unset). If the endpoint now requires one, the handshake still SUCCEEDS and the endpoint answers HTTP 400 No required SSL certificate was sent, whose HTML body rclone reports as an S3 XML parse failure — which is exactly what the errors above would look like"
 fi
 
-jlog startup "" "s3-uploader starting endpoint=${RCLONE_CONFIG_SW_ENDPOINT:-<unset>} bucket=${S3_BUCKET} prefix=${S3_PREFIX} reclaim=${RECLAIM} client_cert=${mtls_state}"
+mkdir -p "$RECOPY_DIR"
+# A request claimed by a run that died: back to pending, so it is served again.
+for f in "$RECOPY_DIR"/*.claimed; do
+    [ -f "$f" ] || continue
+    [ -f "${f%.claimed}" ] && rm -f "$f" || mv -f "$f" "${f%.claimed}"
+    jlog recopy_requeued "$(basename "${f%.claimed}")" "a repair request claimed by an earlier run goes back to pending"
+done
+jlog startup "" "s3-uploader starting endpoint=${RCLONE_CONFIG_SW_ENDPOINT:-<unset>} bucket=${S3_BUCKET} prefix=${S3_PREFIX} chunk=${S3_CHUNK_SIZE} client_cert=${mtls_state}; copies only, the staged-reclaimer deletes"
 
 # -----------------------------------------------------------------------------
 # Pre-flight. Refuse to enter the upload loop against an endpoint we cannot
@@ -178,7 +242,7 @@ until probe_endpoint; do
         # error itself goes to stderr from probe_endpoint; it can contain quotes
         # and newlines, so it must not be interpolated into this JSON.
         jlog endpoint_failed "" "bucket probe failed after 12 attempts (60s) — refusing to start upload loop. Endpoint mTLS: ${mtls_hint}. The rclone error for each attempt is on stderr above; an mTLS refusal arrives there as a 400/403 with an unparseable XML body, not as an auth error"
-        sleep 15
+        sleep "$STOP_DELAY"
         exit 1
     fi
     jlog endpoint_retrying "" "attempt ${attempt}/12 — endpoint not ready, retrying in 5s"
@@ -231,7 +295,15 @@ while true; do
 
         fp=$(fingerprint "$session_dir")
         state_file="${STATE_DIR}/${session_name}"
-        if [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$fp" ]; then
+        # A repair request (the reclaimer found an object missing or different):
+        # claimed by a rename, so a request written during this copy keeps the
+        # plain name and is served next pass. Copied with --ignore-times, so every
+        # file goes again whatever the modification times say.
+        request="${RECOPY_DIR}/${session_name}"; recopy=""
+        if [ -f "$request" ] && mv -f "$request" "${request}.claimed" 2>/dev/null; then
+            recopy="--ignore-times"
+            jlog recopy_claimed "$session_name" "$(head -c 200 "${request}.claimed" | tr -d '\n')"
+        elif [ -f "$state_file" ] && [ "$(cat "$state_file")" = "$fp" ]; then
             # Already uploaded and unchanged. Emit NOTHING — a per-cycle event
             # here is exactly what produced two days of duplicate
             # "upload completed" alert mail.
@@ -251,20 +323,14 @@ while true; do
         # below — so the local copy survives for the next attempt.
         if ! rclone lsd "sw:${S3_BUCKET}" --log-level ERROR >/dev/null 2>&1; then
             jlog upload_skipped "$session_name" "endpoint probe failed — preserving local copy for next retry"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
             continue
         fi
 
-        # NOTE: DRY_RUN does NOT gate the upload.
-        #
-        # It used to. That was wrong in a way that only shows up when someone
-        # does the careful thing: dataPolicy is about what is KEPT and what is
-        # RECLAIMED, and uploading is neither — it is the pipeline's whole job.
-        # With the upload behind this flag, setting
-        #     dataPolicy: {enabled: true, dryRun: true}
-        # to preview reclaim decisions stopped the edge shipping to S3
-        # altogether. Turning on the safety mode silently halted delivery.
-        # Only the reclaim below is a data-policy action, so only the reclaim
-        # is gated.
+        # Uploading is never gated by dataPolicy: it is the pipeline's whole job.
+        # (It used to be, and a dryRun meant to preview reclaim decisions stopped
+        # the edge shipping to S3.) What dataPolicy governs is the local copy,
+        # and that is the staged-reclaimer's, not this script's.
 
         # `rclone copy`, NEVER `rclone sync`. This is the one line where the
         # port from `aws s3 sync` is not a rename: `aws s3 sync` never deletes
@@ -283,33 +349,66 @@ while true; do
         # 2 symlinked DICOMs: without this flag rclone uploaded 2 objects,
         # exited 0, and --log-level ERROR suppressed the warning — so the run
         # would emit upload_completed with the full bytes/files/dicoms counts
-        # (they come from `find -L`, which does follow), write the state file,
-        # and then rm -rf the only remaining copy. That is the mc data-loss
-        # bug rebuilt out of new parts. With the flag: 4 objects, exit 0.
+        # (they come from `find -L`, which does follow) and write the state file,
+        # while the bucket held 2 of 4 files. The reclaimer's proof would then
+        # keep the 2 unproved files, but the session would never be delivered
+        # whole: the flag is what makes the copy complete. With it: 4 objects.
         #
         # A dangling link under --copy-links is a hard error (exit 6, measured),
         # which lands in the else branch — no state file, no reclaim.
+        #
+        # UNDER THE WRITER LOCK for the whole copy: the writer stage and the
+        # staged-reclaimer take the same lock, so a session is never copied while
+        # it is being written or deleted, and every PUT and multipart completion
+        # of this copy is finished before a delete can start.
+        #
+        # The multipart flags are the contract with the reclaimer's proof: a part
+        # size it knows (S3_CHUNK_SIZE, or rclone's 5 MiB default when rclone
+        # raises it above --s3-max-upload-parts), and the multipart ETag kept.
+        #
+        # ONLY A TIMEOUT IS CONTENTION. `flock -E 3` names the timeout exit, so
+        # any other exit (127: no flock in the image, as on 2026-10-14; a bad
+        # descriptor; a lock file that cannot be opened) is an error: the loop
+        # stops, the pod restarts and S3UploaderRestartedRecently names it,
+        # rather than skipping every session for ever as "lock not free".
+        if ! { exec 8>>"$WRITER_LOCK"; } 2>/dev/null; then
+            jlog lock_failed "$session_name" "cannot open the writer lock ${WRITER_LOCK}; refusing to copy without the lock, so the uploader stops"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
+            sleep "$STOP_DELAY"
+            exit 1
+        fi
+        flock -w "$LOCK_WAIT" -E 3 8; lock_rc=$?
+        if [ "$lock_rc" -eq 3 ]; then
+            jlog upload_skipped "$session_name" "the upload-tree writer lock was not free within ${LOCK_WAIT}s; next pass"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
+            exec 8>&-
+            continue
+        elif [ "$lock_rc" -ne 0 ]; then
+            jlog lock_failed "$session_name" "flock on ${WRITER_LOCK} failed with exit ${lock_rc}, which is not a timeout; refusing to copy without the lock, so the uploader stops"
+            [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
+            exec 8>&-
+            sleep "$STOP_DELAY"
+            exit 1
+        fi
         if rclone copy "$session_dir" "sw:${S3_BUCKET}/${S3_PREFIX}/${session_name}/" \
-             --copy-links --transfers 4 --checkers 8 --retries 3 --log-level ERROR; then
+             --copy-links --transfers 4 --checkers 8 --retries 3 --log-level ERROR \
+             --s3-chunk-size "$S3_CHUNK_SIZE" --s3-max-upload-parts 10000 --s3-use-multipart-etag=true $recopy; then
+            exec 8>&-
             duration=$(( $(date +%s) - start_ts ))
             jlog upload_completed "$session_name" "" \
                 ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms},\"duration_s\":${duration}"
             echo "$fp" > "$state_file"
-
-            # dataPolicy.derived.assigned.reclaim. Only ever reached after a
-            # zero-exit transfer. The bytes also exist in Orthanc storage and the
-            # facility backup, both governed by the `originals` rules.
-            if [ "$RECLAIM" = "onUploaded" ]; then
-                if [ "$DRY_RUN" = "true" ]; then
-                    jlog reclaim_skipped "$session_name" "dataPolicy dryRun/disabled — uploaded, but leaving the local copy in place"
-                else
-                    rm -rf "$session_dir"
-                fi
+            if [ -n "$recopy" ]; then
+                rm -f "${request}.claimed"
+                jlog recopy_done "$session_name" "copied again on the reclaimer's request" ",\"duration_s\":${duration}"
             fi
         else
+            exec 8>&-
             duration=$(( $(date +%s) - start_ts ))
             jlog upload_failed "$session_name" "rclone copy non-zero exit; will retry next cycle" \
                 ",\"bytes\":${bytes},\"files\":${files},\"dicoms\":${dicoms},\"duration_s\":${duration}"
+            # the request goes back to pending, unless a newer one arrived meanwhile
+            [ -n "$recopy" ] && { [ -f "$request" ] && rm -f "${request}.claimed" || mv -f "${request}.claimed" "$request"; }
         fi
     done
 
@@ -345,5 +444,8 @@ while true; do
         jlog marker_retired "$sname" "upload marker dropped: no stage directory holds this session any more, so nothing can ask about it again"
     done
 
+    if [ "$PASSES" -gt 0 ]; then
+        PASSES=$((PASSES - 1)); [ "$PASSES" -eq 0 ] && exit 0
+    fi
     sleep "$INTERVAL"
 done

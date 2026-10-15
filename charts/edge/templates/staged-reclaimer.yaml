@@ -1,34 +1,59 @@
 {{- /*
-TERMINAL-STAGE RECLAIMER FOR DIRECT UPLOAD (tier-1).
+TERMINAL-STAGE RECLAIMER, both upload modes.
 
-Under upload.mode=s3 the staged copy lives in the bucket and charts/mgmt reclaims
-it. Under upload.mode=direct there is no bucket and no s3-uploader, so nothing
-ever wrote an `uploaded` marker into the terminal stage directory. That made
-`onUploaded` — the site default for assigned.reclaim — permanently unsatisfiable:
-the tree grew without bound and no data policy could touch it. MEASURED on .240:
-/data/assigned held sessions that had been in XNAT for hours.
+The uploader never deletes what it sent: under upload.mode=s3 the s3-uploader
+copies, under upload.mode=direct xnat-ingest upload only uploads. So nothing
+would ever retire the terminal tree (/data/assigned, or /data/deidentified
+under deid.engine=ingest), and `onUploaded`, the site default for that tree,
+would be permanently unsatisfiable. MEASURED on .240 under direct upload:
+/data/assigned held sessions that had been in XNAT for hours; the s3 mode's
+`rm -rf` after a zero-exit copy, which this replaces, deleted the only copy
+on the strength of rclone's exit code.
 
-This CronJob closes that. It runs the SAME reclaim-staged.sh as charts/mgmt with
-STORAGE=filesystem, which hands each session to reclaim-files.py: for each local
-file, the uploader's XNAT resource must hold it, checked by a HEAD (present, same
-size). XNAT is the only authority that does not depend on a marker nobody writes.
+This CronJob runs the SAME reclaim-staged.sh as charts/mgmt with
+STORAGE=filesystem, which hands each session to reclaim-files.py. The proof
+follows the mode:
+  s3      PROOF=s3: each local file must be in the bucket with its size and an
+          ETag equal to the MD5 of its bytes read now (or the multipart form of
+          it for upload.s3.chunkSize and rclone's 5 MiB). A file that is not
+          gets a repair request under the uploader's state dir (recopy/), and
+          the uploader copies the session again. XNAT is not consulted.
+  direct  PROOF=xnat: for each local file, the uploader's XNAT resource must
+          hold it, checked by a HEAD (present, same size).
 It deletes only the proved files, inside the upload-tree writer lock, while the
-writer holds edge.uploadTreeAlive.
+writer holds edge.uploadTreeAlive. Under s3 the uploader holds the same lock for
+each copy, so a session is never proven or deleted while it is being copied.
 
-It is deliberately NOT the uploader's delete path. The uploader deletes what it
-just sent, on its own success. This deletes what XNAT confirms it already holds,
-later, under minAge. The two answer different questions.
+THE TWO CLOCKS (s3): the mgmt reclaimer removes the bucket copy after XNAT holds
+every file and dataPolicy.derived.s3Staged.minAge; that must be the longer
+clock, by more than this CronJob's interval, proof time, lock wait and any edge
+downtime, or the bucket copy goes before the edge has proven its local copy
+against it and the two ping-pong (RecopyLoop alerts on it). 36 hours against a
+day: the longer clock must also stay under the 48 hours after which
+SessionStagedNotConfirmedInXNAT counts a session unconfirmed, because the XNAT
+proof runs only after it. See values.yaml, s3Staged.
 */}}
-{{- if eq .Values.upload.mode "direct" }}
 {{- $reclaim := include "edge.uploadReclaim" . }}
 {{- if ne $reclaim "never" }}
+{{- /* A FOLDER STORE NEEDS A POSITIVE AGE. reclaim-files.py rechecks each file by
+       identity (inode, size, mtime, ctime) taken before the proof; file times have
+       tick granularity, so with a minAge of 0 a same-size rewrite within the tick of
+       the previous write keeps its identity and could pass the recheck (codex-193).
+       One minute keeps every identity the proof saw well ahead of any later write;
+       the script itself refuses under one second. */ -}}
+{{- $srMinAgeS := include "edge.durationSeconds" .Values.dataPolicy.derived.stagedReclaimer.minAge }}
+{{- if and (ne $srMinAgeS "-") (lt (int64 $srMinAgeS) 60) }}
+  {{- fail (printf "dataPolicy.derived.stagedReclaimer.minAge=%v is under 1m. The reclaimer rechecks each file by identity before it deletes, and file times have tick granularity: with no age a rewrite within the same tick as the previous write is invisible to it. Set at least 1m." .Values.dataPolicy.derived.stagedReclaimer.minAge) }}
+{{- end }}
 {{- $root := . }}
 {{- $stagedRoot := include "edge.uploadSourceDir" . }}
 {{- $armed := and .Values.dataPolicy.enabled (not .Values.dataPolicy.dryRun) }}
+{{- $s3 := eq .Values.upload.mode "s3" }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "edge.fullname" . }}-staged-reclaimer
+  namespace: {{ .Values.namespace }}
   labels: {{- include "edge.labels" . | nindent 4 }}
 data:
   reclaim-staged.sh: |-
@@ -40,6 +65,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: {{ include "edge.fullname" . }}-staged-reclaimer
+  namespace: {{ .Values.namespace }}
   labels: {{- include "edge.labels" . | nindent 4 }}
 spec:
   schedule: {{ .Values.dataPolicy.derived.stagedReclaimer.schedule | quote }}
@@ -50,11 +76,33 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # Shorter than the schedule so a run wedged on an unreachable XNAT is
-      # killed before the next one is due, rather than pinning Forbid forever.
+      # Shorter than the schedule so a run wedged on an unreachable XNAT or
+      # bucket is killed before the next one is due, rather than pinning
+      # Forbid forever.
       activeDeadlineSeconds: {{ .Values.dataPolicy.derived.stagedReclaimer.deadlineSeconds }}
       template:
+        metadata:
+          labels:
+            {{- include "edge.labels" . | nindent 12 }}
+            app: xnat-ingest
+            # LOAD-BEARING LABELS. Vector turns these into the Loki stream
+            # labels the ruler selects on (namespace / app / component /
+            # cluster): SessionStagedNotConfirmedInXNAT and
+            # ReclaimerRunUnavailable read component=s3-reclaimer in this
+            # namespace too. Without them the lines reach Loki as
+            # component=unknown and no rule sees them (MEASURED on main).
+            component: s3-reclaimer
+          annotations:
+            # Hash the script FILES, so a change to the reclaim logic is
+            # visible in `helm diff` even though a CronJob has no rollout.
+            checksum/script: {{ .Files.Get "files/reclaim-staged.sh" | sha256sum }}
+            checksum/helper: {{ .Files.Get "files/reclaim-files.py" | sha256sum }}
         spec:
+          # seaweedfs.<domain> resolves through the same hostAliases the
+          # uploader uses (on-prem topology): the proof reads what it wrote.
+          {{- include "edge.hostAliases" . | nindent 10 }}
+          {{- include "edge.schedulingRules" . | nindent 10 }}
+          automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
           restartPolicy: Never
           # NO POD securityContext, deliberately, and matching the other ingest
           # workloads which also set none. They run as root and create
@@ -68,9 +116,9 @@ spec:
           # which is the worst moment to discover it.
           containers:
             - name: reclaimer
-              # The ingest image, not the curl image: reclaim-staged.sh needs
-              # python3 to parse XNAT's JSON and to walk the staged tree, and
-              # curlimages/curl does not ship it. MEASURED, not assumed.
+              # The ingest image, not the curl image: reclaim-files.py needs
+              # python3 (and boto3 for the s3 proof), and curlimages/curl does
+              # not ship it. MEASURED, not assumed.
               image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
               imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
               # /bin/bash, NOT sh. reclaim-staged.sh declares #!/usr/bin/env bash
@@ -92,14 +140,15 @@ spec:
                 - name: CLUSTER_LABEL
                   value: {{ .Values.clusterLabel | quote }}
                 # TRANSLATED, not passed through. The operator writes `onUploaded`
-                # for the terminal tree, which under s3 means "an uploaded marker
-                # exists". Direct upload writes no such marker — that is the whole
-                # reason this CronJob exists — so the reclaimer establishes the same
-                # fact from the only authority available, XNAT itself. The script's
-                # word for that is onXnatConfirmed. Passing `onUploaded` straight
-                # through would hit its enum check and remove nothing, silently.
+                # for the terminal tree; the script's word for "established by
+                # the proof, not by a marker" is onXnatConfirmed, whatever the
+                # proof is. Passing `onUploaded` straight through would hit its
+                # enum check and remove nothing, silently.
                 - name: RECLAIM
                   value: "onXnatConfirmed"
+                # The proof, by mode: the bucket (s3) or XNAT (direct).
+                - name: PROOF
+                  value: {{ ternary "s3" "xnat" $s3 | quote }}
                 - name: MIN_AGE
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.minAge | quote }}
                 # The recovery window of the tree this CronJob owns. data-policy
@@ -109,8 +158,6 @@ spec:
                   value: {{ if eq (include "edge.uploadTreeKey" .) "deidentified" }}{{ .Values.dataPolicy.derived.deidentified.minAge | quote }}{{ else }}{{ .Values.dataPolicy.derived.assigned.minAge | quote }}{{ end }}
                 - name: TREE_MIN_AGE_KEY
                   value: {{ printf "dataPolicy.derived.%s.minAge" (include "edge.uploadTreeKey" .) | quote }}
-                - name: VERIFY_XNAT
-                  value: {{ .Values.dataPolicy.derived.stagedReclaimer.verifyAgainstXnat | quote }}
                 # The upload-tree writer lock, the same paths the writer stage
                 # uses. Every delete happens inside it, and only while the
                 # wrapped writer holds .alive (edge.uploadTreeAlive).
@@ -120,9 +167,53 @@ spec:
                   value: {{ include "edge.uploadTreeAlive" . | quote }}
                 - name: MAX_REMOVALS
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.maxRemovals | quote }}
-                # dryRun and a disabled policy both mean "report, delete nothing".
+                # dryRun and a disabled policy both mean "report, delete nothing"
+                # (and, under s3, write no repair request).
                 - name: DRY_RUN
                   value: {{ or (not .Values.dataPolicy.enabled) .Values.dataPolicy.dryRun | quote }}
+                {{- if $s3 }}
+                # --- the bucket: the same endpoint, bucket, prefix and identity
+                # the uploader copies with, so the proof reads what it wrote.
+                - name: S3_BUCKET
+                  value: {{ include "edge.s3Bucket" . | quote }}
+                - name: S3_PREFIX
+                  value: {{ .Values.upload.s3.prefix | quote }}
+                - name: S3_CHUNK_SIZE
+                  value: {{ .Values.upload.s3.chunkSize | quote }}
+                # Repair requests for the uploader: one file per session under
+                # its state dir, claimed by a rename.
+                - name: RECOPY_DIR
+                  value: {{ printf "%s/recopy" (include "edge.uploaderStateDir" .) | quote }}
+                - name: AWS_ENDPOINT_URL
+                  value: {{ include "edge.s3Endpoint" . | quote }}
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.upload.s3.region | quote }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.upload.s3.existingSecret }}
+                      key: access-key
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.upload.s3.existingSecret }}
+                      key: secret-key
+                {{- if .Values.upload.s3.caBundleSecret }}
+                # botocore reads the CA bundle from this variable; the same
+                # bundle the uploader gives rclone.
+                - name: AWS_CA_BUNDLE
+                  value: {{ printf "/etc/ssl/ais-edge/%s" .Values.upload.s3.caBundleKey | quote }}
+                {{- end }}
+                {{- if .Values.upload.s3.requireClientCert }}
+                # mTLS on the upload path: the uploader's client certificate.
+                - name: S3_CLIENT_CERT
+                  value: /etc/ssl/s3-client/tls.crt
+                - name: S3_CLIENT_KEY
+                  value: /etc/ssl/s3-client/tls.key
+                {{- end }}
+                {{- else }}
+                - name: VERIFY_XNAT
+                  value: {{ .Values.dataPolicy.derived.stagedReclaimer.verifyAgainstXnat | quote }}
                 - name: XNAT_SERVER
                   valueFrom:
                     secretKeyRef:
@@ -140,11 +231,18 @@ spec:
                       key: password
                 - name: XNAT_VERIFY_SSL
                   value: {{ .Values.upload.direct.verifySsl | quote }}
+                {{- end }}
               volumeMounts:
                 - {name: scripts, mountPath: /scripts, readOnly: true}
                 # Read-only unless the policy is armed. A dry run that cannot
                 # write cannot delete even if the script is wrong.
                 - {name: pipeline, mountPath: /data, readOnly: {{ not $armed }}}
+                {{- if and $s3 .Values.upload.s3.caBundleSecret }}
+                - {name: ca-bundle, mountPath: /etc/ssl/ais-edge, readOnly: true}
+                {{- end }}
+                {{- if and $s3 .Values.upload.s3.requireClientCert }}
+                - {name: s3-client, mountPath: /etc/ssl/s3-client, readOnly: true}
+                {{- end }}
               resources:
                 {{- toYaml .Values.dataPolicy.derived.stagedReclaimer.resources | nindent 16 }}
           volumes:
@@ -154,5 +252,14 @@ spec:
                 defaultMode: 0555
             - name: pipeline
               persistentVolumeClaim: {claimName: {{ include "edge.pipelinePvc" . }}}
-{{- end }}
+            {{- if and $s3 .Values.upload.s3.caBundleSecret }}
+            - name: ca-bundle
+              secret:
+                secretName: {{ .Values.upload.s3.caBundleSecret }}
+            {{- end }}
+            {{- if and $s3 .Values.upload.s3.requireClientCert }}
+            - name: s3-client
+              secret:
+                secretName: {{ .Values.upload.s3.clientCertSecret }}
+            {{- end }}
 {{- end }}

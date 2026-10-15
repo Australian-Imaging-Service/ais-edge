@@ -96,12 +96,12 @@ chart is not needed.
 | **deidentify-and-forward.lua** | edge | Writes the untouched original to the facility backup, then rewrites identity tags per the site's profile, then labels the study for pickup. |
 | **group-orthanc** | edge | Pulls studies labelled `xnat-ingest-ready` out of Orthanc into `/data/grouped`, then labels them `xnat-ingest-processed` so they are not pulled twice. |
 | **assign** | edge | Groups instances into XNAT sessions under `/data/assigned`, writing `__MANIFEST__.json` (per-resource, with MD5 checksums) and `__METADATA__.json`. |
-| **s3-uploader** | edge | `aws s3 sync` each settled session to `s3://ingest-<edge>/staged/`. Emits a JSON event schema that the alert rules consume. |
+| **s3-uploader** | edge | `rclone copy` each settled session to `s3://ingest-<edge>/staged/`, inside the upload-tree writer lock. Copies only: it never deletes the local copy, and it copies a session again when the staged-reclaimer leaves a repair request for it. Emits a JSON event schema that the alert rules consume. |
 | **Vector** | edge | Ships pod logs to Loki on the management node over TLS. |
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
 | **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**: one object at a time, each delete conditional on the ETag it listed (`If-Match`), never a folder. The only component that deletes patient data. |
-| **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory. Renders **only under `upload.mode: direct`**, where there is no bucket and no s3-uploader to write an `uploaded` marker, so `onUploaded` would otherwise be unsatisfiable and the tree would grow unbounded. Also deletes patient data, under the same XNAT confirmation. |
+| **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory, in **both upload modes**. Under `upload.mode: s3` it deletes a local file only after the bucket holds it with the same size and an ETag equal to the MD5 of the bytes read from disk now (`PROOF=s3`); a file that fails gets one repair request, which the s3-uploader answers with a new copy. Under `upload.mode: direct` it deletes only what XNAT proves, file by file (`PROOF=xnat`). Without it nothing retires the tree: the uploader never deletes, so `onUploaded` would be unsatisfiable and the tree would grow unbounded. Also deletes patient data, one proved resource at a time, inside the upload-tree writer lock. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
 | **cert-manager** | mgmt | Issues the internal CA and every server certificate. |
@@ -144,16 +144,21 @@ server on the management node means:
         │   + __MANIFEST__.json  (filenames + MD5 per resource)
         │   + __METADATA__.json
         │
-10.  s3-uploader   waits settleMinutes, fingerprints the tree, uploads
-        │          HTTPS, per-site credential, custom CA
+10.  s3-uploader   waits settleMinutes, fingerprints the tree, copies
+        │          HTTPS, per-site credential, custom CA; never deletes
         ▼
 11.  s3://ingest-<edge>/staged/<session>/
+        │   staged-reclaimer (edge), after stagedReclaimer.minAge: proves
+        │   each local file against the bucket (same size, ETag = MD5 of
+        │   the bytes on disk) and only then deletes the edge copy; a file
+        │   that fails leaves a repair request, and step 10 copies again
         │
 12.  mgmt-upload-<edge>  ──▶ XNAT
         │
-13.  mgmt-reclaim-<edge>  re-queries XNAT, proves each manifest file by its
-                          row in the mapped resource AND a HEAD of the same
-                          size, and only then deletes, object by object
+13.  mgmt-reclaim-<edge>  after s3Staged.minAge (the longer clock): re-queries
+                          XNAT, proves each manifest file by its row in the
+                          mapped resource AND a HEAD of the same size, and
+                          only then deletes, object by object
 ```
 
 **Every hop is idempotent and fails safe.** If the S3 endpoint is unreachable,
@@ -725,15 +730,16 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | Stage | Proves |
 |---|---|
 | `render` | both charts render across 40 value combinations |
-| `negative` | 57 render-time guards each fire on the condition they claim to detect, plus a census that fails if a guard is added without a case |
+| `negative` | 114 render-time guards each fire on the condition they claim to detect, plus a census that fails if a guard is added without a case |
 | `promtool` | 16 alert-rule unit tests — each rule fires on the condition it describes |
 | `shell-syntax` | every script parses; no `yes \|` pipeline under `pipefail` |
 | `pvc-retention` | nothing holding data can be auto-deleted |
 | `runtime-templates` | scripts survive Helm rendering |
 | `duplicate-names` | no two objects collide |
-| `reclaimer` | 100 cases, asserting on **what was deleted**, not on log text. 32 drive the S3 backend through the real helper against a fake S3 (`If-Match` honoured, 412 on a stale ETag), a fake XNAT and a fake filer over HTTP, and assert which keys were deleted, that every DELETE carried `If-Match` and that none named a folder; 68 drive the filesystem backend against a real directory tree with real lock files, where the assertion is what is left on disk |
+| `reclaimer` | 114 cases, asserting on **what was deleted**, not on log text. 14 drive the edge's `PROOF=s3` proof (the filesystem backend against the fake S3: ETag and size per file, multipart ETag forms, repair requests written once and never in a dry run). 32 drive the S3 backend through the real helper against a fake S3 (`If-Match` honoured, 412 on a stale ETag), a fake XNAT and a fake filer over HTTP, and assert which keys were deleted, that every DELETE carried `If-Match` and that none named a folder; 68 drive the filesystem backend against a real directory tree with real lock files, where the assertion is what is left on disk |
 | `reclaimer-fence` | 27 cases against a stub kubectl: the drain and resume around an upgrade of the edge's staged-reclaimer fail closed, a failed read is never "no Job runs" |
-| `cleaner-activation` | 23 cases against a stub kubectl and a stub curl: the order of the steps that opt a bucket out of the SeaweedFS cleaner, and that a failed query (a pod listing, the multipart check, a scale) is never read as "nothing runs": a failure attests and resumes nothing beyond that point, what it changed stays marked on the object, and a rerun puts it back |
+| `cleaner-activation` | 27 cases against a stub kubectl and a stub curl: the order of the steps that opt a bucket out of the SeaweedFS cleaner, and that a failed query (a pod listing, the multipart check, a scale) is never read as "nothing runs": a failure attests and resumes nothing beyond that point, what it changed stays marked on the object, and a rerun puts it back |
+| `s3-uploader` | 9 cases against a stub rclone: the uploader copies only inside the upload-tree writer lock, skips a session while the lock is held, claims a repair request by rename and answers it with `--ignore-times`, returns it on a failed copy, requeues a claim left by a crash, and has no delete at all |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
 | `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |

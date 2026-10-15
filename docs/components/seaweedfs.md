@@ -8,10 +8,12 @@ sites and XNAT. Apache 2.0 licensed.
 
 ## Role in this stack
 
-The DICOM staging buffer. Edge sites upload session directories with
-`aws s3 sync` (`charts/edge/files/s3-uploader.sh` — the `minio/mc`
-implementation is gone) into the `staged/` prefix of **their own**
-bucket. With `seaweedfs.perSiteBuckets: true`, the default, that bucket
+The DICOM staging buffer. Edge sites copy session directories with
+`rclone copy` (`charts/edge/files/s3-uploader.sh` — the `minio/mc` and AWS
+CLI implementations are gone) into the `staged/` prefix of **their own**
+bucket, and keep their own copy until the edge's staged-reclaimer has proved
+the bucket's copy against it ([xnat-ingest.md](xnat-ingest.md), "S3 mode:
+prove, then delete"). With `seaweedfs.perSiteBuckets: true`, the default, that bucket
 is `ingest-<edge>`; the single shared `ingest-bucket` survives only for
 sites not yet migrated off it. The management-side `mgmt-upload-<edge>`
 pod polls that one bucket and forwards new sessions to XNAT. SeaweedFS
@@ -275,10 +277,10 @@ reclaimer is the only thing that deletes from staging.
 | Object | CronJob `mgmt-reclaim-<edge>`, **one per `edges[]` entry**, namespace `xnat-upload` |
 | Driven by | `dataPolicy.derived.s3Staged` in `charts/mgmt/values.yaml` |
 | Schedule | `17 * * * *` |
-| Age gate | `minAge: 1d` |
+| Age gate | `minAge: 36h`, the longer of the two clocks (and at most 36h: the XNAT proof runs only after it, and `SessionStagedNotConfirmedInXNAT` counts a session unconfirmed after 48h; the chart refuses more): the edge's staged-reclaimer must prove its local copy against the bucket (`stagedReclaimer.minAge`, a day) before this removes the bucket copy, or the two ping-pong (`RecopyLoop`); see [xnat-ingest.md](xnat-ingest.md), "S3 mode: prove, then delete" |
 | Per-run cap | `maxRemovals: 50` — bounds a "delete everything" bug to 50 sessions per hour, while still draining ~1200/day if genuinely needed |
 | Confirmation | `verifyAgainstXnat: true` — re-queries XNAT before deleting, rather than trusting the uploader's exit code, which only means the call returned |
-| Deletion path | `DELETE <filer>/buckets/<bucket>/<prefix>/<session>?recursive=true` via `mgmt.filerInternalEndpoint`, never `aws s3 rm` — see the section above for why |
+| Deletion path | one S3 `DeleteObject` per object, with `If-Match` set to the ETag listed before the proof, never a folder and never `aws s3 rm` or a filer folder delete — see "Deleting staged objects" above for why; the bucket must carry the cleaner opt-out and its attestation first |
 | Opt out | `reclaim: never` renders **nothing** — not a suspended CronJob, not an empty ConfigMap, so there is no object left that could be resumed by accident |
 
 Metrics discovery is likewise done: `charts/mgmt/templates/observability.yaml`

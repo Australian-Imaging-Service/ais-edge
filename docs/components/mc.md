@@ -2,8 +2,10 @@
 
 ## Overview
 
-The edge S3 uploader is a bash loop running inside the
-[AWS CLI](https://docs.aws.amazon.com/cli/) image. It pushes assigned
+The edge S3 uploader is a bash loop. It ran inside the
+[AWS CLI](https://docs.aws.amazon.com/cli/) image until October 2026 and now
+runs in a pinned Ubuntu (`upload.s3.shell.image`) with the rclone binary
+staged in by an initContainer; see the status note below. It pushes assigned
 session directories from the edge's working volume into that site's
 staging bucket in SeaweedFS.
 
@@ -12,6 +14,23 @@ document [`mc`](https://min.io/docs/minio/linux/reference/minio-mc.html),
 the MinIO client, which was the uploader until the client migration.
 `mc` is gone from the deployment entirely — no chart, script or installer
 references it (`charts/edge/files/s3-uploader.sh:5-7` says so outright).
+
+**Status (2026-10).** The loop now runs `rclone copy` and copies only: it
+never deletes the local copy, and `RECLAIM` and `DRY_RUN` are gone from the
+script. The staged-reclaimer CronJob retires each session after it has proved
+every file in the bucket (same size, ETag = MD5 of the bytes on disk) and
+leaves a repair request the uploader answers when a file fails. Steps 5 and 6
+below, the `aws s3 sync` call and the `rm -rf` describe the AWS CLI
+generation and are kept as history; the current behaviour is in
+[xnat-ingest.md, "S3 mode: prove, then delete"](xnat-ingest.md).
+The loop no longer runs in the AWS CLI image either: that image has every
+GNU tool the loop uses and no `flock`, and the first live run with the
+writer lock skipped every copy as lock contention for five hours (2026-10-14).
+The shell image is a dated `ubuntu:noble` build now; the loop checks each
+tool it needs by use at startup and stops the pod with the tool named
+(`dependency_missing`), and CI runs one real copy inside the pinned image
+(`tests/s3-uploader/image-tests.sh`). The image table and the "full
+userland" bullet below describe the AWS CLI generation.
 The S3 client is now the AWS CLI, so that edge, management and any future
 cloud target speak one client with one set of credential and endpoint
 conventions. Where behaviour differs from the `mc` era, this doc says so,
@@ -91,9 +110,12 @@ Both Secrets are delivered by cert-sync, not by the edge chart.
   the release name install.sh uses. One replica, `strategy: Recreate`:
   two uploaders would race on the same session directories and on the
   reclaim that follows a successful sync.
-- Image: `amazon/aws-cli:2.31.19` (pinned in `upload.s3.image`, not
-  `latest`). Its entrypoint is `aws`, so the pod overrides `command` to
-  `/bin/bash /scripts/s3-uploader.sh`.
+- Image: a dated `ubuntu:noble` build (pinned in `upload.s3.shell.image`,
+  not `latest`), with the rclone binary of `upload.s3.image`
+  (`rclone/rclone:1.75.0`) staged into `/opt/rclone` by an initContainer. It
+  was `amazon/aws-cli:2.31.19` until October 2026 (see the status note at the
+  top). The pod runs `command` `/bin/bash /scripts/s3-uploader.sh` whatever
+  the image's own entrypoint is.
 - Labels `app=xnat-ingest`, `component=s3-uploader`. **The component
   label is load-bearing** — every uploader alert rule and dashboard
   panel selects on it, and renaming it disables them silently.
@@ -239,7 +261,11 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
 - **A full userland** — `amazon/aws-cli` ships bash and findutils, so
   the loop can use `find -L`, `du` and `md5sum` directly. The old
   busybox-based `minio/mc` image had none of them, which forced
-  workarounds the script no longer needs.
+  workarounds the script no longer needs. (It does NOT ship `flock`, which
+  the writer lock added in 2026-10 needs; that is why the loop moved to a
+  plain Ubuntu image, which has the same GNU userland plus util-linux. The
+  loop now checks each tool by use at startup rather than trusting any
+  image's name.)
 
 ## Risks and failure modes
 
@@ -253,7 +279,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
 | Disk full on edge | `aws s3 sync` fails to stage; nothing reclaims | `/data/xnat-ingest` is the worker's hostPath behind the pipeline PVC; size accordingly. `EdgeDiskLow` alerts before it bites. |
 | Deletes the wrong session | Data loss | Reclaim is reached only after a zero-exit `sync`, only when `RECLAIM=onUploaded`, and never when `DRY_RUN=true`; re-runs are idempotent |
 | Session still being written | Partial upload | `SETTLE_MINUTES` quiet-period guard, plus a dangling-symlink check that skips rather than uploads an incomplete tree |
-| Image pulled from registry | Edge needs internet to pull `amazon/aws-cli:2.31.19` first time | Same as xnat-ingest: in air-gap, pre-import via `ctr`. Budget for a noticeably larger image than the old `minio/mc` one. |
+| Image pulled from registry | Edge needs internet to pull the shell image (`ubuntu:noble-<date>`, about 30 MB compressed; `amazon/aws-cli:2.31.19` before 2026-10) and `rclone/rclone:1.75.0` the first time | Same as xnat-ingest: in air-gap, pre-import via `ctr`. The Ubuntu image is smaller than the AWS CLI one was. |
 
 ## Replacements / future
 

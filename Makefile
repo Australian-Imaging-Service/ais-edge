@@ -42,8 +42,8 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation
-ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
+FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader
+ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy s3-uploader-image greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
 # clears it, because it has already run `render` as a stage and each stage is
@@ -121,6 +121,17 @@ reclaimer-fence:
 # query is never "nothing runs", and nothing is attested or resumed after one.
 cleaner-activation:
 	@tests/cleaner-activation/run-tests.sh
+
+# charts/edge/files/s3-uploader.sh against a stub rclone over a real tree: it
+# copies under the writer lock, serves repair requests, and never deletes.
+s3-uploader:
+	@tests/s3-uploader/run-tests.sh
+
+# Needs docker: the same script INSIDE the pinned shell image, with the pinned
+# rclone lifted as the initContainer lifts it, one real copy. The stage above
+# runs with the host's tools and was green while the image had no flock.
+s3-uploader-image:
+	@tests/s3-uploader/image-tests.sh
 
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,

@@ -22,6 +22,22 @@
 # CAUTION: the listing alone is not proof. XNAT keeps a row for a file it lost.
 # CAUTION: this proves presence and size, NOT content.
 #
+# PROOF=s3 (the edge in S3 mode, STORAGE=filesystem): the bucket is the next copy,
+# so each local file is proven by its object: the session prefix is listed once,
+# and the file passes when the object with its key has the file's size and an
+# ETag equal to the MD5 of the bytes read now, or the multipart form of it for
+# S3_CHUNK_SIZE or rclone's 5 MiB default. The identity of the file (inode, size,
+# times) is taken before the hash and checked after it. A resource is removed only
+# when its data files and its sidecars pass; the session's and the scans' own
+# sidecars (the parent __METADATA__.json files) must pass too when anything is
+# removed, and their identities are checked again inside the lock, before any
+# data goes and before each is unlinked. The age has TWO clocks here: the newest
+# local ctime AND the newest object's LastModified in the bucket must both be
+# older than minAge, so a backlog of old files copied today still waits its
+# window. A file that fails gets a repair request for the uploader (a file named
+# for the session under RECOPY_DIR; not in a dry run) and the session is kept;
+# XNAT is not consulted.
+#
 # DELETE, per session. A folder: inside the upload-tree writer lock, while a
 # wrapped writer holds <tree>.alive, and only if names and file identities did not
 # change; data first, the manifest last, empty folders after. A prefix: one
@@ -47,6 +63,7 @@ from datetime import datetime
 
 E = os.environ
 STORAGE = E.get("STORAGE", "filesystem")
+PROOF = E.get("PROOF", "xnat")   # xnat: the row and HEAD in XNAT; s3: the object and MD5 in S3 (edge, S3 mode)
 ROOT = E.get("STAGED_ROOT", "").rstrip("/")
 DRY_RUN = E.get("DRY_RUN", "true") == "true"
 MIN_AGE_S = int(E.get("MIN_AGE_S", "0"))
@@ -74,8 +91,10 @@ REMOVED, KEPT, SKIPPED, EMPTY = 0, 10, 11, 12
 
 def jlog(event, session, message, **extra):
     """One JSON line, the same shape as jlog() in reclaim-staged.sh."""
+    # proof: what a decision rests on (xnat or s3). SessionStagedNotConfirmedInXNAT
+    # counts only an XNAT proof as delivery; the edge's bucket proof is not one.
     rec = {"ts": datetime.now().astimezone().isoformat(timespec="seconds"),
-           "component": "s3-reclaimer", "cluster": E.get("CLUSTER_LABEL", ""),
+           "component": "s3-reclaimer", "cluster": E.get("CLUSTER_LABEL", ""), "proof": PROOF,
            "event": event, "session": session, "message": message[:400], **extra}
     print(json.dumps(rec, separators=(",", ":")), flush=True)
 
@@ -106,11 +125,186 @@ def walk(top):
     return out
 
 
+def parse_size(text):
+    """A Kubernetes-style quantity (64Mi, 5M, 1048576) in bytes."""
+    m = re.fullmatch(r"\s*(\d+)\s*([KMGT]i?)?\s*", text or "")
+    if not m:
+        raise Keep("bad_chunk_size", f"S3_CHUNK_SIZE={text!r} is not a size")
+    unit = {"": 1, "K": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9, "T": 10 ** 12,
+            "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40}[m.group(2) or ""]
+    return int(m.group(1)) * unit
+
+
+def identity(path):
+    """The file identity the delete path rechecks: a regular file, or Keep."""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise Keep("unknown_entry", f"{path} is not a regular file")
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def hashes(path, part_sizes):
+    """One pass over the file: the MD5 of the whole, and for each part size the
+    multipart ETag form, md5(part md5s)-<parts>, as S3 lists a multipart upload."""
+    import hashlib, math
+    block = math.gcd(*part_sizes)
+    whole, parts = hashlib.md5(), {p: ([], hashlib.md5(), 0) for p in part_sizes}
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(block), b""):
+            whole.update(chunk)
+            for p, (done, cur, filled) in parts.items():
+                cur.update(chunk)
+                filled += len(chunk)
+                if filled >= p:
+                    done.append(cur.digest()); cur, filled = hashlib.md5(), 0
+                parts[p] = (done, cur, filled)
+    forms = {}
+    for p, (done, cur, filled) in parts.items():
+        if filled:
+            done.append(cur.digest())
+        forms[p] = f"{hashlib.md5(b''.join(done)).hexdigest()}-{len(done)}"
+    return whole.hexdigest(), forms
+
+
+def list_prefix(s3, bucket, prefix, what):
+    """{rel: (ETag, size, LastModified epoch)} of the objects under prefix, from a
+    COMPLETE listing, or Keep. Every page must carry an explicit IsTruncated, every
+    truncated page a new continuation token, and the last page IsTruncated false:
+    botocore stops quietly on a truncated page that has no token (codex-191, codex-193),
+    and a listing that ended that way hides the objects of the pages it did not reach.
+    This run deletes on what it lists, so an incomplete listing keeps everything. A key
+    listed twice with different attributes, or outside the prefix, keeps as well."""
+    out, tokens, complete = {}, set(), False
+    try:
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            if complete or not isinstance(page.get("IsTruncated"), bool):
+                raise Keep("listing_incomplete", f"{what}: a page without a completion marker")
+            if page["IsTruncated"]:
+                token = page.get("NextContinuationToken")
+                if not isinstance(token, str) or not token or token in tokens:
+                    raise Keep("listing_incomplete", f"{what}: a truncated page without a new continuation token")
+                tokens.add(token)
+            else:
+                complete = True
+            for o in page.get("Contents") or []:
+                key = o["Key"]
+                if not key.startswith(prefix):
+                    raise Keep("listing_incomplete", f"{what}: {key} is outside the prefix asked for")
+                rel = key[len(prefix):]
+                if not rel or rel.endswith("/"):
+                    continue
+                rec = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
+                if rel in out and out[rel] != rec:
+                    raise Keep("listing_incomplete", f"{what}: {rel} listed twice with different attributes")
+                out[rel] = rec
+    except Keep:
+        raise
+    except Exception as e:
+        raise Keep("listing_failed", f"cannot list {prefix}: {e}")
+    if not complete:
+        raise Keep("listing_incomplete", f"{what}: the listing ended without its last page")
+    return out
+
+
+class S3Proof:
+    """PROOF=s3: the local files of one session, proven by their objects in the
+    staging bucket (see the header). The prefix is listed once; a file that fails
+    gets a repair request, and the Keep says so."""
+
+    def __init__(self, session):
+        import boto3
+        from botocore.config import Config
+        cert = E.get("S3_CLIENT_CERT")   # mTLS on the upload path: the same pair the uploader uses
+        self.s3 = boto3.client("s3", config=Config(client_cert=(cert, E["S3_CLIENT_KEY"])) if cert else None)
+        self.bucket, self.session = E["S3_BUCKET"], session
+        self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
+        self.parts = sorted({parse_size(E.get("S3_CHUNK_SIZE", "64Mi")), 5 << 20})
+        self.requested = False
+        self.objects = list_prefix(self.s3, self.bucket, self.prefix, "the proof's listing")   # rel: (etag, size, modified epoch)
+
+    def newest(self):
+        """When the newest object of the session reached the bucket (None: no object)."""
+        return max((m for _, _, m in self.objects.values()), default=None)
+
+    def refresh(self, rels):
+        """INSIDE THE LOCK, before the first unlink: list the prefix again and require
+        every object this run proved (rels) to be there as it was listed before the
+        proof: the same ETag, size AND LastModified. The proof ran outside the lock,
+        so between it and the lock the uploader can copy the session again (the same
+        bytes: identical ETag, a fresh LastModified, so the bucket clock restarts) or
+        the management reclaimer or a fault can remove or rewrite an object. A proof
+        from before either is stale. A missing or different object asks for a repair;
+        a fresh one is kept without a request (the next run proves it when it is old
+        enough). The lock does not hold the bucket still; this makes the proof and
+        the delete belong to the same observed generation of the objects, no more."""
+        live = list_prefix(self.s3, self.bucket, self.prefix, "the listing inside the lock")
+        for rel in sorted(rels):
+            was, now = self.objects.get(rel), live.get(rel)
+            if now is None:
+                raise self.repair("not_in_s3", f"{rel}: the object went between the proof and the lock")
+            if now[:2] != was[:2]:
+                raise self.repair("s3_mismatch", f"{rel}: the object changed between the proof and the lock")
+            if now[2] != was[2]:
+                raise Keep("s3_changed_after_proof", f"{rel}: the object was written again between the proof and the lock "
+                                                     f"(the same bytes, a new LastModified); the bucket clock restarts")
+
+    def prove(self, path, rel):
+        """The local file at path, whose key is <session>/<rel>: Keep unless its
+        object has its size and the MD5 of its bytes."""
+        before = identity(path)
+        whole, forms = hashes(path, self.parts)
+        if identity(path) != before:
+            raise Keep("changed_during_check", f"{rel} changed while it was hashed")
+        obj = self.objects.get(rel)
+        if obj is None:
+            raise self.repair("not_in_s3", f"{rel}: no object in the bucket")
+        etag, size, _ = obj
+        if size != before[2]:
+            raise self.repair("s3_mismatch", f"{rel}: the object has {size} bytes, the file {before[2]}")
+        if etag == whole or etag in forms.values():
+            return
+        if "-" in etag and etag.rsplit("-", 1)[1].isdigit():
+            raise Keep("unknown_layout", f"{rel}: a multipart object in parts of a size this run does not compute ({etag}); an operator must check it")
+        raise self.repair("s3_mismatch", f"{rel}: the object's ETag is not the MD5 of the file")
+
+    def repair(self, reason, message):
+        """A request for the uploader to copy the session again, once per run and
+        session, never in a dry run. Returns the Keep to raise."""
+        d = E.get("RECOPY_DIR")
+        if DRY_RUN or not d or self.requested:
+            return Keep(reason, message)
+        self.requested = True
+        try:
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, f".{self.session}.tmp")
+            with open(tmp, "w") as f:
+                f.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')} {reason} {message}\n")
+            if os.path.exists(os.path.join(d, self.session)):
+                os.unlink(tmp)   # an earlier request stands; the uploader serves it
+            else:
+                os.rename(tmp, os.path.join(d, self.session))
+            jlog("recopy_requested", self.session, f"asked the uploader to copy the session again: {message}", reason=reason)
+        except OSError as e:
+            return Keep("recopy_request_failed", f"{message}; and the repair request could not be written: {e}")
+        return Keep(reason, f"{message}; re-copy requested")
+
+
 def newest_ctime(top):
     # ctime, not mtime: assign hard-links files, so mtime is Orthanc's old write
     # time, while each new link updates ctime.
     return max([os.lstat(top).st_ctime] + [os.lstat(os.path.join(d, n)).st_ctime
                                            for d, ds, fs in os.walk(top) for n in ds + fs])
+
+
+def sidecar_digest(path):
+    """MD5 of a small sidecar's bytes, bound to its identity before and after the read."""
+    import hashlib
+    before = identity(path)
+    with open(path, "rb") as f:
+        digest = hashlib.md5(f.read()).hexdigest()
+    if identity(path) != before:
+        raise Keep("changed_during_check", f"{path} changed while it was read")
+    return digest
 
 
 class LocalStore:
@@ -147,28 +341,53 @@ class LocalStore:
         return WriterLock()
 
     def remove(self, res):
-        """Inside the lock. Data first, the manifest last, then the folders."""
+        """Inside the lock. Data first, the manifest last, then the folders. The
+        identities of every entry, and the bytes of the sidecars, as at the snapshot."""
         top = os.path.join(self.path, res.rel)
         if walk(top) != res.entries:
             raise Keep("changed_during_check", f"{res.rel} changed after the proof")
+        for rel, digest in res.sidecar_sums.items():
+            if sidecar_digest(os.path.join(top, rel)) != digest:
+                raise Keep("changed_during_check", f"{res.rel}/{rel} was rewritten after the proof")
         for rel in sorted(res.data) + sorted(res.sidecars, key=lambda n: n in MANIFESTS):
             os.unlink(os.path.join(top, rel))
         dirs = [n for n, i in res.entries.items() if i == "dir"]
         for rel in sorted(dirs, key=len, reverse=True) + ["."]:
             os.rmdir(os.path.normpath(os.path.join(top, rel)))   # refuses a non-empty folder
 
-    def tidy(self, resources, kept_rels, batches, unknown, act):
+    def parent_sidecars(self, scans):
+        """{rel: (identity, MD5)} of the sidecar FILES at the session root and at the
+        root of each scan folder named: the session's and the scans' own metadata,
+        which tidy() unlinks last. The bytes are hashed as well as the identity: the
+        kernel stamps mtime and ctime at tick granularity (milliseconds), so a
+        same-size rewrite within the tick of the previous write has the same
+        identity (codex-188's probe); these files are small. A sidecar that is not a
+        regular file keeps the session."""
+        out = {}
+        for base in [""] + list(scans):
+            for n in sorted(os.listdir(os.path.join(self.path, base))):
+                if n in SIDECARS:
+                    rel = f"{base}/{n}" if base else n
+                    path = os.path.join(self.path, rel)
+                    out[rel] = (identity(path), sidecar_digest(path))
+        return out
+
+    def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
         """Scan folders with only sidecars, then the session folder if it has only
         sidecars. With act=False only say whether there is something to remove. A
         kept resource or a batch is a folder with files, so its scopes are never
-        "only sidecars"; the lists are for the prefix store."""
+        "only sidecars"; the lists are for the prefix store. proven: the parent
+        sidecars this run snapshotted and proved ({rel: identity}); a sidecar not
+        in it, or whose identity changed, then keeps the session. None is the one
+        deliberate case: a leftover folder that held no data at the start of the
+        run, whose sidecars describe nothing."""
         found = False
         for scan in sorted(os.listdir(self.path)):
             spath = os.path.join(self.path, scan)
             if scan in SIDECARS or scan in unknown or os.path.islink(spath) or not os.path.isdir(spath):
                 continue
-            found = only_sidecars(spath, act) or found
-        return only_sidecars(self.path, act) or found
+            found = only_sidecars(spath, act, proven, scan) or found
+        return only_sidecars(self.path, act, proven, "") or found
 
     def gone(self):
         return not os.path.lexists(self.path)
@@ -184,15 +403,7 @@ class S3Store:
         self.s3 = boto3.client("s3")
         self.bucket = E["S3_BUCKET"]
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
-        self.objects = {}   # rel: (etag, size, modified epoch)
-        try:
-            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
-                for o in page.get("Contents") or []:
-                    rel = o["Key"][len(self.prefix):]
-                    if rel and not rel.endswith("/"):
-                        self.objects[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
-        except Exception as e:
-            raise Keep("listing_failed", f"cannot list {self.prefix}: {e}")
+        self.objects = list_prefix(self.s3, self.bucket, self.prefix, "the snapshot")   # rel: (etag, size, modified epoch)
         self.deleted, self.live = set(), None
 
     def newest(self):
@@ -260,15 +471,20 @@ class S3Store:
             self.delete(f"{res.rel}/{rel}")
 
     def relist(self):
+        """Every key under the prefix now, folder entries included (a late folder is a
+        late arrival too), from a complete listing."""
+        listed = list_prefix(self.s3, self.bucket, self.prefix, "the listing before the sidecars go")
         try:
-            return {o["Key"][len(self.prefix):]
-                    for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix)
-                    for o in page.get("Contents") or []}
+            folders = {o["Key"][len(self.prefix):]
+                       for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix)
+                       for o in page.get("Contents") or [] if o["Key"].endswith("/")}
         except Exception as e:
             raise Keep("listing_failed", f"cannot list {self.prefix} again: {e}")
+        return set(listed) | folders
 
-    def tidy(self, resources, kept_rels, batches, unknown, act):
-        """Sidecars with nothing left to describe. A sidecar is recognised by where
+    def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
+        """Sidecars with nothing left to describe (proven is the folder store's; here
+        every delete is bound to the listing by If-Match). A sidecar is recognised by where
         it is, never by its name alone: at the root of a resource this run
         recognised, at the root of a scan folder, or at the session root. Every
         other object is data. Nothing under an unknown entry, a batch folder or a
@@ -309,12 +525,22 @@ class S3Store:
         return not (seen - self.deleted)
 
 
-def only_sidecars(path, act):
-    """True if the folder holds sidecars only. With act=True, also remove it."""
-    if not all(n in SIDECARS for n in os.listdir(path)):
+def only_sidecars(path, act, proven=None, base=""):
+    """True if the folder holds sidecars only. With act=True, also remove it: each
+    sidecar must then be one the run snapshotted and proved (in proven, keyed by
+    its path from the session root) with the same identity, unless proven is None."""
+    names = sorted(os.listdir(path))
+    if not all(n in SIDECARS for n in names):
         return False
     if act:
-        for n in os.listdir(path):
+        if proven is not None:
+            for n in names:
+                rel = f"{base}/{n}" if base else n
+                if rel not in proven:
+                    raise Keep("changed_during_check", f"{rel} appeared after the proof")
+                if identity(os.path.join(path, n)) != proven[rel][0]:
+                    raise Keep("changed_during_check", f"{rel} changed after the proof")
+        for n in names:
             os.unlink(os.path.join(path, n))
         os.rmdir(path)
     return True
@@ -330,6 +556,12 @@ class Resource:
             raise Keep("unknown_entry", f"{rel} has a hidden entry")
         files = [n for n, i in self.entries.items() if i != "dir"]
         self.sidecars = [n for n in files if n in SIDECARS]
+        # The sidecars' bytes, rechecked before the delete (a folder store): the kernel
+        # stamps file times at tick granularity, so a same-size rewrite within the tick
+        # of the previous write keeps its identity. These files are small. Data files
+        # are bound by identity: the age gate puts every identity at least minAge
+        # before any later write, which lands in a later tick.
+        self.sidecar_sums = {n: sidecar_digest(os.path.join(store.path, rel, n)) for n in self.sidecars} if isinstance(store, LocalStore) else {}
         self.data = {n: self.entries[n] for n in files if n not in SIDECARS}
         self.sizes = {n: store.size(i) for n, i in self.data.items()}
         self.sums, self.label = self.manifest() if self.data else ({}, None)
@@ -375,6 +607,12 @@ class Resource:
             # the image header and refuses a folder that differs. Not mapped.
             raise Keep("unmapped_resource", f"{self.rel}: DICOM datatype {datatype} is not mapped")
         return name   # not DICOM: the uploader keeps the folder name
+
+    def prove_s3(self, proof):
+        """Raise Keep unless every file of this folder (data and sidecars) is in the
+        bucket with its size and the MD5 of its bytes."""
+        for rel in sorted(self.data) + sorted(self.sidecars):
+            proof.prove(os.path.join(self.store.path, self.rel, rel), f"{self.rel}/{rel}")
 
     def prove(self, xnat, index):
         """Raise Keep unless XNAT holds every file that the manifest names, all in
@@ -555,18 +793,35 @@ def reclaim(session):
              f"last written {age}s ago, minAge is {E.get('MIN_AGE')} ({MIN_AGE_S}s) from {E.get('MIN_AGE_KEY')}",
              age_s=age)
         return SKIPPED
-    if E.get("VERIFY_XNAT", "true") != "true":
+    if PROOF == "xnat" and E.get("VERIFY_XNAT", "true") != "true":
         raise Keep("verify_disabled", "verifyAgainstXnat=false: this deleter removes only what XNAT proves")
+    proof = None
+    if PROOF == "s3":
+        # THE SECOND CLOCK. The files are proven against the bucket copy, and the
+        # mgmt reclaimer's clock starts when the objects reach it; this one must
+        # too, or a backlog of old files copied today is retired at once, with no
+        # window in which a fault in the copy can still be seen. The listing is
+        # this run's one snapshot of the prefix; a listing error keeps the session.
+        proof = S3Proof(session)
+        newest = proof.newest()
+        s3_age = None if newest is None else now - int(newest)
+        if s3_age is not None and s3_age < MIN_AGE_S:
+            jlog("reclaim_skipped", session,
+                 f"the newest object of this session reached the bucket {s3_age}s ago, minAge is {E.get('MIN_AGE')} "
+                 f"({MIN_AGE_S}s) from {E.get('MIN_AGE_KEY')}; the local copy was last written {age}s ago",
+                 age_s=age, s3_age_s=s3_age)
+            return SKIPPED
 
     # Snapshot. A scan folder is <id>.<type>. Its dot entries are the uploader's
     # batches: never deleted here, as one can hold the only link to unproved data.
-    resources, kept, kept_rels, unknown, batches = [], [], [], [], []
+    resources, kept, kept_rels, unknown, batches, scans = [], [], [], [], [], []
     for scan, kind in sorted(store.names().items()):
         if scan in SIDECARS:
             continue
         if scan.startswith(".") or "." not in scan or kind != "dir":
             unknown.append(scan)
             continue
+        scans.append(scan)
         for res, rkind in sorted(store.names(scan).items()):
             rel = f"{scan}/{res}"
             if res in SIDECARS:
@@ -581,9 +836,40 @@ def reclaim(session):
             except Keep as k:
                 kept.append(k)
                 kept_rels.append(rel)
+    # The parent sidecars (the session's and each scan's own metadata) as they are
+    # now. tidy() unlinks them last, so the same set with the same identities is
+    # required again inside the lock, before any data goes and before each is
+    # unlinked. Under PROOF=s3 each is proven in the bucket as well, below. A
+    # session that holds no data file at all is the one case without this bind:
+    # its sidecars describe nothing (an earlier run removed the data and stopped).
+    held_data = any(r.data for r in resources) or bool(kept_rels)
+    parents = store.parent_sidecars(scans) if STORAGE == "filesystem" else {}
 
-    # Proof, outside the lock.
-    if resources:
+    # Proof, outside the lock. proved: the keys this run proved, rechecked in the lock.
+    proved = set()
+    if resources and PROOF == "s3":
+        try:
+            for res in list(resources):
+                try:
+                    res.prove_s3(proof)
+                    proved |= {f"{res.rel}/{rel}" for rel in list(res.data) + list(res.sidecars)}
+                except Keep as k:
+                    kept.append(k)
+                    kept_rels.append(res.rel)
+                    resources.remove(res)
+            # the parent sidecars go with the last resource of their folder (tidy):
+            # each must be in the bucket before any data of the session is removed
+            for rel in sorted(parents):
+                if resources:
+                    proof.prove(os.path.join(store.path, rel), rel)
+                    if identity(os.path.join(store.path, rel)) != parents[rel][0]:
+                        raise Keep("changed_during_check", f"{rel} changed after the snapshot")
+                    proved.add(rel)
+        except Keep as k:   # a parent sidecar: nothing of the session is removed
+            kept.append(k)
+            kept_rels += [r.rel for r in resources]
+            resources = []
+    elif resources:
         xnat = Xnat()
         try:
             index = xnat.file_index(*parts)
@@ -598,11 +884,18 @@ def reclaim(session):
             xnat.close()
     nfiles = sum(len(r.data) for r in resources)
     if resources and not kept and not unknown:
-        jlog("reclaim_confirmed", session,
-             f"XNAT holds each of the {nfiles} file(s) of this session with the same size (HEAD); content is not verified",
-             resources=len(resources), have=nfiles)
+        if PROOF == "s3":
+            jlog("reclaim_confirmed", session,
+                 f"the bucket holds each of the {nfiles} file(s) of this session with the MD5 of its bytes (ETag) and its size",
+                 resources=len(resources), have=nfiles)
+        else:
+            jlog("reclaim_confirmed", session,
+                 f"XNAT holds each of the {nfiles} file(s) of this session with the same size (HEAD); content is not verified",
+                 resources=len(resources), have=nfiles)
     seen = [r.rel for r in resources] + kept_rels
-    if not resources and not store.tidy(seen, kept_rels, batches, unknown, act=False):
+    # Nothing proven: a session that still holds data is reported kept as it is; one
+    # that holds none may still have leftover sidecar folders to tidy.
+    if not resources and (held_data or not store.tidy(seen, kept_rels, batches, unknown, act=False)):
         return report_kept(session, kept, unknown, batches, 0)
     if DRY_RUN:
         jlog("reclaim_skipped", session, f"dataPolicy dryRun/disabled: would have removed {len(resources)} proven resource(s)",
@@ -613,6 +906,21 @@ def reclaim(session):
     # refused or failed delete ends every delete of this session for this run.
     removed, stopped = 0, False
     with store.lock():
+        # The parent sidecars first: the same set, with the same identities, as at
+        # the snapshot, or nothing goes. The resources are rechecked by remove().
+        # Then the bucket again (PROOF=s3): every proved object as it was listed,
+        # or the proof is stale and nothing goes.
+        if STORAGE == "filesystem" and held_data:
+            try:
+                if store.parent_sidecars(scans) != parents:
+                    raise Keep("changed_during_check", "the session's or a scan's metadata changed after the proof")
+                if PROOF == "s3" and resources:
+                    proof.refresh(proved)
+            except Keep as k:
+                kept.append(k)
+                kept_rels += [r.rel for r in resources]
+                report_kept(session, kept, unknown, batches, 0)
+                return KEPT
         for res in resources:
             try:
                 store.remove(res)
@@ -622,11 +930,12 @@ def reclaim(session):
                 stopped = True
                 break
             removed += 1
-            jlog("reclaim_resource_removed", session, f"removed {res.rel}: {len(res.data)} file(s) proved in XNAT",
+            jlog("reclaim_resource_removed", session,
+                 f"removed {res.rel}: {len(res.data)} file(s) proved in {'the bucket' if PROOF == 's3' else 'XNAT'}",
                  files=len(res.data))
         if not stopped:
             try:
-                store.tidy(seen, kept_rels, batches, unknown, act=True)
+                store.tidy(seen, kept_rels, batches, unknown, act=True, proven=parents if held_data else None)
             except Keep as k:
                 kept.append(k)
                 stopped = True
@@ -635,7 +944,8 @@ def reclaim(session):
         report_kept(session, kept, unknown, batches, removed)
         return REMOVED if removed else KEPT
     if not nfiles and not removed:
-        # No data files are left to deliver. Say so, or SessionStagedNotConfirmedInXNAT
+        # No data files are left to deliver (leftover sidecars, retired without a
+        # proof: they describe nothing). Say so, or SessionStagedNotConfirmedInXNAT
         # fires 48h later for a session that is gone on purpose.
         jlog("reclaim_confirmed", session, "the session holds no data files: nothing left to deliver",
              resources=0, have=0, empty=True)
@@ -657,13 +967,28 @@ def bucket_sessions():
     """The session names under the staging prefix, one per line (`--list`)."""
     import boto3
     s3, prefix = boto3.client("s3"), E.get("S3_PREFIX", "staged").strip("/") + "/"
+    names, tokens, complete = [], set(), False
     try:
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix, Delimiter="/"):
+            # the same complete-listing rule as list_prefix(): a run that misses a page misses sessions
+            if complete or not isinstance(page.get("IsTruncated"), bool):
+                raise ValueError("a page without a completion marker")
+            if page["IsTruncated"]:
+                token = page.get("NextContinuationToken")
+                if not isinstance(token, str) or not token or token in tokens:
+                    raise ValueError("a truncated page without a new continuation token")
+                tokens.add(token)
+            else:
+                complete = True
             for p in page.get("CommonPrefixes") or []:
-                print(p["Prefix"][len(prefix):].rstrip("/"))
+                names.append(p["Prefix"][len(prefix):].rstrip("/"))
+        if not complete:
+            raise ValueError("the listing ended without its last page")
     except Exception as e:
-        print(f"cannot list {prefix}: {e}", file=sys.stderr)
+        print(f"cannot list {prefix} completely: {e}", file=sys.stderr)
         return 1
+    for n in names:
+        print(n)
 
 
 def cleaner_gate():

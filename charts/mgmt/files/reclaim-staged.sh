@@ -45,6 +45,8 @@
 #     reclaim_removed    every object (or file) of this session was deleted
 #     reclaim_kept       deliberately NOT removed — undelivered, or uncertain
 #     reclaim_failed     reclaim-files.py stopped with an exit code it does not define
+#     recopy_requested   PROOF=s3: a local file is not in the bucket as it is here;
+#                        the uploader is asked to copy the session again
 #     reclaim_unavailable  pre-flight failed; nothing was DECIDED. Emitted once
 #                        with session="" for the run, then once per staged
 #                        session — see the pre-flight note below for why the
@@ -331,6 +333,16 @@ if [ -n "$TREE_MIN_AGE" ]; then
         MIN_AGE="$TREE_MIN_AGE" MIN_AGE_S="$TREE_MIN_AGE_S" _minage_key="$TREE_MIN_AGE_KEY"
     fi
 fi
+# A FOLDER STORE NEEDS A POSITIVE AGE. The delete rechecks each file by identity (inode,
+# size, mtime, ctime) taken before the proof; the kernel stamps file times at tick
+# granularity, so a rewrite within the tick of the previous write keeps its identity.
+# With minAge of at least a second every identity the proof saw is at least that much
+# older than any later write, which lands in a later tick. With 0, a same-size rewrite
+# right after a write can pass the recheck (codex-193). The chart refuses under 1m;
+# this is the deleter's own floor. The bucket store needs none: If-Match binds content.
+if [ "$STORAGE" = "filesystem" ] && [ "$MIN_AGE_S" -lt 1 ]; then
+    unavailable minage_zero "${_minage_key}=${MIN_AGE} is under one second: the file identities this deleter rechecks cannot tell a rewrite within the same clock tick from the original; set at least 1m. Nothing was examined"
+fi
 
 # The per-run removal cap is the blast-radius bound, and a non-numeric value
 # does not clamp it, it REMOVES it: `[ N -ge notanumber ]` prints "integer
@@ -448,7 +460,17 @@ xnat_logout() {
 # exit early and would otherwise leak the very session this change exists to stop.
 trap xnat_logout EXIT
 
-if [ "$VERIFY_XNAT" = "true" ]; then
+# PROOF=s3 (the edge in S3 mode): the next copy is the bucket, and reclaim-files.py
+# proves each file there (the MD5 of its bytes against the object's ETag). XNAT is
+# not consulted and no XNAT credential is needed; verifyAgainstXnat has no effect.
+PROOF="${PROOF:-xnat}"
+case "$PROOF" in xnat|s3) : ;; *) unavailable bad_proof "PROOF=${PROOF} is not one of xnat, s3 — refusing to run" ;; esac
+if [ "$PROOF" = "s3" ]; then
+    [ "$STORAGE" = "filesystem" ] || unavailable bad_proof "PROOF=s3 proves a local tree against the bucket; STORAGE=${STORAGE} already is the bucket"
+    [ -n "${S3_BUCKET:-}" ] || unavailable bucket_unset "PROOF=s3 needs S3_BUCKET; nothing was examined"
+    python3 -c 'import boto3' 2>/dev/null || \
+        unavailable missing_tool "python3 in this image has no boto3 module; reclaim-files.py needs it to list the bucket for the proof; nothing was examined"
+elif [ "$VERIFY_XNAT" = "true" ]; then
     if [ -z "$XNAT_SERVER" ] || [ -z "${XNAT_USER:-}" ] || [ -z "${XNAT_PASS:-}" ]; then
         unavailable xnat_credentials_missing "verifyAgainstXnat=true but the XNAT credentials Secret gave an empty server/username/password"
     fi
@@ -506,7 +528,7 @@ if [ "$STORAGE" = "filesystem" ]; then
 else
     _origin="bucket=${S3_BUCKET} prefix=${S3_PREFIX}"
 fi
-jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
+jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} proof=${PROOF} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
 
 # -----------------------------------------------------------------------------
 # S3 helpers. Each returns ERR on ANY doubt — a non-zero exit, an empty

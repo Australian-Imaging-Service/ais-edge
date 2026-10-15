@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stub rclone for the s3-uploader harness. Records every call to calls.log and answers
+# from the case's fixtures: `lsd` fails when lsd.fail exists; `copy` fails when copy.fail
+# exists, sleeps copy.sleep seconds, and while it "copies" records whether the writer lock
+# is held (flock -n must FAIL) and whether the request file is claimed, and writes a new
+# request when request.during exists (a request arriving mid-copy).
+S="${SCENARIO:?SCENARIO required}"
+echo "rclone $*" >> "$S/calls.log"
+case "$1" in
+    lsd)  [ -f "$S/lsd.fail" ] && { echo "stub: endpoint down" >&2; exit 1; }; exit 0 ;;
+    copy)
+        src=$2; session=$(basename "${src%/}")
+        if flock -n "$WRITER_LOCK" true 2>/dev/null; then echo "lock-free $session" >> "$S/observed"; else echo "lock-held $session" >> "$S/observed"; fi
+        [ -f "$RECOPY_DIR/$session.claimed" ] && echo "claimed $session" >> "$S/observed"
+        [ -f "$S/request.during" ] && printf 'during-copy\n' > "$RECOPY_DIR/$session"
+        [ -f "$S/copy.sleep" ] && sleep "$(cat "$S/copy.sleep")"
+        [ -f "$S/copy.fail" ] && { echo "stub: copy failed" >&2; exit 1; }
+        exit 0 ;;
+esac
+echo "stub rclone: unexpected call: $*" >&2; exit 1

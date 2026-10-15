@@ -82,11 +82,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             keys = [k for k in keys if k > start] if start else keys
             page = int(fx.get("page", 0) or 0)
             shown, more = (keys[:page], len(keys) > page) if page else (keys, False)
+            # truncate_no_token: the first page says IsTruncated=true and carries NO
+            # continuation token, with the last key left off it, as a server that
+            # stops paginating does; botocore then ends the listing quietly.
+            no_token = False
+            if fx.get("truncate_no_token") and not start and len(keys) > 1:
+                shown, more, no_token, fx["truncate_no_token"] = keys[:-1], True, True, False
+                save(fx)
             items = common + "".join(
                 f"<Contents><Key>{escape(k)}</Key><Size>{fx['objects'][k]['size']}</Size>"
                 f"<ETag>&quot;{fx['objects'][k]['etag']}&quot;</ETag>"
                 f"<LastModified>{fx['objects'][k]['modified']}</LastModified></Contents>" for k in shown)
-            nxt = f"<NextContinuationToken>{escape(shown[-1])}</NextContinuationToken>" if more else ""
+            nxt = f"<NextContinuationToken>{escape(shown[-1])}</NextContinuationToken>" if more and not no_token else ""
             body = (f'<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>{escape(parts[0])}</Name>'
                     f"<Prefix>{escape(prefix)}</Prefix><KeyCount>{len(shown)}</KeyCount>"
                     f"<IsTruncated>{'true' if more else 'false'}</IsTruncated>{nxt}{items}</ListBucketResult>")

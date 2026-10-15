@@ -20,13 +20,13 @@ bash script in `charts/edge/files/s3-uploader.sh`:
   "ts":         "2026-05-14T07:16:50+00:00",
   "component":  "s3-uploader",
   "edge":       "edge-dev",
-  "event":      "upload_completed",    // one of nine names — see the table below
+  "event":      "upload_completed",    // one of twelve names — see the table below
   "session":    "test-project.subject-04.visit01",
   "message":    "",                    // human-readable; can be empty
   "bytes":       538740,               // total session size on disk via `du -sb`
   "files":       2,                    // objects staged: DICOMs + __MANIFEST__.json per resource + any other metadata
   "dicoms":      1,                    // subset of `files` matching *.dcm / *.DCM
-  "duration_s":  0                     // `aws s3 sync` wall time, only on upload_completed / upload_failed
+  "duration_s":  0                     // `rclone copy` wall time, only on upload_completed / upload_failed
 }
 ```
 
@@ -34,7 +34,7 @@ bash script in `charts/edge/files/s3-uploader.sh`:
 
 The `sum by (event)` panels draw one series per name in this table and nothing
 filters the set, so a legend entry that is not listed here means the script
-grew an event and this page did not. All nine come from `jlog` calls in
+grew an event and this page did not. All twelve come from `jlog` calls in
 `charts/edge/files/s3-uploader.sh`.
 
 | Event | Emitted when | What it tells the operator |
@@ -44,10 +44,18 @@ grew an event and this page did not. All nine come from `jlog` calls in
 | `endpoint_retrying` | A pre-flight attempt failed; retrying in 5s, up to 12 attempts. | Expected for a few seconds during a pod-startup or DNS race; alarming any later. |
 | `endpoint_failed` | All 12 attempts failed (60s); the script exits rather than entering the upload loop. | The pod crashloops **on purpose** — a broken endpoint or credential is made visible instead of quietly uploading nothing. Its `message` names the client-certificate state (`no client certificate is configured` / `configured and readable` / `MISSING OR UNREADABLE`), because with mTLS on the upload path this probe is the **first** thing a bad certificate breaks — and (measured) the endpoint answers HTTP 400/403 with an HTML body that rclone reports as an S3 XML parse failure, naming neither certificates nor auth, so it otherwise reads as an unreachable endpoint. The rclone error for each attempt is on stderr, not in this field. |
 | `upload_started` | A settled, changed session is about to transfer; carries `bytes`, `files`, `dicoms`. | Denominator of the failure-rate panel. |
-| `upload_completed` | `aws s3 sync` exited 0; adds `duration_s`. | The success counter every headline panel sums. |
-| `upload_failed` | `aws s3 sync` exited non-zero; adds `duration_s`. Retried next cycle. | Numerator of the failure-rate panel. |
-| `upload_skipped` | The session has dangling symlinks, or the re-probe immediately before the transfer failed. | Neither success nor failure: the local copy is deliberately preserved for the next cycle. Sustained `upload_skipped` with no `upload_completed` is a stalled pipeline that the `upload_failed` panels will never show. |
-| `reclaim_skipped` | The upload succeeded but `dataPolicy` is in `dryRun`, so the local copy stays. | Expected while previewing reclaim decisions; in steady state it means staging keeps growing after every successful upload. |
+| `upload_completed` | `rclone copy` exited 0; adds `duration_s`. A claimed repair request is removed. | The success counter every headline panel sums. |
+| `upload_failed` | `rclone copy` exited non-zero; adds `duration_s`. Retried next cycle; a claimed repair request goes back to pending. | Numerator of the failure-rate panel. |
+| `upload_skipped` | The session has dangling symlinks, the re-probe immediately before the transfer failed, or the upload-tree writer lock was not free within `upload.s3.lockWait` seconds. | Neither success nor failure: the local copy is deliberately preserved for the next cycle. Sustained `upload_skipped` with no `upload_completed` is a stalled pipeline that the `upload_failed` panels will never show. |
+| `recopy_requeued` | At startup, a repair request claimed by a previous container was returned to pending. | A crash mid-copy; the next pass answers the request. |
+| `recopy_claimed` | A repair request from the staged-reclaimer was claimed and the session is copied again with `--ignore-times`. | One per repair attempt; a request whose copy never completes is claimed again on every pass. More than three completed copies (`recopy_done`) for one session in 24h is `RecopyLoop`: the management reclaimer is removing the bucket copy before the edge has proven its own against it. |
+| `recopy_done` | The copy that answered a repair request exited 0. | The repaired file should prove on the reclaimer's next run. More than three for one session in 24h is `RecopyLoop` (the two clocks crossing). |
+| `dependency_missing` | At startup, a tool the loop needs is not in the image, or is a busybox variant without the options used (checked by use); the pod exits 1. | `S3UploaderRestartedRecently`. The line names the tool; fix `upload.s3.shell.image`. |
+| `lock_failed` | The upload-tree writer lock could not be opened, or `flock` failed for a reason that is not a timeout; the pod exits 1 and a claimed repair request goes back to pending. | `S3UploaderRestartedRecently`. A timeout is `upload_skipped`, never this. |
+| `marker_retired` | A state file whose session is in no stage directory any more was dropped. | Housekeeping; a later session of the same name starts without an inherited fingerprint. |
+
+`reclaim_skipped` is gone: the uploader no longer deletes, so it has no
+delete to skip. A panel that still selects it draws an empty series.
 
 An already-uploaded, unchanged session emits **nothing at all** — the
 fingerprint check `continue`s silently, because a per-cycle "still fine" event

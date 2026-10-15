@@ -280,19 +280,27 @@ either way; step 7 is where you would see it.)
 **A fresh install expires nothing.** Run with `dryRun` for a week, read the
 decisions in the logs, then enable.
 
-**Under `upload.mode: direct` a `staged-reclaimer` CronJob retires the upload
-tree** (`/data/assigned` under `deid.engine: orthanc`, `/data/deidentified`
-under `ingest`). For each resource of a session it finds every local file in
-XNAT's file listing and checks it with a HEAD request: present, with the same
-size (no download, so content is not compared). It removes only the files it
-proved, inside the upload-tree writer lock, and keeps everything it cannot
-prove. The first upgrade to this check, and any rollback to a release without
-the lock, need the drain in
+**A `staged-reclaimer` CronJob retires the upload tree in both upload modes**
+(`/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
+`ingest`). Under `upload.mode: s3` it proves each local file against the
+bucket: the object must be there with the same size and an ETag equal to the
+MD5 of the bytes read from disk now (or the multipart form of it for
+`upload.s3.chunkSize` and rclone's 5 MiB). A file that fails leaves one repair
+request under the uploader's state directory, and the uploader copies the
+session again. Under `upload.mode: direct` it finds every local file in XNAT's
+file listing and checks it with a HEAD request: present, with the same size
+(no download, so content is not compared). In both modes it removes only the
+files it proved, inside the upload-tree writer lock, and keeps everything it
+cannot prove. The first upgrade to this check, and any rollback to a release
+without the lock, need the drain in
 [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule,
 its minimum age (counted from when the newest file reached the tree), whether
-it verifies against XNAT (with `false` it removes nothing), and how many
-sessions one run may remove.
+it verifies against XNAT under `direct` (with `false` it removes nothing), and
+how many sessions one run may remove. Under `s3` the management side's
+`dataPolicy.derived.s3Staged.minAge` must be the longer clock by a wide
+margin, or the bucket copy goes before the edge has proven its own against it
+(`charts/edge/values.yaml`, "the two clocks").
 
 ---
 
@@ -946,11 +954,17 @@ lives in it.
  5. group-orthanc pulls it to /data/grouped, relabels `xnat-ingest-processed`
  6. assign builds an XNAT session in /data/assigned
        + __MANIFEST__.json  (filenames + MD5 per resource)
- 7. s3-uploader waits settleMinutes, then uploads to s3://ingest-<edge>/staged/
+ 7. s3-uploader waits settleMinutes, then copies to s3://ingest-<edge>/staged/
+       (a copy: the edge keeps its own until step 9)
  8. mgmt-upload-<edge> writes it into XNAT
- 9. mgmt-reclaim-<edge> re-queries XNAT, proves each manifest file by its
-       row in the mapped resource and a HEAD of the same size, and only
-       then deletes the staged copy, object by object
+ 9. staged-reclaimer (edge), after stagedReclaimer.minAge, proves each local
+       file against the bucket (same size, ETag = MD5 of the bytes on disk)
+       and only then deletes the edge copy; a file that fails leaves a
+       repair request and step 7 copies the session again
+10. mgmt-reclaim-<edge>, after s3Staged.minAge (the longer clock), re-queries
+       XNAT, proves each manifest file by its row in the mapped resource and
+       a HEAD of the same size, and only then deletes the staged copy,
+       object by object
 ```
 
 **Order matters at step 2.** The original is written to the facility backup
@@ -961,10 +975,16 @@ processed derivative.
 being written to is not a session ready to ship. The uploader waits for the tree
 to stop changing.
 
-**Step 9 is the only place patient data is deleted**, and it is deliberately
-paranoid:
+**Steps 9 and 10 are the only places patient data is deleted**, and both are
+deliberately paranoid:
 
-* XNAT creates the experiment on the *first* resource POST, so "the experiment
+* Step 9 trusts neither rclone's exit code nor the bucket listing alone: it
+  reads each local file again, hashes it, and compares the hash and the size
+  with what the bucket lists for that key. A changed file, a missing object or
+  an ETag in a layout it cannot compute keeps the session (the first two also
+  leave a repair request), and a listing error keeps the whole session. It
+  deletes inside the upload-tree writer lock, one proved resource at a time.
+* Step 10 is the management side. XNAT creates the experiment on the *first* resource POST, so "the experiment
   exists" is **true for a partial upload**. Existence is not evidence.
 * So the reclaimer reads every `__MANIFEST__.json` for the file names, finds
   each name's row in the one XNAT resource the uploader maps that folder to,
@@ -984,8 +1004,9 @@ paranoid:
   capped, leaving the rest for someone to notice.
 
 **Files:** `charts/edge/files/deidentify-and-forward.lua`,
-`charts/edge/files/s3-uploader.sh`, `charts/mgmt/files/reclaim-staged.sh`,
-`charts/mgmt/files/reclaim-files.py`
+`charts/edge/files/s3-uploader.sh`, `charts/edge/templates/staged-reclaimer.yaml`,
+`charts/mgmt/files/reclaim-staged.sh`, `charts/mgmt/files/reclaim-files.py` (the
+edge runs the same two files from `charts/edge/files/`)
 
 ---
 
@@ -1465,7 +1486,9 @@ is absent, so **it does not upgrade the cluster that already runs v0.0.30.**
 Everything else that is behind upstream is behind for currency reasons, not
 CVE reasons. The gaps worth a diary entry: `amazon/aws-cli` 2.31.19 is from
 October 2025, so it carries ~9 months of unpatched Amazon Linux base layer in
-a pod that holds S3 credentials on both clusters; `timberio/vector` is 0.49.0
+the management bucket Job that holds S3 credentials (the edge uploader left
+that image for a dated `ubuntu:noble` build when the writer lock needed a
+`flock` the AWS CLI image does not ship); `timberio/vector` is 0.49.0
 on the edges against 0.57.0 on management, eight releases and about a year of
 skew inside one fleet; and Loki 3.6.8 carries CVE-2026-21729, a genuine
 unauthenticated DoS upstream that is not unauthenticated *here* because the
