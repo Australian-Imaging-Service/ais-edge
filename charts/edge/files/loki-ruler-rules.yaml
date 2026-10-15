@@ -567,6 +567,39 @@ groups:
         the deidentification-profile.json for syntax issues.
 
         '
+  - alert: IngestStageError
+    # Vector promotes JSON log severity to the level stream label, then
+    # removes that field from the body. Match that label, not the word
+    # ERROR in a filename or message. Plain tracebacks are JSON-wrapped by
+    # Vector with level=unknown, so inspect their decoded message too.
+    # The assign missing-ID diagnostic belongs to DICOMValidationFailureSpike.
+    # Its per-pass summary adds no cause; each other concrete error still fires.
+    expr: |
+      sum by (cluster, component) (count_over_time(
+        {namespace="xnat-ingest", app="xnat-ingest", component=~"group|group-fs|assign"}
+        | json | __error__=""
+        | json stage_message="message" | __error__=""
+        | level=~"(?i)ERROR|CRITICAL" or stage_message=~"(?s)^Traceback \\(most recent call last\\):.*"
+        | stage_message !~ "(?s)^(Could not resolve project/subject/session IDs for .*|Assign completed with [0-9]+ errors)$"
+        [10m])) > 0
+    # One event remains in the window long enough to meet this hold.
+    for: 1m
+    labels:
+      severity: warning
+      source: loki-ruler
+      category: edge-pipeline
+    annotations:
+      summary: "xnat-ingest {{ $labels.component }} logged an error on {{ $labels.cluster }}"
+      description: |
+        The {{ $labels.component }} stage logged ERROR, CRITICAL, or a Python
+        traceback within the last 10 minutes. Inspect the stage logs on this
+        edge and check which sessions did not complete:
+          kubectl -n xnat-ingest logs -l app=xnat-ingest,component={{ $labels.component }} --since=15m
+        This reports a logged error. The alert clears when its evidence leaves
+        the time window; that does not prove recovery or data loss. A process
+        killed without a log, an image pull failure, or missing telemetry can
+        remain silent here. Check pod status and previous container logs too.
+
   - alert: DeidentifyStageError
     # Counterpart to OrthancDeidLuaError for the xnat-ingest engine. Whichever
     # engine a site runs, a failure to de-identify has to be visible; without
@@ -574,11 +607,17 @@ groups:
     # nothing in its place, leaving the one thing you cannot afford to miss
     # unwatched.
     #
-    # Matches error text rather than a structured event: the stage logs
-    # tracebacks as plain text. tqdm writes progress bars to the same stream
+    # Structured ERROR/CRITICAL is a stream label after Vector processing;
+    # it need not leave the word "error:" in the body. Keep the existing
+    # text fallback because the stage also logs tracebacks as plain text.
+    # tqdm writes progress bars to the same stream
     # ("Processing staged sessions ... 100%|####|"), so the pattern is anchored
     # on error words and never on a bare percentage.
     expr: |
+      sum by (cluster) (count_over_time(
+        {namespace="xnat-ingest", component="deidentify", level=~"(?i)ERROR|CRITICAL"}
+        [10m])) > 0
+      or
       sum by (cluster) (count_over_time(
         {namespace="xnat-ingest", component="deidentify"}
         |~ "(?i)traceback|error:|exception|no applicable spec" [10m])) > 0
@@ -590,10 +629,11 @@ groups:
     annotations:
       summary: xnat-ingest deidentify errored on {{ $labels.cluster }}
       description: >
-        The deidentify stage logged an error in the last 10 minutes. Sessions
-        that fail to de-identify are NOT uploaded, so this is a stall rather
-        than a leak. Check the pod logs and confirm the recipes under
-        ingest.deidentify.specConfigMap cover the formats being received.
+        The deidentify stage logged an error in the last 10 minutes. Check
+        the pod logs and confirm the recipes under ingest.deidentify.specConfigMap
+        cover the formats being received. The time window can expire before
+        the cause is fixed. This alert does not establish data loss or recovery,
+        and cannot detect a process killed without a log.
   - alert: OrthancStorageGrowing
     expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\" [1h])) > 1000\n"
     for: 5m

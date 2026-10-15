@@ -86,6 +86,8 @@ with `.Files.Get` and Helm never templates it.
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
 | DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, or `assign`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for the `__unmapped_aet__` subtree — an AE title nobody has mapped to a project yet. |
 | `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. Rendered only while `dataPolicy.reporter.enabled` is true. |
@@ -109,6 +111,20 @@ emits `"component":"data-policy"` in every line but carries no `component` pod
 label produces a stream with an empty label, and every rule selecting on it
 matches nothing and can never fire. That is not hypothetical: it is why
 `charts/edge/templates/data-policy.yaml` sets the label explicitly.
+
+The stage-error rules use a 10-minute lookback and a 1-minute hold. A single
+error can fire; repeated errors are not required. Resolution means that the
+matching log left the window, not that the stage recovered. The group and
+assign rule reads Vector's JSON log envelope and its `level` stream label.
+`ingest.logFormat: json` supplies that severity for handled errors. A plain
+Python traceback still matches through its decoded message. Malformed JSON
+records are excluded, and an absent severity does not turn a message that
+contains "ERROR" into an error event. Existing `IngestPodCrashLoop` and upstream
+pod-readiness/crash-loop rules cover Kubernetes symptoms through local
+kube-state-metrics. A recovered group, assign, or deidentify OOM still needs
+separate event attribution; these log rules cannot report a kill with no log.
+Alert firing, recovery, and notification-delivery drills remain necessary.
+No new exporter, scrape, or permissions are needed for this log-based change.
 
 ## What the chart installs, and what it does not
 
