@@ -8,7 +8,7 @@ evaluated by **Loki's built-in ruler** running LogQL queries against the JSON
 event stream. XNAT *backlog* is deliberately NOT among them: `XNATBacklogGrowing`
 was measured and deleted, because the log string it matched could not
 distinguish a new arrival from a static backlog. See "What lives where" below
-for the current inventory — 13 Loki-ruler alerts and 13 Prometheus alerts — and
+for the current inventory of 21 Loki-ruler alerts and 13 Prometheus alerts, and
 "What we removed" for the four that went. K8s/cert-manager-derived alerts
 (node NotReady, certificate expiry, cert-sync staleness, SeaweedFS down) stay in
 **Prometheus** as `PrometheusRule` objects. Both fire into the existing
@@ -48,7 +48,7 @@ expressions sit close to the dashboard queries that operators already trust.
 
 ## What lives where
 
-This table is the full shipped inventory, not a sample: **13** alerts in
+This table is the full shipped inventory, not a sample: **21** alerts in
 `charts/mgmt/files/loki-ruler-rules.yaml` and **13** across the six files in
 `charts/mgmt/files/prometheus-rules/`. If you add one, add a row — an alert
 missing from here reads as coverage nobody knows about, and an alert listed
@@ -75,7 +75,8 @@ here that no longer ships reads as coverage that does not exist.
 | `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line in the `xnat-upload` namespace: XNAT already held the session with files missing, and the uploader tried to re-send them from staging. Logged whether or not that worked, so it claims only the attempt; a session that stays incomplete is never confirmed, and `SessionStagedNotConfirmedInXNAT` follows. Seen on 2026-09-23 and 2026-09-28 after XNAT restarts. One firing-only mail per edge per burst. |
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log — the de-identification script failing open is a PHI risk, not a cosmetic one. |
-| `DeidentifyStageError` | Loki ruler | error or traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine the site runs |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, or `assign`, grouped by edge and stage. Uses existing Vector logs; no remote-edge Kubernetes metrics are assumed. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
 | `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` / `dependency_missing` / `lock_failed` — the uploader's own refusals and stops (the pre-flight probe, a tool the image lacks, a writer lock that cannot be opened or taken), which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
@@ -86,6 +87,25 @@ here that no longer ships reads as coverage that does not exist.
 | `CertSyncNeverSucceeded` | Prometheus | A `*-cert-sync-*` CronJob that has had a scheduled run (`kube_cronjob_status_last_schedule_time`), or has existed 24h without one (`kube_cronjob_created`), `unless on (namespace, cronjob)` a last-success timestamp, held for 30m. Catches a site whose Secrets were never delivered at all, which "stale" cannot see. It waits for the first scheduled run because on a new edge that can be ~6h away; the old `kube_cronjob_info` form paged critical 2h after creation if nothing had succeeded yet, whether or not a run had been due. |
 | `CARotationDue` | Prometheus | `ais-edge-ca` inside a year of expiry. Fleet-wide reissue is a planned job, not an incident, so it is `info`. |
 | `CertificateRenewed` | Prometheus | `changes(certmanager_certificate_renewal_timestamp_seconds[1h])` — an `info` receipt that rotation is actually happening. |
+
+The stage-error rules use a 10-minute lookback and a 1-minute hold. A single
+error can fire; repeated errors are not required. Resolution means that the
+matching log left the window, not that the stage recovered. The new group and
+assign rule reads Vector's JSON log envelope and its `level` stream label.
+`ingest.logFormat: json` supplies that severity for handled errors. A plain
+Python traceback still matches through its decoded message. A malformed JSON
+record is excluded from the message parser, and an absent severity field does
+not turn an ordinary message containing "ERROR" into an error event.
+
+These rules do not close OOM, CrashLoopBackOff, image-pull, or scheduling gaps
+when the process emits no log. Tier-2 management kube-state-metrics reads only
+the management cluster, so it cannot establish remote-edge pod health. Add an
+explicit edge status/event transport before adding such remote-edge alerts;
+this needs exporter/RBAC, transport, and telemetry-loss coverage. Tier-1 has
+local kube-state-metrics and existing pod crash-loop/readiness alerts. Recovered
+stage OOM attribution and firing, recovery, and notification-delivery drills
+remain a separate follow-up. The existing backlog and reporter-silence alerts are useful symptoms, not proof
+that each stage is alive. These log rules need no new exporter or permissions.
 
 `kube-prometheus-stack`'s own rule pack is **not** part of that count:
 `defaultRules.create: false` (`charts/mgmt/values.yaml`), so every Prometheus
