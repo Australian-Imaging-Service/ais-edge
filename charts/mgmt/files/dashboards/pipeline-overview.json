@@ -11,8 +11,8 @@
   "panels": [
     {
       "type": "stat",
-      "title": "DICOMs uploaded (last 1h)",
-      "description": "Sum of the `dicoms` field across upload_completed events. Counts only files with .dcm/.DCM suffix. Events from sessions captured before the dicoms counter was added do not contribute (the unwrap directive skips events missing the field) \u2014 re-counts settle within 1h of deployment.",
+      "title": "DICOMs in completed S3 uploads (last 1h)",
+      "description": "Sum of the pre-transfer dicoms inventory on upload_completed events. Counts .dcm/.DCM files, including files already present at the destination. Repeated uploads of a changed session can count the same DICOM again. Missing or invalid numeric fields are excluded. This is not an XNAT delivery count.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -25,7 +25,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap dicoms [1h])) or vector(0)",
+          "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap dicoms | __error__=\"\" [1h])) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -63,8 +63,8 @@
     },
     {
       "type": "stat",
-      "title": "S3 objects uploaded (last 1h)",
-      "description": "Sum of the `files` field across upload_completed events. Includes every object written to S3 \u2014 DICOMs AND the per-session __MANIFEST__.json (and any other staged metadata). Always strictly >= DICOMs uploaded.",
+      "title": "Files in completed S3 uploads (last 1h)",
+      "description": "Sum of the pre-transfer files inventory on upload_completed events, including DICOMs, one __MANIFEST__.json per resource, and other staged metadata. This is not the number of newly written S3 objects. Repeated uploads can count the same file again; missing or invalid numeric fields are excluded.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -77,7 +77,7 @@
       },
       "targets": [
         {
-          "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap files [1h])) or vector(0)",
+          "expr": "sum(sum_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_completed\" | unwrap files | __error__=\"\" [1h])) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -103,8 +103,8 @@
     },
     {
       "type": "stat",
-      "title": "Sessions uploaded (last 1h)",
-      "description": "Count of upload_completed events. One per session whose transfer to the staging bucket returned success. Each session contains 1 or more DICOMs plus 1 __MANIFEST__.json.",
+      "title": "Completed S3 uploads (last 1h)",
+      "description": "Count of upload_completed events: the S3 copy command returned success. A changed session can complete more than once. This counts transfer attempts, not unique sessions or confirmed XNAT delivery.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -144,7 +144,7 @@
     {
       "type": "stat",
       "title": "Upload failures (last 1h)",
-      "description": "Count of upload_failed events (the transfer to the staging bucket returned non-zero). 0 = pipeline healthy.",
+      "description": "Count of upload_failed events from the transfer to the staging bucket. Zero means no matching failures were recorded; it does not prove that uploads ran or that log delivery is healthy.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -188,7 +188,7 @@
     {
       "type": "stat",
       "title": "Invalid sessions (last 1h)",
-      "description": "Sessions rejected by xnat-ingest assign because of missing/invalid DICOM headers (e.g. AccessionNumber). These land in /data/staging/__invalid__/ on the edge VM and require a human to rename and re-stage. Each session counts once: we anchor on the per-session error message and ignore the secondary 'Staging completed with N errors' summary line that repeats the same content.",
+      "description": "Count of Invalid IDs found ERROR messages from xnat-ingest assign. These indicate missing or invalid session identifiers. Repeated attempts can count the same session again. Inspect the message and staged data before correcting identifiers and retrying.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -282,8 +282,8 @@
     },
     {
       "type": "stat",
-      "title": "Active edge sites",
-      "description": "Distinct cluster labels seen in Loki in the last hour, excluding the management cluster. Grows by 1 each time a new edge starts shipping logs.",
+      "title": "Edge sites with assign logs (last 1h)",
+      "description": "Distinct non-management cluster labels on assign logs in the last hour. Management reclaimers can carry the served edge label, so their activity is excluded. This measures recent assign log delivery, not pod health or successful delivery to XNAT.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -296,7 +296,7 @@
       },
       "targets": [
         {
-          "expr": "count(count by (cluster) (count_over_time({cluster!=\"\",cluster!=\"mgmt\"}[1h]))) or vector(0)",
+          "expr": "count(count by (cluster) (count_over_time({component=\"assign\",cluster!=\"\",cluster!=\"mgmt\"}[1h]))) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -323,7 +323,8 @@
     {
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
-      "description": "Each line is a session that xnat-ingest assign routed to /data/staging/__invalid__/. Site-admin action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
+      "timeFrom": "1h",
+      "description": "Invalid session identifier messages from assign. Inspect the stated errors and the staged files before correcting identifiers and retrying. A session can appear more than once after repeated attempts.",
       "gridPos": {
         "h": 9,
         "w": 24,
@@ -351,6 +352,7 @@
     {
       "type": "timeseries",
       "title": "Pipeline events per minute (by event type)",
+      "description": "Structured s3-uploader events only. Lines without an event field are excluded so they do not create an unnamed series.",
       "gridPos": {
         "h": 9,
         "w": 24,
@@ -363,7 +365,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json [1m]))",
+          "expr": "sum by (event) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event != \"\" [1m]))",
           "legendFormat": "{{event}}",
           "refId": "A"
         }
@@ -395,6 +397,7 @@
     {
       "type": "timeseries",
       "title": "Per-edge upload throughput (events/min)",
+      "description": "Count of upload_completed events per minute, grouped by edge cluster. Counts completed S3 transfer attempts, not unique sessions or XNAT delivery.",
       "gridPos": {
         "h": 9,
         "w": 12,
@@ -421,6 +424,7 @@
     {
       "type": "timeseries",
       "title": "Failure rate (upload_failed / upload_started)",
+      "description": "Ratio of upload_failed to upload_started events in each 15-minute window. Reports zero when starts exist without failures; leaves a gap when there are no starts. A transfer can start and finish in different windows, so this is an event ratio, not a matched-attempt failure probability.",
       "gridPos": {
         "h": 9,
         "w": 12,
@@ -433,7 +437,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [15m])) / clamp_min(sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_started\" [15m])), 0.001)",
+          "expr": "(sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_failed\" [15m])) or (0 * sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_started\" [15m])))) / (sum by (cluster) (count_over_time({namespace=\"xnat-ingest\",component=\"s3-uploader\"} | json | event=\"upload_started\" [15m])) > 0)",
           "legendFormat": "{{cluster}}",
           "refId": "A"
         }
@@ -449,6 +453,8 @@
     {
       "type": "logs",
       "title": "Recent pipeline events (last 30 min)",
+      "timeFrom": "30m",
+      "description": "Structured edge pipeline events over the last 30 minutes when a relative dashboard range is selected. The Session Timeline also includes management upload and reclaim logs.",
       "gridPos": {
         "h": 12,
         "w": 24,

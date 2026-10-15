@@ -50,7 +50,7 @@
     {
       "type": "stat",
       "title": "Completed uploads (last 10m, cluster=$cluster / node=$node)",
-      "description": "Count of upload_completed events in the last 10 minutes, scoped by the dashboard's cluster + node filters. 0 with active scanners likely means the pipeline is stuck — drill into the panels below.",
+      "description": "Count of completed S3 transfer attempts in the last 10 minutes for the selected edge and node. Repeated uploads can count a session again. Zero is normal when idle and does not establish pipeline health.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -116,8 +116,8 @@
     },
     {
       "type": "stat",
-      "title": "Assign errors (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of ERROR-level log lines from the xnat-ingest assign pod in the last hour. Loki-derived because mgmt Prometheus cannot scrape edge clusters (no metrics path across the konnectivity boundary). A non-zero value typically indicates DICOM validation failures or staging errors.",
+      "title": "Invalid session reports (last 1h, cluster=$cluster / node=$node)",
+      "description": "Count of Invalid IDs found ERROR messages from xnat-ingest assign for the selected edge and node. This excludes other assign errors. A repeated attempt can report the same session again.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -188,7 +188,7 @@
     {
       "type": "stat",
       "title": "Upload failures (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of upload_failed JSON events from the s3-uploader. Loki-derived. Prolonged non-zero means the edge cannot reach SeaweedFS or the bucket credentials are wrong; see also the Loki ruler alert S3UploaderRetryStorm.",
+      "description": "Count of upload_failed events from the edge s3-uploader. Check the logs for the cause; a non-zero count can reflect a transient failure that later recovered.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -254,8 +254,8 @@
     },
     {
       "type": "stat",
-      "title": "DICOM rejected — unmapped AE title (last 1h, cluster=$cluster / node=$node)",
-      "description": "Studies rejected at Orthanc intake because the calling AE title is not in routing.json's AETMap. These never become sessions, so they do NOT appear in 'Upload failures' — the rejection happens before the upload stage. The originals are quarantined to <FacilityBackupDir>/__unmapped_aet__/<AET>/ and can be re-sent once the AET is mapped.",
+      "title": "Unmapped AE rejection logs (last 1h, cluster=$cluster / node=$node)",
+      "description": "Count of legacy Orthanc AET-map rejection log lines, not studies. In the receiver-only mode used with xnat-ingest de-identification, Orthanc returns before this lookup, so zero is expected and does not validate routing or de-identification. Legacy rejection handling preserves originals in the facility quarantine.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -322,7 +322,7 @@
     {
       "type": "logs",
       "title": "Live log tail — xnat-ingest pods on $cluster / $node",
-      "description": "",
+      "description": "Edge pipeline log lines for the selected cluster and worker. The node dropdown is limited to the edge pipeline namespace, excluding management reclaimers that carry an edge cluster label. Raw messages are retained when JSON message is absent.",
       "gridPos": {
         "h": 12,
         "w": 24,
@@ -341,7 +341,7 @@
             "uid": "loki"
           },
           "refId": "A",
-          "expr": "{cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{.message}}\""
+          "expr": "{cluster=\"$cluster\",node=~\"$node\",namespace=\"xnat-ingest\"} | json | line_format \"[{{.component}}] {{if .event}}event={{.event}} {{end}}{{if .session}}session={{.session}} {{end}}{{if .message}}{{.message}}{{else}}{{__line__}}{{end}}\""
         }
       ],
       "fieldConfig": {
@@ -365,7 +365,7 @@
     {
       "type": "timeseries",
       "title": "Upload events per minute (cluster=$cluster / node=$node)",
-      "description": "",
+      "description": "Structured uploader event counts per minute for the selected edge and worker. Each event type is a separate series; these counts are not unique sessions.",
       "gridPos": {
         "h": 9,
         "w": 24,
@@ -467,7 +467,7 @@
           "type": "loki",
           "uid": "loki"
         },
-        "query": "label_values(cluster)",
+        "query": "label_values({namespace=\"xnat-ingest\",component=\"assign\",cluster!=\"mgmt\"}, cluster)",
         "refresh": 1,
         "sort": 0,
         "includeAll": false,
@@ -489,7 +489,7 @@
           "type": "loki",
           "uid": "loki"
         },
-        "query": "label_values({cluster=\"$cluster\"}, node)",
+        "query": "label_values({cluster=\"$cluster\",namespace=\"xnat-ingest\"}, node)",
         "refresh": 2,
         "sort": 0,
         "includeAll": true,
