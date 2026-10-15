@@ -679,8 +679,14 @@ ingest:
   # fields directly; turning this off breaks monitoring, not just formatting.
   logFormat: json
 
+  # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
+  # these stages without chart-set reservations or limits, as before. Set each
+  # stage for the site's workload; do not infer production limits from a small
+  # test. See docs/components/xnat-ingest.md, Ingest stage CPU and memory.
+
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
+    resources: {}
     enabled: true
     interval: 60
     # Only studies carrying this label are pulled. Applied by the Lua hook
@@ -695,6 +701,7 @@ ingest:
   # OFF by default — see dataPolicy.originals.fileDrop for why this path
   # deserves more care than the Orthanc one.
   fileDrop:
+    resources: {}
     enabled: false
     interval: 300
     # Files in subfolders are read too: group runs with --recursive.
@@ -707,6 +714,7 @@ ingest:
   # routing.json's AETMap is the single source of truth for project; there is
   # no hardcoded project ID anywhere.
   assign:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
     # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
@@ -799,6 +807,7 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file, exactly like

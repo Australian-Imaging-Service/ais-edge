@@ -186,6 +186,54 @@ Important env vars on each pod:
 - `AWS_ENDPOINT_URL` (upload pod only) — points boto3 at SeaweedFS
 - `XINGEST_HOST/USER/PASS` — XNAT REST credentials
 
+### Ingest stage CPU and memory
+
+Set each stage's Kubernetes `resources` in the site's values file. The keys
+are independent, including the two group inputs:
+
+| Values key | Container |
+|---|---|
+| `ingest.orthancGroup.resources` | `group` in the group-orthanc Deployment |
+| `ingest.fileDrop.resources` | `group-fs` in the optional file-drop Deployment |
+| `ingest.assign.resources` | `assign` |
+| `ingest.deidentify.resources` | `deidentify`, when `deid.engine=ingest` |
+
+Each key accepts Kubernetes `requests` and `limits` for CPU and memory.
+An omitted key, `{}`, or `null` adds no resources to that container. These
+empty defaults preserve the existing behavior: the chart does not reserve CPU
+or memory for these stages and does not cap their use. A namespace LimitRange
+can still apply defaults. Installing this chart change alone does not establish
+a memory limit or a tested production capacity.
+
+This example shows the format for one stage. The numbers are illustrative;
+they are not a tested site profile or recommended production limits:
+
+```yaml
+ingest:
+  assign:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+```
+
+Use the other keys to size the other stages separately. Keep uploader settings
+under `upload.direct.resources` or, on main in S3 mode, `upload.s3.resources`.
+Orthanc remains the DICOM receiver; size the `deidentify` stage for the
+xnat-ingest recipes used at the site.
+
+Before setting a production profile, measure CPU and memory with the largest
+supported studies, the site's recipes, and concurrent stages. Allow memory
+headroom above observed peaks and check the total requests against node
+allocatable capacity, including Orthanc and the other services. Short synthetic
+runs and idle snapshots do not establish a safe upper bound. A memory limit
+that is too low can stop a stage with OOMKilled; CPU limits can slow the
+pipeline. Verify throughput, restarts, and recovery on the test deployment
+before applying a site profile.
+
 ### s3-uploader event schema
 
 Every state change in the upload loop emits one JSON line via the
