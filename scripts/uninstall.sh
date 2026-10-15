@@ -23,8 +23,12 @@
 # the charts.
 #
 # --keep-cluster stops before touching k0s: it removes the releases, the
-# namespaces, the CRDs and the data, but leaves both clusters running. Use it
-# when you want to reinstall the charts onto the same Kubernetes.
+# namespaces, the CRDs, the PersistentVolume objects and the management
+# node's /data, but leaves both clusters running and never reaches the edge
+# hosts over SSH: /data on every edge (the facility backup, Orthanc storage)
+# stays. Use it when you want to reinstall the charts onto the same
+# Kubernetes. The confirmation text below says exactly this, per mode; it
+# used to claim the edges' /data went in both modes, which was not so.
 #
 # WHAT IS DELIBERATELY NOT REMOVED
 #   * ~/.config/sops/age/keys.txt  — the ONLY key that can decrypt every
@@ -108,11 +112,16 @@ echo "  This removes:"
 echo "    - the mgmt and cert-manager Helm releases, and every edge release"
 echo "    - namespaces: ${MGMT_NS}, xnat-upload, cert-manager, k0smotron, each edge's"
 echo "    - cert-manager / k0smotron / prometheus-operator CRDs and webhooks"
-echo "    - all PersistentVolumes and their host directories"
-echo "    - /data on the management node AND on every edge"
-echo "      (facility backup, Orthanc storage, S3 staging — PATIENT DATA)"
-[ "$KEEP_CLUSTER" = false ] && \
+echo "    - all PersistentVolume objects, on the management cluster and each edge cluster"
+echo "    - /data on the management node (S3 staging — PATIENT DATA in transit)"
+if [ "$KEEP_CLUSTER" = false ]; then
+echo "    - /data on every edge (facility backup, Orthanc storage — PATIENT DATA)"
 echo "    - k0s itself, on the management node and every edge (k0s reset)"
+else
+echo "  It does NOT reach the edge hosts: /data on every edge (facility backup,"
+echo "  Orthanc storage) stays, and k0s keeps running on every node. The edges'"
+echo "  PersistentVolume objects go; the host directories behind them do not."
+fi
 echo
 echo "  It KEEPS: your age key, sites/*/secrets.enc.yaml, values.yaml, the k0s binary."
 echo "============================================"
