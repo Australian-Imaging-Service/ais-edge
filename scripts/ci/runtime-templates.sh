@@ -637,4 +637,42 @@ edge-upload-alerts	deidentify	assign
 edge-direct-ingest-reclaim	deidentify	assign
 EOF
 
+# Per-stage resource settings must reach their own application container.
+ci_heading "ingest stage resource settings"
+resource_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_RESOURCES'
+from pathlib import Path
+import sys, yaml
+
+root = Path(sys.argv[1])
+expected = {
+    "group": {"requests": {"cpu": "101m", "memory": "301Mi"},
+              "limits": {"cpu": "901m", "memory": "1301Mi"}},
+    "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"},
+                 "limits": {"cpu": "902m", "memory": "1302Mi"}},
+    "assign": {"requests": {"memory": "444Mi"}},
+    "deidentify": {"limits": {"cpu": "888m"}},
+}
+for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null"):
+    found = {}
+    for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for container in doc["spec"]["template"]["spec"].get("containers", []):
+            name = container["name"]
+            if name in expected:
+                if name in found:
+                    raise SystemExit(f"{case}: duplicate stage container {name}")
+                found[name] = container.get("resources")
+    names = set(expected)
+    if case == "edge-direct-ingest-reclaim":
+        names.remove("group-fs")
+    if set(found) != names:
+        raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
+    wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
+    if found != wanted:
+        raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
+print("configured, partial, unset and null resources reach only the expected stage containers")
+PY_RESOURCES
+)" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
+
 ci_summary "runtime-templates"
