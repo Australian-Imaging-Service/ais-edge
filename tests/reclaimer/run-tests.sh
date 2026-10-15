@@ -582,7 +582,32 @@ assert_fs_s3_session_meta_rewritten(){ reason "$1" changed_during_check && kept_
 setup_fs_s3_session_meta_added()     { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; WRITER=rewrite; REWRITE_FILE="$1/$SESS/MANIFEST.json"; REWRITE_CONTENT='{}'; }
 assert_fs_s3_session_meta_added()    { reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$SESS/MANIFEST.json" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
 setup_fs_session_meta_rewritten()    { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; WRITER=rewrite; REWRITE_FILE="$1/$SESS/__METADATA__.json"; REWRITE_CONTENT='{"rewritten":true}'; }
+# A resource's own metadata rewritten with the SAME size between the proof and the lock: the
+# bytes are rechecked, not only the identity (a same-size rewrite within one clock tick of the
+# previous write keeps its identity; codex-188's probe).
+setup_fs_s3_resource_meta_rewritten()  { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; WRITER=rewrite; REWRITE_FILE="$1/$R/__METADATA__.json"; REWRITE_CONTENT="$(printf '{"SOPClassUID":"%s","Modality":"CT"}' "$MR")"; }
+assert_fs_s3_resource_meta_rewritten() { reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
 assert_fs_session_meta_rewritten()   { reason "$1" changed_during_check && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+# THE PROOF IS RECHECKED INSIDE THE LOCK (codex-188). The fake bucket's after_list hook
+# changes the fixture after the helper's first listing (the proof), before its second (in
+# the lock): a same-byte re-copy (a fresh LastModified, the same ETag) keeps the session
+# with no request; an object gone or rewritten keeps it with a repair request; a re-copied
+# parent sidecar keeps it; an unchanged bucket is the control. In every case the first
+# listing proved the files, and nothing may be removed on that stale proof.
+FRESH="import datetime; t=datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.000Z')"
+setup_fs_s3_recopy_after_proof()  { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"
+                                    s3_set "$FRESH; k='staged/$SESS/1.scan/DICOM/f1.dcm'; d['after_list']={k: dict(d['objects'][k], modified=t)}"; }
+assert_fs_s3_recopy_after_proof() { reason "$1" s3_changed_after_proof && not_requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_gone_after_proof()    { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_set "d['after_list']={'staged/$SESS/1.scan/DICOM/f2.dcm': None}"; }
+assert_fs_s3_gone_after_proof()   { reason "$1" not_in_s3 && requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_rewritten_after_proof()  { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"
+                                       s3_set "k='staged/$SESS/1.scan/DICOM/f1.dcm'; d['after_list']={k: dict(d['objects'][k], etag='0'*32)}"; }
+assert_fs_s3_rewritten_after_proof() { reason "$1" s3_mismatch && requested && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_parent_recopied_after_proof()  { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"
+                                             s3_set "$FRESH; k='staged/$SESS/__METADATA__.json'; d['after_list']={k: dict(d['objects'][k], modified=t)}"; }
+assert_fs_s3_parent_recopied_after_proof() { reason "$1" s3_changed_after_proof && not_requested && kept_files "$2" "$R/f1.dcm" "$SESS/__METADATA__.json" && ! grep -q '"event":"reclaim_resource_removed"' "$1"; }
+setup_fs_s3_relist_unchanged()    { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; s3_set "k='staged/$SESS/1.scan/DICOM/f1.dcm'; d['after_list']={k: dict(d['objects'][k])}"; }
+assert_fs_s3_relist_unchanged()   { [ "$(grep -c '^GET ' "$CASE_DIR/s3-requests.log")" -ge 2 ] || { echo "the bucket was listed once: no recheck inside the lock"; return 1; }; }
 # THE SECOND CLOCK: the newest object's LastModified in the bucket must be older than
 # minAge too, however old the local files are: a backlog copied today waits. The
 # bucket clock is asserted in the skip line; the old-object control removes.
@@ -608,6 +633,12 @@ run_fs_case fs_s3_scan_meta_proved      yes reclaim_removed
 run_fs_case fs_s3_session_meta_rewritten no reclaim_kept     LOCK_WAIT=10
 run_fs_case fs_s3_session_meta_added    no  reclaim_kept     LOCK_WAIT=10
 run_fs_case fs_session_meta_rewritten   no  reclaim_kept     LOCK_WAIT=10
+run_fs_case fs_s3_resource_meta_rewritten no reclaim_kept     LOCK_WAIT=10
+run_fs_case fs_s3_recopy_after_proof    no  reclaim_kept
+run_fs_case fs_s3_gone_after_proof      no  reclaim_kept
+run_fs_case fs_s3_rewritten_after_proof no  reclaim_kept
+run_fs_case fs_s3_parent_recopied_after_proof no reclaim_kept
+run_fs_case fs_s3_relist_unchanged      yes reclaim_removed
 
 run_fs_case fs_happy_path              yes reclaim_removed
 run_fs_case fs_partial_upload          no  reclaim_kept

@@ -193,6 +193,36 @@ class S3Proof:
         """When the newest object of the session reached the bucket (None: no object)."""
         return max((m for _, _, m in self.objects.values()), default=None)
 
+    def refresh(self, rels):
+        """INSIDE THE LOCK, before the first unlink: list the prefix again and require
+        every object this run proved (rels) to be there as it was listed before the
+        proof: the same ETag, size AND LastModified. The proof ran outside the lock,
+        so between it and the lock the uploader can copy the session again (the same
+        bytes: identical ETag, a fresh LastModified, so the bucket clock restarts) or
+        the management reclaimer or a fault can remove or rewrite an object. A proof
+        from before either is stale. A missing or different object asks for a repair;
+        a fresh one is kept without a request (the next run proves it when it is old
+        enough). The lock does not hold the bucket still; this makes the proof and
+        the delete belong to the same observed generation of the objects, no more."""
+        live = {}
+        try:
+            for page in self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=self.prefix):
+                for o in page.get("Contents") or []:
+                    rel = o["Key"][len(self.prefix):]
+                    if rel and not rel.endswith("/"):
+                        live[rel] = (o["ETag"].strip('"'), int(o["Size"]), o["LastModified"].timestamp())
+        except Exception as e:
+            raise Keep("listing_failed", f"cannot list {self.prefix} again inside the lock: {e}")
+        for rel in sorted(rels):
+            was, now = self.objects.get(rel), live.get(rel)
+            if now is None:
+                raise self.repair("not_in_s3", f"{rel}: the object went between the proof and the lock")
+            if now[:2] != was[:2]:
+                raise self.repair("s3_mismatch", f"{rel}: the object changed between the proof and the lock")
+            if now[2] != was[2]:
+                raise Keep("s3_changed_after_proof", f"{rel}: the object was written again between the proof and the lock "
+                                                     f"(the same bytes, a new LastModified); the bucket clock restarts")
+
     def prove(self, path, rel):
         """The local file at path, whose key is <session>/<rel>: Keep unless its
         object has its size and the MD5 of its bytes."""
@@ -241,6 +271,17 @@ def newest_ctime(top):
                                            for d, ds, fs in os.walk(top) for n in ds + fs])
 
 
+def sidecar_digest(path):
+    """MD5 of a small sidecar's bytes, bound to its identity before and after the read."""
+    import hashlib
+    before = identity(path)
+    with open(path, "rb") as f:
+        digest = hashlib.md5(f.read()).hexdigest()
+    if identity(path) != before:
+        raise Keep("changed_during_check", f"{path} changed while it was read")
+    return digest
+
+
 class LocalStore:
     """A session folder of the upload tree. Paths are relative to it."""
 
@@ -275,10 +316,14 @@ class LocalStore:
         return WriterLock()
 
     def remove(self, res):
-        """Inside the lock. Data first, the manifest last, then the folders."""
+        """Inside the lock. Data first, the manifest last, then the folders. The
+        identities of every entry, and the bytes of the sidecars, as at the snapshot."""
         top = os.path.join(self.path, res.rel)
         if walk(top) != res.entries:
             raise Keep("changed_during_check", f"{res.rel} changed after the proof")
+        for rel, digest in res.sidecar_sums.items():
+            if sidecar_digest(os.path.join(top, rel)) != digest:
+                raise Keep("changed_during_check", f"{res.rel}/{rel} was rewritten after the proof")
         for rel in sorted(res.data) + sorted(res.sidecars, key=lambda n: n in MANIFESTS):
             os.unlink(os.path.join(top, rel))
         dirs = [n for n, i in res.entries.items() if i == "dir"]
@@ -286,15 +331,20 @@ class LocalStore:
             os.rmdir(os.path.normpath(os.path.join(top, rel)))   # refuses a non-empty folder
 
     def parent_sidecars(self, scans):
-        """{rel: identity} of the sidecar FILES at the session root and at the root
-        of each scan folder named: the session's and the scans' own metadata, which
-        tidy() unlinks last. A sidecar that is not a regular file keeps the session."""
+        """{rel: (identity, MD5)} of the sidecar FILES at the session root and at the
+        root of each scan folder named: the session's and the scans' own metadata,
+        which tidy() unlinks last. The bytes are hashed as well as the identity: the
+        kernel stamps mtime and ctime at tick granularity (milliseconds), so a
+        same-size rewrite within the tick of the previous write has the same
+        identity (codex-188's probe); these files are small. A sidecar that is not a
+        regular file keeps the session."""
         out = {}
         for base in [""] + list(scans):
             for n in sorted(os.listdir(os.path.join(self.path, base))):
                 if n in SIDECARS:
                     rel = f"{base}/{n}" if base else n
-                    out[rel] = identity(os.path.join(self.path, rel))
+                    path = os.path.join(self.path, rel)
+                    out[rel] = (identity(path), sidecar_digest(path))
         return out
 
     def tidy(self, resources, kept_rels, batches, unknown, act, proven=None):
@@ -467,7 +517,7 @@ def only_sidecars(path, act, proven=None, base=""):
                 rel = f"{base}/{n}" if base else n
                 if rel not in proven:
                     raise Keep("changed_during_check", f"{rel} appeared after the proof")
-                if identity(os.path.join(path, n)) != proven[rel]:
+                if identity(os.path.join(path, n)) != proven[rel][0]:
                     raise Keep("changed_during_check", f"{rel} changed after the proof")
         for n in names:
             os.unlink(os.path.join(path, n))
@@ -485,6 +535,12 @@ class Resource:
             raise Keep("unknown_entry", f"{rel} has a hidden entry")
         files = [n for n, i in self.entries.items() if i != "dir"]
         self.sidecars = [n for n in files if n in SIDECARS]
+        # The sidecars' bytes, rechecked before the delete (a folder store): the kernel
+        # stamps file times at tick granularity, so a same-size rewrite within the tick
+        # of the previous write keeps its identity. These files are small. Data files
+        # are bound by identity: the age gate puts every identity at least minAge
+        # before any later write, which lands in a later tick.
+        self.sidecar_sums = {n: sidecar_digest(os.path.join(store.path, rel, n)) for n in self.sidecars} if isinstance(store, LocalStore) else {}
         self.data = {n: self.entries[n] for n in files if n not in SIDECARS}
         self.sizes = {n: store.size(i) for n, i in self.data.items()}
         self.sums, self.label = self.manifest() if self.data else ({}, None)
@@ -768,12 +824,14 @@ def reclaim(session):
     held_data = any(r.data for r in resources) or bool(kept_rels)
     parents = store.parent_sidecars(scans) if STORAGE == "filesystem" else {}
 
-    # Proof, outside the lock.
+    # Proof, outside the lock. proved: the keys this run proved, rechecked in the lock.
+    proved = set()
     if resources and PROOF == "s3":
         try:
             for res in list(resources):
                 try:
                     res.prove_s3(proof)
+                    proved |= {f"{res.rel}/{rel}" for rel in list(res.data) + list(res.sidecars)}
                 except Keep as k:
                     kept.append(k)
                     kept_rels.append(res.rel)
@@ -783,8 +841,9 @@ def reclaim(session):
             for rel in sorted(parents):
                 if resources:
                     proof.prove(os.path.join(store.path, rel), rel)
-                    if identity(os.path.join(store.path, rel)) != parents[rel]:
+                    if identity(os.path.join(store.path, rel)) != parents[rel][0]:
                         raise Keep("changed_during_check", f"{rel} changed after the snapshot")
+                    proved.add(rel)
         except Keep as k:   # a parent sidecar: nothing of the session is removed
             kept.append(k)
             kept_rels += [r.rel for r in resources]
@@ -828,10 +887,14 @@ def reclaim(session):
     with store.lock():
         # The parent sidecars first: the same set, with the same identities, as at
         # the snapshot, or nothing goes. The resources are rechecked by remove().
+        # Then the bucket again (PROOF=s3): every proved object as it was listed,
+        # or the proof is stale and nothing goes.
         if STORAGE == "filesystem" and held_data:
             try:
                 if store.parent_sidecars(scans) != parents:
                     raise Keep("changed_during_check", "the session's or a scan's metadata changed after the proof")
+                if PROOF == "s3" and resources:
+                    proof.refresh(proved)
             except Keep as k:
                 kept.append(k)
                 kept_rels += [r.rel for r in resources]
