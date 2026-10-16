@@ -725,4 +725,20 @@ print('assigned/deidentified inputs, custom/default temp and retained data/permi
 PY_UPLOAD
 )" && ci_pass "upload startup: $upload_startup_out" || ci_fail "upload startup: $upload_startup_out"
 
+ci_heading "group waits for HTTP availability"
+group_startup_out="$(python3 - "$CI_RENDER_DIR/edge-auth-on.yaml" 2>&1 <<'PY_GROUP'
+import subprocess, sys, yaml
+pod = next(d['spec']['template']['spec'] for d in yaml.safe_load_all(open(sys.argv[1]))
+           if d and d.get('kind') == 'Deployment' and d['metadata']['name'].endswith('-group-orthanc'))
+init, app = pod['initContainers'][0], pod['containers'][0]
+assert init['name'] == 'wait-for-orthanc' and init['command'] == ['sh', '-c']
+assert init['image'] == 'curlimages/curl:8.11.1' and init['imagePullPolicy'] == 'IfNotPresent'
+assert init['env'] == [e for e in app['env'] if e['name'] in ('ORTHANC_USER', 'ORTHANC_PASSWORD')]
+assert app['args'][0] + '/system' in init['args'][0]
+assert 'for try in $(seq 1 18); do' in init['args'][0] and '-m 5' in init['args'][0] and 'sleep 5' in init['args'][0]
+subprocess.run(['sh', '-n', '-c', init['args'][0]], check=True)
+print('receiver endpoint, credentials, curl image and shell syntax checked')
+PY_GROUP
+)" && ci_pass "group startup: $group_startup_out" || ci_fail "group startup: $group_startup_out"
+
 ci_summary "runtime-templates"

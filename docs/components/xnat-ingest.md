@@ -49,6 +49,9 @@ here. The chart no longer contains the S3 uploader. Every stage reads
 and writes directories on one shared volume; upload reads the same
 `/data/assigned` that `assign` wrote.
 
+The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
+This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
+
 ## Role in this stack
 
 The DICOM ingest engine downstream of Orthanc.

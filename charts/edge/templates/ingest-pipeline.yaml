@@ -46,6 +46,30 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      initContainers:
+        - name: wait-for-orthanc
+          image: "{{ .Values.dataPolicy.reporter.image.repository }}:{{ .Values.dataPolicy.reporter.image.tag }}"
+          imagePullPolicy: {{ .Values.dataPolicy.reporter.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - |-
+              set --
+              {{- if .Values.orthanc.auth.enabled }}
+              set -- -u "$ORTHANC_USER:$ORTHANC_PASSWORD"
+              {{- end }}
+              for try in $(seq 1 18); do
+                code=$(curl -q -sS --noproxy '*' -m 5 -o /dev/null -w '%{http_code}' "$@" "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}/system" 2>/dev/null) && [ "$code" = 200 ] && exit 0
+                sleep 5
+              done
+              echo 'Orthanc API did not become available after 18 attempts (up to about 180 seconds)' >&2
+              exit 1
+          {{- if .Values.orthanc.auth.enabled }}
+          env:
+            - name: ORTHANC_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.orthanc.auth.existingSecret | quote }}, key: orthanc-user}}
+            - name: ORTHANC_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.orthanc.auth.existingSecret | quote }}, key: orthanc-password}}
+          {{- end }}
       containers:
         - name: group
           image: {{ $img }}
