@@ -212,4 +212,11 @@ while IFS= read -r tpl; do
 done < <(find "$REPO_ROOT/charts" -path '*/templates/*' -name '*.yaml' 2>/dev/null)
 [ "$shebang_bad" -eq 0 ] && ci_pass "every template runs its script with an interpreter its shebang allows"
 
+# Exercise node readiness before the installer can write kubeconfig.
+if python3 "$REPO_ROOT/tests/bootstrap-readiness/test_readiness.py"; then
+  ci_pass "installer readiness: five offline cases"
+else
+  ci_fail "installer readiness"
+fi
+
 ci_summary "shell syntax"
