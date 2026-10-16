@@ -225,6 +225,17 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # assign validates its input before entering --loop. The group/Orthanc
+      # pods can start later, so create this input on the same PVC first.
+      # mkdir -p preserves existing data and permissions; a volume error keeps
+      # the init container failing instead of starting assign with no input.
+      initContainers:
+        - name: init-grouped-dir
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "/data/grouped"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: assign
           image: {{ $img }}
