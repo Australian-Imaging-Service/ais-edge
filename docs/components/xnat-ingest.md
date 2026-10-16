@@ -31,6 +31,9 @@ node:
 > and it writes reversible re-identification metadata, which the Lua hook does
 > not. See [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
 
+The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
+This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
+
 ## Role in this stack
 
 The DICOM ingest engine. On each edge worker Orthanc receives and
