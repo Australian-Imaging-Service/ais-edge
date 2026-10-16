@@ -1313,6 +1313,19 @@ ingest:
     enabled: true
 EOF
 
+# Upload owns its configured temporary parent; an empty value keeps the
+# application's system temporary-directory default.
+cat >"$V/edge-upload-temp-custom.yaml" <<'EOF'
+upload:
+  direct:
+    tempDir: '/data/upload scratch/cache;literal'
+EOF
+cat >"$V/edge-upload-temp-default.yaml" <<'EOF'
+upload:
+  direct:
+    tempDir: ''
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1340,6 +1353,9 @@ mgmt-s3-mtls-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-s3-mt
 edge-defaults	charts/edge	edge-base.yaml
 edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
+edge-upload-temp-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-custom.yaml
+edge-upload-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-default.yaml
+edge-upload-ingest-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-upload-temp-default.yaml
 edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml

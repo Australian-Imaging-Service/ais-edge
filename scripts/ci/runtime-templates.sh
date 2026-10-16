@@ -743,4 +743,42 @@ print("stage resources and assign initialization verified, including file-drop w
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
 
+ci_heading "upload input and temporary parent exist before startup"
+upload_startup_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_UPLOAD'
+from pathlib import Path
+import subprocess, sys, tempfile, yaml
+cases = [('edge-upload-direct', '/data/assigned', '/data/tmp'),
+         ('edge-upload-temp-custom', '/data/assigned', '/data/upload scratch/cache;literal'),
+         ('edge-upload-temp-default', '/data/assigned', ''),
+         ('edge-direct-ingest-reclaim', '/data/deidentified', '/data/tmp'),
+         ('edge-upload-ingest-temp-default', '/data/deidentified', '')]
+for name, source, temp in cases:
+    pod = next(d['spec']['template']['spec'] for d in yaml.safe_load_all((Path(sys.argv[1]) / (name + '.yaml')).read_text())
+               if d and d.get('kind') == 'Deployment' and d['metadata']['name'].endswith('-upload'))
+    app = pod['containers'][0]
+    assert app['args'][0] == source
+    assert len(pod['initContainers']) == 1
+    init = pod['initContainers'][0]
+    paths = [source] + ([temp] if temp else [])
+    assert init['name'] == 'init-upload-dirs' and init['command'] == ['mkdir', '-p', '--', *paths]
+    assert init['image'] == app['image'] and init['imagePullPolicy'] == app['imagePullPolicy']
+    assert init['volumeMounts'] == app['volumeMounts'] == [{'name': 'pipeline', 'mountPath': '/data'}]
+    with tempfile.TemporaryDirectory() as tmp:
+        targets = [Path(tmp) / Path(p).relative_to('/data') for p in paths]
+        command = ['mkdir', '-p', '--', *map(str, targets)]
+        subprocess.run(command, check=True)
+        retained = targets[0] / 'existing-data'; retained.write_bytes(b'preserve')
+        targets[0].chmod(0o750)
+        subprocess.run(command, check=True)
+        assert retained.read_bytes() == b'preserve' and targets[0].stat().st_mode & 0o777 == 0o750
+        if temp:
+            with tempfile.TemporaryDirectory(dir=targets[1]): pass
+        else:
+            assert not (Path(tmp) / 'tmp').exists()
+        blocked = Path(tmp) / 'blocked'; blocked.write_text('file')
+        assert subprocess.run(['mkdir','-p','--',str(blocked)],capture_output=True).returncode != 0
+print('assigned/deidentified inputs, custom/default temp and retained data/permissions checked')
+PY_UPLOAD
+)" && ci_pass "upload startup: $upload_startup_out" || ci_fail "upload startup: $upload_startup_out"
+
 ci_summary "runtime-templates"
