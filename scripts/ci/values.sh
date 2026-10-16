@@ -1163,6 +1163,39 @@ fullnameOverride: custom
 namespace: upload-custom
 EOF
 
+# Distinct stage settings catch values wired to the wrong container. Partial
+# requests/limits must also pass through without chart-supplied additions.
+cat >"$V/edge-stage-resources.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources:
+      requests: {cpu: 101m, memory: 301Mi}
+      limits: {cpu: 901m, memory: 1301Mi}
+  fileDrop:
+    enabled: true
+    resources:
+      requests: {cpu: 102m, memory: 302Mi}
+      limits: {cpu: 902m, memory: 1302Mi}
+  assign:
+    resources:
+      requests: {memory: 444Mi}
+  deidentify:
+    resources:
+      limits: {cpu: 888m}
+EOF
+cat >"$V/edge-stage-resources-null.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources: null
+  fileDrop:
+    enabled: true
+    resources: null
+  assign:
+    resources: null
+  deidentify:
+    resources: null
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1191,6 +1224,8 @@ edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-stage-resources	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources.yaml
+edge-stage-resources-null	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-null.yaml
 edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
 edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml

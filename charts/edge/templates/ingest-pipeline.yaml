@@ -50,6 +50,10 @@ spec:
         - name: group
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          {{- with .Values.ingest.orthancGroup.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["xnat-ingest", "group-orthanc"]
           args:
             - "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
@@ -138,6 +142,10 @@ spec:
         - name: group-fs
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          {{- with .Values.ingest.fileDrop.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command: ["xnat-ingest", "group"]
           args:
             - {{ .Values.ingest.fileDrop.inputGlob | quote }}
@@ -221,6 +229,10 @@ spec:
         - name: assign
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          {{- with .Values.ingest.assign.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- if eq (include "edge.uploadTreeKey" .) "assigned" }}
           # This stage writes the upload tree: one pass at a time, inside the
           # writer lock. See edge.lockedStage.
@@ -327,6 +339,10 @@ spec:
         - name: deidentify
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          {{- with .Values.ingest.deidentify.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           # This stage writes the upload tree: one pass at a time, inside the
           # writer lock. See edge.lockedStage.
           command:
