@@ -673,6 +673,13 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
                     assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                if name == "deidentify":
+                    init = doc["spec"]["template"]["spec"]["initContainers"]
+                    assert len(init) == 1 and init[0]["name"] == "init-assigned-dir", case
+                    assert init[0]["command"] == ["mkdir", "-p", "--", container["args"][0]], case
+                    assert init[0]["image"] == container["image"], case
+                    assert init[0]["imagePullPolicy"] == container["imagePullPolicy"], case
+                    assert init[0]["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
     names = set(expected)
     if case == "edge-direct-ingest-reclaim":
         names.remove("group-fs")
