@@ -1196,6 +1196,15 @@ ingest:
     resources: null
 EOF
 
+# File-drop grouping must initialize assign without waiting for Orthanc.
+cat >"$V/edge-assign-filedrop-only.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    enabled: false
+  fileDrop:
+    enabled: true
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1218,6 +1227,7 @@ edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edg
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
+edge-assign-filedrop-only	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-assign-filedrop-only.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-duration-base10	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-duration-base10.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml

@@ -652,7 +652,8 @@ expected = {
     "assign": {"requests": {"memory": "444Mi"}},
     "deidentify": {"limits": {"cpu": "888m"}},
 }
-for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null"):
+for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null",
+             "edge-assign-filedrop-only"):
     found = {}
     for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
         if not doc or doc.get("kind") != "Deployment":
@@ -663,15 +664,26 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                 if name in found:
                     raise SystemExit(f"{case}: duplicate stage container {name}")
                 found[name] = container.get("resources")
+                if name == "assign":
+                    initializers = doc["spec"]["template"]["spec"].get("initContainers", [])
+                    assert len(initializers) == 1, (case, "assign initializer missing or duplicated")
+                    init = initializers[0]
+                    assert init["name"] == "init-grouped-dir", case
+                    assert init["image"] == container["image"], case
+                    assert init["imagePullPolicy"] == container["imagePullPolicy"], case
+                    assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
+                    assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
     names = set(expected)
     if case == "edge-direct-ingest-reclaim":
         names.remove("group-fs")
+    elif case == "edge-assign-filedrop-only":
+        names.remove("group")
     if set(found) != names:
         raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
     wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
     if found != wanted:
         raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
-print("configured, partial, unset and null resources reach only the expected stage containers")
+print("stage resources and assign initialization verified, including file-drop without Orthanc")
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
 
