@@ -370,6 +370,14 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # Deidentify can start before assign creates its output directory.
+      initContainers:
+        - name: init-assigned-dir
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "--", "/data/assigned"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: deidentify
           image: {{ $img }}
