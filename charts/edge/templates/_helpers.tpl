@@ -979,6 +979,19 @@ installs for the running Python, so the pod passes its own image in.
      and any child it leaves keep the lock until they stop.
      A pass that fails stops the container, as an exception out of --loop did.
      fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
+{{- /* A stage that writes an INTERMEDIATE tree the upload-tree writer reads and
+     retires (deidentify when the package stage is on). Same one-pass-per-lock
+     loop as edge.lockedStage, on the same lock, without the .alive handle: its
+     passes never overlap a package pass, so nothing changes under the package
+     stage while it reads and unlinks a session. */}}
+{{- define "edge.serialisedStage" -}}
+- /bin/sh
+- -c
+- {{ printf "mkdir -p /data/.locks && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- xnat-ingest
+- {{ index . 1 | quote }}
+{{- end }}
+
 {{- define "edge.lockedStage" -}}
 - /bin/sh
 - -c
