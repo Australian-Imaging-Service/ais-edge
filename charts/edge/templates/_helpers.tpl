@@ -946,7 +946,8 @@ installs for the running Python, so the pod passes its own image in.
      CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
      different trees. */}}
 {{- define "edge.uploadTreeKey" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
 {{- end }}
 
 {{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
