@@ -42,6 +42,13 @@ with the individual DICOM files in XNAT.
   container of the package pod and of the upload pod (`ingest.extraPipPackages`).
   The node needs access to github.com for that install, or a mirror of the
   package.
+- Under `upload.mode: s3` (the tier-2 default) the edge `s3-uploader` copies
+  the packaged tree as it is and needs nothing. The management uploader
+  (`xnatUpload` in `charts/mgmt`) reads the packaged sessions from the bucket,
+  so it needs the same two things: an image with fileformats 0.22.1 or later
+  (`xnatUpload.image.tag`) and the vendor package
+  (`xnatUpload.extraPipPackages`). The management staged reclaimer needs
+  nothing: it proves the zip by its folder label.
 
 ## Turn it on
 
@@ -51,6 +58,16 @@ Add this to `sites/<site>/values.yaml`:
 ingest:
   package:
     enabled: true
+  extraPipPackages:
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+```
+
+Under `upload.mode: s3`, add this to the management values as well
+(`charts/mgmt`, the values file of the management release):
+
+```yaml
+xnatUpload:
   extraPipPackages:
     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
@@ -97,7 +114,9 @@ output resources, and `copyMode: hardlink_or_copy`.
    per series.
 
 3. In XNAT, open the session. Each scan has a `DICOM-zip` resource with
-   `archive.zip` and a `DICOM` (or `secondary`) resource with one file.
+   `archive.zip` and a `DICOM` (or `secondary`) resource with one file. Under
+   `upload.mode: s3`, the upload runs on the management node:
+   `kubectl -n xnat-upload logs deploy/mgmt-upload-<edge>` shows it.
 
 4. The trees drain: `/data/deidentified` is empty after each pass and
    `/data/packaged` is empty after the upload and the next staged-reclaimer

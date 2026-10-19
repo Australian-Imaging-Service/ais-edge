@@ -23,6 +23,13 @@ node:
   the destination and `aws s3 sync` does not
 - **`xnat-ingest upload`** on the management node, rendered **once per
   edge site** rather than once for the fleet
+- **`xnat-ingest package`** on each edge VM — OPTIONAL and off by default
+  (`ingest.package.enabled`, under `deid.engine: ingest` only). Reads
+  `/data/deidentified` and writes `/data/packaged`: each DICOM series becomes
+  one `DICOM-zip` resource (`archive.zip`) plus one DICOM sample. The
+  `s3-uploader` then reads `/data/packaged`, and the management uploader needs
+  the vendor datatype package (`xnatUpload.extraPipPackages`). See
+  [package-stage.md](../package-stage.md).
 
 > **De-identification is done in Orthanc by default** (the Lua hook), not in
 > xnat-ingest. The optional `deidentify` stage is also wired into this chart
@@ -83,7 +90,8 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 
 ### s3-uploader pod (edge)
 - **The same pipeline PVC** — reads the terminal tree (`assigned/`, or
-  `deidentified/` under `deid.engine: ingest`) and copies each settled
+  `deidentified/` under `deid.engine: ingest`, or `packaged/` when the package
+  stage is on) and copies each settled
   session, inside the upload-tree writer lock. It never removes a session:
   the staged-reclaimer CronJob does that, after it has proved each file in
   the bucket (see "S3 mode: prove, then delete" below). Its state
