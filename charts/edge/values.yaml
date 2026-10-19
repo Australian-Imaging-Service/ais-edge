@@ -925,11 +925,9 @@ ingest:
   # resource. An empty input directory is normal while waiting for new work.
   package:
     enabled: false
-    # `package` first ships in xnat-ingest 0.16.0. Only this stage runs it;
-    # use a build containing the DicomSeries compatibility and empty-input
-    # fixes before enabling it. The other stages stay on ingest.image.tag.
-    # Drop this override once ingest.image.tag includes those fixes.
-    imageTag: "0.16.2"
+    # Runs on ingest.image.tag like every stage. Needs xnat-ingest 0.16.2 or
+    # later and fileformats libraries that zip a DICOM series (see
+    # docs/package-stage.md for the versions and the vendor package).
     interval: 60
     copyMode: hardlink_or_copy
     sourceDatatype: medimage/dicom-series
