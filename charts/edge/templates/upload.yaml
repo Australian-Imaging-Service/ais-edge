@@ -49,7 +49,7 @@ spec:
         {{- include "edge.extraPip.initContainer" (dict "root" $ "image" (printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag)) | nindent 8 }}
       containers:
         - name: upload
-          image: {{ $uploadImage | quote }}
+          image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
           # xnat-ingest loops internally via --loop; no bash wrapper needed.
           command: ["xnat-ingest", "upload"]

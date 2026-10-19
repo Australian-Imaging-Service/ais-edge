@@ -502,13 +502,19 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
-      {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.package.imageTag }}
-      {{- include "edge.extraPip.initContainers" (dict "root" $ "image" $pkgImage) | nindent 6 }}
+      {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
+      {{- with .Values.ingest.extraPipPackages }}
+      initContainers:
+        {{- include "edge.extraPip.initContainer" (dict "root" $ "image" $pkgImage) | nindent 8 }}
+      {{- end }}
       containers:
         - name: package
           image: {{ $pkgImage }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "package"]
+          # This stage writes the upload tree: one pass at a time inside the
+          # writer lock, no --loop. See edge.lockedStage.
+          command:
+            {{- include "edge.lockedStage" (list . "package" .Values.ingest.package.interval) | nindent 12 }}
           args:
             - "/data/deidentified"
             - {{ include "edge.uploadSourceDir" . | quote }}

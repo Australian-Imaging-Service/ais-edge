@@ -965,20 +965,21 @@ The init container MUST run the same image as the container it serves: pip
 installs for the running Python, so the pod passes its own image in.
   include "edge.extraPip.initContainers" (dict "root" $ "image" $image)
 */ -}}
-{{- define "edge.extraPip.initContainers" -}}
+{{- /* One init container, as a list item: the caller writes `initContainers:`
+     and may put other items beside it (upload.yaml creates its directories first). */ -}}
+{{- define "edge.extraPip.initContainer" -}}
 {{- with .root.Values.ingest.extraPipPackages }}
-initContainers:
-  - name: pip-install
-    image: {{ $.image }}
-    imagePullPolicy: {{ $.root.Values.ingest.image.pullPolicy }}
-    command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
-    args:
-      {{- range . }}
-      - {{ . | quote }}
-      {{- end }}
-    volumeMounts:
-      - name: site-packages
-        mountPath: /opt/site-packages
+- name: pip-install
+  image: {{ $.image }}
+  imagePullPolicy: {{ $.root.Values.ingest.image.pullPolicy }}
+  command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
+  args:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  volumeMounts:
+    - name: site-packages
+      mountPath: /opt/site-packages
 {{- end }}
 {{- end }}
 
