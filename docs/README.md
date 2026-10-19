@@ -81,6 +81,8 @@ which values file you are editing matters.
   ceremony, required by `certManager.ca.mode: intermediate` (the chart fails
   the render and points here when that mode is set without a `secretRef`).
   Does not apply to the default `selfSigned` mode.
+- [`package-stage.md`](package-stage.md) — the optional package stage: one zip
+  per DICOM series, what it needs, how a site turns it on, what to check
 - [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event
   alerts live in Loki ruler (LogQL) while K8s-level alerts stay in
   Prometheus, and the tradeoff against an edge-Prometheus remote-write

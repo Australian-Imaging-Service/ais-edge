@@ -931,12 +931,15 @@ ingest:
     interval: 60
     copyMode: hardlink_or_copy
     sourceDatatype: medimage/dicom-series
-    # label: resource name in XNAT eg. DICOM to select one sample file in dicom series, or `auto`.
+    # label: resource name in XNAT. For the DICOM sample use `auto`: it takes the
+    #        label XNAT expects from the SOP class of the series (DICOM for
+    #        images, secondary for secondary captures, ...). A fixed label is
+    #        refused for a series of another class, and the session fails.
     # spec:  target datatype, with converter options after ':'.
     outputResources:
       - label: DICOM-zip
         spec: "medimage/dicom-series+zip:compression=ZIP_STORED"
-      - label: DICOM
+      - label: auto
         spec: medimage/vnd.australianimagingservice.dicom-sample
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
