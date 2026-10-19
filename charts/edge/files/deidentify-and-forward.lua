@@ -2,7 +2,8 @@
 --
 -- OnStoredInstance: facility-backup the original, /modify against the
 --   deidentification profile, delete the original (keep the deid'd one).
--- OnStableStudy:    PUT `xnat-ingest-ready` label on the study.
+-- OnStableStudy:    PUT the ready label; remove the processed label if the
+--   study changed after group-orthanc staged it (a late series).
 --
 -- Inputs (mounted at /etc/orthanc/):
 --   routing.json                     AET -> { project } map + default paths
@@ -264,15 +265,45 @@ end
 function OnStableStudy(studyId, tags, metadata)
   -- Fires StableAge seconds after the last instance arrives. By now
   -- OnStoredInstance has run for every instance; the study contains only
-  -- deid'd copies. Label idempotently so sort picks it up (filters
-  -- --orthanc-label xnat-ingest-ready and --orthanc-skip-label xnat-ingest-skip).
-  RestApiPut("/studies/" .. studyId .. "/labels/xnat-ingest-ready", "")
+  -- deid'd copies. Label idempotently so group-orthanc picks it up (its
+  -- --to-process-label and --processed-label). The names come from
+  -- routing.json (ingest.orthancGroup in the site values); the literals are
+  -- the fallback for a routing file written before they were published.
+  local routing   = loadJsonFile(ROUTING_FILE)
+  local defaults  = routing.Defaults or {}
+  local ready     = defaults.ReadyLabel
+  local processed = defaults.ProcessedLabel
+  if ready == nil then ready = "xnat-ingest-ready" end
+  if processed == nil then processed = "xnat-ingest-processed" end
+
+  -- A study becomes stable again only after its instances changed. If
+  -- group-orthanc already staged it, the change is a late series: remove
+  -- the processed label so the next group pass stages the study again.
+  -- Label writes do not change LastUpdate, so this cannot loop.
+  if processed ~= "" then
+    local study = ParseJson(RestApiGet("/studies/" .. studyId))
+    for _, label in ipairs((study and study["Labels"]) or {}) do
+      if label == processed then
+        RestApiDelete("/studies/" .. studyId .. "/labels/" .. processed)
+        print(DumpJson({
+          ts        = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+          component = "orthanc-deid",
+          event     = "study_reopened",
+          studyId   = studyId,
+          label     = processed,
+          series    = #(study["Series"] or {})
+        }, false))
+      end
+    end
+  end
+  if ready == "" then return end
+  RestApiPut("/studies/" .. studyId .. "/labels/" .. ready, "")
 
   print(DumpJson({
     ts        = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     component = "orthanc-deid",
     event     = "study_labeled_ready",
     studyId   = studyId,
-    label     = "xnat-ingest-ready"
+    label     = ready
   }, false))
 end

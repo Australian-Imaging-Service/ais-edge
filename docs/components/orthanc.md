@@ -60,6 +60,13 @@ Every step aborts and KEEPS the instance rather than losing it: if the facility
 backup write fails, nothing is modified and nothing is deleted; if `/modify` or
 the re-POST fails, the study simply never gets labelled and stalls visibly.
 
+A series that arrives after `group-orthanc` staged its study makes the study
+unstable again. When it is stable, `OnStableStudy` removes the
+`xnat-ingest-processed` label and applies `xnat-ingest-ready`, so the next
+`group-orthanc` pass stages the whole study again. The log event is
+`study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
+study is never re-staged.
+
 ## What Orthanc has access to
 
 | Resource | Why |
