@@ -94,6 +94,7 @@ print(e.get("WRITER_LOCK", ""), e.get("WRITER_ALIVE", ""))' "$TMP/cj") || die "c
     case "$(basename "$lock")" in
         assigned.lock)     writer=assign ;;
         deidentified.lock) writer=deidentify ;;
+        packaged.lock)     writer=package ;;
         *) die "unknown writer lock $lock. $CJ stays suspended." ;;
     esac
     k rollout status "deploy/$REL-$writer" --timeout=300s >/dev/null \
