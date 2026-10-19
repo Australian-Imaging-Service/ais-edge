@@ -51,10 +51,28 @@ local function writeAtomic(path, bytes)
     print("ERROR opening " .. tmp .. ": " .. (err or "unknown"))
     return false
   end
-  f:write(bytes)
-  f:close()
+  -- Every step reports its result. A short write, a failed close or a failed
+  -- sync left the archive without the bytes while this function said true.
+  local written, werr = f:write(bytes)
+  if not written then
+    print("ERROR writing " .. tmp .. ": " .. (werr or "unknown"))
+    f:close()
+    os.remove(tmp)
+    return false
+  end
+  local closed, cerr = f:close()
+  if not closed then
+    print("ERROR closing " .. tmp .. ": " .. (cerr or "unknown"))
+    os.remove(tmp)
+    return false
+  end
 
-  os.execute("sync " .. shellQuote(tmp) .. " 2>/dev/null")
+  local synced, _, src = os.execute("sync " .. shellQuote(tmp) .. " 2>/dev/null")
+  if not synced or src ~= 0 then
+    print("ERROR syncing " .. tmp .. " (exit " .. tostring(src) .. ")")
+    os.remove(tmp)
+    return false
+  end
   local ok, _, rc = os.execute("mv -f " .. shellQuote(tmp) .. " " .. shellQuote(path))
   if not ok and rc ~= 0 then
     print("ERROR renaming " .. tmp .. " -> " .. path)
