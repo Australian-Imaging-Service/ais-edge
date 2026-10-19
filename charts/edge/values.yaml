@@ -722,8 +722,8 @@ ingest:
   # refs to a commit, not a branch, or a restart can pick up different code.
   #
   #   extraPipPackages:
-  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@<sha>"
-  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@<sha>#subdirectory=extras"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
   extraPipPackages: []
   # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
   # these stages without chart-set reservations or limits, as before. Set each

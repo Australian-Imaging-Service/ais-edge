@@ -391,8 +391,8 @@ ingest:
   package:
     enabled: true
   extraPipPackages:
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@f68a8ab"
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@f68a8ab#subdirectory=extras"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
