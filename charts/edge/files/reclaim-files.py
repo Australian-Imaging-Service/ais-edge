@@ -151,6 +151,11 @@ class Resource:
             if "SOPClassUID" not in meta:
                 raise Keep("unmapped_resource", f"{self.path}: no SOPClassUID in __METADATA__.json; the uploader would read the headers")
             return sop_label(meta["SOPClassUID"]) if meta["SOPClassUID"] else name
+        if datatype.endswith("+zip"):
+            # A zipped series (the package stage's DICOM-zip) is one archive
+            # file. The uploader keeps the folder name for it: it is neither a
+            # DICOM collection nor a DICOM image, so no header decides.
+            return name
         if datatype.startswith("medimage/dicom"):
             # Includes a single DICOM image: the uploader takes its label from
             # the image header and refuses a folder that differs. Not mapped.
