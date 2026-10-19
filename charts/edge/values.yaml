@@ -943,7 +943,7 @@ ingest:
     # spec:  target datatype, with converter options after ':'.
     outputResources:
       - label: DICOM-zip
-        spec: "medimage/dicom-series+zip:compression=0"
+        spec: "medimage/dicom-series+zip:compression=ZIP_STORED"
       - label: DICOM
         spec: medimage/vnd.australianimagingservice.dicom-sample
 
