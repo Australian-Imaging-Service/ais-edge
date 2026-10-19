@@ -353,6 +353,14 @@ dataPolicy:
       # deletes them through its API. Replacing the de-identifier means changing
       # this word (or pointing location at the new store), not rewriting the
       # engine.
+      # orthanc-rest deletes a study only when its export is proven: the
+      # processed label is present, LastUpdate is unchanged since the first
+      # read, and the one snapshot label group-orthanc wrote
+      # (<processedLabel>-<LastUpdate>-<digest>) names that LastUpdate and the
+      # digest of the instance list read now. Then exactly that list is
+      # deleted. Anything else is kept and logged as reclaim_kept with reason
+      # export_state_unknown: a series that arrived late, a study staged by an
+      # xnat-ingest that writes no snapshot label, an unreadable reply.
       backend: orthanc-rest      # filesystem | orthanc-rest
       reclaim: onGrouped         # never | onGrouped
       minAge: 7d
