@@ -29,18 +29,19 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
-- **`xnat-ingest package`** (`<release>-package`, `component=package`) — runs
-  after deidentify, under `deid.engine: ingest` only (`ingest.package.enabled`,
-  currently off). Reads `/data/deidentified` and writes `/data/packaged`. Each
-  `medimage/dicom-series` scan resource is replaced by a `DICOM-zip` resource,
-  holding the whole series as an uncompressed zip, and one DICOM sample that
-  XNAT can read headers from. Each session is removed from `/data/deidentified`
-  once it has been packaged (`dataPolicy.derived.deidentified.reclaim:
-  onPackaged`). If staged sessions exist but none has a `dicom-series` scan
-  resource, the stage fails instead of reporting success. An empty input is
-  normal while waiting for work. Set `ingest.package.imageTag` to a build with
-  these fixes before enabling the stage; 0.16.0 was the first release with
-  `package`.
+- **`xnat-ingest package`** (`<release>-package`, `component=package`) —
+  OPTIONAL and off by default (`ingest.package.enabled`); runs after
+  deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
+  writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
+  replaced by a `DICOM-zip` resource, holding the whole series as an
+  uncompressed zip, and one DICOM sample that XNAT can read headers from. A
+  session with no `dicom-series` scan resource passes through unchanged. Each
+  session is removed from `/data/deidentified` once it has been packaged
+  (`dataPolicy.derived.deidentified.reclaim: onPackaged`). An empty input is
+  normal while waiting for work. The stage runs the pipeline image
+  (`ingest.image.tag`), which needs fileformats 0.22.1 or later; 0.16.2 does
+  not have it. See [package-stage.md](../package-stage.md) for the versions,
+  the vendor package and how a site turns the stage on.
 - **`xnat-ingest upload`** (`<release>-upload`, `component=upload`) — reads
   `/data/assigned`, `/data/deidentified` when the deidentify stage is on, or
   `/data/packaged` when the package stage is on, and uploads sessions to XNAT

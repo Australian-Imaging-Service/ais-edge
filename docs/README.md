@@ -59,6 +59,8 @@ must not need a working path to the internet to reinstall). Both carry a
 
 ### System-level references
 
+- [`package-stage.md`](package-stage.md) — the optional package stage: one zip
+  per DICOM series, what it needs, how a site turns it on, what to check
 - [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event
   alerts live in the Loki ruler (LogQL over JSON events) while K8s-level
   alerts stay in Prometheus.
