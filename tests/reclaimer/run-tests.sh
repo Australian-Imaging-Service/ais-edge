@@ -417,6 +417,9 @@ assert_fs_no_sop_key()    { reason "$1" unmapped_resource && kept_files "$2" "$S
 setup_fs_no_metadata()    { fs_session "$1" "$SESS" 2 1.scan secondary none; xnat_files subj EXP1 visit 2 100 1 secondary; }
 assert_fs_no_metadata()   { reason "$1" unmapped_resource && kept_files "$2" "$SESS/1.scan/secondary/f1.dcm"; }
 setup_fs_empty_sop()      { fs_session "$1" "$SESS" 2 1.scan DICOM empty; xnat_files subj EXP1 visit 2; }
+# A zipped series (the package stage's DICOM-zip): one archive, labelled by its
+# folder name like any non-DICOM resource, so it is proved and removed.
+setup_fs_dicom_zip()      { fs_session "$1" "$SESS" 1 1.scan DICOM-zip - medimage/dicom-series+zip; xnat_files subj EXP1 visit 1 100 1 DICOM-zip; }
 # A single DICOM image: its label comes from its header, so it is not mapped.
 setup_fs_dicom_image()    { fs_session "$1" "$SESS" 1 1.scan secondary - medimage/dicom-image; xnat_files subj EXP1 visit 1 100 1 secondary; }
 assert_fs_dicom_image()   { reason "$1" unmapped_resource && kept_files "$2" "$SESS/1.scan/secondary/f1.dcm"; }
@@ -676,6 +679,7 @@ run_fs_case fs_both_labels             yes reclaim_removed
 run_fs_case fs_no_sop_key              no  reclaim_kept
 run_fs_case fs_no_metadata             no  reclaim_kept
 run_fs_case fs_empty_sop               yes reclaim_removed
+run_fs_case fs_dicom_zip               yes reclaim_removed
 run_fs_case fs_dicom_image             no  reclaim_kept
 run_fs_case fs_unknown_dicom_type      no  reclaim_kept
 run_fs_case fs_no_label_rule           no  reclaim_kept       PYTHONPATH="$WORK/broken-rule"
