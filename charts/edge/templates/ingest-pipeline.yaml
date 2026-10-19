@@ -396,8 +396,14 @@ spec:
           {{- end }}
           # This stage writes the upload tree: one pass at a time, inside the
           # writer lock. See edge.lockedStage.
+          {{- if eq (include "edge.uploadTreeKey" .) "deidentified" }}
           command:
             {{- include "edge.lockedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
+          {{- else }}
+          # The package stage writes the upload tree and holds the lock; this
+          # stage writes an intermediate tree the package stage retires.
+          command: ["xnat-ingest", "deidentify"]
+          {{- end }}
           args:
             - "/data/assigned"
             - "/data/deidentified"
@@ -435,6 +441,10 @@ spec:
             # Deletes hardlinks, not data, when copyMode is hardlink_or_copy.
             - "--unlink-source"
             - "all"
+            {{- end }}
+            {{- if ne (include "edge.uploadTreeKey" .) "deidentified" }}
+            - "--loop"
+            - {{ .Values.ingest.deidentify.interval | quote }}
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
@@ -537,8 +547,6 @@ spec:
             - "--unlink-source"
             - "all"
             {{- end }}
-            - "--loop"
-            - {{ .Values.ingest.package.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- include "edge.extraPip.env" . | nindent 12 }}
