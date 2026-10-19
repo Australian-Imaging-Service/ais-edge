@@ -372,11 +372,12 @@ dataPolicy:
     # uploader copies (s3) or uploads (direct) and never deletes, so only the
     # stagedReclaimer CronJob below retires it, through `reclaim` here.
     deidentified:
-      # No `location` key on purpose. The path is DERIVED from
-      # edge.uploadSourceDir, the same helper upload.yaml uses for its argument,
-      # so the stage and the uploader cannot end up pointed at different trees.
-      # Restating it here would also declare a path that does not exist in a
-      # render with de-identification off.
+      # No `location` key on purpose. The path is /data/deidentified, the one
+      # the deidentify stage writes; without the package stage it is also what
+      # upload.yaml reads (edge.uploadSourceDir), so the stage and the uploader
+      # cannot end up pointed at different trees. Restating it here would also
+      # declare a path that does not exist in a render with de-identification
+      # off.
       # OPTION: onUploaded is satisfiable here under BOTH upload modes: the
       # stagedReclaimer CronJob below proves each file in the bucket (s3) or in
       # XNAT (direct) before it deletes. It stays `never`
