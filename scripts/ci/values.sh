@@ -36,6 +36,16 @@ mkdir -p "$V"
 # nothing else, so `<chart>-defaults` really is the shipped configuration plus
 # the operator's mandatory answers.
 
+# The management uploader with the vendor datatype package an edge with the
+# package stage needs (xnatUpload.extraPipPackages): renders the pip init
+# container, the site-packages volume and PYTHONPATH.
+cat >"$V/mgmt-upload-extrapip.yaml" <<'EOF'
+xnatUpload:
+  extraPipPackages:
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+EOF
+
 cat >"$V/mgmt-base.yaml" <<'EOF'
 domain:
   internal: ci.198-51-100-10.nip.io
@@ -1357,6 +1367,7 @@ ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
 mgmt-upload-custom	charts/mgmt	mgmt-base.yaml mgmt-upload-custom.yaml
+mgmt-upload-extrapip	charts/mgmt	mgmt-base.yaml mgmt-upload-extrapip.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
