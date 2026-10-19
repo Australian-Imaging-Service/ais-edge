@@ -62,7 +62,9 @@ every change. The chart then:
 - starts the `<release>-package` pod and points the upload stage at
   `/data/packaged`;
 - runs the package stage inside the writer lock, one pass per
-  `ingest.package.interval` seconds (default 60);
+  `ingest.package.interval` seconds (default 60), and runs the deidentify
+  stage one pass per turn of the same lock, so the two never work on a
+  session at the same time;
 - sets `dataPolicy.derived.deidentified.reclaim: auto` to `onPackaged` (the
   package stage retires each session after it is packaged) and
   `dataPolicy.derived.packaged.reclaim: auto` to `onUploaded` (the staged
@@ -116,6 +118,12 @@ they cover every other upload.
   the first one, so the upload stage skips it as already uploaded, and the new
   series is uploaded beside it. This needs the xnat-ingest fix "the same files
   give the same zip" (in the same release as PR #216).
+- Part of a series arriving later (file drop only): when a file drop brings
+  more images of a series that was already packaged, the new zip would hold
+  fewer images than the packaged one. The stage refuses it, logs an error
+  (`IngestStageError` fires) and keeps both the input and the packaged copy.
+  Drop the whole series again in one go. Through Orthanc this does not
+  happen: a late series stages the whole study again.
 - Turn it off: set `ingest.package.enabled: false` and upgrade the release.
   Do this only when `/data/packaged` is empty: the upload stage reads
   `/data/deidentified` again after the change and does not look at
