@@ -400,9 +400,12 @@ spec:
           command:
             {{- include "edge.lockedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
           {{- else }}
-          # The package stage writes the upload tree and holds the lock; this
-          # stage writes an intermediate tree the package stage retires.
-          command: ["xnat-ingest", "deidentify"]
+          # The package stage writes the upload tree and holds the lock per
+          # pass. This stage writes the intermediate tree the package stage
+          # reads and retires: one pass per turn of the SAME lock, so a
+          # deidentify pass never runs while a package pass reads a session.
+          command:
+            {{- include "edge.serialisedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
           {{- end }}
           args:
             - "/data/assigned"
@@ -441,10 +444,6 @@ spec:
             # Deletes hardlinks, not data, when copyMode is hardlink_or_copy.
             - "--unlink-source"
             - "all"
-            {{- end }}
-            {{- if ne (include "edge.uploadTreeKey" .) "deidentified" }}
-            - "--loop"
-            - {{ .Values.ingest.deidentify.interval | quote }}
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
