@@ -1058,11 +1058,34 @@ installs for the running Python, so the pod passes its own image in.
      state, and not during the upgrade that turns the package stage on or off
      or rolls it back, when an old pod of either stage may still be finishing a
      pass. No marker file, nothing that can go stale. */}}
+{{- /* STOP SIGNALS, for both wrappers (edge.serialisedStage, edge.lockedStage).
+     The shell is PID 1 of its container, and the kubelet sends SIGTERM to
+     PID 1 only. PID 1 has no default action for a signal. Without a trap, the
+     SIGTERM had no effect: each stop waited for SIGKILL at the end of the
+     grace period (30 s), and a pass could start after the SIGTERM.
+     GUIDING: `trap exit TERM INT` stops the loop at the next command boundary.
+     In the sleep, that is at once: the sleep runs in the background, and
+     `wait` returns when the signal comes. In a pass, that is when the pass
+     ends: the shell runs no trap while a foreground command runs. The pass
+     gets no signal, so it does not stop during a write, and its exit releases
+     its lock as before. No pass starts from the sleep after the signal.
+     GUIDING: `exit` in a trap keeps the status of the command before the
+     trap: 128 + the signal number after the sleep, the pass status after a
+     pass. A pass that fails still stops the container with its status.
+     CAUTION: a pass that is longer than the grace period still gets SIGKILL.
+     A signal that comes while a pass waits for its lock has effect only after
+     that pass.
+     CAUTION: a child that a pass leaves running is stopped when the shell
+     exits after the pass (PID 1 exits, so the kernel stops the namespace).
+     CAUTION: keep `sleep N & wait $!`. A sleep in the foreground holds the
+     trap until the sleep ends.
+     scripts/ci/runtime-templates.sh runs the rendered wrappers with dash and
+     sends these signals. */}}
 {{- define "edge.serialisedStage" -}}
 {{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v; done" (index $tree (index . 1)) (index . 2) | quote }}
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
 - xnat-ingest
 - {{ index . 1 | quote }}
 {{- end }}
@@ -1083,7 +1106,7 @@ installs for the running Python, so the pod passes its own image in.
 {{- end }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
 - xnat-ingest
 - {{ $stage | quote }}
 {{- end }}

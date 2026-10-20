@@ -279,12 +279,20 @@ The chart runs these arguments one pass at a time inside the upload-tree writer
 lock, with no `--loop`:
 
 ```
-sh -c 'mkdir -p /data/.locks && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60; done' \
+sh -c 'trap exit TERM INT; mkdir -p /data/.locks && exec 9>>/data/.locks/assigned.alive && flock -s 9 && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60 & wait $!; done' \
   xnat-ingest assign <the arguments above>   # sleep: ingest.assign.interval
 ```
 
 The sleep after each pass is the same full interval that `--loop` sleeps. A
-pass that fails stops the container, as an exception out of `--loop` did. Under
+pass that fails stops the container, as an exception out of `--loop` did.
+fd 9 holds the shared lock on `assigned.alive` for the life of the container.
+The shell is PID 1, and PID 1 has no default action for a signal, so the
+`trap` is necessary. A stop (SIGTERM or SIGINT) ends the loop at once in the
+sleep: the sleep runs in the background, and `wait` returns on the signal. In
+a pass, it ends the loop when the pass ends: the pass is not stopped during a
+write, and no pass starts from the sleep after the signal. A stop that comes
+while the stage waits for its lock runs that one pass first. A pass that is
+longer than the grace period (30 s) still gets SIGKILL. Under
 deid.engine ingest, `assign` does not write the upload tree, so it keeps
 `--loop 60` and `deidentify` runs inside the lock. With the package stage on,
 `package` runs inside `deidentified.lock` and then `packaged.lock` for each
