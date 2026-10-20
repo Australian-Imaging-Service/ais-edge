@@ -531,7 +531,7 @@ spec:
           # This stage writes the upload tree: one pass at a time inside the
           # writer lock, no --loop. See edge.lockedStage.
           command:
-            {{- include "edge.lockedStage" (list . "package" .Values.ingest.package.interval) | nindent 12 }}
+            {{- include "edge.lockedStage" (list . "package" .Values.ingest.package.interval "deidentify") | nindent 12 }}
           args:
             - "/data/deidentified"
             - {{ include "edge.uploadSourceDir" . | quote }}

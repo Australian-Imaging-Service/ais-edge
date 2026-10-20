@@ -597,17 +597,17 @@ EOF
 # .alive check relies on it), or when the staged-reclaimer gets other lock paths.
 ci_heading "the upload-tree writer runs under the writer lock"
 
-while IFS=$'\t' read -r case_name locked plain; do
+while IFS=$'\t' read -r case_name locked plain serialised; do
   render="$CI_RENDER_DIR/$case_name.yaml"
   if [ ! -s "$render" ]; then
     ci_fail "no render at $render — run scripts/ci/render.sh first"
     continue
   fi
-  lock_out="$(python3 - "$render" "$locked" "$plain" 2>&1 <<'PY2'
+  lock_out="$(python3 - "$render" "$locked" "$plain" "${serialised:--}" 2>&1 <<'PY2'
 import sys, yaml
 
-path, locked, plain = sys.argv[1:4]
-tree = {"assign": "assigned", "deidentify": "deidentified"}
+path, locked, plain, serialised = sys.argv[1:5]
+tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
 stages, strategy, reclaimer = {}, {}, None
 for doc in yaml.safe_load_all(open(path)):
     if not doc:
@@ -636,12 +636,34 @@ if reclaimer is not None and (reclaimer.get("WRITER_LOCK"), reclaimer.get("WRITE
     raise SystemExit(f"the staged-reclaimer locks {reclaimer.get('WRITER_LOCK')}, {reclaimer.get('WRITER_ALIVE')}, not {lock}, {alive}")
 if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
+if f"rm -f /data/.locks/{locked}.serialised && " not in cmd[2]:
+    raise SystemExit(f"{locked} does not clear its own .serialised marker at start: {cmd[2]}")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
     if cmd != ["xnat-ingest", plain] or "--loop" not in args:
         raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
+if serialised != "-":
+    # The stage that writes the writer's INPUT tree takes turns on the writer's
+    # lock and announces itself; the writer waits for that announcement before
+    # its first pass (the transition gate for the upgrade that turns the stage on).
+    wcmd, _ = stages.get(locked, ([], []))
+    marker = f"/data/.locks/{serialised}.serialised"
+    if f"until [ -f {marker} ]" not in wcmd[2]:
+        raise SystemExit(f"{locked} does not wait for {marker} before its first pass: {wcmd[2]}")
+    scmd, sargs = stages.get(serialised, ([], []))
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != ["xnat-ingest", serialised]:
+        raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
+    if f"flock {lock} " not in scmd[2] or "flock -s 9" in scmd[2]:
+        raise SystemExit(f"{serialised} must take turns on {lock} without holding {alive}: {scmd[2]}")
+    if f"> {marker} && " not in scmd[2]:
+        raise SystemExit(f"{serialised} does not write {marker} at start: {scmd[2]}")
+    if "--loop" in sargs:
+        raise SystemExit(f"{serialised} takes turns on the lock and still passes --loop")
+    if strategy.get(serialised) != "Recreate":
+        raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
 print(f"{locked} under {tree[locked]}.lock" + (", reclaimer on the same locks" if reclaimer else "")
-      + ("" if plain == "-" else f", {plain} loops on its own"))
+      + ("" if plain == "-" else f", {plain} loops on its own")
+      + ("" if serialised == "-" else f", {serialised} takes turns on it and {locked} waits for its marker"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
      || ci_fail "$case_name: $lock_out"
@@ -651,6 +673,8 @@ edge-deid-off	assign	-
 edge-upload-direct	assign	-
 edge-upload-alerts	deidentify	assign
 edge-direct-ingest-reclaim	deidentify	assign
+edge-direct-ingest-package	package	-	deidentify
+edge-s3-ingest-package	package	-	deidentify
 EOF
 
 # Per-stage resource settings must reach their own application container.
