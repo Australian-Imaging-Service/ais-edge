@@ -92,7 +92,13 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   the writer keeps for its whole life. This does not change how a stage
   removes its own input (`--unlink-source`). The chart runs each pass from a shell loop with the same full-interval
   sleep as `--loop`, so that stage has no `--loop` argument. A pass that
-  fails stops the container, as an exception out of `--loop` did
+  fails stops the container, as an exception out of `--loop` did. A stop
+  (SIGTERM) ends the loop at once in the sleep. In a pass, it ends the loop
+  when the pass ends: the pass is not stopped during a write, and no pass
+  starts from the sleep after the SIGTERM. A stop that comes while the stage
+  waits for its lock (for example while the uploader copies a session) runs
+  that one pass first. A pass that is longer than the grace period (30 s)
+  still gets SIGKILL.
 
 ### s3-uploader pod (edge)
 - **The same pipeline PVC** — reads the terminal tree (`assigned/`, or
