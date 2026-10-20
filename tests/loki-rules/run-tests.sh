@@ -110,8 +110,11 @@ EOF
 docker rm -f "$NAME" >/dev/null 2>&1
 docker run -d --name "$NAME" -p "${PORT}:3100" \
     -v "$WORK/loki.yaml:/etc/loki/local-config.yaml:ro" \
-    "$IMAGE" -config.file=/etc/loki/local-config.yaml >/dev/null 2>&1 || {
-    echo "could not start $IMAGE" >&2; exit 2; }
+    "$IMAGE" -config.file=/etc/loki/local-config.yaml >"$WORK/start.log" 2>&1 || {
+    echo "could not start $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+}
 
 for _ in $(seq 1 60); do
     curl -sf "http://localhost:${PORT}/ready" >/dev/null 2>&1 && break
