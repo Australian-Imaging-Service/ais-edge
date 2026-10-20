@@ -37,11 +37,20 @@ with the individual DICOM files in XNAT.
   fails on every series with `Incorrect type for field in 'in_file' field of
   create_zip interface`. Use the first release that includes
   [xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
-- The vendor package `fileformats-vendor-australianimagingservice` v0.1.1. It
-  holds the DICOM sample datatype. The chart installs it with `pip` in an init
-  container of the package pod and of the upload pod (`ingest.extraPipPackages`).
-  The node needs access to github.com for that install, or a mirror of the
-  package.
+- The vendor package `fileformats-vendor-australianimagingservice` v0.1.2 or
+  later. It holds the DICOM sample datatype and its converter, which takes the
+  instance with the lowest SOPInstanceUID, so the sample of a series is the
+  same file every run. v0.1.1 took the first entry of an unsorted list: a study
+  staged again for a late series got a different sample, and the upload refused
+  it as a different resource. The chart installs the package with `pip` in an
+  init container of the package pod and of the upload pod
+  (`ingest.extraPipPackages`). The node needs access to github.com for that
+  install, or a mirror of the package.
+- A fileformats-extras release with the `reproducible` option of the zip
+  converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
+  timestamps and sorted entries, so the zip of unchanged files has the same
+  bytes every time. An older fileformats-extras refuses the option: the stage
+  logs `Invalid option 'reproducible'` and fails until the image is new enough.
 - Under `upload.mode: s3` (the tier-2 default) the edge `s3-uploader` copies
   the packaged tree as it is and needs nothing. The management uploader
   (`xnatUpload` in `charts/mgmt`) reads the packaged sessions from the bucket,
@@ -59,8 +68,8 @@ ingest:
   package:
     enabled: true
   extraPipPackages:
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
 ```
 
 Under `upload.mode: s3`, add this to the management values as well
@@ -69,8 +78,8 @@ Under `upload.mode: s3`, add this to the management values as well
 ```yaml
 xnatUpload:
   extraPipPackages:
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
 ```
 
 Upgrade the release with the same `helm upgrade` command the site uses for
@@ -148,8 +157,9 @@ they cover every other upload.
 - Late series: when a series arrives after the study was uploaded, the whole
   study is staged again. The zip of an unchanged series is byte-identical to
   the first one, so the upload stage skips it as already uploaded, and the new
-  series is uploaded beside it. This needs the xnat-ingest fix "the same files
-  give the same zip" (in the same release as PR #216).
+  series is uploaded beside it. This needs `reproducible=true` in the
+  `DICOM-zip` spec and a fileformats-extras release that has the option (see
+  What it needs).
 - Part of a series arriving later (file drop only): when a file drop brings
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
