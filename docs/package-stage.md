@@ -30,30 +30,47 @@ with the individual DICOM files in XNAT.
 
 ## What it needs
 
-- `deid.engine: ingest`. The stage runs after the xnat-ingest deidentify
-  stage only.
+**Status on 2026-10-20:** no released xnat-ingest image runs the default package stage.
+The latest release is 0.16.2. It lacks the library support from
+[xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
+The stage also needs xnat-ingest PRs #217, #218, #221 and #222.
+PR #219 adds a guard; the chart locks already keep the producer passes apart.
+The fileformats-extras `reproducible` option is in
+[PR #168](https://github.com/python-fileformats/fileformats/pull/168), which remains open.
+Vendor v0.1.2 is not tagged. The live tests used a local integration image
+with the pending fixes. Keep the stage off at a site until a release contains
+all required features and that release has passed the site's validation.
+
+- `deid.engine: ingest`. The stage runs after the xnat-ingest deidentify stage
+  only.
 - An xnat-ingest image with fileformats 0.22.1 and fileformats-medimage 0.15.4
-  or later. xnat-ingest 0.16.2 does not have them: with that image the stage
-  fails on every series with `Incorrect type for field in 'in_file' field of
-  create_zip interface`. Use the first release that includes
-  [xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
+  or later. xnat-ingest 0.16.2 does not have them. With the default spec
+  (`reproducible=true`), that image stops at start with `ValueError: Invalid
+  option 'reproducible'`. With a spec without the option, it fails on every
+  series with `Incorrect type for field in 'in_file' field of create_zip
+  interface`. Use the first release that includes [xnat-ingest PR
+  #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
 - The vendor package `fileformats-vendor-australianimagingservice` v0.1.2 or
   later. It holds the DICOM sample datatype and its converter, which takes the
-  instance with the lowest SOPInstanceUID, so the sample of a series is the
-  same file every run. v0.1.1 took the first entry of an unsorted list: a study
+  instance with the lowest SOPInstanceUID, so the sample of a series is the same
+  file every run. v0.1.1 took the first entry of an unsorted list: a study
   staged again for a late series got a different sample, and the upload refused
   it as a different resource. The chart installs the package with `pip` in an
   init container of the package pod and of the upload pod
   (`ingest.extraPipPackages`). The node needs access to github.com for that
-  install, or a mirror of the package.
+  install, or a mirror of the package. Vendor v0.1.2 is not released yet
+  (2026-10-20). The fix is in vendor PR #3. Until the tag exists, the pins below
+  fail. The live tests used commit f8daa6f of that PR. Do not pin a site to that
+  commit: a rewrite or a delete of the PR branch can make it unreachable.
 - A fileformats-extras release with the `reproducible` option of the zip
   converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
   timestamps and sorted entries, so the zip of unchanged files has the same
-  bytes every time. An older fileformats-extras does not know the option: the
-  stage fails on every series with `create_zip.__init__() got an unexpected
-  keyword argument 'reproducible'` until the image is new enough.
-- Under `upload.mode: s3` (the tier-2 default) the edge `s3-uploader` copies
-  the packaged tree as it is and needs nothing. The management uploader
+  bytes every time. An older fileformats-extras does not know the option. The
+  package command then stops at start, before its first pass, with `ValueError:
+  Invalid option 'reproducible' for target spec ...`. The pod restarts and stops
+  the same way until the image is new enough.
+- Under `upload.mode: s3` (the tier-2 default) the edge `s3-uploader` copies the
+  packaged tree as it is and needs nothing. The management uploader
   (`xnatUpload` in `charts/mgmt`) reads the packaged sessions from the bucket,
   so it needs the same two things: an image with fileformats 0.22.1 or later
   (`xnatUpload.image.tag`) and the vendor package
@@ -122,8 +139,16 @@ output resources, and `copyMode: hardlink_or_copy`.
    kubectl -n xnat-ingest get pods | grep package
    ```
 
-   The `pip-install` init container must be `Completed`. If it fails, the
-   node cannot reach github.com.
+   The `pip-install` init container must be `Completed`. If it is not, read its
+   log: `kubectl -n xnat-ingest logs deploy/<release>-package -c pip-install`.
+   `pathspec 'v0.1.2' did not match any file(s) known to git` means that the tag
+   does not exist yet. `Could not resolve host` or a timeout means that the node
+   cannot reach github.com. While the init container fails, the package
+   container does not start, so `IngestStageError` does not fire. No other
+   alert fires at once. `StageBacklogAgeing` fires only when the oldest
+   session in `/data/deidentified` is older than the management chart's
+   `dataPolicy.stageAgeAlertAfter` (default 7d). So check the init container
+   after each change to the package settings.
 
 2. The stage reports each pass:
 
@@ -142,8 +167,14 @@ output resources, and `copyMode: hardlink_or_copy`.
    `kubectl -n xnat-upload logs deploy/mgmt-upload-<edge>` shows it.
 
 4. The trees drain: `/data/deidentified` is empty after each pass and
-   `/data/packaged` is empty after the upload and the next staged-reclaimer
-   run (every 4 minutes).
+   `/data/packaged` keeps each session until the staged-reclaimer proves it: in the
+   bucket under `upload.mode: s3`, in XNAT under `direct`. With the defaults, that
+   is the first run (hourly, at minute 17) after
+   `dataPolicy.derived.stagedReclaimer.minAge` (1d). Under s3, the newest object of
+   the session in the bucket must be that old too. On a fresh install,
+   `dataPolicy.enabled` is false and `dryRun` is true. The reclaimer then only
+   logs, and `/data/packaged` does not drain. The stress test overlay runs the
+   reclaimer every 4 minutes.
 
 ## Alerts
 
@@ -165,7 +196,8 @@ they cover every other upload.
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
   (`IngestStageError` fires) and keeps both the input and the packaged copy.
-  Drop the whole series again in one go. Through Orthanc this does not
+  This refusal needs xnat-ingest PR #221. Without it, a smaller replacement zip
+  can lose members of the packaged copy. Drop the whole series again in one go. Through Orthanc this does not
   happen: a late series stages the whole study again.
 - Turn it off: set `ingest.package.enabled: false` and upgrade the release.
   Do this only when `/data/packaged` is empty: the upload stage reads
