@@ -725,6 +725,8 @@ ingest:
   # index or git host each time; if it can't, the pod stays in Init. Pin git
   # refs to a commit, not a branch, or a restart can pick up different code.
   #
+  # CAUTION: the vendor package has no v0.1.2 tag yet (vendor PR #3 is open).
+  # pip cannot install a missing tag.
   #   extraPipPackages:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
@@ -929,13 +931,14 @@ ingest:
   # output, which exists only under that engine. Under any other engine this
   # block is ignored and the uploader reads /data/assigned as before.
   #
-  # The packager fails if sessions exist but none has a sourceDatatype scan
-  # resource. An empty input directory is normal while waiting for new work.
+  # A session without a sourceDatatype scan resource is skipped at INFO and
+  # stays in /data/deidentified. xnat-ingest PR #217 passes it through.
+  # An empty input directory is normal while waiting for new work.
   package:
     enabled: false
-    # Runs on ingest.image.tag like every stage. Needs xnat-ingest 0.16.2 or
-    # later and fileformats libraries that zip a DICOM series (see
-    # docs/package-stage.md for the versions and the vendor package).
+    # Runs on ingest.image.tag like every stage. No released xnat-ingest
+    # runs the default spec yet: 0.16.2 stops at start. See the What it needs
+    # section in docs/package-stage.md for all required features.
     interval: 60
     copyMode: hardlink_or_copy
     sourceDatatype: medimage/dicom-series
@@ -949,7 +952,9 @@ ingest:
         # reproducible=true: fixed entry timestamps and sorted entries, so the
         # zip of unchanged files has the same bytes every time, and a study
         # staged again for a late series uploads nothing twice. Needs a
-        # fileformats-extras release with the option; older ones refuse it.
+        # fileformats-extras release with the option (fileformats PR #168,
+        # not released yet). An older one stops at start with ValueError:
+        # Invalid option 'reproducible'.
         spec: "medimage/dicom-series+zip:compression=ZIP_STORED,reproducible=true"
       - label: auto
         spec: medimage/vnd.australianimagingservice.dicom-sample
