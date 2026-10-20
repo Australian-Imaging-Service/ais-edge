@@ -87,12 +87,13 @@ every change. The chart then:
   `dataPolicy.derived.packaged.reclaim: auto` to `onUploaded` (the staged
   reclaimer removes each packaged session after the upload).
 
-During the upgrade that turns the stage on, the first package pass can run
-beside the last pass of the old deidentify pod, which did not take the lock.
-Every stage pod restarts with `Recreate`, so that window is the old pod's
-termination grace. The package stage keeps any input whose files changed while
-it read them, and packages it again on the next pass, so nothing is lost; at
-most one session is packaged one pass later.
+The upgrade that turns the stage on is safe without extra steps. The new
+deidentify pod, which takes turns on the lock, writes a marker file when it
+starts, and the package pod does not begin its first pass until that marker
+exists. Every stage pod restarts with `Recreate`, so the marker means the old
+deidentify pod, which did not take the lock, has already stopped. No deidentify
+pass runs beside a package pass, not even during that upgrade. Turning the
+stage off removes the marker, so a later turn-on waits again.
 
 The defaults in `charts/edge/values.yaml` under `ingest.package` are the ones
 every site can keep: the source datatype `medimage/dicom-series`, the two

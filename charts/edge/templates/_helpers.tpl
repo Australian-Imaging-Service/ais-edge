@@ -984,18 +984,34 @@ installs for the running Python, so the pod passes its own image in.
      loop as edge.lockedStage, on the same lock, without the .alive handle: its
      passes never overlap a package pass, so nothing changes under the package
      stage while it reads and unlinks a session. */}}
+{{- /* It also writes /data/.locks/<stage>.serialised at start. The upload-tree
+     writer (edge.lockedStage with a fourth argument) waits for that marker
+     before its first pass: with strategy Recreate the marker means the pod
+     that takes the lock has started, so the old pod that did not take it has
+     stopped. An ordinary helm upgrade that turns the package stage on is
+     therefore safe without operator steps. */}}
 {{- define "edge.serialisedStage" -}}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- {{ printf "mkdir -p /data/.locks && echo \"$HOSTNAME $(date -u +%%FT%%TZ)\" > /data/.locks/%s.serialised && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (index . 1) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
 - xnat-ingest
 - {{ index . 1 | quote }}
 {{- end }}
 
+{{- /* (list $ "<stage>" <interval> ["<serialised stage>"]). The wrapper removes
+     its own stage's .serialised marker at start, so a stage that returns to
+     being the writer (package turned off) clears what its serialised run left;
+     the next turn-on waits again instead of trusting a stale marker. With the
+     fourth argument it waits for that stage's marker before the first pass. */}}
 {{- define "edge.lockedStage" -}}
+{{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
+{{- $wait := "" }}
+{{- if gt (len .) 3 }}
+{{- $wait = printf "until [ -f /data/.locks/%s.serialised ]; do echo \"waiting for the %s pod that takes the lock (an upgrade is in progress)\"; sleep 10; done && " (index . 3) (index . 3) }}
+{{- end }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" (index . 0)) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- {{ printf "mkdir -p /data/.locks && rm -f /data/.locks/%s.serialised && %sexec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" $stage $wait (include "edge.uploadTreeAlive" $root) (include "edge.uploadTreeLock" $root) $interval | quote }}
 - xnat-ingest
-- {{ index . 1 | quote }}
+- {{ $stage | quote }}
 {{- end }}
