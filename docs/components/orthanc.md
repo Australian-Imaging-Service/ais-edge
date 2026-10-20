@@ -67,6 +67,14 @@ unstable again. When it is stable, `OnStableStudy` removes the
 `study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
 study is never re-staged.
 
+`group-orthanc` (xnat-ingest 0.16.3 and later) also writes a snapshot label,
+`xnat-ingest-processed-<LastUpdate>-<digest>`, when it labels a study, and
+re-stages any processed study whose `LastUpdate` no longer matches it. The data
+policy (`dataPolicy.derived.orthancStorage`, backend `orthanc-rest`) deletes a
+study only when that snapshot label matches what Orthanc holds now, and then
+deletes exactly the instances the label covers. A study without a matching
+snapshot label is kept and logged (`reclaim_kept`, `export_state_unknown`).
+
 ## What Orthanc has access to
 
 | Resource | Why |

@@ -538,6 +538,23 @@ orthanc_curl() {   # orthanc_curl <method> <path> [data]
     fi
 }
 
+# orthanc_flat_list <path> <item-regex>: GET a JSON array of strings and print
+# one item per line. Fails (status 1, nothing printed) unless the ORIGINAL body is
+# exactly such an array, with every item matching the regex and only JSON
+# whitespace between tokens. The body is validated before any whitespace is
+# removed, so a space or a line break inside a quoted item is a malformed body,
+# not an item with its spaces removed. Used for the two flat endpoints the
+# reclaim path reads, so no study document is ever parsed.
+orthanc_flat_list() {   # orthanc_flat_list <path> <item-regex>
+    ofl_raw=$(orthanc_curl GET "$1") || return 1
+    ofl_one=$(printf '%s' "$ofl_raw" | tr '\n\r\t' '   ')
+    ofl_item="\"$2\""
+    printf '%s' "$ofl_one" | grep -qE "^ *\[ *(${ofl_item} *(, *${ofl_item} *)*)?\] *$" || return 1
+    ofl_flat=$(printf '%s' "$ofl_one" | tr -d ' ')
+    [ "$ofl_flat" = '[]' ] && return 0
+    printf '%s' "$ofl_flat" | sed 's/^\[//; s/\]$//' | tr ',' '\n' | tr -d '"'
+}
+
 reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
     o_name="$1" o_policy="$2" o_age="$3"
     case "$o_policy" in never|-|"") return 0 ;; esac
@@ -577,11 +594,13 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         # attached ("20260806T145356,") and every study was then rejected as
         # having an unparseable timestamp — safe, but it would have meant this
         # backend silently never reclaimed anything.
-        last=$(orthanc_curl GET "/studies/${id}" \
-               | sed -n 's/.*"LastUpdate"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        # The bare metadata endpoint, with its status checked, instead of a sed
+        # over the study document: a failed or truncated reply reads as unknown.
+        last=$(orthanc_curl GET "/studies/${id}/metadata/LastUpdate") || last=""
         case "${last:-}" in
-            ''|*[!0-9T]*) jlog reclaim_kept "$o_name" "no usable LastUpdate for study ${id} — age UNKNOWN" \
-                               ",\"study\":\"$(jsan "$id")\""; continue ;;
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) jlog reclaim_kept "$o_name" "no usable LastUpdate for study ${id} — age UNKNOWN" \
+                    ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue ;;
         esac
         epoch=$(date -u -D '%Y%m%dT%H%M%S' -d "$last" +%s 2>/dev/null)
         case "${epoch:-}" in ''|*[!0-9]*)
@@ -597,12 +616,65 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
                  ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"min_age_s\":${o_age}"
             continue
         fi
-        if orthanc_curl DELETE "/studies/${id}" >/dev/null 2>&1; then
+        # DELETE THE INSTANCES THIS PASS SAW, NOT THE STUDY. A series can arrive
+        # after the age check above. A study DELETE would take it with it, before
+        # group-orthanc ever saw it. The late instances are not in this list, so
+        # they stay, the study stays with them, and group-orthanc stages it again.
+        #
+        # EVERY READ USES AN ENDPOINT THAT RETURNS ONE FLAT VALUE, so this shell
+        # never has to parse a study document: /instances?expand=false is a JSON
+        # array of ids, /labels a JSON array of labels, /metadata/LastUpdate the
+        # bare timestamp. Each reply is captured first, its status checked, and
+        # its shape checked strictly. Anything unexpected reads as "unknown" and
+        # keeps the study; it never reads as "nothing there".
+        o_inst=$(orthanc_flat_list "/studies/${id}/instances?expand=false" '[0-9a-f]{8}(-[0-9a-f]{8}){4}') || {
+            jlog reclaim_kept "$o_name" "instance list of study ${id} unavailable or malformed — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        [ -n "$o_inst" ] || {
+            jlog reclaim_kept "$o_name" "study ${id} lists no instances — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        o_labels=$(orthanc_flat_list "/studies/${id}/labels" '[A-Za-z0-9_-]+') || {
+            jlog reclaim_kept "$o_name" "labels of study ${id} unavailable or malformed — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        o_last_again=$(orthanc_curl GET "/studies/${id}/metadata/LastUpdate") || o_last_again=""
+        case "$o_last_again" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) jlog reclaim_kept "$o_name" "LastUpdate of study ${id} unreadable after the age check — kept" \
+                    ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue ;;
+        esac
+        if ! printf '%s\n' $o_labels | grep -qx -- "$ORTHANC_PROCESSED_LABEL"; then
+            jlog reclaim_skipped "$o_name" "study ${id} lost ${ORTHANC_PROCESSED_LABEL} after the age check — left for group-orthanc" \
+                 ",\"study\":\"$(jsan "$id")\""; continue
+        fi
+        if [ "$o_last_again" != "$last" ]; then
+            jlog reclaim_skipped "$o_name" "study ${id} changed after the age check — left for group-orthanc" \
+                 ",\"study\":\"$(jsan "$id")\""; continue
+        fi
+        # EXPORT-BOUND. group-orthanc writes one snapshot label beside the processed
+        # label: <processed>-<LastUpdate>-<digest>, the digest being the first 24 hex
+        # characters (fewer for a long processed label) of the SHA256 of the staged
+        # instance ids, one per line, sorted. The same digest is computed from the
+        # list read above, so only a study whose instances are exactly the staged
+        # ones is deleted. No label, two labels, or another digest: export state
+        # unknown, kept, and said so. An older xnat-ingest writes no label.
+        o_sorted=$(printf '%s\n' $o_inst | LC_ALL=C sort)
+        o_dlen=$(( 64 - ${#ORTHANC_PROCESSED_LABEL} - ${#last} - 2 )); [ "$o_dlen" -gt 24 ] && o_dlen=24
+        o_hash=$(printf '%s\n' $o_sorted | sha256sum | cut -c1-"$o_dlen")
+        o_receipt="${ORTHANC_PROCESSED_LABEL}-${last}-${o_hash}"
+        o_nrec=$(printf '%s\n' $o_labels | grep -c -- "^${ORTHANC_PROCESSED_LABEL}-")
+        if [ "$o_nrec" != 1 ] || ! printf '%s\n' $o_labels | grep -qx -- "$o_receipt"; then
+            jlog reclaim_kept "$o_name" "study ${id} has no single snapshot label ${o_receipt}: its export state is unknown, kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"reason\":\"export_state_unknown\""; continue
+        fi
+        o_list=""
+        for o_i in $o_sorted; do o_list="${o_list:+$o_list,}\"${o_i}\""; done
+        o_n=$(printf '%s\n' $o_sorted | grep -c .)
+        if orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" >/dev/null 2>&1; then
             o_removed=$((o_removed + 1))
-            jlog reclaim_removed "$o_name" "deleted study ${id} from Orthanc after ${o_age}s" \
-                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age}"
+            jlog reclaim_removed "$o_name" "deleted the ${o_n} instance(s) of study ${id} from Orthanc after ${o_age}s" \
+                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"instances\":${o_n}"
         else
-            jlog reclaim_failed "$o_name" "Orthanc refused DELETE for study ${id}" ",\"study\":\"$(jsan "$id")\""
+            jlog reclaim_failed "$o_name" "Orthanc refused the delete of study ${id}" ",\"study\":\"$(jsan "$id")\""
         fi
     done
 }
