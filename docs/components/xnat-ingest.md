@@ -23,7 +23,7 @@ node:
   the destination and `aws s3 sync` does not
 - **`xnat-ingest upload`** on the management node, rendered **once per
   edge site** rather than once for the fleet
-- **`xnat-ingest package`** on each edge VM — OPTIONAL and off by default
+- **`xnat-ingest package`** runs on each edge VM. It is optional and off by default
   (`ingest.package.enabled`, under `deid.engine: ingest` only). Reads
   `/data/deidentified` and writes `/data/packaged`: each DICOM series becomes
   one `DICOM-zip` resource (`archive.zip`) plus one DICOM sample. The
