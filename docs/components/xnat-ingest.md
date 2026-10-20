@@ -399,6 +399,31 @@ package stage on or off moves the writer lock between `deidentified.lock` and
 `deidentified.lock` for each pass, see the writer lock above), and the fence
 follows the lock path for the reclaimer.
 
+### Reidentification maps at production sites
+
+The ingest deidentification engine writes maps under the pipeline `reid`
+directory, normally `/data/xnat-ingest/reid` on the host. Without
+`ingest.deidentify.reidEncryptKeySecret`, these maps are plaintext JSON.
+Production sites that use this engine must set this Secret reference and
+manage the key separately from the data. Restrict access to both the maps
+and the key. The Secret must contain `XINGEST_REID_ENCRYPT_KEY`, a valid
+Fernet key for the ingest command. Do not place the key in a values file.
+
+Enabling encryption affects new writes. It does not encrypt or remove
+existing `.json` maps. A later pass can leave both a plaintext map and an
+encrypted `.json.enc` map. Inventory existing maps and arrange a verified
+migration before claiming that the stored maps are encrypted. Routing labels
+can still contain original identifiers; select approved pseudonymous tags
+for the assign stage as described in the chart values.
+
+There is no retention rule for this directory. A proposed rule would retain
+each map until its delivery and retention obligations are met, then remove
+it after a site-selected interval. The site must decide that interval, the
+required restore window, backup handling, legal holds and key retention.
+Use a dry-run inventory first. Do not enable automatic deletion until the
+site approves those decisions and verifies that the required maps remain
+recoverable. This proposal changes no retention behavior.
+
 ## Benefits
 
 - **Battle-tested DICOM parsing** — handles edge cases (missing
