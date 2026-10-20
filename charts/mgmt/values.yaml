@@ -1029,6 +1029,12 @@ loki:
       # error that reads as "the bucket was never created" and is not. Full
       # explanation: docs/components/loki.md.
       delete_request_store: filesystem
+    storage_config:
+      filesystem:
+        # The S3 chunk store does not set a filesystem root. The compactor's
+        # delete-request object store otherwise tries to write ./index on the
+        # read-only container root. Keep it on the existing persistent volume.
+        directory: /var/loki/delete-requests
 
     commonConfig:
       replication_factor: 1
