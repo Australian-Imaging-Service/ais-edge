@@ -49,8 +49,9 @@ with the individual DICOM files in XNAT.
 - A fileformats-extras release with the `reproducible` option of the zip
   converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
   timestamps and sorted entries, so the zip of unchanged files has the same
-  bytes every time. An older fileformats-extras refuses the option: the stage
-  logs `Invalid option 'reproducible'` and fails until the image is new enough.
+  bytes every time. An older fileformats-extras does not know the option: the
+  stage fails on every series with `create_zip.__init__() got an unexpected
+  keyword argument 'reproducible'` until the image is new enough.
 - Under `upload.mode: s3` (the tier-2 default) the edge `s3-uploader` copies
   the packaged tree as it is and needs nothing. The management uploader
   (`xnatUpload` in `charts/mgmt`) reads the packaged sessions from the bucket,
