@@ -917,4 +917,6 @@ if [ "$FAIL" -gt 0 ]; then
     printf '  - %s\n' "${FAILED[@]}"
     exit 1
 fi
+# Shared-connection controls exercise fresh per-session reads and auth expiry.
+python3 "$HERE/test-batch.py" || exit 1
 exit 0
