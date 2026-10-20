@@ -617,11 +617,6 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         if [ "$age" -lt "$o_age" ]; then
             continue
         fi
-        if [ "$RECLAIM_ENABLED" != "true" ] || [ "$DRY_RUN" = "true" ]; then
-            jlog reclaim_skipped "$o_name" "WOULD delete study ${id} (age ${age}s >= minAge ${o_age}s), enabled=${RECLAIM_ENABLED} dryRun=${DRY_RUN}" \
-                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"min_age_s\":${o_age}"
-            continue
-        fi
         # DELETE THE INSTANCES THIS PASS SAW, NOT THE STUDY. A series can arrive
         # after the age check above. A study DELETE would take it with it, before
         # group-orthanc ever saw it. The late instances are not in this list, so
@@ -671,6 +666,17 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         if [ "$o_nrec" != 1 ] || ! printf '%s\n' $o_labels | grep -qx -- "$o_receipt"; then
             jlog reclaim_kept "$o_name" "study ${id} has no single snapshot label ${o_receipt}: its export state is unknown, kept" \
                  ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"reason\":\"export_state_unknown\""; continue
+        fi
+        # THE DRY-RUN GATE COMES LAST, and only the delete follows it. A dry run
+        # must log the decisions of an armed run: the same kept and skipped lines,
+        # and WOULD delete only for a study that an armed run deletes. The gate
+        # was after the age check. A dry run then said WOULD delete for a study
+        # that an armed run keeps as export_state_unknown. The steps above only
+        # read from Orthanc.
+        if [ "$RECLAIM_ENABLED" != "true" ] || [ "$DRY_RUN" = "true" ]; then
+            jlog reclaim_skipped "$o_name" "WOULD delete study ${id} (age ${age}s >= minAge ${o_age}s), enabled=${RECLAIM_ENABLED} dryRun=${DRY_RUN}" \
+                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"min_age_s\":${o_age}"
+            continue
         fi
         o_list=""
         for o_i in $o_sorted; do o_list="${o_list:+$o_list,}\"${o_i}\""; done
