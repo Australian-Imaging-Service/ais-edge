@@ -116,11 +116,11 @@ The DICOM ingest engine downstream of Orthanc.
   `/data/.locks/deidentified.lock` instead. With the package stage on
   (`ingest.package.enabled`), `package` writes the upload tree and takes
   `/data/.locks/packaged.lock`; `deidentify` then takes turns on that same
-  lock, one pass per turn and without `--loop`, and writes
-  `/data/.locks/deidentify.serialised` when it starts. The package pod waits
-  for that marker before its first pass, so the upgrade that turns the stage
-  on never runs a package pass beside the old deidentify pod (see
-  [package-stage.md](../package-stage.md))
+  lock, one pass per turn and without `--loop`: `deidentify` keeps holding
+  `/data/.locks/deidentified.lock` for each pass, and `package` takes that lock
+  and then `packaged.lock` for each of its passes, so a pass of one never runs
+  beside a pass of the other, also during the upgrade that turns the stage on
+  or off (see [package-stage.md](../package-stage.md))
 
 ### upload pod (`component=upload`)
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
@@ -287,8 +287,9 @@ The sleep after each pass is the same full interval that `--loop` sleeps. A
 pass that fails stops the container, as an exception out of `--loop` did. Under
 deid.engine ingest, `assign` does not write the upload tree, so it keeps
 `--loop 60` and `deidentify` runs inside the lock. With the package stage on,
-`package` runs inside the lock (`packaged.lock`) and `deidentify` takes turns
-on it with the same loop, without the `.alive` handle and without `--loop`.
+`package` runs inside `deidentified.lock` and then `packaged.lock` for each
+pass, and `deidentify` keeps its own `deidentified.lock` per pass with the same
+loop, without the `.alive` handle and without `--loop`.
 
 `--unlink-source all` drops each grouped session once it has been assigned, and
 it is not an optimisation. `assign` rebuilds its work list from a live
@@ -386,9 +387,9 @@ lock path: `packaged.lock` means the `package` writer) lacks the wrapper or is
 still terminating. An upgrade or a rollback between two releases in which BOTH
 the writer and the staged-reclaimer take the lock needs no drain. Turning the
 package stage on or off moves the writer lock between `deidentified.lock` and
-`packaged.lock`; the stages themselves handle that move (the marker described
-under the group-orthanc and assign pods above), and the fence follows the lock
-path for the reclaimer.
+`packaged.lock`; the stages themselves order that move (both hold
+`deidentified.lock` for each pass, see the writer lock above), and the fence
+follows the lock path for the reclaimer.
 
 ## Benefits
 
