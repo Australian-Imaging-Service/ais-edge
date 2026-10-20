@@ -354,7 +354,7 @@ R="$SESS/1.scan/DICOM"
 
 # --- the proof ----------------------------------------------------------------
 setup_fs_happy_path()     { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; }
-assert_fs_happy_path()    { grep -q '"event":"reclaim_confirmed"' "$1" || { echo "no reclaim_confirmed before the removal"; return 1; }; }
+assert_fs_happy_path()    { grep -Fq "verifyAgainstXnat=true" "$1" || return 1; grep -q '"event":"reclaim_confirmed"' "$1" || { echo "no reclaim_confirmed before the removal"; return 1; }; }
 setup_fs_partial_upload() { fs_session "$1" "$SESS" 400; xnat_files subj EXP1 visit 3; }
 assert_fs_partial_upload(){ reason "$1" incomplete_in_xnat && kept_files "$2" "$R/f1.dcm" "$R/f400.dcm" "$R/__MANIFEST__.json"; }
 setup_fs_xnat_absent()    { fs_session "$1" "$SESS" 2; }
@@ -544,7 +544,7 @@ assert_fs_xnat_tls_verified() {
 # Every case: XNAT is never asked, the bucket only listed, and a repair request is written
 # exactly when a file failed (never in a dry run, never for an unknown layout).
 setup_fs_s3_happy_path()        { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; }
-assert_fs_s3_happy_path()       { grep -q '"event":"reclaim_confirmed".*the bucket holds each of the 2 file' "$1" || { echo "no bucket reclaim_confirmed"; return 1; }; }
+assert_fs_s3_happy_path()       { grep -Fq "verifyAgainstXnat=not-applicable(proof=s3)" "$1" || return 1; grep -q '"event":"reclaim_confirmed".*the bucket holds each of the 2 file' "$1" || { echo "no bucket reclaim_confirmed"; return 1; }; }
 setup_fs_s3_no_xnat()           { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; }
 assert_fs_s3_no_xnat()          { grep -q '"event":"reclaim_removed"' "$1"; }
 setup_fs_s3_rewritten()         { fs_session "$1" "$SESS" 2; s3_mirror "$1" "$SESS"; printf '%0100d' 9 > "$1/$SESS/1.scan/DICOM/f1.dcm"; }   # same size, other bytes

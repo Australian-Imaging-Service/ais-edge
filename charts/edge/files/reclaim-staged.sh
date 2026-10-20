@@ -528,7 +528,10 @@ if [ "$STORAGE" = "filesystem" ]; then
 else
     _origin="bucket=${S3_BUCKET} prefix=${S3_PREFIX}"
 fi
-jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} proof=${PROOF} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${VERIFY_XNAT} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
+# Bucket proof uses its own content checks; the XNAT switch does not apply.
+_verify_summary="${VERIFY_XNAT}"
+[ "$PROOF" = s3 ] && _verify_summary="not-applicable(proof=s3)"
+jlog startup "" "s3-reclaimer starting storage=${STORAGE} ${_origin} proof=${PROOF} minAge=${MIN_AGE} (from ${_minage_key}) verifyAgainstXnat=${_verify_summary} dryRun=${DRY_RUN} maxRemovals=${MAX_REMOVALS}"
 
 # -----------------------------------------------------------------------------
 # S3 helpers. Each returns ERR on ANY doubt — a non-zero exit, an empty
