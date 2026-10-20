@@ -726,8 +726,8 @@ ingest:
   # refs to a commit, not a branch, or a restart can pick up different code.
   #
   #   extraPipPackages:
-  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
-  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
   extraPipPackages: []
   # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
   # these stages without chart-set reservations or limits, as before. Set each
@@ -946,7 +946,11 @@ ingest:
     # spec:  target datatype, with converter options after ':'.
     outputResources:
       - label: DICOM-zip
-        spec: "medimage/dicom-series+zip:compression=ZIP_STORED"
+        # reproducible=true: fixed entry timestamps and sorted entries, so the
+        # zip of unchanged files has the same bytes every time, and a study
+        # staged again for a late series uploads nothing twice. Needs a
+        # fileformats-extras release with the option; older ones refuse it.
+        spec: "medimage/dicom-series+zip:compression=ZIP_STORED,reproducible=true"
       - label: auto
         spec: medimage/vnd.australianimagingservice.dicom-sample
 
