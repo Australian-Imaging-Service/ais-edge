@@ -614,10 +614,13 @@ while IFS=$'\t' read -r case_name locked plain serialised; do
     continue
   fi
   lock_out="$(python3 - "$render" "$locked" "$plain" "${serialised:--}" 2>&1 <<'PY2'
-import sys, yaml
+import re, sys, yaml
 
 path, locked, plain, serialised = sys.argv[1:5]
 tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
+# A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
+# pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
+STOPS = re.compile(r"trap exit TERM INT; .*; sleep [0-9]+ & wait \$!; done")
 stages, strategy, reclaimer = {}, {}, None
 for doc in yaml.safe_load_all(open(path)):
     if not doc:
@@ -640,6 +643,8 @@ if f"flock {lock} " not in cmd[2]:
     raise SystemExit(f"{locked} does not take {lock}: {cmd[2]}")
 if f"exec 9>>{alive} && flock -s 9 && " not in cmd[2]:
     raise SystemExit(f"{locked} does not hold {alive} for its life: {cmd[2]}")
+if not STOPS.fullmatch(cmd[2]):
+    raise SystemExit(f"{locked} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {cmd[2]}")
 if strategy.get(locked) != "Recreate":
     raise SystemExit(f"{locked} is not strategy Recreate: {strategy.get(locked)}")
 if reclaimer is not None and (reclaimer.get("WRITER_LOCK"), reclaimer.get("WRITER_ALIVE")) != (lock, alive):
@@ -664,11 +669,13 @@ if serialised != "-":
         raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
     if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
         raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
+    if not STOPS.fullmatch(scmd[2]):
+        raise SystemExit(f"{serialised} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {scmd[2]}")
     if "--loop" in sargs:
         raise SystemExit(f"{serialised} takes turns on the lock and still passes --loop")
     if strategy.get(serialised) != "Recreate":
         raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
-print(f"{locked} under {tree[locked]}.lock" + (", reclaimer on the same locks" if reclaimer else "")
+print(f"{locked} under {tree[locked]}.lock, stops on TERM and INT" + (", reclaimer on the same locks" if reclaimer else "")
       + ("" if plain == "-" else f", {plain} loops on its own")
       + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
 PY2
@@ -683,6 +690,213 @@ edge-direct-ingest-reclaim	deidentify	assign
 edge-direct-ingest-package	package	-	deidentify
 edge-s3-ingest-package	package	-	deidentify
 EOF
+
+# =============================================================================
+# The stage wrappers stop on SIGTERM
+# =============================================================================
+# The wrapper shell is PID 1 of its container. PID 1 has no default signal
+# action. A wrapper without a trap ignored the SIGTERM from the kubelet: each
+# stop waited 30 s for SIGKILL, and a pass could start after the SIGTERM
+# (measured on the tier-2 test edge, 2026-10-20). This check runs each rendered
+# wrapper with dash, the shell of the stage image, and sends the signals:
+#   - TERM or INT in the sleep: the shell stops at once, status 128 + signal.
+#   - TERM in a pass: the pass ends, then the shell stops with its status.
+#   - A pass that fails stops the shell with its status, as before.
+# No pass starts after a signal. A pass holds its locks while it runs.
+# The stage is a fake, and /data/.locks is a temporary directory.
+# The shell is PID 1 of a new PID namespace when `unshare` can make one, as in
+# the container. Else it is a plain child: a wrapper without the trap then
+# stops at once, before the pass ends, so this check still finds it. In both,
+# dash starts with the default action for TERM and INT, as PID 1 does in the
+# container (a shell cannot trap a signal that was ignored when it started).
+ci_heading "the stage wrappers stop on SIGTERM"
+if ! command -v dash >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1; then
+  ci_skip "stage wrapper signals NOT CHECKED: dash or flock (util-linux) is not on this host"
+else
+  stop_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_STOP'
+import concurrent.futures, glob, os, re, shutil, signal, subprocess, sys, tempfile, time, yaml
+
+wrappers = {}
+LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)   # the C parser is 20x faster
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    text = open(path).read()
+    if "flock /data/.locks/" not in text:
+        continue
+    for doc in yaml.load_all(text, Loader=LOADER):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for c in doc["spec"]["template"]["spec"].get("containers", []):
+            cmd = c.get("command") or []
+            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
+                wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
+# serialised (one lock), locked (.alive + one lock), locked with the outer lock
+shapes = {("flock -s 9" in s, s.count("flock /data/.locks/")) for s in wrappers}
+if not {(False, 1), (True, 1), (True, 2)} <= shapes:
+    raise SystemExit(f"expected the serialised, locked and nested-lock wrappers, found {sorted(shapes)}")
+
+DASH = shutil.which("dash")
+NS = ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child"]
+try:
+    PID1 = subprocess.run(NS + ["true"], capture_output=True, timeout=10).returncode == 0
+except (OSError, subprocess.TimeoutExpired):
+    PID1 = False
+# A shell cannot trap a signal that was ignored when it started. unshare
+# (util-linux 2.37) starts its child with TERM and INT ignored. So set the
+# default actions, as the container runtime gives PID 1, then start dash.
+DEFAULT_SIGNALS = [sys.executable, "-c", "import os, signal, sys\n"
+                   "for s in (signal.SIGTERM, signal.SIGINT, signal.SIGPIPE, signal.SIGXFSZ):\n"
+                   "    signal.signal(s, signal.SIG_DFL)\n"
+                   "os.execv(sys.argv[1], sys.argv[1:])"]
+FAKE = """#!/bin/sh
+echo "start $(date +%s.%N)" >> "$PROOF_LOG"
+for l in $PROOF_LOCKS; do flock -n "$l" true && echo "free $l" >> "$PROOF_LOG"; done
+sleep "$PASS_SECONDS"
+echo "end $(date +%s.%N)" >> "$PROOF_LOG"
+exit "$PASS_STATUS"
+"""
+# name, pass seconds, pass status, signal, when to send it, expected status
+CASES = [
+    ("TERM in the sleep", 0, 0, signal.SIGTERM, "sleep", 143),
+    ("INT in the sleep", 0, 0, signal.SIGINT, "sleep", 130),
+    ("TERM in a pass", 2, 0, signal.SIGTERM, "pass", 0),
+    ("TERM in a failing pass", 1, 3, signal.SIGTERM, "pass", 3),
+    ("a failing pass", 0, 3, None, None, 3),
+]
+
+
+CHILDREN_FILE = os.path.exists(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+
+
+def children(pid):
+    """(pid, comm) of each child, as this /proc numbers them."""
+    if CHILDREN_FILE:
+        try:
+            kids = open(f"/proc/{pid}/task/{pid}/children").read().split()
+        except OSError:
+            return []
+    else:   # no CONFIG_PROC_CHILDREN: read the parent of each process
+        kids = []
+        for d in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                stat = open(f"/proc/{d}/stat").read()
+            except OSError:
+                continue
+            if stat[stat.rindex(")") + 2:].split()[1] == str(pid):
+                kids.append(d)
+    found = []
+    for k in kids:
+        try:
+            found.append((int(k), open(f"/proc/{k}/comm").read().strip()))
+        except OSError:
+            pass
+    return found
+
+
+def until(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
+def shell_of(p):
+    """The pid of dash (after the exec): the child of unshare, or the process itself."""
+    end = time.time() + 5
+    while time.time() < end:
+        for pid, comm in children(p.pid) if PID1 else [(p.pid, "")]:
+            try:
+                comm = comm if comm == "dash" else open(f"/proc/{pid}/comm").read().strip()
+            except OSError:
+                continue
+            if comm == "dash":
+                return pid
+        time.sleep(0.02)
+    return None
+
+
+def stamps(log, word):
+    try:
+        return [float(l.split()[1]) for l in open(log) if l.startswith(word + " ")]
+    except OSError:
+        return []
+
+
+def run(script, case):
+    name, seconds, status, sig, when, want = case
+    with tempfile.TemporaryDirectory(prefix="stage-stop-") as tmp:
+        body = script.replace("/data/.locks", os.path.join(tmp, "locks"))
+        locks = re.findall(r"\S+\.lock", body)
+        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "xnat-ingest")
+        with open(fake, "w") as f:
+            f.write(FAKE)
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, PROOF_LOG=log, PROOF_LOCKS=" ".join(locks),
+                   PASS_SECONDS=str(seconds), PASS_STATUS=str(status))
+        p = subprocess.Popen((NS if PID1 else []) + DEFAULT_SIGNALS + [DASH, "-c", body, fake, "stage"],
+                             env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            shell = shell_of(p) if sig else None
+            if sig and not shell:
+                return f"{name}: no shell under unshare"
+            if when == "sleep":
+                # Send it in the sleep, not at the end of the pass.
+                if not until(lambda: any(c == "sleep" for _, c in children(shell)), 5):
+                    return f"{name}: the shell does not sleep after a pass"
+                time.sleep(0.3)
+            elif when == "pass":
+                if not until(lambda: stamps(log, "start"), 5):
+                    return f"{name}: no pass started"
+                time.sleep(0.3)
+            sent = time.time()
+            if sig:
+                try:
+                    os.kill(shell, sig)
+                except ProcessLookupError:
+                    return f"{name}: the shell stopped before the signal"
+            if not until(lambda: p.poll() is not None, seconds + 3):
+                return f"{name}: still runs {seconds + 3} s after the signal"
+            gone = time.time()
+            if p.returncode != want:
+                return f"{name}: status {p.returncode}, not {want}"
+            if len(stamps(log, "start")) != 1:
+                return f"{name}: {len(stamps(log, 'start'))} passes started, not 1"
+            if when == "pass":
+                ends = stamps(log, "end")
+                if not ends or gone < ends[0]:
+                    return f"{name}: the shell stopped before the pass ended"
+                if gone - ends[0] > 3:
+                    return f"{name}: the shell stopped {gone - ends[0]:.1f} s after the pass"
+            if any(l.startswith("free ") for l in open(log)):
+                return f"{name}: a pass ran without its lock"
+            for lock in locks:
+                if subprocess.run(["flock", "-n", lock, "true"]).returncode != 0:
+                    return f"{name}: {lock} is held after the shell stopped"
+            return round(gone - sent, 2) if when == "sleep" else None
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+
+
+jobs = [(s, c) for s in wrappers for c in CASES]
+with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    results = list(pool.map(lambda j: run(*j), jobs))
+problems = [f"{wrappers[s]}: {r}" for (s, _), r in zip(jobs, results) if isinstance(r, str)]
+if problems:
+    raise SystemExit("; ".join(problems))
+slowest = max(r for r in results if isinstance(r, float))
+print(f"{len(wrappers)} wrappers x {len(CASES)} cases, "
+      + ("as PID 1 of a new PID namespace" if PID1 else "as a plain child (unshare cannot make a PID namespace here)")
+      + f": TERM and INT in the sleep stop it in {slowest} s or less; TERM in a pass stops it after the pass")
+PY_STOP
+  )" && ci_pass "stage wrapper signals: $stop_out" \
+     || ci_fail "stage wrapper signals: $stop_out"
+fi
 
 # -----------------------------------------------------------------------------
 # Inline Python in rendered scripts compiles. A script written INLINE in a
