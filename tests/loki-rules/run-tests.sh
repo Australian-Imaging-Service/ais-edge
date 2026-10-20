@@ -32,9 +32,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 RULES="${REPO_ROOT}/charts/mgmt/files/loki-ruler-rules.yaml"
-PORT="${LOKI_TEST_PORT:-33100}"
-NAME="${LOKI_TEST_NAME:-loki-rule-test}"
+# Let Docker reserve a free loopback port atomically. A PID-derived port can
+# collide with another process; separate PID namespaces can also reuse a name.
+PORT="${LOKI_TEST_PORT:-0}"
 WORK="$(mktemp -d)"
+NAME="${LOKI_TEST_NAME:-loki-rule-test-${WORK##*/}}"
+CREATED_ID=""
 
 _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
 PASS=0; FAIL=0; FAILED=()
@@ -42,7 +45,9 @@ pass() { PASS=$((PASS+1)); printf '  %sPASS%s  %-38s %s\n' "$_G" "$_O" "$1" "$2"
 fail() { FAIL=$((FAIL+1)); FAILED+=("$1"); printf '  %sFAIL%s  %-38s %s\n' "$_R" "$_O" "$1" "$2"; }
 
 cleanup() {
-    [ "${LOKI_KEEP:-0}" = "1" ] || docker rm -f "$NAME" >/dev/null 2>&1
+    if [ "${LOKI_KEEP:-0}" != "1" ] && [ -n "$CREATED_ID" ]; then
+        docker rm -f "$CREATED_ID" >/dev/null 2>&1
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -107,14 +112,23 @@ ingester:
   max_chunk_age: 720h
 EOF
 
-docker rm -f "$NAME" >/dev/null 2>&1
-docker run -d --name "$NAME" -p "${PORT}:3100" \
+# Track only the container we created, including if start fails. A conflicting
+# explicit name is refused by Docker and must never be removed by our trap.
+if ! CREATED_ID="$(docker create --name "$NAME" -p "127.0.0.1:${PORT}:3100" \
     -v "$WORK/loki.yaml:/etc/loki/local-config.yaml:ro" \
-    "$IMAGE" -config.file=/etc/loki/local-config.yaml >"$WORK/start.log" 2>&1 || {
+    "$IMAGE" -config.file=/etc/loki/local-config.yaml 2>"$WORK/start.log")"; then
+    CREATED_ID=""
+    echo "could not create $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+fi
+docker start "$CREATED_ID" >"$WORK/start.log" 2>&1 || {
     echo "could not start $IMAGE" >&2
     cat "$WORK/start.log" >&2
     exit 2
 }
+PORT="$(docker port "$CREATED_ID" 3100/tcp | awk -F: 'NR == 1 {print $NF}')"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "could not discover Loki test port" >&2; exit 2; }
 
 for _ in $(seq 1 60); do
     curl -sf "http://localhost:${PORT}/ready" >/dev/null 2>&1 && break
