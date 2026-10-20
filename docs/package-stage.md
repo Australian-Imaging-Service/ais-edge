@@ -87,13 +87,13 @@ every change. The chart then:
   `dataPolicy.derived.packaged.reclaim: auto` to `onUploaded` (the staged
   reclaimer removes each packaged session after the upload).
 
-The upgrade that turns the stage on is safe without extra steps. The new
-deidentify pod, which takes turns on the lock, writes a marker file when it
-starts, and the package pod does not begin its first pass until that marker
-exists. Every stage pod restarts with `Recreate`, so the marker means the old
-deidentify pod, which did not take the lock, has already stopped. No deidentify
-pass runs beside a package pass, not even during that upgrade. Turning the
-stage off removes the marker, so a later turn-on waits again.
+Turning the stage on, off, or rolling it back needs no extra steps. The
+deidentify stage holds its own lock, `/data/.locks/deidentified.lock`, for each
+pass in both modes. The package stage takes that same lock, and then the
+upload-tree lock, for each of its passes. A lock is held for the whole pass and
+released by the kernel when a pod stops, so a pass of one stage never runs
+beside a pass of the other: not in normal running, and not while an old pod of
+either stage is finishing its last pass during the upgrade.
 
 The defaults in `charts/edge/values.yaml` under `ingest.package` are the ones
 every site can keep: the source datatype `medimage/dicom-series`, the two

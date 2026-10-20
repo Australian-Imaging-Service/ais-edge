@@ -984,34 +984,41 @@ installs for the running Python, so the pod passes its own image in.
      loop as edge.lockedStage, on the same lock, without the .alive handle: its
      passes never overlap a package pass, so nothing changes under the package
      stage while it reads and unlinks a session. */}}
-{{- /* It also writes /data/.locks/<stage>.serialised at start. The upload-tree
-     writer (edge.lockedStage with a fourth argument) waits for that marker
-     before its first pass: with strategy Recreate the marker means the pod
-     that takes the lock has started, so the old pod that did not take it has
-     stopped. An ordinary helm upgrade that turns the package stage on is
-     therefore safe without operator steps. */}}
+{{- /* The stage takes turns on ITS OWN tree lock (deidentified.lock for
+     deidentify), the same lock it holds as the writer when the package stage is
+     off. The upload-tree writer (edge.lockedStage with a fourth argument) takes
+     that lock too, for each of its passes, before the upload-tree lock. A lock
+     is held for a whole pass and released by the kernel when the pod stops, so
+     a pass of one stage never runs beside a pass of the other: not in steady
+     state, and not during the upgrade that turns the package stage on or off
+     or rolls it back, when an old pod of either stage may still be finishing a
+     pass. No marker file, nothing that can go stale. */}}
 {{- define "edge.serialisedStage" -}}
+{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && echo \"$HOSTNAME $(date -u +%%FT%%TZ)\" > /data/.locks/%s.serialised && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (index . 1) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- {{ printf "mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v; done" (index $tree (index . 1)) (index . 2) | quote }}
 - xnat-ingest
 - {{ index . 1 | quote }}
 {{- end }}
 
-{{- /* (list $ "<stage>" <interval> ["<serialised stage>"]). The wrapper removes
-     its own stage's .serialised marker at start, so a stage that returns to
-     being the writer (package turned off) clears what its serialised run left;
-     the next turn-on waits again instead of trusting a stale marker. With the
-     fourth argument it waits for that stage's marker before the first pass. */}}
+{{- /* (list $ "<stage>" <interval> ["<stage whose tree this one reads>"]). With
+     the fourth argument each pass first takes that stage's own tree lock, then
+     the upload-tree lock: the package stage reads /data/deidentified, so it
+     takes deidentified.lock (which deidentify holds for each of its passes in
+     either mode) and then packaged.lock (which the staged reclaimer fences
+     on). deidentify never takes packaged.lock and the reclaimer never takes
+     deidentified.lock, so the nested order cannot deadlock. */}}
 {{- define "edge.lockedStage" -}}
 {{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
-{{- $wait := "" }}
+{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $outer := "" }}
 {{- if gt (len .) 3 }}
-{{- $wait = printf "until [ -f /data/.locks/%s.serialised ]; do echo \"waiting for the %s pod that takes the lock (an upgrade is in progress)\"; sleep 10; done && " (index . 3) (index . 3) }}
+{{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}
 {{- end }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && rm -f /data/.locks/%s.serialised && %sexec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" $stage $wait (include "edge.uploadTreeAlive" $root) (include "edge.uploadTreeLock" $root) $interval | quote }}
+- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
 - xnat-ingest
 - {{ $stage | quote }}
 {{- end }}
