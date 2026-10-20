@@ -43,23 +43,12 @@ fi
 TIER_NS="$(grep -m1 '^namespace:' "${REPO_ROOT}/${OBS_CHART}/values.yaml" | awk '{print $2}')"
 TIER_NS="${TIER_NS:-xnat-upload}"
 RULES="${REPO_ROOT}/${OBS_CHART}/files/loki-ruler-rules.yaml"
-# PER-RUN, NOT FIXED. Both used to be constants: NAME="${LOKI_TEST_NAME:-loki-rule-test}" and port
-# 33100. Two concurrent runs then fought over one container, and the loser was
-# not told. The second run's `docker rm -f` DESTROYED the first run's Loki, the
-# first run carried on querying the second run's replacement, and its fixture
-# check reported a count that was the sum of both:
-#
-#     FAIL  fixture_ingestion: pushed 81 lines, only 162 are queryable
-#
-# 162 = 2 x 81. Neither run's results were trustworthy and neither said so: one
-# reported a mismatch it could not explain, the other could pass on doubled data.
-# Observed on this machine, where several sessions share one checkout.
-#
-# $$ is unique per process, so runs coexist instead of clobbering. LOKI_TEST_PORT
-# still overrides for a run that needs a predictable port.
-PORT="${LOKI_TEST_PORT:-$((33100 + ($$ % 500)))}"
-NAME="loki-rule-test-$$"
+# Let Docker reserve a free loopback port atomically. A PID-derived port can
+# collide with another process; separate PID namespaces can also reuse a name.
+PORT="${LOKI_TEST_PORT:-0}"
 WORK="$(mktemp -d)"
+NAME="${LOKI_TEST_NAME:-loki-rule-test-${WORK##*/}}"
+CREATED_ID=""
 
 _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
 PASS=0; FAIL=0; FAILED=()
@@ -69,7 +58,9 @@ SKIP=0
 skip() { SKIP=$((SKIP+1)); printf '  %sSKIP%s  %-38s %s\n' "$_Y" "$_O" "$1" "$2"; }
 
 cleanup() {
-    [ "${LOKI_KEEP:-0}" = "1" ] || docker rm -f "$NAME" >/dev/null 2>&1
+    if [ "${LOKI_KEEP:-0}" != "1" ] && [ -n "$CREATED_ID" ]; then
+        docker rm -f "$CREATED_ID" >/dev/null 2>&1
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -134,17 +125,23 @@ ingester:
   max_chunk_age: 720h
 EOF
 
-# NO BLANKET `docker rm -f` HERE. It used to remove "$NAME" unconditionally,
-# which under the fixed name above meant removing SOMEONE ELSE'S run. The name
-# is unique per process now, so there is nothing of ours to clear first, and a
-# collision means a genuine leftover worth failing on rather than deleting.
-if docker inspect "$NAME" >/dev/null 2>&1; then
-    echo "container $NAME already exists; refusing to clobber it" >&2; exit 2
-fi
-docker run -d --name "$NAME" -p "${PORT}:3100" \
+# Track only the container we created, including if start fails. A conflicting
+# explicit name is refused by Docker and must never be removed by our trap.
+if ! CREATED_ID="$(docker create --name "$NAME" -p "127.0.0.1:${PORT}:3100" \
     -v "$WORK/loki.yaml:/etc/loki/local-config.yaml:ro" \
-    "$IMAGE" -config.file=/etc/loki/local-config.yaml >/dev/null 2>&1 || {
-    echo "could not start $IMAGE" >&2; exit 2; }
+    "$IMAGE" -config.file=/etc/loki/local-config.yaml 2>"$WORK/start.log")"; then
+    CREATED_ID=""
+    echo "could not create $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+fi
+docker start "$CREATED_ID" >"$WORK/start.log" 2>&1 || {
+    echo "could not start $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+}
+PORT="$(docker port "$CREATED_ID" 3100/tcp | awk -F: 'NR == 1 {print $NF}')"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "could not discover Loki test port" >&2; exit 2; }
 
 for _ in $(seq 1 60); do
     curl -sf "http://localhost:${PORT}/ready" >/dev/null 2>&1 && break
