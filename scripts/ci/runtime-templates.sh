@@ -999,4 +999,24 @@ print('receiver endpoint, credentials, curl image and shell syntax checked')
 PY_GROUP
 )" && ci_pass "group startup: $group_startup_out" || ci_fail "group startup: $group_startup_out"
 
+ci_heading "Vector discovers short-lived pod logs"
+vector_poll_out="$(python3 - "$CI_RENDER_DIR" edge-observability-on edge-obsstack-on 2>&1 <<'PY_VECTOR_POLL'
+import sys, yaml
+from pathlib import Path
+for case in sys.argv[2:]:
+    sources = []
+    for doc in yaml.safe_load_all((Path(sys.argv[1]) / (case + ".yaml")).read_text()):
+        if not doc or doc.get("kind") != "ConfigMap":
+            continue
+        for name, body in doc.get("data", {}).items():
+            if name != "vector.yaml":
+                continue
+            config = yaml.safe_load(body)
+            sources.extend(s for s in config.get("sources", {}).values() if s.get("type") == "kubernetes_logs")
+    assert sources, f"{case}: no Kubernetes log source found"
+    assert all(s.get("glob_minimum_cooldown_ms") == 1000 for s in sources), case
+print("every rendered Kubernetes log source scans at a one-second interval")
+PY_VECTOR_POLL
+)" && ci_pass "$vector_poll_out" || ci_fail "$vector_poll_out"
+
 ci_summary "runtime-templates"
