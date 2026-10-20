@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # =============================================================================
-# reclaim-files.py: the per-session deleter of reclaim-staged.sh.
+# reclaim-files.py: the data-pass worker of reclaim-staged.sh.
 # =============================================================================
-# reclaim-staged.sh calls this once per session name. STORAGE=filesystem: the
-# session is a folder of the upload tree (tier-1, and direct mode on main).
+# reclaim-staged.sh calls --batch once per run. Direct session calls remain
+# supported. STORAGE=filesystem: the session is a folder of the upload tree
+# (tier-1, and direct mode on main).
 # STORAGE=s3: the session is a prefix of the staging bucket (the mgmt reclaimer).
-# Exit: 0 removed something, 10 kept, 11 skipped (too young or dry run), 12 nothing
-# there. Any other exit is an error; the caller logs reclaim_failed.
+# Direct-session exits: 0 removed something, 10 kept, 11 skipped (too young or
+# dry run), 12 nothing there. Batch exit 0 means the pass finished; 20 means
+# discovery failed and reclaim_unavailable was logged. Other exits are errors.
 # `--list` prints the session prefixes of the bucket; `--probe` checks it answers.
 #
 # PROOF, per file: the ONE row of the experiment's file listing in the resource the
@@ -58,6 +60,7 @@ import ssl
 import stat
 import sys
 import time
+import tempfile
 import urllib.parse
 from datetime import datetime
 
@@ -211,11 +214,8 @@ class S3Proof:
     staging bucket (see the header). The prefix is listed once; a file that fails
     gets a repair request, and the Keep says so."""
 
-    def __init__(self, session):
-        import boto3
-        from botocore.config import Config
-        cert = E.get("S3_CLIENT_CERT")   # mTLS on the upload path: the same pair the uploader uses
-        self.s3 = boto3.client("s3", config=Config(client_cert=(cert, E["S3_CLIENT_KEY"])) if cert else None)
+    def __init__(self, session, s3=None):
+        self.s3 = s3 if s3 is not None else make_s3_client()
         self.bucket, self.session = E["S3_BUCKET"], session
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
         self.parts = sorted({parse_size(E.get("S3_CHUNK_SIZE", "64Mi")), 5 << 20})
@@ -398,9 +398,8 @@ class S3Store:
     the proof; a delete names the ETag of that listing (If-Match), so an object
     rewritten after it stays. Folders are never deleted."""
 
-    def __init__(self, session):
-        import boto3   # endpoint, keys, region and CA bundle from the AWS_* environment
-        self.s3 = boto3.client("s3")
+    def __init__(self, session, s3=None):
+        self.s3 = s3 if s3 is not None else make_s3_client()
         self.bucket = E["S3_BUCKET"]
         self.prefix = f"{E.get('S3_PREFIX', 'staged').strip('/')}/{session}/"
         self.objects = list_prefix(self.s3, self.bucket, self.prefix, "the snapshot")   # rel: (etag, size, modified epoch)
@@ -643,84 +642,128 @@ class Resource:
 
 
 class Xnat:
-    """GET and HEAD on one connection. Redirects are never followed."""
+    """Reuse transport and authentication, never response data. Do not follow redirects."""
 
     def __init__(self):
         url = urllib.parse.urlsplit(E["XNAT_SERVER"])
         self.prefix = url.path.rstrip("/")
         if url.scheme == "https":
-            ctx = ssl.create_default_context()   # the system trust store, as curl uses
+            ctx = ssl.create_default_context()
             if E.get("XNAT_VERIFY_SSL", "true") != "true":
                 ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
             self.conn = http.client.HTTPSConnection(url.hostname, url.port, timeout=TIMEOUT, context=ctx)
         else:
             self.conn = http.client.HTTPConnection(url.hostname, url.port, timeout=TIMEOUT)
-        self.owned = False   # True when this helper opened the session and must end it
-        if E.get("XNAT_JSESSION"):   # the run's one XNAT session, from reclaim-staged.sh
-            self.headers = {"Cookie": "JSESSIONID=" + E["XNAT_JSESSION"]}
-        else:
-            token = base64.b64encode(f"{E.get('XNAT_USER', '')}:{E.get('XNAT_PASS', '')}".encode())
-            self.headers = {"Authorization": "Basic " + token.decode()}
+        token = base64.b64encode(f"{E.get('XNAT_USER', '')}:{E.get('XNAT_PASS', '')}".encode()).decode()
+        self.basic = {"Authorization": "Basic " + token}
+        self.owned = False
+        self.headers = ({"Cookie": "JSESSIONID=" + E["XNAT_JSESSION"]}
+                        if E.get("XNAT_JSESSION") else dict(self.basic))
 
-    def request(self, method, path, query=""):
+    def raw_request(self, method, path, query="", headers=None):
         path = urllib.parse.quote(urllib.parse.unquote(path), safe="/:@")
         if self.prefix and not path.startswith(self.prefix + "/"):
             path = self.prefix + path
+        auth = self.headers if headers is None else headers
         try:
-            self.conn.request(method, path + ("?" + query if query else ""), headers=self.headers)
+            self.conn.request(method, path + ("?" + query if query else ""),
+                              headers={**auth, "Cache-Control": "no-cache", "Pragma": "no-cache"})
             resp = self.conn.getresponse()
             body = resp.read()
-        except (OSError, http.client.HTTPException) as e:
+        except (OSError, http.client.HTTPException) as exc:
             self.conn.close()
-            raise Keep("xnat_check_failed", f"{method} {path}: {e}")
-        if "Authorization" in self.headers:
-            # XNAT opens a session for each request that logs in. Keep the first
-            # one, or a run would leave a session behind for every file it checks.
-            m = re.search(r"JSESSIONID=([^;\s]+)", " ".join(resp.headers.get_all("Set-Cookie") or []))
-            if m:
-                self.headers, self.owned = {"Cookie": "JSESSIONID=" + m.group(1)}, True
+            raise Keep("xnat_check_failed", f"{method} {path}: {exc}")
         return resp.status, resp.headers, body
 
+    @staticmethod
+    def cookie(headers):
+        match = re.search(r"JSESSIONID=([^;\s]+)", " ".join(headers.get_all("Set-Cookie") or []))
+        return match.group(1) if match else None
+
+    def login(self):
+        if self.owned:
+            self.close()  # a permission failure can leave the old login valid
+        status, headers, body = self.raw_request("GET", "/data/JSESSION", headers=self.basic)
+        token = self.cookie(headers)
+        if token is None:
+            token = body.decode(errors="replace").strip()
+        if status != 200 or not re.fullmatch(r"[A-Za-z0-9._-]{1,256}", token):
+            raise Keep("xnat_check_failed", f"XNAT re-authentication failed: HTTP {status}")
+        self.headers, self.owned = {"Cookie": "JSESSIONID=" + token}, True
+        jlog("xnat_session_opened", "", "reusing one XNAT session for this run")
+
+    def request(self, method, path, query=""):
+        status, headers, body = self.raw_request(method, path, query)
+        if method != "DELETE" and (status in (401, 403) or 300 <= status < 400):
+            # One bounded refresh. An auth response is never an absence result.
+            self.login()
+            status, headers, body = self.raw_request(method, path, query)
+            if status in (401, 403) or 300 <= status < 400:
+                raise Keep("xnat_check_failed", f"{method} {path}: HTTP {status} after re-authentication")
+        elif "Authorization" in self.headers:
+            token = self.cookie(headers)
+            if token:
+                self.headers, self.owned = {"Cookie": "JSESSIONID=" + token}, True
+        return status, headers, body
+
     def close(self):
-        """End the session this helper opened; the run's own session is not ours."""
+        # A signal can interrupt an in-flight response. Logout needs a fresh
+        # transport even when that old connection is still Request-sent.
+        self.conn.close()
         if self.owned:
             try:
-                self.request("DELETE", "/data/JSESSION")
-            except Keep:
-                pass
+                status, _, _ = self.raw_request("DELETE", "/data/JSESSION")
+                if status != 200:
+                    jlog("xnat_session_close_failed", "",
+                         f"the XNAT logout returned HTTP {status}; XNAT keeps this session until it times out")
+            except Keep as exc:
+                jlog("xnat_session_close_failed", "", str(exc))
         self.conn.close()
+        self.owned = False
 
     def rows(self, path, what, absent=None):
-        """The rows of a listing. absent: the reason when XNAT answers 404, which says
-        the thing is not there at lookup (a session not uploaded yet). Without it, a
-        404 is a failed check, as any other code."""
         status, _, body = self.request("GET", path, "format=json")
         if status == 404 and absent:
             raise Keep(absent, f"{what}: HTTP 404, not found at lookup")
         if status != 200:
             raise Keep("xnat_check_failed", f"{what}: HTTP {status}")
         try:
-            return json.loads(body)["ResultSet"]["Result"]
+            rows = json.loads(body)["ResultSet"]["Result"]
+            if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                raise ValueError("invalid rows")
+            return rows
         except Exception:
             raise Keep("xnat_check_failed", f"{what}: the answer is not the expected JSON")
 
     def file_index(self, project, subject, visit):
-        """{relpath: [(scan id, resource label, resource id, URI, digest)]} for the session."""
         want = (visit, f"{subject}_{visit}")
         exps = [r["ID"] for r in self.rows(f"/data/projects/{project}/subjects/{subject}/experiments",
                                            "experiment lookup", absent="incomplete_in_xnat")
                 if r.get("label") in want or r.get("ID") in want]
         if not exps:
             raise Keep("incomplete_in_xnat", "XNAT has no experiment for this session")
+        if len(exps) != 1:
+            raise Keep("xnat_ambiguous", "XNAT lists more than one experiment for this session")
+        # The file catalog may outlive the experiment or its file bodies. Check
+        # the experiment endpoint before the catalog, then still HEAD each file.
+        status, _, body = self.request("GET", f"/data/experiments/{exps[0]}", "format=json")
+        if status == 404:
+            raise Keep("incomplete_in_xnat", "experiment endpoint: HTTP 404, not found at lookup")
+        if status != 200:
+            raise Keep("xnat_check_failed", f"experiment endpoint: HTTP {status}")
+        try:
+            experiment = json.loads(body)
+            if not isinstance(experiment, dict) or not experiment:
+                raise ValueError("invalid experiment")
+        except Exception:
+            raise Keep("xnat_check_failed", "experiment endpoint: the answer is not the expected JSON")
         index = {}
-        for r in self.rows(f"/data/experiments/{exps[0]}/scans/ALL/files", "file listing"):
-            m = re.match(r"^.*?/scans/([^/]+)/resources/([^/]+)/files/(.+)$", r.get("URI") or "")
-            if m:
-                scan, res, rel = (urllib.parse.unquote(g) for g in m.groups())
-                # XNAT 1.9 names the resource by its numeric id in the URI and
-                # lists the label as "collection" and the id as "cat_ID".
-                label, rid = str(r.get("collection") or res), str(r.get("cat_ID") or res)
-                index.setdefault(rel, []).append((scan, label, rid, r["URI"], str(r.get("digest") or "")))
+        for row in self.rows(f"/data/experiments/{exps[0]}/scans/ALL/files", "file listing"):
+            match = re.match(r"^.*?/scans/([^/]+)/resources/([^/]+)/files/(.+)$", row.get("URI") or "")
+            if match:
+                scan, res, rel = (urllib.parse.unquote(g) for g in match.groups())
+                label, rid = str(row.get("collection") or res), str(row.get("cat_ID") or res)
+                index.setdefault(rel, []).append((scan, label, rid, row["URI"], str(row.get("digest") or "")))
         return index
 
     def head_size(self, uri):
@@ -784,11 +827,11 @@ class WriterLock:
             raise Keep("lock_error", f"{path}: {e}")
 
 
-def reclaim(session):
+def reclaim(session, *, s3=None, xnat=None):
     parts = session.split(".")
     if len(parts) != 3 or not all(parts):
         raise Keep("unsafe_prefix_name", "not a project.subject.visit session name")
-    store = LocalStore(session) if STORAGE == "filesystem" else S3Store(session)
+    store = LocalStore(session) if STORAGE == "filesystem" else S3Store(session, s3=s3)
     if STORAGE != "filesystem" and not store.objects:
         return EMPTY   # a prefix with no objects: the uploader's listing skips it too
     now = int(E.get("RECLAIM_NOW") or time.time())   # RECLAIM_NOW: tests only (ctime cannot be set back)
@@ -807,7 +850,7 @@ def reclaim(session):
         # too, or a backlog of old files copied today is retired at once, with no
         # window in which a fault in the copy can still be seen. The listing is
         # this run's one snapshot of the prefix; a listing error keeps the session.
-        proof = S3Proof(session)
+        proof = S3Proof(session, s3=s3)
         newest = proof.newest()
         s3_age = None if newest is None else now - int(newest)
         if s3_age is not None and s3_age < MIN_AGE_S:
@@ -875,7 +918,8 @@ def reclaim(session):
             kept_rels += [r.rel for r in resources]
             resources = []
     elif resources:
-        xnat = Xnat()
+        owned_xnat = xnat is None
+        xnat = xnat or Xnat()
         try:
             index = xnat.file_index(*parts)
             for res in list(resources):
@@ -886,7 +930,8 @@ def reclaim(session):
                     kept_rels.append(res.rel)
                     resources.remove(res)
         finally:
-            xnat.close()
+            if owned_xnat:
+                xnat.close()
     nfiles = sum(len(r.data) for r in resources)
     if resources and not kept and not unknown:
         if PROOF == "s3":
@@ -968,32 +1013,52 @@ def report_kept(session, kept, unknown, batches, removed):
     return KEPT
 
 
-def bucket_sessions():
-    """The session names under the staging prefix, one per line (`--list`)."""
+def make_s3_client():
     import boto3
-    s3, prefix = boto3.client("s3"), E.get("S3_PREFIX", "staged").strip("/") + "/"
-    names, tokens, complete = [], set(), False
+    from botocore.config import Config
+    cert = E.get("S3_CLIENT_CERT")
+    return boto3.client("s3", config=Config(client_cert=(cert, E["S3_CLIENT_KEY"])) if cert else None)
+
+
+def iter_bucket_sessions(s3):
+    """Validate discovery pages, yielding names, never session object snapshots."""
+    prefix = E.get("S3_PREFIX", "staged").strip("/") + "/"
+    tokens, complete = set(), False
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix, Delimiter="/"):
+        if complete or not isinstance(page.get("IsTruncated"), bool):
+            raise ValueError("a page without a completion marker")
+        if page["IsTruncated"]:
+            token = page.get("NextContinuationToken")
+            if not isinstance(token, str) or not token or token in tokens:
+                raise ValueError("a truncated page without a new continuation token")
+            tokens.add(token)
+        else:
+            complete = True
+        for entry in page.get("CommonPrefixes") or []:
+            name = entry["Prefix"]
+            if not isinstance(name, str) or not name.startswith(prefix) or not name.endswith("/"):
+                raise ValueError("a prefix outside the requested staging tree")
+            yield name[len(prefix):].rstrip("/")
+    if not complete:
+        raise ValueError("the listing ended without its last page")
+
+
+def bucket_sessions():
+    """Compatibility --list, with no partial stdout on a failed discovery."""
+    s3 = make_s3_client()
     try:
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix, Delimiter="/"):
-            # the same complete-listing rule as list_prefix(): a run that misses a page misses sessions
-            if complete or not isinstance(page.get("IsTruncated"), bool):
-                raise ValueError("a page without a completion marker")
-            if page["IsTruncated"]:
-                token = page.get("NextContinuationToken")
-                if not isinstance(token, str) or not token or token in tokens:
-                    raise ValueError("a truncated page without a new continuation token")
-                tokens.add(token)
-            else:
-                complete = True
-            for p in page.get("CommonPrefixes") or []:
-                names.append(p["Prefix"][len(prefix):].rstrip("/"))
-        if not complete:
-            raise ValueError("the listing ended without its last page")
-    except Exception as e:
-        print(f"cannot list {prefix} completely: {e}", file=sys.stderr)
+        with tempfile.TemporaryFile(mode="w+t") as names:
+            for name in iter_bucket_sessions(s3):
+                names.write(name + "\n")
+            names.seek(0)
+            for line in names:
+                print(line, end="")
+    except Exception as exc:
+        print(f"cannot list staging completely: {exc}", file=sys.stderr)
         return 1
-    for n in names:
-        print(n)
+    finally:
+        s3.close()
+    return 0
 
 
 def cleaner_gate():
@@ -1023,7 +1088,93 @@ def cleaner_gate():
     return 0
 
 
+BATCH_UNAVAILABLE = 20  # pre-flight style abort already logged by the worker
+BATCH_S3 = True
+
+
+def session_names(s3=None):
+    """Discover names only. The per-session snapshot must be taken later."""
+    if STORAGE == "s3":
+        yield from iter_bucket_sessions(s3)
+    else:
+        with os.scandir(ROOT) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("__"):
+                    yield entry.name
+
+
+def batch():
+    """One worker and shared connections; no listing or proof survives a session."""
+    s3 = make_s3_client() if STORAGE == "s3" or PROOF == "s3" else None
+    xnat = Xnat() if PROOF == "xnat" and E.get("VERIFY_XNAT", "true") == "true" else None
+    counts = dict(examined=0, removed=0, kept=0, skipped=0)
+    if BATCH_S3:
+        counts["empty"] = 0
+    # Finish discovery before the first delete, as the shell did. Spool names to
+    # disk instead of retaining every prefix or every session's objects in RAM.
+    try:
+        with tempfile.TemporaryFile(mode="w+t") as names:
+            try:
+                for name in session_names(s3):
+                    names.write(json.dumps(name) + "\n")
+            except Exception as exc:
+                message = f"listing staging failed: {exc}; nothing examined"
+                jlog("reclaim_unavailable", "", message, reason="staging_list_failed")
+                names.seek(0)
+                for number, line in enumerate(names):
+                    if number >= int(E.get("UNAVAILABLE_SESSION_CAP", "500")):
+                        jlog("reclaim_unavailable", "", "staged session report reached the cap",
+                             reason="staging_list_failed", truncated=True)
+                        break
+                    jlog("reclaim_unavailable", json.loads(line),
+                         "staged, and this run could not decide anything about it: " + message,
+                         reason="staging_list_failed")
+                return BATCH_UNAVAILABLE
+            names.seek(0)
+            for line in names:
+                session = json.loads(line)
+                if not session:
+                    continue
+                counts["examined"] += 1
+                if session == ".reclaim-state":
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9._-]+", session) or session.startswith((".", "-", "__")):
+                    jlog("reclaim_kept", session,
+                         "prefix name is not a plain [A-Za-z0-9._-] session id — refusing to pass it on",
+                         reason="unsafe_prefix_name")
+                    counts["kept"] += 1
+                    continue
+                cap = int(E.get("MAX_REMOVALS", "50"))
+                if counts["removed"] >= cap:
+                    jlog("reclaim_skipped", "", f"per-run removal cap of {cap} reached — remaining sessions left for the next run")
+                    break
+                try:
+                    rc = reclaim(session, s3=s3, xnat=xnat)
+                except Keep as exc:
+                    jlog("reclaim_kept", session, str(exc), reason=exc.reason)
+                    rc = KEPT
+                except Exception as exc:
+                    # Equivalent to a failed child process: keep the remaining
+                    # data and make this session's failure visible.
+                    jlog("reclaim_failed", session, f"reclaim-files.py stopped for this session: {type(exc).__name__}: {exc}")
+                    rc = KEPT
+                key = {0: "removed", 10: "kept", 11: "skipped", 12: "empty"}.get(rc)
+                if key not in counts:
+                    jlog("reclaim_failed", session, f"reclaim-files.py stopped with exit {rc}; nothing more was done for this session")
+                    key = "kept"
+                counts[key] += 1
+        jlog("reclaim_finished", "", " ".join(f"{k}={v}" for k, v in counts.items()), **counts)
+        return 0
+    finally:
+        if xnat is not None:
+            xnat.close()
+        if s3 is not None:
+            s3.close()
+
+
 def main():
+    if sys.argv[1] == "--batch":
+        return batch()
     if sys.argv[1] == "--list":
         return bucket_sessions()
     if sys.argv[1] == "--probe":
@@ -1045,4 +1196,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # A stop can interrupt an HTTP operation or a sequence of conditional
+    # deletes. Raising runs the writer-lock and XNAT cleanup finally blocks.
+    # Each unlink/DeleteObject is atomic; the manifest is removed last.
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     sys.exit(main())
