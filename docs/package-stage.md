@@ -77,6 +77,11 @@ upload-tree lock, for each of its passes. A lock is held for the whole pass and
 released by the kernel when a pod stops, so a pass of one stage never runs
 beside a pass of the other: not in normal running, and not while an old pod of
 either stage is finishing its last pass during the upgrade.
+This holds for an upgrade from a release in which the package stage was off,
+and for one in which it already used this lock. A test build from before this
+lock protocol, whose package stage took only its own lock, is not ordered: stop
+its package Deployment (scale it to 0 and let the running pass end) before you
+upgrade from it. No released chart has shipped such a build.
 
 The defaults in `charts/edge/values.yaml` under `ingest.package` are the ones
 every site can keep: the source datatype `medimage/dicom-series`, the two
