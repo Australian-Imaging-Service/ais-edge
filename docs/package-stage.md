@@ -161,12 +161,20 @@ they cover every other upload.
   series is uploaded beside it. This needs `reproducible=true` in the
   `DICOM-zip` spec and a fileformats-extras release that has the option (see
   What it needs).
+  When XNAT lists no checksums, the uploader compares a zip by filename only.
+  More images added to an already uploaded series can therefore leave the
+  older zip in XNAT, even if Orthanc stages the changed study again.
+  A larger zip is retained by the reclaimer's size check, but an equal-size
+  content change is not detected without a digest. Preserve the source and
+  resolve that conflict before accepting the new images as delivered.
 - Part of a series arriving later (file drop only): when a file drop brings
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
   (`IngestStageError` fires) and keeps both the input and the packaged copy.
-  Drop the whole series again in one go. Through Orthanc this does not
-  happen: a late series stages the whole study again.
+  Drop the whole series again in one go. Orthanc re-stages the whole study
+  only while it still holds the complete study. If Orthanc has
+  already retired it, a later arrival can be staged alone. A series split
+  across separate arrivals still needs complete-member and content checks.
 - Turn it off: set `ingest.package.enabled: false` and upgrade the release.
   Do this only when `/data/packaged` is empty: the upload stage reads
   `/data/deidentified` again after the change and does not look at
