@@ -458,6 +458,37 @@ label: `SessionStagedNotConfirmedInXNAT` counts only an XNAT proof as
 delivery, and `ReclaimerRunUnavailable` judges the edge's reclaimer apart
 from the management one.
 
+### Stopping stage loops
+
+The chart runs group, group-orthanc and assign through the same pass wrapper
+as the other producers. Each pass holds the lock of its output tree. Group and
+group-orthanc share `grouped.lock`; assign holds `assigned.lock`. These locks
+stop two writers of the same tree. They do not make the full pipeline a
+transaction.
+
+TERM and INT stop an idle wrapper at once. A busy wrapper lets the current
+pass finish, releases its lock, and starts no further pass. A pass that lasts
+longer than the pod termination grace period can still be killed.
+
+During a `helm upgrade`, the `Recreate` strategy stops the old pod before the
+new pod starts. A pod deletion or an eviction does not wait: the replacement
+can start while the old pod still stops. The lock covers that case. On the
+first upgrade to this chart the old pod has no lock, but `Recreate` stops it
+first, so the upgrade itself is safe. An old pod that ignores TERM is killed
+after the grace period, possibly during a pass, as before this change.
+
+Each pass starts a new `xnat-ingest` process. Its imports take about 1.6 s of
+CPU per pass, the same cost that the deidentify and package stages already
+have. A new process for each pass also returns its memory after the pass.
+
+The data-policy loop also stops from idle sleep and after a current foreground
+command. An external child that does not finish within the grace period can
+still be killed.
+
+The S3 uploader uses the same sleep handling. Its current copy can finish
+before the shell exits. If a repair claim remains when it exits between
+commands, the existing startup recovery returns that claim to the queue.
+
 ### Upgrade or roll back while the cleanup can delete
 
 This applies to both upload modes: the staged-reclaimer deletes from the

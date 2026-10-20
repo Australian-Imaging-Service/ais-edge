@@ -48,6 +48,11 @@
 # =============================================================================
 set -u
 
+# PID 1 must catch stop signals. Foreground work finishes before the shell
+# runs this trap. Idle sleeps run in the background so wait is interruptible.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 INTERVAL="${INTERVAL:-300}"
 EDGE_NAME="${EDGE_NAME:?EDGE_NAME required}"
 STAGES_FILE="${STAGES_FILE:-/etc/data-policy/stages.tsv}"
@@ -747,5 +752,5 @@ while true; do
     done < "$STAGES_FILE"
 
     [ "$ONESHOT" = "true" ] && break
-    sleep "$INTERVAL"
+    sleep "$INTERVAL" & wait $!
 done
