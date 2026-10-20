@@ -643,8 +643,10 @@ if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
-    if cmd != ["xnat-ingest", plain] or "--loop" not in args:
-        raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", plain] or "--loop" in args:
+        raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
+    if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
+        raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
 if serialised != "-":
     # The stage that writes the writer's INPUT tree holds its own tree lock for
     # each pass, and the writer takes that lock before the upload-tree lock for
@@ -666,7 +668,7 @@ if serialised != "-":
     if strategy.get(serialised) != "Recreate":
         raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
 print(f"{locked} under {tree[locked]}.lock, stops on TERM and INT" + (", reclaimer on the same locks" if reclaimer else "")
-      + ("" if plain == "-" else f", {plain} loops on its own")
+      + ("" if plain == "-" else f", {plain} holds its producer lock")
       + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
@@ -717,6 +719,13 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
             continue
         for c in doc["spec"]["template"]["spec"].get("containers", []):
             cmd = c.get("command") or []
+            if c["name"] in ("group", "group-fs", "assign"):
+                expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
+                tree = "assigned" if expected == "assign" else "grouped"
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", expected]:
+                    raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
+                if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
+                    raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
             if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
                 wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
 # serialised (one lock), locked (.alive + one lock), locked with the outer lock

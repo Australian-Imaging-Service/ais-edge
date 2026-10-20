@@ -81,7 +81,9 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          command: ["xnat-ingest", "group-orthanc"]
+          # Serialize producers across overlapping old and replacement pods.
+          command:
+            {{- include "edge.serialisedStage" (list . "group-orthanc" .Values.ingest.orthancGroup.interval) | nindent 12 }}
           args:
             - "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
             - "/data/orthanc-storage"
@@ -108,8 +110,6 @@ spec:
             - {{ .Values.ingest.orthancGroup.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.orthancGroup.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.orthancGroup.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.orthanc.auth.enabled }}
@@ -173,7 +173,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          command: ["xnat-ingest", "group"]
+          command:
+            {{- include "edge.serialisedStage" (list . "group" .Values.ingest.fileDrop.interval) | nindent 12 }}
           args:
             - {{ .Values.ingest.fileDrop.inputGlob | quote }}
             - "/data/grouped"
@@ -206,8 +207,6 @@ spec:
             - {{ .Values.ingest.fileDrop.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.fileDrop.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.fileDrop.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if ne .Values.dataPolicy.originals.fileDrop.reclaim "never" }}
@@ -277,7 +276,10 @@ spec:
           command:
             {{- include "edge.lockedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
           {{- else }}
-          command: ["xnat-ingest", "assign"]
+          # Assign still needs its own producer lock when it does not write
+          # the upload tree. A replacement pod can overlap a busy old pod.
+          command:
+            {{- include "edge.serialisedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
           {{- end }}
           args:
             - "/data/grouped"
@@ -313,10 +315,6 @@ spec:
             # dataPolicy.originals and both defaulting to forever.
             - "--unlink-source"
             - "all"
-            {{- end }}
-            {{- if ne (include "edge.uploadTreeKey" .) "assigned" }}
-            - "--loop"
-            - {{ .Values.ingest.assign.interval | quote }}
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}

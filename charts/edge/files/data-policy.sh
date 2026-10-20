@@ -48,6 +48,11 @@
 # =============================================================================
 set -u
 
+# PID 1 must catch stop signals. Foreground work finishes before the shell
+# runs this trap. Idle sleeps run in the background so wait is interruptible.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 INTERVAL="${INTERVAL:-300}"
 EDGE_NAME="${EDGE_NAME:?EDGE_NAME required}"
 STAGES_FILE="${STAGES_FILE:-/etc/data-policy/stages.tsv}"
@@ -766,7 +771,8 @@ while true; do
 
     [ "$ONESHOT" = "true" ] && break
     # A failed sleep returns at once: exit rather than sweep back to back.
-    sleep "$INTERVAL" || {
+    sleep "$INTERVAL" &
+    wait $! || {
         jlog sleep_failed "" "sleep ${INTERVAL} failed; exiting rather than sweeping back to back"
         exit 1
     }
