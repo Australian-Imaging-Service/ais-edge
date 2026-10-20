@@ -905,6 +905,8 @@ ingest:
     # Fernet.generate_key()). Set, mappings are written encrypted as
     # <session>.json.enc and are unreadable without it. Unset, they are plain
     # JSON on the same volume as the data they de-identify.
+    # Production ingest sites must set this reference. Empty means plaintext
+    # reidentification maps; existing plaintext is not migrated automatically.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
 
   # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`
