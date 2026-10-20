@@ -78,9 +78,15 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 - **No XNAT credentials** — neither edge stage talks to XNAT
 - **The upload-tree writer lock, `/data/.locks/<tree>.lock`**: the
   stage that writes the tree the uploader reads (`assign` under the
-  Orthanc engine or none, `deidentify` under the ingest engine) runs one
+  Orthanc engine or none, `deidentify` under the ingest engine, `package`
+  when the optional package stage is on) runs one
   pass at a time, and holds this lock for each pass (`edge.lockedStage`
-  in `charts/edge/templates/_helpers.tpl`). Under `upload.mode: direct`
+  in `charts/edge/templates/_helpers.tpl`). With the package stage on,
+  `deidentify` takes turns on that same lock, one pass per turn and without
+  `--loop`, and writes `/data/.locks/deidentify.serialised` when it starts;
+  the package pod waits for that marker before its first pass, so the upgrade
+  that turns the stage on never runs a package pass beside the old deidentify
+  pod (see [package-stage.md](../package-stage.md)). Under `upload.mode: direct`
   the staged-reclaimer takes the same lock around each delete, and deletes
   only while the writer holds `/data/.locks/<tree>.alive`, a shared lock
   the writer keeps for its whole life. This does not change how a stage
@@ -488,9 +494,14 @@ separate shell lines: a failed step does not stop the next one. (`drain` and
 
 The resume step refuses, and leaves the CronJob suspended, when the CronJob's
 deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
-complete, or when any writer pod (`assign` or `deidentify`, from the lock path)
-lacks the wrapper or is still terminating. An upgrade or a rollback between two releases
-in which BOTH the writer and the staged-reclaimer take the lock needs no drain.
+complete, or when any writer pod (`assign`, `deidentify` or `package`, from the
+lock path: `packaged.lock` means the `package` writer) lacks the wrapper or is
+still terminating. An upgrade or a rollback between two releases in which BOTH
+the writer and the staged-reclaimer take the lock needs no drain. Turning the
+package stage on or off moves the writer lock between `deidentified.lock` and
+`packaged.lock`; the stages themselves handle that move (the marker described
+under the writer lock above), and the fence follows the lock path for the
+reclaimer.
 
 ## Benefits
 
