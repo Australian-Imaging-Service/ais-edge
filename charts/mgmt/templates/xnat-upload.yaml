@@ -109,10 +109,34 @@ spec:
       serviceAccountName: {{ include "mgmt.fullname" $root }}-xnat-upload
       automountServiceAccountToken: false
       {{- include "mgmt.schedulingRules" $root | nindent 6 }}
+      {{- with $root.Values.xnatUpload.extraPipPackages }}
+      # The same image as the uploader: pip installs for the running Python.
+      initContainers:
+        - name: pip-install
+          image: "{{ $root.Values.xnatUpload.image.repository }}:{{ $root.Values.xnatUpload.image.tag }}"
+          imagePullPolicy: {{ $root.Values.xnatUpload.image.pullPolicy }}
+          command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
+          args:
+            {{- range . }}
+            - {{ . | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: site-packages
+              mountPath: /opt/site-packages
+      volumes:
+        - name: site-packages
+          emptyDir: {}
+      {{- end }}
       containers:
         - name: upload
           image: "{{ $root.Values.xnatUpload.image.repository }}:{{ $root.Values.xnatUpload.image.tag }}"
           imagePullPolicy: {{ $root.Values.xnatUpload.image.pullPolicy }}
+          {{- with $root.Values.xnatUpload.extraPipPackages }}
+          volumeMounts:
+            - name: site-packages
+              mountPath: /opt/site-packages
+              readOnly: true
+          {{- end }}
           # xnat-ingest loops internally via --loop; no bash wrapper needed.
           command: ["xnat-ingest", "upload"]
           args:
@@ -204,6 +228,11 @@ spec:
             # xnat-upload alert stop matching.
             - name: AIS_LOG_FORMAT
               value: "json"
+            {{- with $root.Values.xnatUpload.extraPipPackages }}
+            # The packages the init container installed (xnatUpload.extraPipPackages).
+            - name: PYTHONPATH
+              value: /opt/site-packages
+            {{- end }}
           resources:
             {{- toYaml $root.Values.xnatUpload.resources | nindent 12 }}
 {{- end }}

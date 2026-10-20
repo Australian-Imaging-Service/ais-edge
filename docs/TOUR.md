@@ -282,7 +282,8 @@ decisions in the logs, then enable.
 
 **A `staged-reclaimer` CronJob retires the upload tree in both upload modes**
 (`/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
-`ingest`). Under `upload.mode: s3` it proves each local file against the
+`ingest`, `/data/packaged` when the optional package stage is on). Under
+`upload.mode: s3` it proves each local file against the
 bucket: the object must be there with the same size and an ETag equal to the
 MD5 of the bytes read from disk now (or the multipart form of it for
 `upload.s3.chunkSize` and rclone's 5 MiB). A file that fails leaves one repair

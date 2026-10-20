@@ -23,6 +23,13 @@ node:
   the destination and `aws s3 sync` does not
 - **`xnat-ingest upload`** on the management node, rendered **once per
   edge site** rather than once for the fleet
+- **`xnat-ingest package`** on each edge VM — OPTIONAL and off by default
+  (`ingest.package.enabled`, under `deid.engine: ingest` only). Reads
+  `/data/deidentified` and writes `/data/packaged`: each DICOM series becomes
+  one `DICOM-zip` resource (`archive.zip`) plus one DICOM sample. The
+  `s3-uploader` then reads `/data/packaged`, and the management uploader needs
+  the vendor datatype package (`xnatUpload.extraPipPackages`). See
+  [package-stage.md](../package-stage.md).
 
 > **De-identification is done in Orthanc by default** (the Lua hook), not in
 > xnat-ingest. The optional `deidentify` stage is also wired into this chart
@@ -71,9 +78,15 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 - **No XNAT credentials** — neither edge stage talks to XNAT
 - **The upload-tree writer lock, `/data/.locks/<tree>.lock`**: the
   stage that writes the tree the uploader reads (`assign` under the
-  Orthanc engine or none, `deidentify` under the ingest engine) runs one
+  Orthanc engine or none, `deidentify` under the ingest engine, `package`
+  when the optional package stage is on) runs one
   pass at a time, and holds this lock for each pass (`edge.lockedStage`
-  in `charts/edge/templates/_helpers.tpl`). Under `upload.mode: direct`
+  in `charts/edge/templates/_helpers.tpl`). With the package stage on,
+  `deidentify` keeps holding its own `/data/.locks/deidentified.lock` for each
+  pass, one pass per turn and without `--loop`, and `package` takes that lock
+  and then `packaged.lock` for each of its passes, so a pass of one never runs
+  beside a pass of the other, also during the upgrade that turns the stage on
+  or off (see [package-stage.md](../package-stage.md)). Under `upload.mode: direct`
   the staged-reclaimer takes the same lock around each delete, and deletes
   only while the writer holds `/data/.locks/<tree>.alive`, a shared lock
   the writer keeps for its whole life. This does not change how a stage
@@ -83,7 +96,8 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 
 ### s3-uploader pod (edge)
 - **The same pipeline PVC** — reads the terminal tree (`assigned/`, or
-  `deidentified/` under `deid.engine: ingest`) and copies each settled
+  `deidentified/` under `deid.engine: ingest`, or `packaged/` when the package
+  stage is on) and copies each settled
   session, inside the upload-tree writer lock. It never removes a session:
   the staged-reclaimer CronJob does that, after it has proved each file in
   the bucket (see "S3 mode: prove, then delete" below). Its state
@@ -480,9 +494,14 @@ separate shell lines: a failed step does not stop the next one. (`drain` and
 
 The resume step refuses, and leaves the CronJob suspended, when the CronJob's
 deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
-complete, or when any writer pod (`assign` or `deidentify`, from the lock path)
-lacks the wrapper or is still terminating. An upgrade or a rollback between two releases
-in which BOTH the writer and the staged-reclaimer take the lock needs no drain.
+complete, or when any writer pod (`assign`, `deidentify` or `package`, from the
+lock path: `packaged.lock` means the `package` writer) lacks the wrapper or is
+still terminating. An upgrade or a rollback between two releases in which BOTH
+the writer and the staged-reclaimer take the lock needs no drain. Turning the
+package stage on or off moves the writer lock between `deidentified.lock` and
+`packaged.lock`; the stages themselves order that move (both hold
+`deidentified.lock` for each pass, see the writer lock above), and the fence
+follows the lock path for the reclaimer.
 
 ## Benefits
 

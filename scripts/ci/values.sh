@@ -36,6 +36,16 @@ mkdir -p "$V"
 # nothing else, so `<chart>-defaults` really is the shipped configuration plus
 # the operator's mandatory answers.
 
+# The management uploader with the vendor datatype package an edge with the
+# package stage needs (xnatUpload.extraPipPackages): renders the pip init
+# container, the site-packages volume and PYTHONPATH.
+cat >"$V/mgmt-upload-extrapip.yaml" <<'EOF'
+xnatUpload:
+  extraPipPackages:
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+EOF
+
 cat >"$V/mgmt-base.yaml" <<'EOF'
 domain:
   internal: ci.198-51-100-10.nip.io
@@ -374,6 +384,25 @@ cat >"$V/edge-deid-off.yaml" <<'EOF'
 deid:
   engine: none
   policyReviewed: true
+EOF
+
+# THE PACKAGE STAGE ON (it is off by default). The uploader, the policy engine
+# and the staged reclaimer move to /data/packaged, and /data/deidentified becomes
+# an intermediate tree the package stage retires (onPackaged). Layered on
+# edge-deid-ingest.yaml, which sets deidentified.reclaim to onUploaded.
+cat >"$V/edge-deid-ingest-package.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    deidentified:
+      reclaim: auto
+    packaged:
+      reclaim: onUploaded
+ingest:
+  package:
+    enabled: true
+  extraPipPackages:
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -947,6 +976,14 @@ printf 'dataPolicy:\n  derived:\n    s3Staged:\n      minAge: 2d\n' >"$V/neg-mgm
 # The folder store's deleter rechecks identities with tick-granular file times: no age, no bind.
 printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      minAge: 30s\n' >"$V/neg-edge-stagedreclaimer-minage-under-1m.yaml"
 
+# Under the package stage the uploader reads /data/packaged, so onUploaded can
+# never be satisfied for /data/deidentified.
+printf 'ingest:\n  package:\n    enabled: true\n' >"$V/neg-edge-reclaim-deid-onuploaded-package.yaml"
+# onPackaged is satisfied by the package stage unlinking its input, so it is
+# meaningless when that stage does not render.
+printf 'dataPolicy:\n  derived:\n    deidentified:\n      reclaim: onPackaged\n' >"$V/neg-edge-reclaim-onpackaged-no-stage.yaml"
+printf 'dataPolicy:\n  derived:\n    deidentified:\n      minAge: 1d\n' >"$V/neg-edge-reclaim-onpackaged-minage.yaml"
+
 # A recovery window on a tree the stage deletes at handoff can never elapse.
 # Also the only live exercise of the durationSeconds/int64 path in that guard.
 cat >"$V/neg-edge-reclaim-ondeid-minage.yaml" <<'EOF'
@@ -1330,6 +1367,7 @@ ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
 mgmt-upload-custom	charts/mgmt	mgmt-base.yaml mgmt-upload-custom.yaml
+mgmt-upload-extrapip	charts/mgmt	mgmt-base.yaml mgmt-upload-extrapip.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
@@ -1371,6 +1409,8 @@ edge-stage-resources	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-dat
 edge-stage-resources-null	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-null.yaml
 edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-s3-ingest	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-direct-ingest-package	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
+edge-s3-ingest-package	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
 edge-s3-mtls	charts/edge	edge-base.yaml edge-s3-mtls.yaml
 edge-s3-mtls-no-cabundle	charts/edge	edge-base.yaml edge-s3-mtls-no-cabundle.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
@@ -1473,6 +1513,9 @@ neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-r
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-reclaim-deid-onuploaded-s3	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded-s3.yaml	with upload.mode=s3
+neg-edge-reclaim-deid-onuploaded-package	charts/edge	edge-base.yaml edge-deid-ingest.yaml neg-edge-reclaim-deid-onuploaded-package.yaml	with ingest.package enabled
+neg-edge-reclaim-onpackaged-no-stage	charts/edge	edge-base.yaml edge-deid-ingest.yaml neg-edge-reclaim-onpackaged-no-stage.yaml	but the package stage does not render
+neg-edge-reclaim-onpackaged-minage	charts/edge	edge-base.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml neg-edge-reclaim-onpackaged-minage.yaml	is set alongside reclaim=onPackaged
 neg-mgmt-s3staged-minage-over-36h	charts/mgmt	mgmt-base.yaml neg-mgmt-s3staged-minage-over-36h.yaml	is longer than 36h
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
 neg-edge-ingest-no-authsecret	charts/edge	edge-base.yaml neg-edge-ingest-no-authsecret.yaml	orthanc.auth.existingSecret is empty

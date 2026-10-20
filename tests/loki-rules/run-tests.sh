@@ -226,6 +226,8 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-group-error","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-fs-critical","level":"CRITICAL"}	{"message":"Cannot open input directory"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-assign-error","level":"ERROR"}	{"message":"Error assigning session example: Permission denied"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"package","cluster":"stage-package-error","level":"ERROR"}	{"message":"Error packaging session 'example': Invalid compression type"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"package","cluster":"stage-package-info","level":"INFO"}	{"message":"Packaging completed successfully"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-traceback","level":"unknown"}	{"message":"Traceback (most recent call last):\\n  File \\"assign.py\\", line 1"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-no-level-traceback"}	{"message":"Traceback (most recent call last):"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-info-word","level":"INFO"}	{"message":"Processing filename ERROR_exception.dcm with no errors"}
@@ -303,6 +305,8 @@ reporter_unlisted	DataPolicyReporterSilent	reporter-unlisted	nofire	not in edges
 stage-group-error	IngestStageError	stage-group-error	fire	stage severity or traceback contract
 stage-fs-critical	IngestStageError	stage-fs-critical	fire	stage severity or traceback contract
 stage-assign-error	IngestStageError	stage-assign-error	fire	stage severity or traceback contract
+stage-package-error	IngestStageError	stage-package-error	fire	the package stage is a grouped-session stage like assign
+stage-package-info	IngestStageError	stage-package-info	nofire	an INFO line of the package stage is not an error
 stage-traceback	IngestStageError	stage-traceback	fire	stage severity or traceback contract
 stage-no-level-traceback	IngestStageError	stage-no-level-traceback	fire	stage severity or traceback contract
 stage-info-word	IngestStageError	stage-info-word	nofire	stage severity or traceback contract

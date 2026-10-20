@@ -417,6 +417,20 @@ xnatUpload:
   xnatSecretRef: xnat-credentials     # keys: server, username, password
   s3SecretRef: seaweedfs-upload       # keys: access-key, secret-key
 
+  # Extra Python packages for the uploader. An init container pip-installs
+  # them into /opt/site-packages at every pod start, and the uploader reads
+  # them through PYTHONPATH. Needed when an edge runs the package stage: its
+  # packaged sessions name the DICOM sample datatype from
+  # fileformats-vendor-australianimagingservice, and the uploader must load it
+  # (see docs/package-stage.md). Same list as ingest.extraPipPackages on the
+  # edge. Pin a tag or a commit. The management node needs access to github.com
+  # for the install.
+  #
+  #   extraPipPackages:
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+  extraPipPackages: []
+
   # No `bucket` key here: with perSiteBuckets the uploader renders once per
   # edge against that site's own bucket. A single fleet-wide value would make
   # one uploader a fleet-wide single point of failure.

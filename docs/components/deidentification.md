@@ -482,14 +482,16 @@ On tier-1 the edge uploads straight to XNAT, so `deidentify` sits between
 uploader moves it on to XNAT, so the chain is longer:
 
 ```
-tier-1   orthanc -> group -> assign -> [deidentify] -> upload ------------> XNAT
-tier-2   orthanc -> group -> assign -> [deidentify] -> rclone -> S3 -> mgmt xnat-upload -> XNAT
+tier-1   orthanc -> group -> assign -> [deidentify] -> [package] -> upload ------------> XNAT
+tier-2   orthanc -> group -> assign -> [deidentify] -> [package] -> rclone -> S3 -> mgmt xnat-upload -> XNAT
 ```
 
 The placement is the same either way — immediately before whatever carries data
 off the node — and the chart handles it with one helper, so no extra
 configuration is needed. `upload` and the rclone S3 uploader both read
-`edge.uploadSourceDir`, which becomes `/data/deidentified` when the stage is on.
+`edge.uploadSourceDir`, which becomes `/data/deidentified` when the stage is on,
+and `/data/packaged` when the optional package stage runs after it (see
+[package-stage.md](../package-stage.md)).
 
 This ordering matters on tier-2 specifically: **de-identification happens before
 anything reaches S3**, so identifiable data never leaves the facility, even into
