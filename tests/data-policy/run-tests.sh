@@ -459,6 +459,98 @@ logged undelegated_stuck "$R" stage_stuck present "same tree, nothing delegated 
         fail orthanc_authed_ok "expected backend_idle; got: $(grep -o '"event":"[a-z_]*"' "$R3/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
     fi
 
+    # A DRY RUN MUST LOG THE DECISIONS OF AN ARMED RUN. A site runs the policy in
+    # dry run to judge it before it arms it. The dry-run gate was after the age
+    # check, before the instance list, the labels and the snapshot label were
+    # read. So a dry run logged WOULD delete for each processed study past
+    # minAge, and the armed run kept some of them as export_state_unknown.
+    # xnat-ingest before 0.16.3 writes no snapshot label. With it, a dry run said
+    # WOULD delete for each study, and an armed run kept them all.
+    #
+    # These cases fill the store, so they come after authok, which needs it empty.
+    # Three studies, one instance each, all with the processed label:
+    #   SA  a snapshot label with a different digest  kept, export_state_unknown
+    #   SB  no snapshot label (xnat-ingest < 0.16.3)  kept, export_state_unknown
+    #   SC  the snapshot label group-orthanc writes   WOULD delete, then deleted
+    # SC is the control. Without it, SA and SB pass if a dry run logs nothing.
+    OU="http://$OIP:8042"; OA=(-u admin:testpw123)
+    o_study() {  # o_study <PatientID>: a new study with one instance; prints the study id
+        curl -sS --fail "${OA[@]}" -X POST "$OU/tools/create-dicom" \
+             -d "{\"Tags\":{\"PatientID\":\"$1\",\"PatientName\":\"DP^$1\",\"Modality\":\"OT\"}}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["ParentStudy"])' 2>/dev/null
+    }
+    o_label() { curl -sS --fail "${OA[@]}" -X PUT "$OU/studies/$1/labels/$2" -d '' >/dev/null; }
+    o_last() { curl -sS --fail "${OA[@]}" "$OU/studies/$1/metadata/LastUpdate"; }
+    # The snapshot label as group-orthanc writes it (xnat_ingest/model/session.py),
+    # not as the engine reads it, so a drift between the two fails here: the
+    # SHA256 of the sorted instance ids, one per line, cut to 24 hex digits.
+    o_snapshot() {
+        curl -sS --fail "${OA[@]}" "$OU/studies/$1/instances?expand=false" | python3 -c '
+import hashlib, json, sys
+ids = sorted(json.load(sys.stdin))
+print(sys.argv[1] + hashlib.sha256(("\n".join(ids) + "\n").encode()).hexdigest()[:24])' \
+            "xnat-ingest-processed-$(o_last "$1")-"
+    }
+    o_http() { curl -s -o /dev/null -w '%{http_code}' "${OA[@]}" "$OU/studies/$1"; }  # 200 or 404
+    o_said() {  # o_said <root> <study> <pattern>: a line about this study matches
+        o_l=$(grep -F "\"study\":\"$2\"" "$1/out.jsonl" 2>/dev/null)
+        grep -q -- "$3" <<<"$o_l"
+    }
+    o_kept() {  # o_kept <name> <root> <study> <desc>
+        if o_said "$2" "$3" '"message":"WOULD delete'; then
+            fail "$1" "$4: it logged WOULD delete, but an armed run keeps it"
+        elif o_said "$2" "$3" '"event":"reclaim_kept".*"reason":"export_state_unknown"'; then
+            pass "$1" "$4"
+        else
+            fail "$1" "$4: expected reclaim_kept with export_state_unknown; got: $(grep -F "\"study\":\"$3\"" "$2/out.jsonl" 2>/dev/null | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+        fi
+    }
+    # The kept lines of a run, less the two fields that change from run to run.
+    o_keeps() { grep '"event":"reclaim_kept"' "$1/out.jsonl" 2>/dev/null | sed -E 's/"ts":"[^"]*",//; s/,"age_s":[0-9]+//' | sort; }
+    o_ids() { grep -- "$2" "$1/out.jsonl" 2>/dev/null | grep -o '"study":"[^"]*"' | sort | tr '\n' ' '; }
+
+    SA=$(o_study DPA); SB=$(o_study DPB); SC=$(o_study DPC)
+    if [ -n "$SA" ] && [ -n "$SB" ] && [ -n "$SC" ]; then
+        for s in "$SA" "$SB" "$SC"; do o_label "$s" xnat-ingest-processed; done
+        o_label "$SA" "xnat-ingest-processed-$(o_last "$SA")-000000000000000000000000"
+        o_label "$SC" "$(o_snapshot "$SC")"
+
+        # Dry run.
+        RD="$WORK/dryorder"; build_case "$RD"
+        ORTHANC_URL_T="$OU" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+            run_engine "$RD" "$STAGE" true true
+        o_kept orthanc_dry_mismatch_kept "$RD" "$SA" "dry run: a snapshot label with another digest is kept, as armed"
+        o_kept orthanc_dry_nolabel_kept "$RD" "$SB" "dry run: a study with no snapshot label is kept, as armed"
+        if o_said "$RD" "$SC" '"message":"WOULD delete'; then
+            pass orthanc_dry_match_would "dry run: the study with the right snapshot label is WOULD delete"
+        else
+            fail orthanc_dry_match_would "expected WOULD delete for the control study; got: $(grep -o '"event":"[a-z_]*"' "$RD/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+        fi
+        [ "$(o_http "$SA") $(o_http "$SB") $(o_http "$SC")" = "200 200 200" ] \
+            && pass orthanc_dry_nodelete "and the dry run deleted no study" \
+            || fail orthanc_dry_nodelete "a study is gone after a dry run"
+
+        # The same store, armed. It must keep with the same lines as the dry run,
+        # and delete only the studies that the dry run said WOULD delete.
+        RA="$WORK/armedorder"; build_case "$RA"
+        ORTHANC_URL_T="$OU" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+            run_engine "$RA" "$STAGE" true false
+        if [ -n "$(o_keeps "$RA")" ] && [ "$(o_keeps "$RD")" = "$(o_keeps "$RA")" ]; then
+            pass orthanc_armed_keeps_same "armed run keeps what the dry run kept, with the same lines"
+        else
+            fail orthanc_armed_keeps_same "kept lines differ; dry run: [$(o_ids "$RD" '"event":"reclaim_kept"')] armed: [$(o_ids "$RA" '"event":"reclaim_kept"')]"
+        fi
+        o_would=$(o_ids "$RD" '"message":"WOULD delete'); o_gone=$(o_ids "$RA" '"event":"reclaim_removed"')
+        [ -n "$o_gone" ] && [ "$o_would" = "$o_gone" ] \
+            && pass orthanc_armed_deletes_same "armed run deletes only what the dry run said WOULD delete" \
+            || fail orthanc_armed_deletes_same "dry run WOULD delete [${o_would}], armed run removed [${o_gone}]"
+        [ "$(o_http "$SA") $(o_http "$SB") $(o_http "$SC")" = "200 200 404" ] \
+            && pass orthanc_armed_state "the kept studies are in Orthanc, the deleted one is gone" \
+            || fail orthanc_armed_state "expected 200 200 404; got $(o_http "$SA") $(o_http "$SB") $(o_http "$SC")"
+    else
+        fail orthanc_dry_run_setup "could not create the test studies in Orthanc"
+    fi
+
     docker kill "$OCID" >/dev/null 2>&1 || true
     rm -rf "$OCFG"
 else

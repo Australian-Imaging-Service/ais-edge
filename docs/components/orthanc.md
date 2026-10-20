@@ -74,6 +74,9 @@ policy (`dataPolicy.derived.orthancStorage`, backend `orthanc-rest`) deletes a
 study only when that snapshot label matches what Orthanc holds now, and then
 deletes exactly the instances the label covers. A study without a matching
 snapshot label is kept and logged (`reclaim_kept`, `export_state_unknown`).
+A dry run makes the same keep checks and logs the same `reclaim_kept` and
+`reclaim_skipped` lines. Where an armed run
+deletes, it logs `WOULD delete` (`reclaim_skipped`).
 
 ## What Orthanc has access to
 
