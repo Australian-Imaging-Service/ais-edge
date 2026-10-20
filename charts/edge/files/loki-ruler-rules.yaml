@@ -576,7 +576,7 @@ groups:
     # Its per-pass summary adds no cause; each other concrete error still fires.
     expr: |
       sum by (cluster, component) (count_over_time(
-        {namespace="xnat-ingest", app="xnat-ingest", component=~"group|group-fs|assign"}
+        {namespace="xnat-ingest", app="xnat-ingest", component=~"group|group-fs|assign|package"}
         | json | __error__=""
         | json stage_message="message" | __error__=""
         | level=~"(?i)ERROR|CRITICAL" or stage_message=~"(?s)^Traceback \\(most recent call last\\):.*"

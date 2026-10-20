@@ -86,7 +86,7 @@ with `.Files.Get` and Helm never templates it.
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
 | DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
-| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, or `assign`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
 | `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for the `__unmapped_aet__` subtree — an AE title nobody has mapped to a project yet. |

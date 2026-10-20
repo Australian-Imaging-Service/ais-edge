@@ -232,7 +232,9 @@ fi
 #
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
-# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
+# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR),
+# and the package layout (the package stage reads /data/deidentified and writes
+# the tree the uploader drains).
 #
 # EXTERNAL_RECLAIM_STAGE must name a row of stages.tsv, and at least one render
 # must set it. The engine compares it against field 1 of that table, and it is
@@ -280,13 +282,17 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     except yaml.YAMLError as e:
         problems.append("%s: %s" % (case, " ".join(str(e).split())))
         continue
-    dp = dp_cpu = None
+    dp = up = dp_cpu = pkg = None
     rows = {}
     for d in docs:
         for c in containers(d):
             if d.get("kind") == "DaemonSet" and c.get("name") == "data-policy":
                 dp = env(c)
                 dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
+            if d.get("kind") == "Deployment" and c.get("name") == "uploader":
+                up = env(c)
+            if d.get("kind") == "Deployment" and c.get("name") == "package":
+                pkg = c.get("args") or []
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
     for d in docs:
@@ -331,7 +337,17 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                         "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
                         "CPUThrottlingHigh flaps on it. Keep only the memory limit" % (case, dp_cpu))
     src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
-    layouts.add("ingest" if src != adir else "orthanc")
+    layouts.add("package" if pkg is not None else "ingest" if src != adir else "orthanc")
+    # The package stage writes the tree the uploader drains, and must retire
+    # its input itself: nothing else can satisfy a reclaim on /data/deidentified.
+    if pkg is not None:
+        if pkg[1:2] != [src]:
+            problems.append("%s: the package stage writes %r but the uploader reads %r" % (case, pkg[1:2], src))
+        if pkg[:1] != ["/data/deidentified"]:
+            problems.append("%s: the package stage reads %r, not the deidentify stage's /data/deidentified" % (case, pkg[:1]))
+        dword = rows.get("derived.deidentified", [""] * 6)[5]
+        if dword == "onPackaged" and "--unlink-source" not in pkg:
+            problems.append("%s: derived.deidentified is onPackaged but the package stage does not unlink its input" % case)
     if not src.startswith("/"):
         problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
     if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
@@ -374,7 +390,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
 
 if checked == 0:
     problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
-for want in ("orthanc", "ingest"):
+for want in ("orthanc", "ingest", "package"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
 if checked and not interval_case_seen:
@@ -581,17 +597,17 @@ EOF
 # .alive check relies on it), or when the staged-reclaimer gets other lock paths.
 ci_heading "the upload-tree writer runs under the writer lock"
 
-while IFS=$'\t' read -r case_name locked plain; do
+while IFS=$'\t' read -r case_name locked plain serialised; do
   render="$CI_RENDER_DIR/$case_name.yaml"
   if [ ! -s "$render" ]; then
     ci_fail "no render at $render — run scripts/ci/render.sh first"
     continue
   fi
-  lock_out="$(python3 - "$render" "$locked" "$plain" 2>&1 <<'PY2'
+  lock_out="$(python3 - "$render" "$locked" "$plain" "${serialised:--}" 2>&1 <<'PY2'
 import sys, yaml
 
-path, locked, plain = sys.argv[1:4]
-tree = {"assign": "assigned", "deidentify": "deidentified"}
+path, locked, plain, serialised = sys.argv[1:5]
+tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
 stages, strategy, reclaimer = {}, {}, None
 for doc in yaml.safe_load_all(open(path)):
     if not doc:
@@ -624,8 +640,27 @@ if plain != "-":
     cmd, args = stages.get(plain, ([], []))
     if cmd != ["xnat-ingest", plain] or "--loop" not in args:
         raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
+if serialised != "-":
+    # The stage that writes the writer's INPUT tree holds its own tree lock for
+    # each pass, and the writer takes that lock before the upload-tree lock for
+    # each of its passes: a pass of one never runs beside a pass of the other,
+    # in steady state and across the upgrade that turns the writer on or off.
+    wcmd, _ = stages.get(locked, ([], []))
+    inner = f"/data/.locks/{tree[serialised]}.lock"
+    if f"flock {inner} flock {lock} " not in wcmd[2]:
+        raise SystemExit(f"{locked} does not take {inner} before {lock} for each pass: {wcmd[2]}")
+    scmd, sargs = stages.get(serialised, ([], []))
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != ["xnat-ingest", serialised]:
+        raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
+    if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
+        raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
+    if "--loop" in sargs:
+        raise SystemExit(f"{serialised} takes turns on the lock and still passes --loop")
+    if strategy.get(serialised) != "Recreate":
+        raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
 print(f"{locked} under {tree[locked]}.lock" + (", reclaimer on the same locks" if reclaimer else "")
-      + ("" if plain == "-" else f", {plain} loops on its own"))
+      + ("" if plain == "-" else f", {plain} loops on its own")
+      + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
      || ci_fail "$case_name: $lock_out"
@@ -635,6 +670,8 @@ edge-deid-off	assign	-
 edge-upload-direct	assign	-
 edge-upload-alerts	deidentify	assign
 edge-direct-ingest-reclaim	deidentify	assign
+edge-direct-ingest-package	package	-	deidentify
+edge-s3-ingest-package	package	-	deidentify
 EOF
 
 # Per-stage resource settings must reach their own application container.

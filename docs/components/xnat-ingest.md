@@ -29,9 +29,22 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
+- **`xnat-ingest package`** (`<release>-package`, `component=package`) —
+  OPTIONAL and off by default (`ingest.package.enabled`); runs after
+  deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
+  writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
+  replaced by a `DICOM-zip` resource, holding the whole series as an
+  uncompressed zip, and one DICOM sample that XNAT can read headers from. A
+  session with no `dicom-series` scan resource passes through unchanged. Each
+  session is removed from `/data/deidentified` once it has been packaged
+  (`dataPolicy.derived.deidentified.reclaim: onPackaged`). An empty input is
+  normal while waiting for work. The stage runs the pipeline image
+  (`ingest.image.tag`), which needs fileformats 0.22.1 or later; 0.16.2 does
+  not have it. See [package-stage.md](../package-stage.md) for the versions,
+  the vendor package and how a site turns the stage on.
 - **`xnat-ingest upload`** (`<release>-upload`, `component=upload`) — reads
-  `/data/assigned`, or `/data/deidentified` when the deidentify stage is on, and
-  uploads sessions to XNAT
+  `/data/assigned`, `/data/deidentified` when the deidentify stage is on, or
+  `/data/packaged` when the package stage is on, and uploads sessions to XNAT
 
 All three run in ONE namespace — `namespace:` in `sites/<site>/values.yaml`,
 `xnat-ingest`. Tier-2 splits ingest (edge cluster) from upload (management
@@ -100,7 +113,14 @@ The DICOM ingest engine downstream of Orthanc.
   life. This does not change how a stage removes its own input
   (`--unlink-source`). Under deid.engine
   ingest, `deidentify` writes the upload tree and takes
-  `/data/.locks/deidentified.lock` instead
+  `/data/.locks/deidentified.lock` instead. With the package stage on
+  (`ingest.package.enabled`), `package` writes the upload tree and takes
+  `/data/.locks/packaged.lock`; `deidentify` then takes turns on that same
+  lock, one pass per turn and without `--loop`: `deidentify` keeps holding
+  `/data/.locks/deidentified.lock` for each pass, and `package` takes that lock
+  and then `packaged.lock` for each of its passes, so a pass of one never runs
+  beside a pass of the other, also during the upgrade that turns the stage on
+  or off (see [package-stage.md](../package-stage.md))
 
 ### upload pod (`component=upload`)
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
@@ -266,7 +286,10 @@ sh -c 'mkdir -p /data/.locks && while :; do flock /data/.locks/assigned.lock "$0
 The sleep after each pass is the same full interval that `--loop` sleeps. A
 pass that fails stops the container, as an exception out of `--loop` did. Under
 deid.engine ingest, `assign` does not write the upload tree, so it keeps
-`--loop 60` and `deidentify` runs inside the lock.
+`--loop 60` and `deidentify` runs inside the lock. With the package stage on,
+`package` runs inside `deidentified.lock` and then `packaged.lock` for each
+pass, and `deidentify` keeps its own `deidentified.lock` per pass with the same
+loop, without the `.alive` handle and without `--loop`.
 
 `--unlink-source all` drops each grouped session once it has been assigned, and
 it is not an optimisation. `assign` rebuilds its work list from a live
@@ -359,9 +382,14 @@ separate shell lines: a failed step does not stop the next one. (`drain` and
 
 The resume step refuses, and leaves the CronJob suspended, when the CronJob's
 deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
-complete, or when any writer pod (`assign` or `deidentify`, from the lock path)
-lacks the wrapper or is still terminating. An upgrade or a rollback between two releases
-in which BOTH the writer and the staged-reclaimer take the lock needs no drain.
+complete, or when any writer pod (`assign`, `deidentify` or `package`, from the
+lock path: `packaged.lock` means the `package` writer) lacks the wrapper or is
+still terminating. An upgrade or a rollback between two releases in which BOTH
+the writer and the staged-reclaimer take the lock needs no drain. Turning the
+package stage on or off moves the writer lock between `deidentified.lock` and
+`packaged.lock`; the stages themselves order that move (both hold
+`deidentified.lock` for each pass, see the writer lock above), and the fence
+follows the lock path for the reclaimer.
 
 ## Benefits
 

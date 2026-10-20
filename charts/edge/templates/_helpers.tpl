@@ -435,6 +435,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          script were written for upload.mode=direct and landed on the branch
          whose default mode is s3, so THIS branch - the one that only ever runs
          direct - was the one left without them. */ -}}
+  {{- /* THE PACKAGE STAGE MOVES THE TERMINAL TREE to /data/packaged, so the
+         deidentified tree becomes an intermediate one, exactly as assigned
+         did under the ingest engine. Its consumer is the package stage, which
+         retires each session with --unlink-source once the packaged copy is
+         written; onUploaded can never be satisfied for it. */ -}}
+  {{- if eq (include "edge.packageEnabled" .) "true" }}
+    {{- if eq (include "edge.deidentifiedReclaim" .) "onUploaded" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onUploaded with ingest.package enabled. The uploader then reads /data/packaged, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/deidentified: every de-identified session would accumulate on the edge disk. Use onPackaged (or auto), which lets the package stage retire each session as soon as it has written the packaged copy, or never if you intend to keep them." }}
+    {{- end }}
+  {{- end }}
+  {{- if eq (include "edge.deidentifiedReclaim" .) "onPackaged" }}
+    {{- if ne (include "edge.packageEnabled" .) "true" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onPackaged but the package stage does not render (it needs ingest.package.enabled=true and deid.engine=ingest). That condition is satisfied by the package STAGE unlinking its own input, so nothing would ever retire /data/deidentified. Use auto." }}
+    {{- end }}
+    {{- $minAge := include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}
+    {{- if and (ne $minAge "-") (gt (int64 $minAge) 0) }}
+      {{- fail (printf "dataPolicy.derived.deidentified.minAge=%v is set alongside reclaim=onPackaged. The package stage deletes each session the moment it has written the packaged copy, so a recovery window on this tree can never elapse. Set minAge to 0, or set dataPolicy.derived.packaged.minAge for a window after upload." .Values.dataPolicy.derived.deidentified.minAge) }}
+    {{- end }}
+  {{- end }}
+
   {{- if eq .Values.upload.mode "direct" }}
     {{- $terminal := include "edge.uploadSourceDir" . }}
     {{- /* DELIBERATELY NOT `assigned` AS WELL when it is the terminal tree: the
@@ -463,7 +483,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          tree the uploader reads. The engine now keeps in both cases, which
          would leave the stage growing while the policy read as if it were
          being cleaned; refusing here makes the mistake an install error. */ -}}
-  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded" "onPackaged") "packaged" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
   {{- range $stage, $allowed := $reclaimWords }}
     {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
     {{- if not (has $w $allowed) }}
@@ -765,8 +785,16 @@ keep a tree it would otherwise retire.
 {{- define "edge.deidentifiedReclaim" -}}
 {{- $v := .Values.dataPolicy.derived.deidentified.reclaim -}}
 {{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.packageEnabled" .) "true" }}onPackaged
 {{- else if eq (include "edge.deidEngine" .) "ingest" }}onUploaded
 {{- else }}never{{ end }}
+{{- end }}
+
+{{- /* /data/packaged is only ever the terminal tree, so onUploaded is the
+       only word that retires it. */ -}}
+{{- define "edge.packagedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.packaged.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}{{- else }}onUploaded{{ end }}
 {{- end }}
 
 {{/*
@@ -810,7 +838,10 @@ derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.loca
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
 derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+derived.deidentified	derived	/data/deidentified	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+derived.packaged	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.packagedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.packaged.minAge }}	filesystem
 {{- end }}
 {{- end }}
 
@@ -887,8 +918,17 @@ with a message rather than silently selecting neither engine.
 {{- eq (include "edge.deidEngine" .) "ingest" -}}
 {{- end }}
 
+{{- /* The package stage renders only under the ingest engine, because its
+       input is the deidentify stage's output. ingest.package.enabled under any
+       other engine is ignored rather than refused: it defaults to true, and a
+       site on the Orthanc engine has nothing to package. */ -}}
+{{- define "edge.packageEnabled" -}}
+{{- and .Values.ingest.package.enabled (eq (include "edge.deidEngine" .) "ingest") -}}
+{{- end }}
+
 {{- define "edge.uploadSourceDir" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}/data/packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
 {{- end }}
 
 {{- /*
@@ -910,7 +950,59 @@ every site is configured, both branches resolve to the assigned key exactly as
 before.
 */}}
 {{- define "edge.uploadReclaim" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}{{ include "edge.packagedReclaim" . }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- end }}
+
+{{- /*
+SITE-SPECIFIC PYTHON PACKAGES (ingest.extraPipPackages), for every pod that
+loads staged sessions whose manifests can name a type the image does not ship.
+An init container pip-installs them into an emptyDir that the main container
+reads via PYTHONPATH; fileformats is a namespace package, so they merge with the
+image's own copy.
+
+The init container MUST run the same image as the container it serves: pip
+installs for the running Python, so the pod passes its own image in.
+  include "edge.extraPip.initContainers" (dict "root" $ "image" $image)
+*/ -}}
+{{- /* One init container, as a list item: the caller writes `initContainers:`
+     and may put other items beside it (upload.yaml creates its directories first). */ -}}
+{{- define "edge.extraPip.initContainer" -}}
+{{- with .root.Values.ingest.extraPipPackages }}
+- name: pip-install
+  image: {{ $.image }}
+  imagePullPolicy: {{ $.root.Values.ingest.image.pullPolicy }}
+  command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
+  args:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  volumeMounts:
+    - name: site-packages
+      mountPath: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.env" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: PYTHONPATH
+  value: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volumeMount" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  mountPath: /opt/site-packages
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volume" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  emptyDir: {}
+{{- end }}
 {{- end }}
 
 {{- /* The terminal tree as a dataPolicy.derived key: the tree the uploader
@@ -919,7 +1011,8 @@ before.
      CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
      different trees. */}}
 {{- define "edge.uploadTreeKey" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
 {{- end }}
 
 {{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
@@ -951,10 +1044,46 @@ before.
      and any child it leaves keep the lock until they stop.
      A pass that fails stops the container, as an exception out of --loop did.
      fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
-{{- define "edge.lockedStage" -}}
+{{- /* A stage that writes an INTERMEDIATE tree the upload-tree writer reads and
+     retires (deidentify when the package stage is on). Same one-pass-per-lock
+     loop as edge.lockedStage, on the same lock, without the .alive handle: its
+     passes never overlap a package pass, so nothing changes under the package
+     stage while it reads and unlinks a session. */}}
+{{- /* The stage takes turns on ITS OWN tree lock (deidentified.lock for
+     deidentify), the same lock it holds as the writer when the package stage is
+     off. The upload-tree writer (edge.lockedStage with a fourth argument) takes
+     that lock too, for each of its passes, before the upload-tree lock. A lock
+     is held for a whole pass and released by the kernel when the pod stops, so
+     a pass of one stage never runs beside a pass of the other: not in steady
+     state, and not during the upgrade that turns the package stage on or off
+     or rolls it back, when an old pod of either stage may still be finishing a
+     pass. No marker file, nothing that can go stale. */}}
+{{- define "edge.serialisedStage" -}}
+{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" (index . 0)) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- {{ printf "mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v; done" (index $tree (index . 1)) (index . 2) | quote }}
 - xnat-ingest
 - {{ index . 1 | quote }}
+{{- end }}
+
+{{- /* (list $ "<stage>" <interval> ["<stage whose tree this one reads>"]). With
+     the fourth argument each pass first takes that stage's own tree lock, then
+     the upload-tree lock: the package stage reads /data/deidentified, so it
+     takes deidentified.lock (which deidentify holds for each of its passes in
+     either mode) and then packaged.lock (which the staged reclaimer fences
+     on). deidentify never takes packaged.lock and the reclaimer never takes
+     deidentified.lock, so the nested order cannot deadlock. */}}
+{{- define "edge.lockedStage" -}}
+{{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
+{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $outer := "" }}
+{{- if gt (len .) 3 }}
+{{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}
+{{- end }}
+- /bin/sh
+- -c
+- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
+- xnat-ingest
+- {{ $stage | quote }}
 {{- end }}

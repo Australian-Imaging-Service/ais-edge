@@ -467,9 +467,26 @@ dataPolicy:
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
-      reclaim: auto             # never | onUploaded
+      # never | onUploaded | onPackaged
+      #
+      # auto resolves to onPackaged when ingest.package renders: the package
+      # stage then reads this tree and removes each session itself once it has
+      # written the packaged copy, so the uploader's markers describe
+      # /data/packaged, not this tree. Otherwise onUploaded.
+      reclaim: auto
       # The recovery window after upload. Under direct upload the stagedReclaimer
-      # CronJob applies it (the longer of this and its own minAge).
+      # CronJob applies it (the longer of this and its own minAge). Not used
+      # when reclaim resolves to onPackaged: the package stage retires the tree.
+      minAge: 0
+    # Where the package stage writes, and what `upload` reads when
+    # ingest.package renders. Rendered as a stage only then.
+    packaged:
+      # No `location` key, for the same reason as `deidentified` above: the
+      # path is derived from edge.uploadSourceDir.
+      reclaim: auto             # never | onUploaded  (auto = onUploaded)
+      # The recovery window after upload, as for `deidentified` above. Under
+      # direct upload the stagedReclaimer CronJob applies it.
+      minAge: 0
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -691,6 +708,27 @@ ingest:
   # fields directly; turning this off breaks monitoring, not just formatting.
   logFormat: json
 
+  # Extra Python packages, as pip requirement specs, for the pods that load
+  # packaged sessions: package, and the direct-mode upload. Use it for
+  # fileformats types the image does not ship, such as package's dicom-sample
+  # output and DicomSeries archive converters, which live in
+  # fileformats-vendor-australianimagingservice (+ -extras). Pin a vendor
+  # revision that provides both DicomSeries converters. Upload needs the type
+  # as well because packaged manifests name it, and loading a session resolves
+  # every manifest's type.
+  #
+  # An init container pip-installs them (--no-deps, so they must need only what
+  # the image already has) into an emptyDir on PYTHONPATH. fileformats is a
+  # namespace package, so they merge with the image's copy.
+  #
+  # CAUTION: the install runs on EVERY pod start, so the edge must reach the
+  # index or git host each time; if it can't, the pod stays in Init. Pin git
+  # refs to a commit, not a branch, or a restart can pick up different code.
+  #
+  #   extraPipPackages:
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+  extraPipPackages: []
   # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
   # these stages without chart-set reservations or limits, as before. Set each
   # stage for the site's workload; do not infer production limits from a small
@@ -729,6 +767,11 @@ ingest:
     resources: {}
     interval: 60
     copyMode: hardlink_or_copy
+    # OPTION: file every session under this one XNAT project, whatever the
+    # project tag says (assign --constant-project-id; the tagMapping project tag
+    # is then ignored). For an edge that only ever feeds one project. Empty:
+    # the project comes from tagMapping.project.
+    constantProjectId: ""
     # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
     # modify instances, so nothing writes the ClinicalTrial* tags and assign must
     # read tags the modality itself populates. The chart refuses to render if
@@ -870,6 +913,46 @@ ingest:
     # <session>.json.enc and are unreadable without it. Unset, they are plain
     # JSON on the same volume as the data they de-identify.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
+
+  # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`
+  # between deidentify and upload: reads /data/deidentified, writes
+  # /data/packaged, and the uploader follows it to /data/packaged.
+  #
+  # Each SOURCE resource is replaced by every outputResources entry, and each
+  # conversion receives the original series. The vendor extras convert that
+  # series into a DICOM directory ZIP and a representative image. The defaults
+  # produce the XNAT layout: the whole series as an uncompressed zip under
+  # DICOM-zip, plus one DICOM sample that XNAT can read headers from. `auto`
+  # names the sample's resource from its SOP class (DICOM, secondary, ...).
+  #
+  # ONLY RENDERS UNDER deid.engine=ingest. The input is the deidentify stage's
+  # output, which exists only under that engine. Under any other engine this
+  # block is ignored and the uploader reads /data/assigned as before.
+  #
+  # The packager fails if sessions exist but none has a sourceDatatype scan
+  # resource. An empty input directory is normal while waiting for new work.
+  package:
+    enabled: false
+    # Runs on ingest.image.tag like every stage. Needs xnat-ingest 0.16.2 or
+    # later and fileformats libraries that zip a DICOM series (see
+    # docs/package-stage.md for the versions and the vendor package).
+    interval: 60
+    copyMode: hardlink_or_copy
+    sourceDatatype: medimage/dicom-series
+    # label: resource name in XNAT. For the DICOM sample use `auto`: it takes the
+    #        label XNAT expects from the SOP class of the series (DICOM for
+    #        images, secondary for secondary captures, ...). A fixed label is
+    #        refused for a series of another class, and the session fails.
+    # spec:  target datatype, with converter options after ':'.
+    outputResources:
+      - label: DICOM-zip
+        # reproducible=true: fixed entry timestamps and sorted entries, so the
+        # zip of unchanged files has the same bytes every time, and a study
+        # staged again for a late series uploads nothing twice. Needs a
+        # fileformats-extras release with the option; older ones refuse it.
+        spec: "medimage/dicom-series+zip:compression=ZIP_STORED,reproducible=true"
+      - label: auto
+        spec: medimage/vnd.australianimagingservice.dicom-sample
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.

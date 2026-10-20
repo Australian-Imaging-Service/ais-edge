@@ -332,7 +332,9 @@ Two consequences worth knowing before you change anything here:
 
 - **Which tree it watches depends on the de-identification engine.**
   `/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
-  `ingest`. The chart derives that, and refuses a combination where the reclaim
+  `ingest`, and `/data/packaged` when the optional package stage is on (its
+  zips are proved under their folder label, `DICOM-zip`). The chart derives
+  that, and refuses a combination where the reclaim
   condition could never be satisfied rather than letting the policy read as
   though it were cleaning something.
 - **`dataPolicy.enabled: false` leaves it inert.** The CronJob still renders, but
