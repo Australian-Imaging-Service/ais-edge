@@ -55,7 +55,11 @@ unstable again. When it is stable, `OnStableStudy` removes the
 `study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
 study is never re-staged.
 
-`group-orthanc` (xnat-ingest 0.16.3 and later) also writes a snapshot label,
+The chart default image, xnat-ingest 0.16.2, writes no snapshot label. With it,
+an armed data policy keeps every Orthanc study (`reclaim_kept`, reason
+`export_state_unknown`), and `/data/orthanc-storage` grows. This lasts until the
+image has xnat-ingest PR #211 (open on 2026-10-20). With that PR,
+`group-orthanc` also writes a snapshot label,
 `xnat-ingest-processed-<LastUpdate>-<digest>`, when it labels a study, and
 re-stages any processed study whose `LastUpdate` no longer matches it. The data
 policy (`dataPolicy.derived.orthancStorage`, backend `orthanc-rest`) deletes a
