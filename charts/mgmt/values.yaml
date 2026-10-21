@@ -426,6 +426,8 @@ xnatUpload:
   # edge. Pin a tag or a commit. The management node needs access to github.com
   # for the install.
   #
+  # CAUTION: the vendor package has no v0.1.2 tag yet (vendor PR #3 is open).
+  # pip cannot install a missing tag.
   #   extraPipPackages:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
