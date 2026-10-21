@@ -407,7 +407,6 @@ dataPolicy:
       # The recovery window after upload, as for `deidentified` above. In both
       # upload modes the stagedReclaimer CronJob applies it.
       minAge: 0
-      minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
     #
