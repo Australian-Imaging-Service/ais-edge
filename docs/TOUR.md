@@ -323,8 +323,10 @@ has no s3-uploader**, so nothing would ever write it, and for a long time nothin
 did: the condition could not come true, the tree was kept for ever, and the
 uploader re-sent the same session every loop while XNAT answered *"already exists
 with different checksums"*. A `staged-reclaimer` CronJob now closes that. It runs
-hourly, asks XNAT whether the session is really there and complete, and only then
-removes it.
+hourly. For each resource of a session it finds every local file in XNAT's file
+listing and checks it with a HEAD request: present, with the same size (no
+download, so content is not compared). It removes only the files it proved, inside
+the upload-tree writer lock, and keeps everything it cannot prove.
 
 Two consequences worth knowing before you change anything here:
 
@@ -337,10 +339,16 @@ Two consequences worth knowing before you change anything here:
   with `DRY_RUN` set: it reports what it would remove and removes nothing. A site
   that never turns the data policy on will fill up, and the alert for it fires
   long after the uploader has started looping.
+- **It deletes only inside the writer lock.** The stage that writes the tree
+  holds `/data/.locks/<tree>.lock` for each pass, and the CronJob takes the same
+  lock to delete. The first upgrade to this check, and any rollback to a release
+  without the lock, need the drain in
+  [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
 
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
-minimum age, whether it verifies against XNAT, and how many sessions one run may
-remove.
+minimum age (counted from when the newest file reached the tree), whether it
+verifies against XNAT (with `false` it removes nothing), and how many sessions one
+run may remove.
 
 `minFreeDiskPercent: 10` and `quarantine.alertAfter: 24h` are read by the
 alerting rules as well as the policy engine, so changing them changes when you
@@ -749,20 +757,30 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **fifteen** alerts of
-its own — eleven log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and four metric rules evaluated by Prometheus
+Dashboards and alert rules ship with the chart. It defines **twenty-six**
+alerts of its own: twenty log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and six metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
-`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
-`NodeCountChanged`) — on top of kube-prometheus-stack's own default rule set,
-which contributes roughly another 130 and is left enabled. The ones specific to
-this tier are:
+`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
+`ReclaimerNotSucceeding`, `NodeCountChanged`). They come on top of
+kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
+apart from `KubeJobFailed`, which the chart replaces with a copy that leaves out
+the staged-reclaimer's own Jobs. Upstream's `CPUThrottlingHigh` runs unmodified:
+the data-policy reporter has no CPU limit, so the kernel never throttles it and
+the rule has no series to read for it. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
   originals. Do not ignore it.
 - **`QuarantinedDataUnresolved`** — something has sat in quarantine longer than
   `alertAfter`. Almost always an AE title missing from `aetMap`.
+- **`DataPolicyReporterSilent`**: the data-policy reporter has stopped sending
+  `stage_report`. The two alerts above read only those lines, so while this
+  fires a filling disk would go unreported.
+- **`XNATRepairAttempted`**: XNAT already held a session with files missing,
+  and the uploader tried to re-send them. It normally stands in for the
+  "upload completed" mail for that session, and does not say whether the
+  re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
 - **`OrthancDeidLuaError`** — de-identification itself is failing (Orthanc Lua
@@ -773,9 +791,25 @@ The alert expressions are unit-tested against recorded log fixtures
 (`tests/loki-rules/`), including the case that asserts a tqdm progress bar
 reading `401.71it/s` does **not** raise a credential alert.
 
-Two tier-2 alerts — `ReclaimerRunUnavailable` and
-`SessionStagedNotConfirmedInXNAT` — are deliberately absent, because there is no
-S3 reclaimer and no staging bucket on a single node.
+`ReclaimerRunUnavailable` and `SessionStagedNotConfirmedInXNAT` are shared with
+tier-2. Under `upload.mode=direct` the staged-reclaimer CronJob runs the same
+`reclaim-staged.sh` against the local upload tree instead of a bucket, so a
+reclaimer that keeps failing, or a session XNAT never confirms, raises the same
+two alerts. One failed run does not: the next hourly run finishing clears it.
+
+`ReclaimerRunUnavailable` only sees runs that log why they stopped. A run killed
+at its deadline, OOM-killed, crashing, stuck on an image pull or never scheduled
+logs nothing, so **`ReclaimerNotSucceeding`** watches the CronJob itself: no
+successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h) raises
+it, counted from creation if it has never succeeded. One failed run never fires
+it, even when the next run takes its full deadline to succeed; two failed runs,
+then a third not succeeding within 15 minutes, do, about 3h15m after the last
+success. It clears on the next good run, however many failed Jobs history
+keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
+outage raises one alert rather than two: its firing mail and its resolve, one
+pair per logged reason. If you slow the schedule, raise `alertAfter` with it: it
+must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
+the usual schedule forms (hourly, every N hours, daily).
 
 ---
 

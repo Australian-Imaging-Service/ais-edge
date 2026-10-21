@@ -54,3 +54,7 @@ docs/BEHAVIOUR-CHANGES.md
 # Run artefacts from scripts/adopt-existing.sh: a record of what one specific
 # live cluster adopted, timestamped per run. Output, not source.
 adoption-records/
+
+# Python bytecode, e.g. from the reclaimer tests. Never in a chart.
+__pycache__/
+*.pyc

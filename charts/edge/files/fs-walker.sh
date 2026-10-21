@@ -41,11 +41,14 @@ while true; do
     grep -Fxq "$study" "$DONE_LIST" && continue
 
     log "Grouping study: $study"
+    # --recursive: **/* also matches subdirectories, which group would
+    # otherwise read as files and fail on (FormatRecognitionError).
     if ! xnat-ingest group \
         "${study_dir}**/*" \
         "$GROUPED_DIR" \
         "${datatype_args[@]}" \
         "${group_id_args[@]}" \
+        --recursive \
         --on-resource-clash avoid all \
         --wait-period "${WAIT_PERIOD:?}" \
         --copy-mode "${COPY_MODE:?}"; then

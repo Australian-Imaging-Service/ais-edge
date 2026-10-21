@@ -42,11 +42,15 @@ Two further stages exist in the chart and are off by default: `group-fs`
 (`ingest.fileDrop.enabled` — a watched directory instead of a modality) and
 `associate` (`ingest.associate.enabled` — Siemens twix/rda/puls side files).
 
-There is **no S3 hop**: `upload.mode: direct`, and `install.sh` refuses anything
-else, because `s3` needs the tier-2 management plane (SeaweedFS, a staging
-bucket, a management-side reclaimer) that does not exist here. Every stage reads
+There is **no S3 hop**: `upload.mode: direct`, and the chart and `install.sh`
+both refuse anything else, because `s3` needs the tier-2 management plane
+(SeaweedFS, a staging bucket, a management-side reclaimer) that does not exist
+here. The chart no longer contains the S3 uploader. Every stage reads
 and writes directories on one shared volume; upload reads the same
 `/data/assigned` that `assign` wrote.
+
+The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
+This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
 
 ## Role in this stack
 
@@ -87,6 +91,16 @@ The DICOM ingest engine downstream of Orthanc.
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/grouped`,
   writes `/data/assigned`
 - **No Orthanc or XNAT access** — it only reshapes local directories
+- **The upload-tree writer lock, `/data/.locks/assigned.lock`**: `assign`
+  writes the tree the uploader reads (deid.engine orthanc or none), so it runs
+  one pass at a time and holds this lock for each pass (`edge.lockedStage` in
+  `charts/edge/templates/_helpers.tpl`). The staged-reclaimer takes the same
+  lock around each delete, and deletes only while the writer holds
+  `/data/.locks/assigned.alive`, a shared lock the writer keeps for its whole
+  life. This does not change how a stage removes its own input
+  (`--unlink-source`). Under deid.engine
+  ingest, `deidentify` writes the upload tree and takes
+  `/data/.locks/deidentified.lock` instead
 
 ### upload pod (`component=upload`)
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
@@ -135,6 +149,54 @@ with `scripts/site-secrets.sh new <name> single`). You never edit
 | Secret `xnat-credentials` (namespace `xnat-ingest`) | `server`, `username`, `password` — SOPS-encrypted in `sites/<site>/secrets.enc.yaml`, applied by `scripts/site-secrets.sh apply <site>` before the chart |
 | `charts/edge/templates/ingest-pipeline.yaml` | the group + assign Deployments (and the optional `group-fs` / `associate` stages) |
 | `charts/edge/templates/upload.yaml` | the upload Deployment (the `direct` branch) |
+
+### Ingest stage CPU and memory
+
+Set each stage's Kubernetes `resources` in the site's values file. The keys
+are independent, including the two group inputs:
+
+| Values key | Container |
+|---|---|
+| `ingest.orthancGroup.resources` | `group` in the group-orthanc Deployment |
+| `ingest.fileDrop.resources` | `group-fs` in the optional file-drop Deployment |
+| `ingest.assign.resources` | `assign` |
+| `ingest.deidentify.resources` | `deidentify`, when `deid.engine=ingest` |
+
+Each key accepts Kubernetes `requests` and `limits` for CPU and memory.
+An omitted key, `{}`, or `null` adds no resources to that container. These
+empty defaults preserve the existing behavior: the chart does not reserve CPU
+or memory for these stages and does not cap their use. A namespace LimitRange
+can still apply defaults. Installing this chart change alone does not establish
+a memory limit or a tested production capacity.
+
+This example shows the format for one stage. The numbers are illustrative;
+they are not a tested site profile or recommended production limits:
+
+```yaml
+ingest:
+  assign:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+```
+
+Use the other keys to size the other stages separately. Keep uploader settings
+under `upload.direct.resources` or, on main in S3 mode, `upload.s3.resources`.
+Orthanc remains the DICOM receiver; size the `deidentify` stage for the
+xnat-ingest recipes used at the site.
+
+Before setting a production profile, measure CPU and memory with the largest
+supported studies, the site's recipes, and concurrent stages. Allow memory
+headroom above observed peaks and check the total requests against node
+allocatable capacity, including Orthanc and the other services. Short synthetic
+runs and idle snapshots do not establish a safe upper bound. A memory limit
+that is too low can stop a stage with OOMKilled; CPU limits can slow the
+pipeline. Verify throughput, restarts, and recovery on the test deployment
+before applying a site profile.
 
 ### group-orthanc arguments
 
@@ -191,12 +253,24 @@ xnat-ingest assign \
   --session  ClinicalTrialTimePointID    # ingest.assign.tagMapping.session
   --copy-mode      hardlink_or_copy      # ingest.assign.copyMode
   --unlink-source  all                   # only when dataPolicy.derived.grouped.reclaim = onAssigned
-  --loop           60                    # ingest.assign.interval
 ```
 
+The chart runs these arguments one pass at a time inside the upload-tree writer
+lock, with no `--loop`:
+
+```
+sh -c 'mkdir -p /data/.locks && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60; done' \
+  xnat-ingest assign <the arguments above>   # sleep: ingest.assign.interval
+```
+
+The sleep after each pass is the same full interval that `--loop` sleeps. A
+pass that fails stops the container, as an exception out of `--loop` did. Under
+deid.engine ingest, `assign` does not write the upload tree, so it keeps
+`--loop 60` and `deidentify` runs inside the lock.
+
 `--unlink-source all` drops each grouped session once it has been assigned, and
-it is not an optimisation. `assign --loop` rebuilds its work list from a live
-listing of `/data/grouped` every cycle, so without it the same sessions are
+it is not an optimisation. `assign` rebuilds its work list from a live
+listing of `/data/grouped` every pass, so without it the same sessions are
 re-assigned forever: `/data/assigned` is repopulated, the uploader re-stages, and
 the upload-success alert re-fires (that produced two days of duplicate mail). It
 deletes HARDLINKS, not data — the bytes remain in Orthanc storage and in the
@@ -216,7 +290,9 @@ xnat-ingest upload /data/assigned $(XINGEST_HOST)   # LOCAL source dir (no s3://
   --always-include        all       # upload.direct.alwaysInclude
   --loop                  60        # upload.direct.loop
   --wait-period           60        # upload.direct.waitPeriod
-  --dont-require-manifest           # rendered when upload.direct.requireManifest = false
+  --require-manifest                # upload.direct.requireManifest = true (default):
+                                    #   a half-written resource waits for the next pass
+  --dont-require-manifest           # instead, when upload.direct.requireManifest = false
   --dont-verify-ssl                 # rendered when upload.direct.verifySsl = false
                                     #   (only for an XNAT with a private/self-signed cert)
 ```
@@ -249,6 +325,44 @@ sudo mv /data/xnat-ingest/assigned/__invalid__/<dir> \
 helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 ```
 
+### Upgrade or roll back while the cleanup can delete
+
+The staged-reclaimer deletes only inside the upload-tree writer lock, and only
+while a writer that takes the lock is running (it holds `<tree>.alive`). That
+check is safe for an upgrade, because Recreate stops the old writer before the
+new one starts. Two moves need a drain first, on a site where
+`dataPolicy.enabled: true` and `dataPolicy.dryRun: false`:
+
+- the FIRST upgrade to a release in which the staged-reclaimer takes the lock.
+  Before it, the cleanup ran `rm -rf` without the lock, and a Job that has
+  started keeps its old behaviour after its CronJob changes. That includes the
+  release that added only the writer lock: its deleter does not take the lock;
+- a rollback to a release in which the writer or the deleter does not take the
+  lock. This rollback is not supported without the drain, and the cleanup then
+  stays suspended.
+
+`suspend` does not stop a Job that has started. `scripts/reclaimer-fence.sh`
+waits for it, and fails on any API error instead of reading it as "nothing
+runs". Give it the upgrade or rollback command:
+
+```bash
+scripts/reclaimer-fence.sh around <release> -- \
+    helm upgrade <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
+```
+
+It suspends the CronJob and waits until no cleanup Job or pod is active (also a
+pod whose Job is already deleted), runs the command, and resumes only if the
+command succeeded and the checks below pass. At the first failure it stops,
+exits non-zero, and the CronJob stays suspended. Do not run the steps as
+separate shell lines: a failed step does not stop the next one. (`drain` and
+`resume` exist on their own for an operator who checks each exit status.)
+
+The resume step refuses, and leaves the CronJob suspended, when the CronJob's
+deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
+complete, or when any writer pod (`assign` or `deidentify`, from the lock path)
+lacks the wrapper or is still terminating. An upgrade or a rollback between two releases
+in which BOTH the writer and the staged-reclaimer take the lock needs no drain.
+
 ## Benefits
 
 - **Battle-tested DICOM parsing** — handles edge cases (missing
@@ -269,6 +383,7 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
+| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
 | `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
 

@@ -246,14 +246,21 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
-      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
-      # a quota below one core is clipped in nearly EVERY CFS period it
-      # runs in, which both trips CPUThrottlingHigh and stretches the
-      # sweep about 11x. requests stays at 5m, so its scheduler weight is
-      # still tiny and it yields under contention; the limit only bounds
-      # a runaway.
+      # 5m = cgroup cpu.weight 1: yields to Burstable pods, NOT to BestEffort ones.
       requests: {cpu: 5m, memory: 16Mi}
-      limits:   {cpu: 1, memory: 64Mi}
+      # NO CPU LIMIT, on purpose. A sweep is a sub-second burst of pipelines
+      # (find | stat | sort | md5sum) that briefly wants more than one core.
+      # Any CFS quota throttles most of the few periods it runs in (61% at
+      # cpu: 1, 0.0014 cores average, stream-2-ab-dev 2026-09-30), and
+      # CPUThrottlingHigh flapped on it. No quota: no throttling, no series.
+      # CPU is bounded by the script running one pipeline at a time, and by
+      # the interval floor (edge.validate, templates/_helpers.tpl).
+      # CAUTION: re-adding limits.cpu brings the CPUThrottlingHigh mails back,
+      # and scripts/ci/runtime-templates.sh fails on it. A site that must cap
+      # CPU (namespace policy) needs the reporter excluded from that rule
+      # again, as #26 did: make it a decision, not an accident.
+      # CAUTION: parallelism in data-policy.sh (&, xargs -P) is uncapped.
+      limits: {memory: 64Mi}
 
   # ---------------------------------------------------------------------
   # ORIGINALS
@@ -400,6 +407,8 @@ dataPolicy:
       # Ignored under onDeidentified — the stage deletes at handoff, so there is
       # no window to measure. The chart refuses the combination rather than
       # letting a configured window be silently discarded.
+      # CAUTION: under direct upload the stagedReclaimer CronJob below applies
+      # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
 
@@ -415,21 +424,36 @@ dataPolicy:
     # upload.mode=direct, because nothing writes the uploader's state dir, so
     # setting it here would keep this tree forever while looking like a policy.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is
-      # the slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by
       # the XNAT check regardless, so this is about noise, not safety.
+      # GUIDING: the CronJob waits for the LONGER of this and the minAge of the
+      # tree it reclaims (assigned or deidentified, by deid engine). Set the
+      # recovery window there; it is logged as the deciding key when it wins.
+      # The age counts from when the newest file reached the tree (its ctime),
+      # not from the file's own mtime, which a hard link keeps from Orthanc.
       minAge: 1d
-      # Ask XNAT whether it holds the session, complete, before deleting the
-      # only remaining copy. Off means trusting local state alone.
-      # CAUTION: `false` removes the last independent check before deletion.
+      # Ask XNAT for each local file (a HEAD: present, same size) before deleting
+      # the only remaining copy.
+      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
+      # XNAT proves, file by file.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes
       # this many and stops, leaving the rest to inspect.
       maxRemovals: 50
       # Killed if a run hangs on an unreachable XNAT, before the next is due.
       deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run,
+      # whatever the cause: failed, killed at the deadline, crashed, not started.
+      # Default: one failed run never fires it. Two failed runs, then a third not
+      # succeeding within 15m, do: about 3h15m after the last success.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it. Raise it when you slow the schedule.
+      # The chart refuses less (reading the period from the usual schedule
+      # forms; others are checked against deadlineSeconds only), and forever/never.
+      alertAfter: 3h
       resources:
         requests: {cpu: 20m, memory: 64Mi}
         limits: {memory: 256Mi}
@@ -440,6 +464,8 @@ dataPolicy:
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
       reclaim: auto             # never | onUploaded
+      # The recovery window after upload. Under direct upload the stagedReclaimer
+      # CronJob applies it (the longer of this and its own minAge).
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -664,15 +690,21 @@ orthanc:
 ingest:
   image:
     repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.15.6"
+    tag: "0.16.2"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
   # fields directly; turning this off breaks monitoring, not just formatting.
   logFormat: json
 
+  # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
+  # these stages without chart-set reservations or limits, as before. Set each
+  # stage for the site's workload; do not infer production limits from a small
+  # test. See docs/components/xnat-ingest.md, Ingest stage CPU and memory.
+
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
+    resources: {}
     enabled: true
     interval: 60
     # Only studies carrying this label are pulled. Applied by the Lua hook
@@ -687,8 +719,10 @@ ingest:
   # OFF by default — see dataPolicy.originals.fileDrop for why this path
   # deserves more care than the Orthanc one.
   fileDrop:
+    resources: {}
     enabled: false
     interval: 300
+    # Files in subfolders are read too: group runs with --recursive.
     inputGlob: "/data/incoming/**/*"
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
@@ -711,6 +745,7 @@ ingest:
   # routing.json's AETMap is the single source of truth for project; there is
   # no hardcoded project ID anywhere.
   assign:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
     # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
@@ -807,6 +842,7 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file, exactly like
@@ -865,18 +901,18 @@ ingest:
 # =============================================================================
 # 5. upload — how sessions reach XNAT
 # =============================================================================
-# s3     edge -> central S3 (SeaweedFS) -> mgmt uploader -> XNAT.
-#        Central buffering and retry, one XNAT credential for the whole
-#        fleet, and the edge never needs to reach XNAT. Needs charts/mgmt.
+# direct edge -> XNAT. No management plane, no S3, no CA plumbing. The
+#        tier-1 / standalone-site path, and the default.
 #
-# direct edge -> XNAT. No management plane, no S3, no CA plumbing. This is
-#        the tier-1 / standalone-site path.
+# s3     edge -> S3 bucket; something else takes it on to XNAT. Upstream
+#        tier-1 removed this mode (PR #54). This branch keeps it for TBPET
+#        (sites/tbpet), which stages to AWS S3 for a separate XNAT process.
+#        It is also the tier-2 path via central SeaweedFS and charts/mgmt.
 #
-# The two are mutually exclusive: both enabled means every session is
-# uploaded twice. The chart refuses to render if you set both.
+# The chart refuses any other value.
 # -----------------------------------------------------------------------------
 upload:
-  mode: s3
+  mode: direct
 
   s3:
     endpoint: ""                       # https://seaweedfs.<domain>
@@ -937,12 +973,19 @@ upload:
     # that has quietly stopped watching the delivery path.
     alwaysInclude: "all"
     verifySsl: true
-    requireManifest: false
-    checkChecksums: false
+    # true: upload a resource only when its manifest is present and every file
+    # in it matches. A half-written resource waits for the next pass.
+    # false: upload the files that are there. Use only for sessions staged
+    # without manifests.
+    requireManifest: true
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
-      limits:   {memory: 1Gi,   cpu: "1"}
+      # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
+      # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
+      # session with many large scans. Lower this only after the image
+      # writes archives to disk (xnat-ingest PR #200).
+      limits:   {memory: 4Gi,   cpu: "1"}
 
 
 # =============================================================================
@@ -1215,6 +1258,18 @@ loki:
 
 kube-prometheus-stack:
   fullnameOverride: ais-kps
+  # Upstream alert rules: all on, except those this chart replaces.
+  defaultRules:
+    disabled:
+      # CPUThrottlingHigh is not listed: upstream's copy runs unmodified. The
+      # data-policy reporter has no CPU limit, so the rule has nothing to read
+      # for it (see dataPolicy.reporter.resources).
+      # Replaced by ais-edge-jobs in files/prometheus-rules/warning.yaml: the
+      # same rule, minus the staged-reclaimer's own Jobs, whose failures
+      # ReclaimerRunUnavailable and ReclaimerNotSucceeding report.
+      # CAUTION: remove this and upstream's copy alerts on the reclaimer's
+      # failed Jobs again; scripts/ci/promtool.sh fails on two copies.
+      KubeJobFailed: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true

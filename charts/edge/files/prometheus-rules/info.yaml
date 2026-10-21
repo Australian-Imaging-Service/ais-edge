@@ -1,6 +1,7 @@
 # =============================================================================
-# Info alerts  —  routine informational events. Slack-only by default;
-# do not page or email.
+# Info alerts: routine informational events. Slack when a webhook is
+# configured, email when not (files/alertmanager-config.yaml).
+# CAUTION: every re-fire after a resolve is a new mail; keep these event-shaped.
 # =============================================================================
 # NOTE: this file is a BARE `groups:` fragment, not a whole
 # PrometheusRule. charts/edge/templates/observability.yaml supplies the
@@ -20,3 +21,4 @@ groups:
       summary: Node inventory changed on the tier-1 host
       description: The number of nodes in this cluster changed in the last 10 minutes. On a tier-1 appliance there is exactly
         one node, so this should never fire.
+

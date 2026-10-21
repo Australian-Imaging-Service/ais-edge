@@ -98,6 +98,24 @@ data:
   {{- end }}
   {{- $uploadCycle := add $uploadLoop 35 }}
   {{- $rules = $rules | replace "__UPLOAD_STUCK_ERRORS__" (printf "%d" (max 20 (div 1800 $uploadCycle))) }}
+  {{- /* No reporter, nothing to go silent: without this a site that turns the
+         reporter off gets DataPolicyReporterSilent firing for ever. The block
+         is fenced by marker comments in the rules file. */ -}}
+  {{- if not .Values.dataPolicy.reporter.enabled }}
+    {{- $rules = regexReplaceAll "(?s)  # >>> DataPolicyReporterSilent.*?  # <<< DataPolicyReporterSilent\n" $rules "" }}
+  {{- end }}
+  {{- /* DataPolicyReporterSilent. Pinned to this site's clusterLabel so the
+         absent series carries it; escaped for the LogQL string it sits in. */ -}}
+  {{- $rules = $rules | replace "__CLUSTER_LABEL__" (.Values.clusterLabel | replace "\\" "\\\\" | replace "\"" "\\\"") }}
+  {{- /* Silence window: at least 30m and at least 3 sweeps, so a pod restart
+         or one slow sweep never fires it. */ -}}
+  {{- $reportIntervalS := 300 }}
+  {{- if .Values.dataPolicy.reporter.enabled }}
+    {{- $reportIntervalS = include "edge.reporterIntervalSeconds" . | atoi }}
+  {{- end }}
+  {{- $reportSilenceS := max 1800 (mul 3 $reportIntervalS) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_S__" (printf "%d" $reportSilenceS) }}
+  {{- $rules = $rules | replace "__DP_REPORT_SILENCE_MIN__" (printf "%d" (div $reportSilenceS 60)) }}
   {{- /* A surviving sentinel is a silent break: the rule ships with a literal
          __..._ where a number belongs, Loki rejects the whole group at load
          time, and every OTHER alert in this file stops evaluating with it.
@@ -130,7 +148,38 @@ data:
      they are authored. `release` is deliberately NOT set: the guard above
      forces ruleSelectorNilUsesHelmValues=false, so Prometheus selects every
      PrometheusRule in the namespace and no label has to be kept in step. */}}
+{{- /* ReclaimerNotSucceeding's threshold, compared with the time since the
+       last successful run. ONE failed run followed by a success that takes
+       its full deadline already goes 2 x the period + deadlineSeconds without
+       one, so anything at or under that mails for a single failure.
+       The period is read from the schedule where the form allows it: hourly
+       at minute M, every N hours at minute M, daily at H:M, and the @hourly,
+       @daily and @midnight macros. Any other schedule is floored at
+       deadlineSeconds alone.
+       forever/never/empty render as "-" (no limit), which reads as 0 here. */ -}}
+{{- $sr := .Values.dataPolicy.derived.stagedReclaimer }}
+{{- $reclaimerAlertAfterS := include "edge.durationSeconds" (.Values.dataPolicy.derived.stagedReclaimer.alertAfter | default "") | int64 }}
+{{- $reclaimerDeadlineS := $sr.deadlineSeconds | int64 }}
+{{- $sched := $sr.schedule | toString | trim }}
+{{- $periodS := 0 }}
+{{- if or (regexMatch "^[0-9]+\\s+\\*\\s+\\*\\s+\\*\\s+\\*$" $sched) (eq $sched "@hourly") }}
+  {{- $periodS = 3600 }}
+{{- else if regexMatch "^[0-9]+\\s+\\*/[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched }}
+  {{- /* atoi, not int: int reads a leading zero as octal. */ -}}
+  {{- $periodS = mul 3600 (regexReplaceAll "^[0-9]+\\s+\\*/([0-9]+)\\s.*$" $sched "${1}" | atoi) }}
+{{- else if or (regexMatch "^[0-9]+\\s+[0-9]+\\s+\\*\\s+\\*\\s+\\*$" $sched) (has $sched (list "@daily" "@midnight")) }}
+  {{- $periodS = 86400 }}
+{{- end }}
+{{- $reclaimerFloorS := $reclaimerDeadlineS }}
+{{- if $periodS }}
+  {{- $reclaimerFloorS = add (mul 2 $periodS) $reclaimerDeadlineS }}
+{{- end }}
+{{- if le $reclaimerAlertAfterS $reclaimerFloorS }}
+  {{- fail (printf "dataPolicy.derived.stagedReclaimer.alertAfter must be longer than %ds, got %q. That is 2 x the period of schedule %q plus deadlineSeconds (%ds), or deadlineSeconds alone when the period cannot be read from the schedule: one failed run followed by a slow success already goes that long without a success, so ReclaimerNotSucceeding would mail for a single failure. forever/never/empty are refused as well; to stop the alert, silence it in Alertmanager." $reclaimerFloorS (toString .Values.dataPolicy.derived.stagedReclaimer.alertAfter) $sched $reclaimerDeadlineS) }}
+{{- end }}
+{{- $uploaderDeploymentRegex := printf "%s-upload" (regexQuoteMeta (include "edge.fullname" .)) | replace "\\" "\\\\" }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+{{- if or (ne (base $path) "uploader.yaml") (eq $.Values.upload.mode "direct") }}
 {{- $sev := base $path | trimSuffix ".yaml" }}
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -141,7 +190,19 @@ metadata:
   labels:
     {{- include "edge.labels" $ | nindent 4 }}
 spec:
-{{ $.Files.Get $path | indent 2 }}
+{{- /* __RELEASE_NAMESPACE__: scopes ais-edge-jobs (KubeJobFailed's exclusion,
+       ReclaimerNotSucceeding) to this release's own staged-reclaimer. A plain
+       replace, never tpl: the files carry Prometheus's own {{ $labels }}
+       templates. */}}
+{{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $ns | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) }}
+{{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
+       reads a bare __NAME__ as a metric name, so the rule loads, reports
+       healthy and compares against a series that never exists. */ -}}
+{{- if regexMatch "__[A-Z0-9_-]+__" $promRules }}
+  {{- fail (printf "a __*__ sentinel survived substitution in %s. Prometheus would read it as a metric name that never exists, so the rule would load, look healthy and never fire. Add the matching replace above." $path) }}
+{{- end }}
+{{ $promRules | indent 2 }}
+{{- end }}
 {{- end }}
 
 ---

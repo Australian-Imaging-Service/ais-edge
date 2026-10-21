@@ -373,7 +373,7 @@ k0s-k0smotron-mvp/
 │       ├── orthanc-deployment.yaml        ← Orthanc Deployment + Service
 │       ├── orthanc-config.yaml            ← orthanc.json, routing.json, deid profile
 │       ├── ingest-pipeline.yaml           ← group-orthanc + assign
-│       ├── upload.yaml                    ← direct upload to XNAT (tier-1) / s3 (tier-2)
+│       ├── upload.yaml                    ← direct upload to XNAT (the only mode on tier-1)
 │       ├── storage.yaml                   ← StorageClass + both hostPath PVs/PVCs
 │       ├── data-policy.yaml               ← the dataPolicy DaemonSet
 │       ├── vector.yaml                    ← hand-written Vector DaemonSet
@@ -399,10 +399,10 @@ configuration into manifests, so a value is stated once and read once.
 each of which otherwise fails *silently* at runtime — de-id enabled without
 `policyReviewed`, an empty `aetMap` (every modality quarantined), an empty
 `profile` (studies reach XNAT with PHI intact and nothing looks wrong), deid
-without `storage.facilityBackup.enabled`, and `upload.mode` set to both paths at
-once. `install.sh` adds one more: tier-1 requires `upload.mode: direct`, because
-`s3` would have the uploader retrying an endpoint that never answers while the
-disk quietly filled.
+without `storage.facilityBackup.enabled`, and any `upload.mode` other than
+`direct`. `install.sh` refuses the same: `s3` would have the uploader retrying
+an endpoint that never answers while the disk quietly filled. S3 staging needs
+the tier-2 management plane, which is on the main branch.
 
 ## Installing on an Existing Kubernetes Cluster
 
@@ -467,7 +467,7 @@ then runs with `--dont-verify-ssl`.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | 0.15.0 | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
+| xnat-ingest | 0.16.2 | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |

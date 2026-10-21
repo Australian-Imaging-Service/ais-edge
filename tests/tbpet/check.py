@@ -88,7 +88,7 @@ services = [d for d in yaml.safe_load_all((work / "render/edge-tbpet.yaml").read
             if d and d["kind"] == "Service"]
 assert {p["nodePort"] for d in services for p in d["spec"]["ports"]} == {31014, 30842}
 for name in ("group-orthanc", "group-fs", "assign"):
-    assert container(name)["image"].endswith(":0.15.6")
+    assert container(name)["image"].endswith(":0.16.2")
 group = container("group-orthanc")["args"]
 for flag, value in (("--to-process-label", "xnat-ingest-ready"),
                     ("--processed-label", "xnat-sorted"),
@@ -98,8 +98,12 @@ for flag, value in (("--to-process-label", "xnat-ingest-ready"),
 assign = container("assign")["args"]
 for flag, value in (("--project", "PatientComments"), ("--subject", "PatientID"),
                     ("--session", "AccessionNumber"), ("--scan", "SeriesDescription"),
-                    ("--copy-mode", "hardlink_or_copy"), ("--loop", "300")):
+                    ("--copy-mode", "hardlink_or_copy")):
     option(assign, flag, value)
+assert "--loop" not in assign
+lock = container("assign")["command"]
+assert lock[:2] == ["/bin/sh", "-c"] and lock[3:] == ["xnat-ingest", "assign"], lock
+assert "flock /data/.locks/assigned.lock" in lock[2] and "sleep 300" in lock[2], lock
 fsenv = env("group-fs")
 assert fsenv["INPUT_GLOB"] == "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
 assert fsenv["WAIT_PERIOD"] == "86400" and fsenv["COPY_MODE"] == "symlink_or_copy"
@@ -113,7 +117,7 @@ upload = env("s3-uploader")
 assert upload["AWS_ENDPOINT_URL"] == "https://s3.ap-southeast-2.amazonaws.com"
 assert upload["AWS_DEFAULT_REGION"] == "ap-southeast-2"
 assert upload["S3_BUCKET"] == "ais-s3-tbp-s3bucket-1afz0bzdw5jd6"
-assert upload["S3_PREFIX"] == "STAGING-202607"
+assert upload["S3_PREFIX"] == "RNSH-TBPET"
 assert upload["ASSIGNED_DIR"] == "/data/assigned"
 assert upload["RECLAIM"] == "onUploaded" and upload["DRY_RUN"] == "false"
 assert upload["EVENT_DIR"] == upload["STATE_DIR"] + "/events"
@@ -340,16 +344,22 @@ for mode in ("success", "copy-failed", "event-failed", "state-failed", "dry-run"
             assert not list(events.iterdir())
 print("PASS upload failures/dry-run preserve data; events survive reclaim and retry Discord; __* excluded")
 
-assert shutil.which("docker"), "Docker required to verify the released 0.15.6 CLI"
+assert shutil.which("docker"), "Docker required to verify the released 0.16.2 CLI"
 image = container("group-fs")["image"]
-cases = captured + [container(n)["command"][1:] + container(n)["args"]
-                    for n in ("group-orthanc", "assign")]
+# Locked stages run `sh -c <script> xnat-ingest <cmd>`: take what follows the binary.
+def cli_argv(n):
+    cmd = container(n)["command"]
+    return cmd[cmd.index("xnat-ingest") + 1:] + container(n)["args"]
+
+
+assert all("--recursive" in args for args in captured if args[0] == "group"), captured
+cases = captured + [cli_argv(n) for n in ("group-orthanc", "assign")]
 probe = """
 import importlib.metadata, json, os, sys, click
 from xnat_ingest.cli import cli
 from fileformats.core import from_mime
 data = json.load(sys.stdin)
-assert importlib.metadata.version("xnat-ingest") == "0.15.6"
+assert importlib.metadata.version("xnat-ingest") == "0.16.2"
 root = click.Context(cli)
 for args in data["cases"]:
     # click only checks directories for some positional args. All synthetic.
@@ -365,7 +375,7 @@ for args in data["cases"]:
                 for datatype in data["datatypes"]:
                     assert issubclass(from_mime(datatype), spec.datatype), (field, datatype)
             assert ctx.params["on_resource_clash"]
-print("PASS 0.15.6 actual walker and rendered argv; session/scan mappings cover all nine datatypes")
+print("PASS 0.16.2 actual walker and rendered argv; session/scan mappings cover all nine datatypes")
 """
 subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "python3", image, "-c", probe],
                input=json.dumps({"cases": cases, "datatypes": fsenv["DATATYPES"].split(";")}),

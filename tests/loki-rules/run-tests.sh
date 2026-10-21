@@ -43,7 +43,7 @@ fi
 TIER_NS="$(grep -m1 '^namespace:' "${REPO_ROOT}/${OBS_CHART}/values.yaml" | awk '{print $2}')"
 TIER_NS="${TIER_NS:-xnat-upload}"
 RULES="${REPO_ROOT}/${OBS_CHART}/files/loki-ruler-rules.yaml"
-# PER-RUN, NOT FIXED. Both used to be constants: NAME="loki-rule-test" and port
+# PER-RUN, NOT FIXED. Both used to be constants: NAME="${LOKI_TEST_NAME:-loki-rule-test}" and port
 # 33100. Two concurrent runs then fought over one container, and the loser was
 # not told. The second run's `docker rm -f` DESTROYED the first run's Loki, the
 # first run carried on querying the second run's replacement, and its fixture
@@ -190,6 +190,9 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-stuck"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":3,"oldest_age_s":172800,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-fresh"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":1,"oldest_age_s":600,"alert_after_s":86400}
 2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"quar-empty"}	{"component":"data-policy","event":"stage_report","stage":"originals.quarantine","location":"/facility-backup/__unmapped_aet__","free_pct":56,"entries":0,"oldest_age_s":0,"alert_after_s":86400}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-forever"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","policy":"forever","free_pct":13,"min_free_pct":10,"entries":767,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-stuck"}	{"component":"data-policy","event":"stage_report","stage":"derived.orthancStorage","location":"/data/orthanc-storage","policy":"onGrouped","free_pct":13,"entries":780,"oldest_age_s":4296654}
+2	{"namespace":"xnat-ingest","component":"data-policy","cluster":"age-fresh"}	{"component":"data-policy","event":"stage_report","stage":"derived.deidentified","location":"/data/deidentified","policy":"onUploaded","free_pct":13,"entries":3,"oldest_age_s":3600}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"Traceback (most recent call last):"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/connectionpool.py", line 1927, in urlopen"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"retry-one","level":"unknown"}	{"message":"    retries = retries.increment("}
@@ -240,6 +243,36 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"  File "/usr/local/lib/python3.14/dist-packages/urllib3/util/retry.py", line 515, in increment"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"unknown"}	{"message":"urllib3.exceptions.NameResolutionError: Failed to resolve xnat-test.example.org"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS0"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Repaired 2 incomplete resource(s) on XNAT in 'proj.S1.E1': ['proj:S1:E1:1-T1:DICOM', 'proj:S1:E1:2-T2:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-fixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S1.E1'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"upload-first","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S2.E2'"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S3.E3': ['proj:S3:E3:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S3.E3'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-mixed","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S4.E4'"}
+9	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-gap","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S5.E5': ['proj:S5:E5:1-T1:DICOM']"}
+1	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-gap","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S5.E5'"}
+18	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-edge","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S9.E9': ['proj:S9:E9:1-T1:DICOM']"}
+9	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-edge","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S9.E9'"}
+25	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S10.E10': ['proj:S10:E10:1-T1:DICOM']"}
+25	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S10.E10'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-later","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S10.E10'"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-failed","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S7.E7': ['proj:S7:E7:1-T1:DICOM']"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-failed","level":"ERROR"}	{"message":"'proj.S7.E7' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S7:E7:1-T1:DICOM"}
+8	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"INFO"}	{"message":"Successfully uploaded all files in 'proj.S8.E8'"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S8.E8': ['proj:S8:E8:1-T1:DICOM']"}
+1	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-prior-ok","level":"ERROR"}	{"message":"'proj.S8.E8' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S8:E8:1-T1:DICOM"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+2	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+4	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"INFO"}	{"message":"Repaired 1 incomplete resource(s) on XNAT in 'proj.S11.E11': ['proj:S11:E11:1-T1:DICOM']"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"Failed to upload 'proj:S11:E11:1-T1:DICOM' resource in 'proj.S11.E11': 500 Server Error"}
+6	{"namespace":"xnat-ingest","component":"upload","cluster":"repair-storm","level":"ERROR"}	{"message":"'proj.S11.E11' did not upload cleanly: 1 of 1 resource(s) failed to upload: proj:S11:E11:1-T1:DICOM"}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-live"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+45	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-stale"}	{"component":"data-policy","event":"stage_report","stage":"originals.facilityBackup","location":"/facility-backup","free_pct":56,"entries":9,"oldest_age_s":50}
+3	{"namespace":"xnat-ingest","component":"data-policy","cluster":"reporter-other"}	{"component":"data-policy","event":"reclaim_kept","stage":"derived.grouped","session":"proj.S6.E6"}
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-some","level":"INFO"}	{"message":"Successfully uploaded all files in proj.SUBJ.SESS1"}
 2	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
 3	{"namespace":"xnat-ingest","component":"upload","cluster":"fail-idle","level":"INFO"}	{"message":"Upload completed successfully"}
@@ -257,6 +290,40 @@ cat <<EOF
 4	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
 5	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"requests.exceptions.ConnectionError: HTTPSConnectionPool(host=xnat.invalid, port=443)"}
 6	{"namespace":"xnat-ingest","component":"upload","cluster":"reoffer-plus","level":"unknown"}	{"message":"Traceback (most recent call last):"}
+30	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+90	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-stuck"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+30	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-blip"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+10	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"rec-t1-blip"}	{"component":"s3-reclaimer","event":"reclaim_finished","session":"","message":"examined=1 removed=0"}
+30	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+90	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
+3600	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"stage-t1-lost"}	{"component":"s3-reclaimer","event":"reclaim_kept","session":"proj.T1.SESS","reason":"incomplete_in_xnat"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-group-error","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-fs-critical","level":"CRITICAL"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-assign-error","level":"ERROR"}	{"message":"Error assigning session example: Permission denied"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-traceback","level":"unknown"}	{"message":"Traceback (most recent call last):\\n  File \\"assign.py\\", line 1"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-no-level-traceback"}	{"message":"Traceback (most recent call last):"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-info-word","level":"INFO"}	{"message":"Processing filename ERROR_exception.dcm with no errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-info-traceback-word","level":"INFO"}	{"message":"Reading traceback_example.dcm"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-progress","level":"unknown"}	{"message":"Processing staged sessions: 100%|####| 401.71it/s"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"upload","cluster":"stage-wrong-component","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"other","component":"assign","cluster":"stage-wrong-app","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-other","app":"xnat-ingest","component":"assign","cluster":"stage-wrong-namespace","level":"ERROR"}	{"message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-message","level":"ERROR"}	{}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-severity"}	{"message":"ERROR appears only in this message"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed","level":"unknown"}	{malformed JSON
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-id","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-summary","level":"ERROR"}	{"message":"Assign completed with 1 errors"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-old","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-structured","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-critical","level":"CRITICAL"}	{"message":"Cannot open recipe directory"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-old","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-info-word","level":"INFO"}	{"message":"Reading ERROR.dcm successfully"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-body-error-only","level":"INFO"}	{"level":"ERROR","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-stream-error","level":"ERROR"}	{"level":"INFO","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-body-component","level":"ERROR"}	{"component":"upload","message":"Cannot open input directory"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed-error","level":"ERROR"}	{malformed JSON
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-error","level":"ERROR"}	{"message":"Permission denied","stage_message":"Assign completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-info","level":"INFO"}	{"message":"Reading file","stage_message":"Traceback (most recent call last):"}
 EOF
 }
 
@@ -271,11 +338,18 @@ auth_progress_bar	XNATAuthFailure	auth-tqdm	nofire	tqdm "401.71it/s" must never 
 staged_unconfirmed	SessionStagedNotConfirmedInXNAT	stage-lost	fire	seen 60h ago, never confirmed
 staged_confirmed	SessionStagedNotConfirmedInXNAT	stage-ok	nofire	confirmed inside the 72h window
 staged_too_recent	SessionStagedNotConfirmedInXNAT	stage-new	nofire	only 1h old — outside the offset window
+reclaimer_t1_stuck	ReclaimerRunUnavailable	rec-t1-stuck	fire	tier-1 namespace: aborted twice, never recovered
+reclaimer_t1_blip	ReclaimerRunUnavailable	rec-t1-blip	nofire	one failed run, then a run finished: the DNS blip of 2026-09-27
+reclaimer_t1_unlabelled	ReclaimerRunUnavailable	rec-t1-unlabelled	nofire	the same lines on a component=unknown stream are invisible: why the pod labels are load-bearing
+staged_t1_unconfirmed	SessionStagedNotConfirmedInXNAT	stage-t1-lost	fire	tier-1 namespace: seen 60h ago, never confirmed
 disk_below_threshold	EdgeDiskLow	disk-low	fire	4% free vs minFreeDiskPercent 10
 disk_above_threshold	EdgeDiskLow	disk-ok	nofire	56% free — comfortably above the limit
 quarantine_stuck	QuarantinedDataUnresolved	quar-stuck	fire	oldest 48h vs alertAfter 24h
 quarantine_fresh	QuarantinedDataUnresolved	quar-fresh	nofire	rejected 10m ago — operator has not had time
 quarantine_empty	QuarantinedDataUnresolved	quar-empty	nofire	nothing quarantined at all
+stage_age_forever_quiet	StageBacklogAgeing	age-forever	nofire	facility backup kept forever by policy: 49-day-old originals are the point (cai-lfs3, 2026-09-30)
+stage_age_stuck	StageBacklogAgeing	age-stuck	fire	a stage with a reclaim policy whose oldest entry is 49 days old
+stage_age_fresh	StageBacklogAgeing	age-fresh	nofire	oldest entry 1h old, under the 7d limit
 retry_one_traceback	XNATUploadRetryStorm	retry-one	nofire	one failure is ~96 lines — must count as ONE, not fire
 retry_many_tracebacks	XNATUploadRetryStorm	retry-many	fire	3 separate failures, none at level=ERROR — the 24h live case
 retry_error_level	XNATUploadRetryStorm	retry-err	fire	3 ERROR-level failures must still fire on their own
@@ -286,6 +360,54 @@ upload_failing_some	XNATUploadFailingForAllSessions	fail-some	nofire	failures, b
 upload_idle	XNATUploadFailingForAllSessions	fail-idle	nofire	idle edge: loop heartbeat only, nothing to upload
 rejected_unmapped_aet	DICOMRejectedUnmappedAET	aet-bad	fire	scanner sent an AE title not in aetMap — studies quarantined, never reached XNAT
 rejected_mapped_aet	DICOMRejectedUnmappedAET	aet-ok	nofire	a mapped AE title must never raise a rejection
+upload_first_success	XNATUploadSuccess	upload-first	fire	a first upload still mails "upload completed"
+upload_repair_not_success	XNATUploadSuccess	repair-fixed	nofire	a repair is not an upload: XNAT lost files and they were re-sent
+upload_mixed_keeps_first	XNATUploadSuccess	repair-mixed	fire	a repair of one session must not hide another session's first upload
+upload_repair_gap	XNATUploadSuccess	repair-gap	nofire	8m between a repair and its success line (verdict and metadata calls): still a repair
+upload_repair_window_edge	XNATUploadSuccess	repair-edge	nofire	success 9m ago, still in its window; repair 18m ago, still inside the 20m suppression
+upload_later_pass	XNATUploadSuccess	repair-later	fire	a new pass 23m after a repair is an upload again
+upload_failed_repair	XNATUploadSuccess	repair-failed	nofire	a failed repair logs no success line, so nothing to mail
+upload_prior_success_failed_repair	XNATUploadSuccess	repair-prior-ok	nofire	an upload 8m ago then a failed repair 2m ago: suppressed now; its own mail went at the time
+repair_attempt_succeeded	XNATRepairAttempted	repair-fixed	fire	XNAT was missing 2 resources and the uploader re-sent them
+repair_attempt_failed	XNATRepairAttempted	repair-failed	fire	a failed repair is still reported; the mail claims only the attempt
+repair_attempt_prior_success	XNATRepairAttempted	repair-prior-ok	fire	an earlier success must not make this a success claim: it claims only the attempt
+repair_not_on_first_upload	XNATRepairAttempted	upload-first	nofire	a first upload creates resources; nothing was repaired
+repair_failing_every_pass	XNATUploadRetryStorm	repair-storm	fire	a repair failing on every pass raises the retry storm
+reporter_live	DataPolicyReporterSilent	reporter-live	nofire	stage_report 3m ago
+reporter_stopped	DataPolicyReporterSilent	reporter-stale	fire	last stage_report 45m ago, over the 30m window
+reporter_never	DataPolicyReporterSilent	reporter-never	fire	no line at all, as for a reporter that never started
+reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but no stage_report: the disk alerts are still blind
+stage-group-error	IngestStageError	stage-group-error	fire	stage severity or traceback contract
+stage-fs-critical	IngestStageError	stage-fs-critical	fire	stage severity or traceback contract
+stage-assign-error	IngestStageError	stage-assign-error	fire	stage severity or traceback contract
+stage-traceback	IngestStageError	stage-traceback	fire	stage severity or traceback contract
+stage-no-level-traceback	IngestStageError	stage-no-level-traceback	fire	stage severity or traceback contract
+stage-info-word	IngestStageError	stage-info-word	nofire	stage severity or traceback contract
+stage-info-traceback-word	IngestStageError	stage-info-traceback-word	nofire	stage severity or traceback contract
+stage-progress	IngestStageError	stage-progress	nofire	stage severity or traceback contract
+stage-wrong-component	IngestStageError	stage-wrong-component	nofire	stage severity or traceback contract
+stage-wrong-app	IngestStageError	stage-wrong-app	nofire	stage severity or traceback contract
+stage-wrong-namespace	IngestStageError	stage-wrong-namespace	nofire	stage severity or traceback contract
+stage-missing-message	IngestStageError	stage-missing-message	fire	stage severity or traceback contract
+stage-missing-severity	IngestStageError	stage-missing-severity	nofire	stage severity or traceback contract
+stage-malformed	IngestStageError	stage-malformed	nofire	stage severity or traceback contract
+stage-invalid-id	IngestStageError	stage-invalid-id	nofire	stage severity or traceback contract
+stage-invalid-summary	IngestStageError	stage-invalid-summary	nofire	stage severity or traceback contract
+stage-old	IngestStageError	stage-old	nofire	stage severity or traceback contract
+deid-structured	DeidentifyStageError	deid-structured	fire	stage severity or traceback contract
+deid-critical	DeidentifyStageError	deid-critical	fire	stage severity or traceback contract
+deid-old	DeidentifyStageError	deid-old	nofire	stage severity or traceback contract
+deid-info-word	DeidentifyStageError	deid-info-word	nofire	stage severity or traceback contract
+stage-single-holds	IngestStageError	stage-group-error	fire	single event survives the one-minute hold	120
+stage-single-expires	IngestStageError	stage-group-error	nofire	single event leaves the ten-minute window	540
+deid-single-holds	DeidentifyStageError	deid-structured	fire	single event survives the one-minute hold	120
+deid-single-expires	DeidentifyStageError	deid-structured	nofire	single event leaves the ten-minute window	540
+stage-body-error-only	IngestStageError	stage-body-error-only	nofire	stream labels are authoritative; malformed envelopes are excluded
+stage-stream-error	IngestStageError	stage-stream-error	fire	stream labels are authoritative; malformed envelopes are excluded
+stage-body-component	IngestStageError	stage-body-component	fire	stream labels are authoritative; malformed envelopes are excluded
+stage-malformed-error	IngestStageError	stage-malformed-error	nofire	stream labels are authoritative; malformed envelopes are excluded
+stage-alias-error	IngestStageError	stage-alias-error	fire	decoded message alias must not use an unrelated body field
+stage-alias-info	IngestStageError	stage-alias-info	nofire	decoded message alias must not use an unrelated body field
 EOF
 }
 
@@ -336,7 +458,7 @@ lookback=$(( NOW_NS - 200 * 3600 * 1000000000 ))
 # xnat-ingest the count came up short — correctly, since a guard that only
 # looks where it already knows to look is the thing it is guarding against.
 stored="$(curl -sG "http://localhost:${PORT}/loki/api/v1/query_range" \
-            --data-urlencode 'query={namespace=~"xnat-upload|xnat-ingest"}' \
+            --data-urlencode 'query={namespace=~"xnat-upload|xnat-ingest|xnat-other"}' \
             --data-urlencode "start=${lookback}" --data-urlencode "end=${NOW_NS}" \
             --data-urlencode 'limit=5000' \
           | python3 -c "
@@ -355,7 +477,7 @@ fi
 printf '  %sPASS%s  %-38s all %s fixture lines queryable\n' "$_G" "$_O" "fixture_ingestion" "$expected"
 
 # --- evaluate -----------------------------------------------------------------
-while IFS=$'\t' read -r name alert cluster expect desc; do
+while IFS=$'\t' read -r name alert cluster expect desc offset_s; do
     [ -n "${name:-}" ] || continue
     # An alert that does not exist ON THIS TIER is not a failure: tier-1 has no
     # S3 reclaimer and no staging bucket, so ReclaimerRunUnavailable and
@@ -365,7 +487,7 @@ while IFS=$'\t' read -r name alert cluster expect desc; do
         skip "$name" "$alert is not in this tier's ruleset"
         continue
     fi
-    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" <<'PY'
+    expr="$(python3 - "$RULES" "$alert" "$REPO_ROOT/$OBS_CHART/values.yaml" "$cluster" <<'PY'
 
 import sys, re, yaml
 
@@ -399,8 +521,17 @@ expr = expr.replace("__DP_MIN_FREE_DISK_PCT__",
                     str(orig.get("facilityBackup", {}).get("minFreeDiskPercent", 10)))
 expr = expr.replace("__DP_QUARANTINE_ALERT_AFTER_S__",
                     seconds(orig.get("quarantine", {}).get("alertAfter", "24h")))
+# Same formula as templates/observability.yaml: max(30m, 3 sweeps).
+interval = int((dp.get("reporter") or {}).get("interval", 300))
+expr = expr.replace("__DP_REPORT_SILENCE_S__", str(max(1800, 3 * interval)))
+# charts/edge reads dataPolicy.reporter.stageAgeAlertAfter (charts/mgmt: dataPolicy.stageAgeAlertAfter).
+expr = expr.replace("__DP_STAGE_AGE_ALERT_AFTER_S__",
+                    seconds((dp.get("reporter") or {}).get("stageAgeAlertAfter", "7d")))
+# The chart pins this to the site's clusterLabel; here, to the case's cluster.
+expr = expr.replace("__CLUSTER_LABEL__", sys.argv[4])
 
-left = re.findall(r"__DP_[A-Z_]+__", expr)
+# ANY sentinel, not only __DP_*__: __CLUSTER_LABEL__ is one too.
+left = re.findall(r"__[A-Z][A-Z0-9_]*__", expr)
 if left:
     raise SystemExit("unsubstituted sentinel(s) in %s: %s — the harness and the "
                      "chart disagree about what to replace" % (sys.argv[2], left))
@@ -408,8 +539,9 @@ print(expr)
 PY
     )" || { fail "$name" "could not extract expression for $alert"; continue; }
 
+    eval_ns=$(( NOW_NS + ${offset_s:-0} * 1000000000 ))
     got="$(curl -sG "http://localhost:${PORT}/loki/api/v1/query" \
-             --data-urlencode "query=${expr}" --data-urlencode "time=${NOW_NS}" \
+             --data-urlencode "query=${expr}" --data-urlencode "time=${eval_ns}" \
            | python3 -c "
 import sys, json
 try: d = json.load(sys.stdin)

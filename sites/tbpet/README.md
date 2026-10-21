@@ -1,7 +1,7 @@
 # TBPET Tier-1 migration / deployment notes
 
-This site ports TBPET onto `origin/tier-1-solution` at
-`be7728236238d63d845ecc6660f008179b01c2a4`, without merging `main`.
+This site ports TBPET onto `origin/tier-1-solution`, last merged at
+`c696c43590559641cb7e4917073f9adf07a36d2f` (chart 0.6.8), without merging `main`.
 Development is on `usyd-tbpet-dev`; only merge into `usyd-tbpet-tier1` after
 validation. Nothing here deploys it or changes live data. Completing this
 open merge will require an operator-authorized commit.
@@ -15,13 +15,17 @@ open merge will require an operator-authorized commit.
   is not recreated. The separate `usyd-data-export` NFS PVC is mounted read-only
   at `/data/usyd-export` in every reader of its symlinks. Originals on NFS are
   never deleted by the pipeline.
-* xnat-ingest **0.15.6** is inherited from Tier-1. Version 0.15.0
+* xnat-ingest **0.16.2** is inherited from Tier-1; resource labels for all
+  nine datatypes are unchanged from 0.15.6. Version 0.15.0
   narrowed default group session/scan scopes to DICOM only. Explicit
   `StudyInstanceUID` / `SeriesNumber` mappings over `generic/file-set` preserve
   grouping for all nine configured DICOM / Siemens raw datatypes. Resource
-  clashes explicitly use `avoid all`. Assign still maps PatientComments,
+  clashes explicitly use `avoid all`. Group runs with upstream's `--recursive`
+  (flat study directories group identically). Assign still maps PatientComments,
   PatientID, AccessionNumber and SeriesDescription.
-* The Tier-1 **AWS CLI** uploader is retained, with the TBPET bucket, prefix,
+* The **AWS CLI** uploader (`upload.mode: s3`) is retained. Upstream Tier-1
+  removed S3 mode (PR #54); this branch restores it for TBPET and keeps the
+  chart default `direct`. It uses the TBPET bucket, prefix,
   region, proxies and external credentials/egress CA. `aws s3 sync` follows
   symlinks and never uses `--delete`. There is no direct XNAT uploader.
   Durable events are published before the atomic completion marker and survive reclamation;
@@ -61,10 +65,13 @@ storage or change live services as part of this development merge.
 
 Regression: `make tbpet` renders the full existing matrix, checks this actual
 site's mounts/configuration, exercises the walker on synthetic data, and parses
-its actual arguments against the released 0.15.6 Docker image. It does not call
+its actual arguments against the released 0.16.2 Docker image. It does not call
 Orthanc, AWS, Discord or Kubernetes.
 
 The runtime fixtures require Bash, GNU findutils/coreutils, Python with PyYAML,
 and Docker (as on the Linux CI runner). On macOS, put Homebrew's Bash and the
 findutils/coreutils `libexec/gnubin` directories first in `PATH`. Set
 `CI_WORK_DIR` to a project-local build directory when required by local policy.
+On macOS, also keep `CI_WORK_DIR` under `/Users`: the default under `$TMPDIR`
+mounts into Docker with a device name BusyBox `df` wraps, which the data-policy
+engine cannot parse, so its fixtures fail with `stage_unreadable`.

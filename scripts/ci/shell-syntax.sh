@@ -149,4 +149,11 @@ PY
   esac
 fi
 
+# Exercise node readiness before the installer can write kubeconfig.
+if python3 "$REPO_ROOT/tests/bootstrap-readiness/test_readiness.py"; then
+  ci_pass "installer readiness: five offline cases"
+else
+  ci_fail "installer readiness"
+fi
+
 ci_summary "shell syntax"

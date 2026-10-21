@@ -9,9 +9,11 @@ the tree grew without bound and no data policy could touch it. MEASURED on .240:
 /data/assigned held sessions that had been in XNAT for hours.
 
 This CronJob closes that. It runs the SAME reclaim-staged.sh as charts/mgmt with
-STORAGE=filesystem, so the decision to delete is made by one implementation for
-both tiers. It asks XNAT directly whether the session is there and complete, which
-is the only authority that does not depend on a marker nobody writes.
+STORAGE=filesystem, which hands each session to reclaim-files.py: for each local
+file, the uploader's XNAT resource must hold it, checked by a HEAD (present, same
+size). XNAT is the only authority that does not depend on a marker nobody writes.
+It deletes only the proved files, inside the upload-tree writer lock, while the
+writer holds edge.uploadTreeAlive.
 
 It is deliberately NOT the uploader's delete path. The uploader deletes what it
 just sent, on its own success. This deletes what XNAT confirms it already holds,
@@ -32,6 +34,8 @@ metadata:
 data:
   reclaim-staged.sh: |-
 {{ .Files.Get "files/reclaim-staged.sh" | indent 4 }}
+  reclaim-files.py: |-
+{{ .Files.Get "files/reclaim-files.py" | indent 4 }}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -52,6 +56,16 @@ spec:
       # killed before the next one is due, rather than pinning Forbid forever.
       activeDeadlineSeconds: {{ .Values.dataPolicy.derived.stagedReclaimer.deadlineSeconds }}
       template:
+        metadata:
+          labels:
+            {{- include "edge.labels" . | nindent 12 }}
+            app: xnat-ingest
+            # LOAD-BEARING. Vector turns pod labels into the Loki stream labels
+            # the ruler selects on; without these the stream is component="unknown"
+            # and ReclaimerRunUnavailable / SessionStagedNotConfirmedInXNAT match
+            # nothing. Same values as charts/mgmt, so the rules stay shared.
+            # scripts/ci/runtime-templates.sh fails if they go.
+            component: s3-reclaimer
         spec:
           restartPolicy: Never
           # NO POD securityContext, deliberately, and matching the other ingest
@@ -100,8 +114,22 @@ spec:
                   value: "onXnatConfirmed"
                 - name: MIN_AGE
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.minAge | quote }}
+                # The recovery window of the tree this CronJob owns. data-policy
+                # hands the tree over before its own age check, so this is the
+                # only reader. The script waits for the LONGER of the two.
+                - name: TREE_MIN_AGE
+                  value: {{ if eq (include "edge.uploadTreeKey" .) "deidentified" }}{{ .Values.dataPolicy.derived.deidentified.minAge | quote }}{{ else }}{{ .Values.dataPolicy.derived.assigned.minAge | quote }}{{ end }}
+                - name: TREE_MIN_AGE_KEY
+                  value: {{ printf "dataPolicy.derived.%s.minAge" (include "edge.uploadTreeKey" .) | quote }}
                 - name: VERIFY_XNAT
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.verifyAgainstXnat | quote }}
+                # The upload-tree writer lock, the same paths the writer stage
+                # uses. Every delete happens inside it, and only while the
+                # wrapped writer holds .alive (edge.uploadTreeAlive).
+                - name: WRITER_LOCK
+                  value: {{ include "edge.uploadTreeLock" . | quote }}
+                - name: WRITER_ALIVE
+                  value: {{ include "edge.uploadTreeAlive" . | quote }}
                 - name: MAX_REMOVALS
                   value: {{ .Values.dataPolicy.derived.stagedReclaimer.maxRemovals | quote }}
                 # dryRun and a disabled policy both mean "report, delete nothing".

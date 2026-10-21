@@ -63,11 +63,7 @@ hostAliases:
   mgmtNodeIP: "198.51.100.10"
   hostnames: ["seaweedfs.ci.198-51-100-10.nip.io", "loki.ci.198-51-100-10.nip.io"]
 upload:
-  mode: s3
-  s3:
-    endpoint: "https://seaweedfs.ci.198-51-100-10.nip.io"
-    bucket: ingest-edge-alpha
-    caBundleSecret: ca-bundle
+  mode: direct
 deid:
   engine: orthanc
   policyReviewed: true
@@ -198,6 +194,39 @@ observability:
   enabled: false
 EOF
 
+# TBPET keeps upload.mode=s3, which upstream removed. This is the S3 block
+# edge-base carried before upstream made it direct; the S3 negative cases
+# layer on it.
+cat >"$V/edge-upload-s3.yaml" <<'EOF'
+upload:
+  mode: s3
+  s3:
+    endpoint: "https://seaweedfs.ci.198-51-100-10.nip.io"
+    bucket: ingest-edge-alpha
+    caBundleSecret: ca-bundle
+EOF
+
+# A site that turns the manifest check off still gets --dont-require-manifest.
+cat >"$V/edge-upload-direct-no-manifest.yaml" <<'EOF'
+upload:
+  direct:
+    requireManifest: false
+EOF
+
+# The reclaimer slowed to every 6h, alertAfter raised with it (floor 12h50m).
+# It must render, and promtool.sh checks its threshold is 13h in seconds, so a
+# template that hardcoded the default would be caught.
+# A NUMERIC interval (Helm reads it as float64): the reporter's INTERVAL env
+# must be "3600", and DataPolicyReporterSilent's window 3 x 3600 = 10800s.
+printf 'dataPolicy:\n  reporter:\n    interval: 3600\n' >"$V/edge-reporter-interval-3600.yaml"
+cat >"$V/edge-reclaimer-six-hourly.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    stagedReclaimer:
+      schedule: "17 */6 * * *"
+      alertAfter: 13h
+EOF
+
 cat >"$V/edge-obsstack-on.yaml" <<'EOF'
 # Alerting is required whenever the local stack is on: without it Alertmanager
 # renders with receiver "null" and every alert is discarded. The guard refuses
@@ -212,6 +241,15 @@ observability:
   loki:
     clientCertSecret: ''
     caBundleSecret: ''
+EOF
+
+# The reporter switched off, with the stack on. DataPolicyReporterSilent must
+# not render here: with no reporter it would fire for ever. runtime-templates.sh
+# checks the rule and the reporter DaemonSet come and go together.
+cat >"$V/edge-reporter-off.yaml" <<'EOF'
+dataPolicy:
+  reporter:
+    enabled: false
 EOF
 
 cat >"$V/edge-observability-on.yaml" <<'EOF'
@@ -243,6 +281,25 @@ dataPolicy:
   dryRun: false
 EOF
 
+# LEADING ZEROS ARE DECIMAL. edge.durationSeconds used int64, which reads a
+# leading zero as octal: "08d" rendered 0 ("expire immediately"), "010d" 8 days.
+# runtime-templates.sh checks each row's seconds column.
+# QUOTED on purpose: YAML reads an unquoted 07200 as octal itself.
+# 9999999999s is the 10-digit ceiling; one digit more is a negative case.
+cat >"$V/edge-duration-base10.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    facilityBackup:
+      retain: "9999999999s"
+    quarantine:
+      alertAfter: "07200"
+  derived:
+    orthancStorage:
+      minAge: "010d"
+    assigned:
+      minAge: "08d"
+EOF
+
 # De-identification off. Facility backup remains enabled in this fixture, so
 # its Lua hook still applies the stable-study label.
 # policyReviewed is what acknowledges that identifiable data would reach XNAT.
@@ -250,6 +307,31 @@ cat >"$V/edge-deid-off.yaml" <<'EOF'
 deid:
   engine: none
   policyReviewed: true
+EOF
+
+# THE SHIPPED ENGINE, RENDERED. deid.engine defaults to ingest, but edge-base
+# pins orthanc, so without this no positive case renders the ingest layout
+# (uploader and policy engine on /data/deidentified, assign still on
+# /data/assigned) and the wiring check in runtime-templates.sh has nothing to
+# compare. edge-direct-ingest-reclaim also renders the staged-reclaimer CronJob
+# that owns the terminal tree under direct upload; neg-edge-reclaim-deid-onuploaded
+# keeps the same declaration failing under Orthanc-deid, where nothing owns it.
+cat >"$V/edge-deid-ingest.yaml" <<'EOF'
+deid:
+  engine: ingest
+dataPolicy:
+  derived:
+    assigned:
+      reclaim: onDeidentified
+    deidentified:
+      reclaim: onUploaded
+ingest:
+  assign:
+    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}
+  deidentify:
+    specs:
+      "__default__/medimage/dicom-series": |
+        FORMAT dicom
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
@@ -671,6 +753,14 @@ EOF
 
 # -- edge ---------------------------------------------------------------------
 printf 'upload:\n  mode: both\n'                          >"$V/neg-edge-bad-mode.yaml"
+# dataPolicy.reporter.interval must be whole seconds >= 60. 0 sweeps back to
+# back (no CPU limit caps it); a unit string reads as 0 where
+# DataPolicyReporterSilent sizes its window, so 30m+ would look silent.
+printf 'dataPolicy:\n  reporter:\n    interval: 0\n'      >"$V/neg-edge-reporter-interval-0.yaml"
+printf 'dataPolicy:\n  reporter:\n    interval: 5m\n'     >"$V/neg-edge-reporter-interval-unit.yaml"
+# Numbers over a day, including ones toString would write in exponent form.
+printf 'dataPolicy:\n  reporter:\n    interval: 1000000\n' >"$V/neg-edge-reporter-interval-1e6.yaml"
+printf 'dataPolicy:\n  reporter:\n    interval: 1e20\n'    >"$V/neg-edge-reporter-interval-1e20.yaml"
 printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-endpoint.yaml"
 # perSiteBuckets derives <bucketPrefix>-<clusterLabel>, which is safe and is
 # now the normal path — so an empty bucket alone is no longer an error. What
@@ -684,6 +774,20 @@ printf 'upload:\n  s3:\n    caBundleSecret: ""\n'         >"$V/neg-edge-https-no
 # non-positive loop is a division by zero at render time rather than a slow
 # poll. Needs the observability stack on, since the guard lives beside the rules.
 printf 'upload:\n  direct:\n    loop: 0\n'                 >"$V/neg-edge-upload-loop-zero.yaml"
+# ReclaimerNotSucceeding compares alertAfter with the time since the last
+# successful run, so it must exceed 2 x the schedule period + deadlineSeconds:
+# one failed run then a slow success already goes that long. forever/never/
+# empty ("-", no limit) and 0 are refused too. Needs the observability stack
+# on, like the loop guard above.
+# 1h: under the hourly floor (2h50m). six-hourly-3h: the default 3h, left as
+# it is when the schedule is slowed, which would mail every cycle.
+printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      alertAfter: 1h\n' >"$V/neg-edge-reclaimer-alert-after-1h.yaml"
+printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      schedule: "17 */6 * * *"\n' >"$V/neg-edge-reclaimer-six-hourly-3h.yaml"
+for w in forever never '""' 0 30m; do
+  n="$(printf '%s' "$w" | tr -d '"')"; n="${n:-empty}"
+  printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      alertAfter: %s\n' "$w" \
+    >"$V/neg-edge-reclaimer-alert-after-$n.yaml"
+done
 printf 'deid:\n  policyReviewed: false\n'                  >"$V/neg-edge-deid-not-reviewed.yaml"
 # The pre-0.6.0 path. Accepting it as an alias would leave the very confusion
 # the move exists to end, so it must fail and name the new key.
@@ -716,6 +820,9 @@ printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-i
 # onDeidentified is satisfied by the deidentify stage unlinking its own input,
 # so it is meaningless when that stage does not render.
 printf 'deid:\n  engine: orthanc\ndataPolicy:\n  derived:\n    assigned:\n      reclaim: onDeidentified\n' >"$V/neg-edge-reclaim-ondeid-no-stage.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      reclaim: onAssigned\n' >"$V/neg-edge-reclaim-onassigned-on-assigned.yaml"
+printf 'dataPolicy:\n  derived:\n    grouped:\n      reclaim: onUploaded\n      location: /data/custom\n' >"$V/neg-edge-reclaim-onuploaded-on-grouped.yaml"
+printf 'dataPolicy:\n  derived:\n    assigned:\n      location: /data/assigned-x\n' >"$V/neg-edge-reclaim-onuploaded-moved-assigned.yaml"
 
 # onUploaded needs a marker that only the s3-uploader writes, and upload.mode
 # =direct renders no s3-uploader. The condition could never come true, so the
@@ -739,6 +846,16 @@ ingest:
     specs:
       "__default__/medimage/dicom-series": |
         FORMAT dicom
+EOF
+
+# A recovery window longer than the CronJob's own minAge. data-policy hands the
+# deidentified tree to the staged-reclaimer, so TREE_MIN_AGE must carry 7d to it
+# (runtime-templates.sh checks the value against stages.tsv).
+cat >"$V/edge-tree-minage.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    deidentified:
+      minAge: 7d
 EOF
 
 cat >"$V/neg-edge-deid-no-facilitybackup.yaml" <<'EOF'
@@ -856,6 +973,16 @@ dataPolicy:
   derived:
     assigned:
       minAge: "7 days"
+EOF
+
+# 11 digits, the first length refused. Nothing else fails on overflow: atoi
+# saturates at MaxInt64 and mul wraps int64 (20 nines + "d" rendered -86400),
+# and the engine reads a negative minAge as 0. The cap sits well below both.
+cat >"$V/neg-edge-duration-11-digits.yaml" <<'EOF'
+dataPolicy:
+  derived:
+    assigned:
+      minAge: "12345678901s"
 EOF
 
 # Same guard on the management side. Both charts read the SAME dataPolicy block
@@ -1092,6 +1219,67 @@ ingest:
       session: AccessionNumber
 EOF
 
+# Exercise the local alert stack with its direct uploader, including overrides.
+cat >"$V/edge-upload-custom.yaml" <<'EOF'
+fullnameOverride: custom
+namespace: upload-custom
+EOF
+
+# Distinct stage settings catch values wired to the wrong container. Partial
+# requests/limits must also pass through without chart-supplied additions.
+cat >"$V/edge-stage-resources.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources:
+      requests: {cpu: 101m, memory: 301Mi}
+      limits: {cpu: 901m, memory: 1301Mi}
+  fileDrop:
+    enabled: true
+    resources:
+      requests: {cpu: 102m, memory: 302Mi}
+      limits: {cpu: 902m, memory: 1302Mi}
+  assign:
+    resources:
+      requests: {memory: 444Mi}
+  deidentify:
+    resources:
+      limits: {cpu: 888m}
+EOF
+cat >"$V/edge-stage-resources-null.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources: null
+  fileDrop:
+    enabled: true
+    resources: null
+  assign:
+    resources: null
+  deidentify:
+    resources: null
+EOF
+
+# File-drop grouping must initialize assign without waiting for Orthanc.
+cat >"$V/edge-assign-filedrop-only.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    enabled: false
+  fileDrop:
+    enabled: true
+EOF
+
+# Upload owns its configured temporary parent; an empty value keeps the
+# application's system temporary-directory default.
+cat >"$V/edge-upload-temp-custom.yaml" <<'EOF'
+upload:
+  direct:
+    tempDir: '/data/upload scratch/cache;literal'
+EOF
+cat >"$V/edge-upload-temp-default.yaml" <<'EOF'
+upload:
+  direct:
+    tempDir: ''
+EOF
+
 ci_positive_cases() {
   cat <<'EOF'
 mgmt-defaults	charts/mgmt	mgmt-base.yaml
@@ -1109,14 +1297,29 @@ edge-defaults	charts/edge	edge-base.yaml
 edge-deid-site-profile	charts/edge	edge-base.yaml edge-deid-site-profile.yaml
 edge-tbpet	charts/edge	edge-tbpet.yaml
 edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
+edge-upload-temp-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-custom.yaml
+edge-upload-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-default.yaml
+edge-upload-ingest-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-upload-temp-default.yaml
+edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
+edge-upload-alerts	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml
+edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml edge-upload-custom.yaml
 edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
+edge-assign-filedrop-only	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-assign-filedrop-only.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
+edge-duration-base10	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-duration-base10.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
+edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
+edge-stage-resources	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources.yaml
+edge-stage-resources-null	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-null.yaml
+edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-obsstack-on	charts/edge	edge-base.yaml edge-obsstack-on.yaml
+edge-reporter-off	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-off.yaml
+edge-reclaimer-six-hourly	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reclaimer-six-hourly.yaml
+edge-reporter-interval-3600	charts/edge	edge-base.yaml edge-obsstack-on.yaml edge-reporter-interval-3600.yaml
 edge-auth-on	charts/edge	edge-base.yaml edge-auth-on.yaml
 edge-auth-on-datapolicy	charts/edge	edge-base.yaml edge-auth-on.yaml edge-datapolicy-on.yaml
 edge-everything-on	charts/edge	edge-base.yaml edge-observability-on.yaml edge-samba-on.yaml edge-filedrop-on.yaml edge-datapolicy-on.yaml
@@ -1175,10 +1378,21 @@ neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-cert
 neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
 neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
-neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
-neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
-neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
+neg-edge-reporter-interval-0	charts/edge	edge-base.yaml neg-edge-reporter-interval-0.yaml	dataPolicy.reporter.interval must be whole seconds
+neg-edge-reporter-interval-unit	charts/edge	edge-base.yaml neg-edge-reporter-interval-unit.yaml	dataPolicy.reporter.interval must be whole seconds
+neg-edge-reporter-interval-1e6	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e6.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
+neg-edge-reporter-interval-1e20	charts/edge	edge-base.yaml neg-edge-reporter-interval-1e20.yaml	dataPolicy.reporter.interval must be whole seconds, 60 to 86400
+neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml edge-upload-s3.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
+neg-edge-s3-no-bucket	charts/edge	edge-base.yaml edge-upload-s3.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
+neg-edge-https-no-ca	charts/edge	edge-base.yaml edge-upload-s3.yaml neg-edge-https-no-ca.yaml	silently DISABLES TLS verification
 neg-edge-upload-loop-zero	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-upload-loop-zero.yaml	upload.direct.loop must be a positive number of seconds
+neg-edge-reclaimer-alert-after-forever	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-forever.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-never	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-never.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-empty	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-empty.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-0	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-0.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-30m	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-30m.yaml	stagedReclaimer.alertAfter must be longer than
+neg-edge-reclaimer-alert-after-1h	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-alert-after-1h.yaml	must be longer than 10200s
+neg-edge-reclaimer-six-hourly-3h	charts/edge	edge-base.yaml edge-obsstack-on.yaml neg-edge-reclaimer-six-hourly-3h.yaml	must be longer than 46200s
 neg-edge-deid-not-reviewed	charts/edge	edge-base.yaml neg-edge-deid-not-reviewed.yaml	requires deid.policyReviewed=true
 neg-edge-deid-moved-key	charts/edge	edge-base.yaml neg-edge-deid-moved-key.yaml	has MOVED to deid.policyReviewed
 neg-edge-deid-empty-aetmap	charts/edge	edge-base.yaml neg-edge-deid-empty-aetmap.yaml	aetMap is empty
@@ -1196,6 +1410,9 @@ neg-edge-watchdog-no-secret	charts/edge	edge-base.yaml neg-edge-watchdog-no-secr
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
+neg-edge-reclaim-onassigned-on-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onassigned-on-assigned.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-on-grouped.yaml	is not a word this stage accepts
+neg-edge-reclaim-onuploaded-moved-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-moved-assigned.yaml	while the uploader reads
 neg-edge-reclaim-ondeid-minage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-minage.yaml	is set alongside reclaim=onDeidentified
 neg-edge-reclaim-deid-onuploaded	charts/edge	edge-base.yaml neg-edge-reclaim-deid-onuploaded.yaml	with upload.mode=direct
 neg-edge-deid-no-facilitybackup	charts/edge	edge-base.yaml neg-edge-deid-no-facilitybackup.yaml	dropped at the front door
@@ -1205,6 +1422,7 @@ neg-edge-hostaliases-no-ip	charts/edge	edge-base.yaml neg-edge-hostaliases-no-ip
 neg-edge-no-clusterlabel	charts/edge	edge-base.yaml neg-edge-no-clusterlabel.yaml	clusterLabel must be set
 neg-edge-auth-no-secret	charts/edge	edge-base.yaml neg-edge-auth-no-secret.yaml	existingSecret is empty
 neg-edge-bad-duration	charts/edge	edge-base.yaml neg-edge-bad-duration.yaml	is not a duration I can parse
+neg-edge-duration-11-digits	charts/edge	edge-base.yaml neg-edge-duration-11-digits.yaml	has more than 10 digits
 neg-mgmt-bad-duration	charts/mgmt	mgmt-base.yaml neg-mgmt-bad-duration.yaml	is not a duration I can parse
 neg-edge-grouped-minage	charts/edge	edge-base.yaml neg-edge-grouped-minage.yaml	was removed and setting it does nothing
 neg-edge-deid-missing-trial-tag	charts/edge	edge-base.yaml neg-edge-deid-missing-trial-tag.yaml	Restore the tag(s) with their

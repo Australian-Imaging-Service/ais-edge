@@ -86,12 +86,23 @@ with `.Files.Get` and Helm never templates it.
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
 | DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, or `assign`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for the `__unmapped_aet__` subtree — an AE title nobody has mapped to a project yet. |
+| `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. Rendered only while `dataPolicy.reporter.enabled` is true. |
+| `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. xnat-ingest logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
+| `ReclaimerRunUnavailable` | Loki ruler | The staged-reclaimer's run-level `reclaim_unavailable` with no `reclaim_finished` since, for 75m, `{component="s3-reclaimer"}`. Shared with tier-2; it needs the CronJob's pod labels, which CI checks. |
+| `SessionStagedNotConfirmedInXNAT` | Loki ruler | A session the reclaimer saw 48 to 72h ago and has never confirmed in XNAT since. Shared with tier-2. |
 | `KubeNodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
 | `KubePodCrashLooping` | Prometheus | Container restart count, kube-state-metrics. |
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
+| `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
+| `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage raises one alert rather than two (a firing mail and its resolve, one pair per logged reason). |
+| `CPUThrottlingHigh` | Prometheus | kube-prometheus-stack's rule, unmodified. The data-policy reporter carries no CPU limit (`dataPolicy.reporter.resources`), so it has no CFS quota, cAdvisor exports no `container_cpu_cfs_*` series for it, and the rule cannot see it. Under the old 1-core limit its sub-second, multi-process sweep was throttled in about 61% of the few CFS periods it ran in, at 0.0014 cores average, and the rule fired and cleared several times a day, each re-fire a new mail. Every container with a CPU limit is still covered. The reporter's real failure, going quiet, is `DataPolicyReporterSilent`. `scripts/ci/runtime-templates.sh` fails if the reporter renders a CPU limit again. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
 `component`, `level` — are built by Vector from **pod labels**, not from the
@@ -100,6 +111,20 @@ emits `"component":"data-policy"` in every line but carries no `component` pod
 label produces a stream with an empty label, and every rule selecting on it
 matches nothing and can never fire. That is not hypothetical: it is why
 `charts/edge/templates/data-policy.yaml` sets the label explicitly.
+
+The stage-error rules use a 10-minute lookback and a 1-minute hold. A single
+error can fire; repeated errors are not required. Resolution means that the
+matching log left the window, not that the stage recovered. The group and
+assign rule reads Vector's JSON log envelope and its `level` stream label.
+`ingest.logFormat: json` supplies that severity for handled errors. A plain
+Python traceback still matches through its decoded message. Malformed JSON
+records are excluded, and an absent severity does not turn a message that
+contains "ERROR" into an error event. Existing `IngestPodCrashLoop` and upstream
+pod-readiness/crash-loop rules cover Kubernetes symptoms through local
+kube-state-metrics. A recovered group, assign, or deidentify OOM still needs
+separate event attribution; these log rules cannot report a kill with no log.
+Alert firing, recovery, and notification-delivery drills remain necessary.
+No new exporter, scrape, or permissions are needed for this log-based change.
 
 ## What the chart installs, and what it does not
 
@@ -114,19 +139,22 @@ that content comes from:
   `charts/edge/templates/observability.yaml` globs
   `files/prometheus-rules/*.yaml` and emits one object per severity file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
-  `ais-edge-warning` (`IngestPodCrashLoop`) and `ais-edge-info`
-  (`NodeCountChanged`). Those objects deliberately carry **no** `release` label;
+  `ais-edge-warning` (`IngestPodCrashLoop`, `ReclaimerNotSucceeding`, and
+  `KubeJobFailed` in place of the upstream copy), `ais-edge-uploader`
+  (`XNATUploaderRestarted`, `XNATUploaderMemoryGrowing`, only in direct-upload mode) and `ais-edge-info`
+  (`NodeCountChanged`; `CPUThrottlingHigh` is upstream's own copy, unmodified). Those objects deliberately carry **no** `release` label;
   instead the template `fail`s the render unless
   `kube-prometheus-stack.prometheus.prometheusSpec.ruleSelectorNilUsesHelmValues`
   is `false`. While it is `true` the operator selects only rules labelled with
   its own release, so it would load none of these — silently, with nothing to
   see in any log.
 - **The Loki ruler ships with a rule set.**
-  `charts/edge/files/loki-ruler-rules.yaml` holds 11 LogQL alerts in four groups
+  `charts/edge/files/loki-ruler-rules.yaml` holds 20 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
-  `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError` and
-  `OrthancStorageGrowing`, which ship but are not tabulated.
+  `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError`,
+  `OrthancStorageGrowing` and the other rules of those groups, which ship but
+  are not tabulated.
   `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
   `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled
   `loki_rule: "true"` — the **label**, not the name and not the namespace, is
@@ -134,7 +162,9 @@ that content comes from:
   render time from `dataPolicy.originals` (`__DP_MIN_FREE_DISK_PCT__`,
   `__DP_QUARANTINE_ALERT_AFTER_S__`), because LogQL cannot compare two extracted
   fields; left unreplaced they are a rule-load syntax error and Loki drops the
-  whole group. The template `fail`s outright if the file is missing or empty. A
+  whole group. `DataPolicyReporterSilent` takes two more the same way: the
+  site's `clusterLabel` (`__CLUSTER_LABEL__`, escaped for LogQL) and its
+  silence window (`__DP_REPORT_SILENCE_S__`). The template `fail`s outright if the file is missing or empty. A
   site adds rules of its own by applying a *second* ConfigMap in the same
   namespace carrying the same label — not by editing this one (next section).
 - **Alertmanager runs the chart's own configuration, not the subchart's.**
@@ -148,6 +178,7 @@ that content comes from:
   alert this chart raises to a `null` receiver — a healthy-looking stack that
   delivers nothing. The rendered config's root receiver is `email-primary`, with
   severity-based routes onto `email-no-resolved`, `email-upload-success`,
+  `email-xnat-repair`,
   `info-email`, and a deliberately empty `null-meta` for kube-prometheus-stack's
   own meta-alerts. `observability.stack.alerting.*` from the site file is
   substituted into it as `__SENTINEL__` tokens — a plain `replace`, never `tpl`,

@@ -187,6 +187,22 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # Upload can start before its producer creates the input directory.
+      # Its configured temporary parent must also exist before the first loop.
+      initContainers:
+        - name: init-upload-dirs
+          image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command:
+            - "mkdir"
+            - "-p"
+            - "--"
+            - {{ include "edge.uploadSourceDir" . | quote }}
+            {{- if .Values.upload.direct.tempDir }}
+            - {{ .Values.upload.direct.tempDir | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: upload
           image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
@@ -202,7 +218,11 @@ spec:
             - {{ .Values.upload.direct.loop | quote }}
             - "--wait-period"
             - {{ .Values.upload.direct.waitPeriod | quote }}
-            {{- if not .Values.upload.direct.requireManifest }}
+            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # does not require a manifest (its option default is unset).
+            {{- if .Values.upload.direct.requireManifest }}
+            - "--require-manifest"
+            {{- else }}
             - "--dont-require-manifest"
             {{- end }}
             {{- if not .Values.upload.direct.verifySsl }}

@@ -275,8 +275,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against the pinned 0.15.6; the same raise is in
-               0.13.1, so this is a long-standing footgun rather than a version
+               it. RE-VERIFIED against the pinned 0.16.2 (api/group_api.py:268, the file is
+               unchanged since 0.16.1); the
+               same raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
         {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
@@ -456,6 +457,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- if .Values.dataPolicy.reporter.enabled }}
+    {{- $_ := include "edge.reporterIntervalSeconds" . }}
+  {{- end }}
+
   {{- /* A removed key that is still set must fail, not be ignored — silently
          dropping it is the exact defect this whole block is being cleaned of. */ -}}
   {{- if hasKey .Values.dataPolicy.derived.grouped "minAge" }}
@@ -498,6 +503,27 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          session would accumulate while the policy looked correct. */ -}}
   {{- if and (eq (include "edge.deidEngine" .) "ingest") (eq (include "edge.assignedReclaim" .) "onUploaded") }}
     {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned — every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
+  {{- end }}
+
+  {{- /* EACH STAGE HAS ITS OWN RECLAIM WORDS, AND ANOTHER STAGE'S WORD IS NOT
+         HARMLESS. onAssigned asks whether assign produced its output, which is
+         true of every assigned session, so on the assigned stage it removed
+         every settled session before upload. onUploaded is only provable on the
+         tree the uploader reads. The engine now keeps in both cases, which
+         would leave the stage growing while the policy read as if it were
+         being cleaned; refusing here makes the mistake an install error. */ -}}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- range $stage, $allowed := $reclaimWords }}
+    {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
+    {{- if not (has $w $allowed) }}
+      {{- fail (printf "dataPolicy.derived.%s.reclaim=%s is not a word this stage accepts. Allowed: %s. Another stage's word is not harmless here: onAssigned on assigned or deidentified is true of every settled session and would remove it before upload, and onUploaded is only provable on the tree the uploader reads." $stage $w (join ", " $allowed)) }}
+    {{- end }}
+  {{- end }}
+  {{- /* onUploaded REMOVES ONLY THE COPY THE UPLOADER FINGERPRINTED. assign
+         always writes /data/assigned, so moving this stage's location points it
+         at a tree whose sessions can never be verified. */ -}}
+  {{- if and (eq (include "edge.assignedReclaim" .) "onUploaded") (ne (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .)) }}
+    {{- fail (printf "dataPolicy.derived.assigned.reclaim resolves to onUploaded, but the stage is at %s while the uploader reads %s. onUploaded removes only the copy the uploader fingerprinted, so nothing at %s could ever be verified and it would be kept for ever. assign writes /data/assigned: leave dataPolicy.derived.assigned.location at its default." (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .) (clean .Values.dataPolicy.derived.assigned.location)) }}
   {{- end }}
 
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
@@ -764,6 +790,33 @@ really is on the old shared layout it must say so explicitly.
 {{- end }}
 
 {{/*
+dataPolicy.reporter.interval as canonical decimal seconds, validated.
+BOTH consumers read this, never the raw value: the reporter's INTERVAL env
+(data-policy.yaml) and DataPolicyReporterSilent's window (observability.yaml).
+- Whole seconds, 60 to 86400 (one day).
+- 0, or anything sleep cannot read, returns at once: back-to-back sweeps, and
+  the reporter has no CPU limit to slow them.
+- Numbers are formatted here, not with toString: Helm reads values numbers
+  as float64 and toString writes 1000000 as "1e+06", which busybox sleep
+  rejects instantly.
+- A unit string ("30m") is refused: sleep would read it, but the window
+  calculation would not.
+*/}}
+{{- define "edge.reporterIntervalSeconds" -}}
+{{- $iv := .Values.dataPolicy.reporter.interval -}}
+{{- $s := "" -}}
+{{- if or (kindIs "float64" $iv) (kindIs "int" $iv) (kindIs "int64" $iv) -}}
+  {{- if eq (floor $iv) (float64 $iv) -}}{{- $s = printf "%.0f" (float64 $iv) -}}{{- end -}}
+{{- else -}}
+  {{- $s = toString $iv | trim -}}
+{{- end -}}
+{{- if not (and (regexMatch "^[1-9][0-9]{1,4}$" $s) (ge (atoi $s) 60) (le (atoi $s) 86400)) -}}
+  {{- fail (printf "dataPolicy.reporter.interval must be whole seconds, 60 to 86400, got %v. 0 or a value sleep cannot read makes the reporter sweep back to back (it has no CPU limit to slow it), and a unit such as 30m reads as 0 where DataPolicyReporterSilent sizes its window, so it would report a healthy reporter silent." $iv) -}}
+{{- end -}}
+{{- $s -}}
+{{- end }}
+
+{{/*
 =============================================================================
 dataPolicy — duration to seconds, and the stage table the engine walks
 =============================================================================
@@ -774,6 +827,13 @@ never has to do arithmetic on unit suffixes.
 `forever` is NOT a duration and never becomes one. It renders as `-`, which the
 engine treats as "no rule", so an unparseable or absent value can never be
 mistaken for 0 (which would read as "expire immediately").
+
+BASE 10, ALWAYS. The number goes through atoi, never int or int64.
+int64 reads a leading zero as octal: "010d" was 8 days, "08d" and "09h" were 0.
+atoi is strconv.Atoi, base 10 only, so "08d" is 8 days.
+
+CAUTION: an UNQUOTED 010 in a values file is still 8 seconds.
+YAML reads it as octal before this helper sees it. Quote it, or add a unit.
 */}}
 {{- define "edge.durationSeconds" -}}
 {{- $d := . | toString | trim -}}
@@ -788,13 +848,21 @@ mistaken for 0 (which would read as "expire immediately").
        scripts/ci/values.sh, which is why this validates first and fails loudly
        rather than defaulting. */ -}}
 {{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
-{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
-{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
-{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
-{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
-{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
-{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
-{{- else -}}{{ $d | int64 }}
+{{- else if regexMatch "^[0-9]{11,}" $d -}}
+{{- /* AT MOST 10 DIGITS, about 317 years of seconds.
+       Overflow raises no error. atoi saturates at MaxInt64,
+       then mul wraps int64: 20 nines + "d" rendered -86400.
+       The engine reads a negative minAge as 0, "expire immediately".
+       Leading zeros count: the cap is on what atoi is handed.
+       10 digits of years still fits int64 after the mul. */ -}}
+{{- fail (printf "dataPolicy: %q has more than 10 digits. The limit is 10 (about 317 years in seconds): a longer number can overflow without an error, saturating or wrapping to a negative number of seconds, and a negative minAge is read as 0, 'expire immediately'. Use a larger unit, or forever where the key accepts it." $d) -}}
+{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | atoi }}
+{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | atoi) 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | atoi) 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | atoi) 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | atoi) 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | atoi) 31536000 }}
+{{- else -}}{{ $d | atoi }}
 {{- end -}}
 {{- end }}
 
@@ -973,4 +1041,50 @@ before.
 */}}
 {{- define "edge.uploadReclaim" -}}
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- end }}
+
+{{- /* The terminal tree as a dataPolicy.derived key: the tree the uploader
+     reads and, under direct upload, the staged-reclaimer CronJob owns.
+     GUIDING: data-policy's hand-off (EXTERNAL_RECLAIM_STAGE) and the age the
+     CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
+     different trees. */}}
+{{- define "edge.uploadTreeKey" -}}
+{{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- end }}
+
+{{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
+     stage folder, so no deleter lists it.
+     GUIDING: the stage that writes the upload tree holds it for each pass
+     (edge.lockedStage). A deleter of that tree must take the same lock before
+     it deletes. No deleter takes it yet: this is the writer side only.
+     CAUTION: keep the path stable. Two paths are two locks, and two locks
+     exclude nothing. */}}
+{{- define "edge.uploadTreeLock" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.lock
+{{- end }}
+
+{{- /* WRITER ALIVE. The wrapped writer holds a SHARED lock on this file for its
+     whole life. The deleter deletes only while it cannot take it: then a wrapped
+     writer runs now, and Recreate means no older writer without the lock runs.
+     CAUTION: this guards an upgrade, not a rollback to a writer without the lock
+     (see docs/components/xnat-ingest.md). */}}
+{{- define "edge.uploadTreeAlive" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.alive
+{{- end }}
+
+{{- /* The command of a stage that writes the upload tree.
+     Argument: (list $ "<stage>" <interval seconds>).
+     One pass at a time, each inside the lock, then a sleep. The sleep is the
+     same full interval that --loop sleeps, so the stage args must not have
+     --loop.
+     `flock <file> <cmd>` for each pass, not one fd for the whole loop: the pass
+     and any child it leaves keep the lock until they stop.
+     A pass that fails stops the container, as an exception out of --loop did.
+     fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
+{{- define "edge.lockedStage" -}}
+- /bin/sh
+- -c
+- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" (index . 0)) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
+- xnat-ingest
+- {{ index . 1 | quote }}
 {{- end }}

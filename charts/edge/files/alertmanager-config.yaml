@@ -29,6 +29,7 @@
 # Routing tree:
 #   alertname=DICOMRejectedUnmappedAET  →  email, firing only
 #   alertname=XNATUploadSuccess         →  email, one per session
+#   alertname=XNATRepairAttempted       →  email, one per edge per burst, firing only
 #   severity=info                       →  slack, or email if no Slack (see below)
 #   severity=critical                   →  email + slack, or email if no Slack
 #   everything else                     →  email
@@ -144,6 +145,24 @@ route:
     - matchers:
         - alertname =~ "Watchdog|InfoInhibitor"
       receiver: "null-meta"
+    # Restart history is an event; expiry of its 15m window is not recovery.
+    # Separate uploader pods so another edge cannot change this notification group.
+    - matchers:
+        - alertname = "XNATUploaderRestarted"
+      receiver: email-no-resolved
+      group_by: ["alertname", "cluster", "uploader_release", "namespace", "pod", "container"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 24h
+      continue: false
+    - matchers:
+        - alertname = "XNATUploaderMemoryGrowing"
+      receiver: email-primary
+      group_by: ["alertname", "cluster", "uploader_release", "namespace", "pod", "container"]
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 24h
+      continue: false
     # Per-alert override: XNATUploadSuccess is severity=info (so the
     # default routing tree below would send it to Slack), but operators
     # want an email confirmation for every successful XNAT push for
@@ -199,6 +218,21 @@ route:
       # 720h rather than 30d: Alertmanager's duration parser accepts `d` only in
       # newer builds, and hours are unambiguous across all of them.
       repeat_interval: 720h
+      continue: false
+    # XNAT was missing files and the uploader tried to re-send them. Firing
+    # only: "[RESOLVED]" would mean the 10m window passed, not that anything
+    # was fixed.
+    - matchers:
+        - alertname = "XNATRepairAttempted"
+      receiver: email-xnat-repair
+      # One mail per edge: an XNAT restart repairs many sessions at once.
+      group_by: ["alertname", "cluster"]
+      group_wait: 2m           # gather the start of the burst into that mail
+      # CAUTION: keep under the alert's ~10m lifetime. A session repaired after
+      # the first mail is only sent at the next tick; at 30m it had resolved
+      # by then and was never mailed.
+      group_interval: 5m
+      repeat_interval: 720h    # an event; repeating it tells nobody anything
       continue: false
     # slack-only when a webhook Secret is configured, info-email when not.
     # Substituted by templates/observability.yaml; see the header.
@@ -297,6 +331,13 @@ receivers:
         headers:
           Subject: 'AIS-Edge: XNAT upload completed — {{ .CommonLabels.session }}'
 
+  - name: email-xnat-repair
+    email_configs:
+      - to: "__ALERT_EMAIL_TO__"
+        send_resolved: false
+        headers:
+          Subject: 'AIS-Edge: XNAT was missing files; {{ .CommonLabels.cluster }} tried to re-send them'
+
   # THE FALLBACK FOR severity=info ON A SITE WITH NO SLACK.
   #
   # Deliberately a separate receiver rather than reusing email-primary, because
@@ -360,5 +401,22 @@ inhibit_rules:
     # happens to work (empty equals empty) but reads as a constraint that is
     # being enforced when nothing is. Tier-1 is one node and one API server,
     # so there is genuinely nothing to disambiguate.
+
+  # One reclaimer outage, one alert. A reclaimer that cannot reach XNAT logs
+  # why and fails every run, so ReclaimerRunUnavailable fires first (its `for`
+  # is 75m) and ReclaimerNotSucceeding would follow within the hour, for the
+  # same cause. The specific one wins. Once it clears, a reclaimer still not
+  # succeeding is dying without saying why, and that mails on its own.
+  # LIMITS: a different reclaimer fault that starts during an outage mails only
+  # once ReclaimerRunUnavailable clears, up to about 3h after the last logged
+  # failure. At recovery the two clear a minute or so apart, so one stray
+  # ReclaimerNotSucceeding mail, then its resolve, is possible.
+  - source_matchers:
+      - alertname = "ReclaimerRunUnavailable"
+    target_matchers:
+      - alertname = "ReclaimerNotSucceeding"
+    # No `equal:`, as above. The source comes from Loki and carries `cluster`,
+    # the target from Prometheus and does not, so equal: [cluster] would never
+    # match. One node, one reclaimer.
 
 templates: []
