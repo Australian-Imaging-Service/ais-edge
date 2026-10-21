@@ -452,6 +452,69 @@ scripts/site-secrets.sh apply my-hospital
 kubectl -n xnat-ingest rollout restart deploy/<the consumer>
 ```
 
+### Pointing the uploader at another XNAT
+
+The XNAT URL, account and password live in one Secret, `xnat-credentials` in
+`xnat-ingest`, with the keys `server`, `username` and `password`
+(`upload.direct.existingSecret`). Two things read it: the uploader
+`<release>-upload` and the staged-reclaimer CronJob. The Secret is defined in
+the site's `sites/<site>/secrets.enc.yaml`.
+
+Work in the deploy checkout on the node, as the operator whose age key is a
+recipient of that file:
+
+```bash
+cd ~/ais-edge
+scripts/site-secrets.sh edit <site>           # sops: decrypts into $EDITOR only
+```
+
+Change the three values of the `xnat-credentials` document and save:
+
+```yaml
+kind: Secret
+metadata:
+  name: xnat-credentials
+  namespace: xnat-ingest
+type: Opaque
+stringData:
+  server: https://xnat.example.org     # the new XNAT, with the scheme
+  username: <account>
+  password: <password>
+```
+
+sops re-encrypts on save, so no plaintext reaches the disk. If nothing changed,
+sops says `File has not changed`. Then:
+
+```bash
+scripts/site-secrets.sh check                 # the file is still encrypted
+scripts/site-secrets.sh apply <site>          # decrypt straight into the cluster
+kubectl -n xnat-ingest rollout restart deploy/<release>-upload
+kubectl -n xnat-ingest rollout status  deploy/<release>-upload
+```
+
+`apply` shows the kubectl context and the namespaces, and asks before it writes.
+The reclaimer CronJob reads the Secret at each run, so it needs no restart.
+Verify with the uploader log and the live check:
+
+```bash
+kubectl -n xnat-ingest logs deploy/<release>-upload --tail=50
+scripts/verify-live.sh <site>
+```
+
+A wrong URL or password shows as 401 or a connection error in the first pass,
+and `XNATAuthFailure` fires. For an XNAT with a certificate the node does not
+trust, set `upload.direct.verifySsl: false` in the site values and upgrade the
+release.
+
+Two cautions:
+
+- Commit and push the re-encrypted `secrets.enc.yaml` from that checkout. The
+  encrypted file is meant to be in git; `.gitignore` blocks only the plaintext
+  variants.
+- Sessions already in the upload tree carry no XNAT identity. After the switch
+  the uploader delivers them to the new XNAT. To hold them back, scale the
+  uploader to zero before the switch and back to one when the new XNAT is ready.
+
 ### Turning on Orthanc's REST API authentication
 
 The shipped site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
