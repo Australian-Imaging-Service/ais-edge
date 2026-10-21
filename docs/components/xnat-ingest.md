@@ -29,8 +29,8 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
-- **`xnat-ingest package`** (`<release>-package`, `component=package`) —
-  OPTIONAL and off by default (`ingest.package.enabled`); runs after
+- **`xnat-ingest package`** (`<release>-package`, `component=package`)
+  is optional and off by default (`ingest.package.enabled`); runs after
   deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
   writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
   replaced by a `DICOM-zip` resource, holding the whole series as an
