@@ -233,6 +233,8 @@ scripts/site-secrets.sh encrypt my-edge
 
 # 8. PROVE IT WORKS. Do not skip this — `helm install` succeeding only means the
 #    objects were accepted, not that the fleet is actually working.
+#    install.sh does not wait for edge pipeline pods. Wait until each expected
+#    pod is Running and ready, then run the checks below.
 make verify-live SITE=my-site
 ```
 
@@ -256,7 +258,9 @@ in it is hardcoded, and a deployment that keeps its data somewhere other than
 On this tier it walks the whole fleet: the management API server, node
 readiness, pod health per namespace, the `ais-edge-ca` Certificate and every
 Certificate derived from it, the SeaweedFS S3 Service, each edge's hosted
-control plane, and XNAT reachability. Its exit code is the number of failures.
+control plane, and XNAT reachability. Its exit code is 0 when every check
+passed, 1 when a check failed, and 2 when it stops early (a usage error or an
+abort).
 
 Run it:
 
@@ -532,14 +536,15 @@ dataPolicy:
                                                #   reach the engine; setting it
                                                #   is rejected at render
     assigned:       {reclaim: onUploaded,      minAge: 0}
-    s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d,
+    s3Staged:       {reclaim: onXnatConfirmed, minAge: 36h,
                      verifyAgainstXnat: true, maxRemovals: 50,
                      schedule: "17 * * * *"}
-    # upload.mode: direct only. NOT a stage of its own: it is the delete
-    # authority for whichever tree above is TERMINAL under the chosen deid
-    # engine (/data/assigned under Orthanc-deid, /data/deidentified under
-    # ais-deid). Under upload.mode: s3 it does not render at all, because the
-    # s3-uploader's marker already answers the same question there.
+    # The bucket clock above must stay longer than the edge clock below.
+    # The edge reclaimer is the delete authority for the terminal tree in
+    # both upload modes: assigned, deidentified, or packaged when enabled.
+    # In direct mode it proves each file in XNAT. In S3 mode it proves the
+    # current local files against the bucket, including their content.
+    # The bucket reclaimer later proves its copy in XNAT at the longer clock.
     stagedReclaimer: {minAge: 1d, verifyAgainstXnat: true,
                       maxRemovals: 50, schedule: "17 * * * *",
                       deadlineSeconds: 3000}
@@ -1017,7 +1022,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| xnat-ingest | `0.15.0` |
+| xnat-ingest | `0.16.2` |
 
 Every one is what is **verified working**, read out of a live deployment rather
 than chosen from a changelog. The previous installer used `/latest/` and
