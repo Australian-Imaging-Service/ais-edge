@@ -534,6 +534,42 @@ Use a dry-run inventory first. Do not enable automatic deletion until the
 site approves those decisions and verifies that the required maps remain
 recoverable. This proposal changes no retention behavior.
 
+### Reclaimer connections and fresh evidence
+
+The staged reclaimer starts one Python worker for its data pass. The worker
+handles session names in sequence and keeps only the current session's file
+listing and proof in memory. Startup probes remain separate from that pass.
+It reuses connections, not response data. Each session gets a fresh listing
+when it is examined; the run-start discovery contains names only.
+
+For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+It queries the experiment endpoint before reading its file catalog and keeps
+the per-file HEAD checks. A missing experiment, missing file, failed request,
+invalid response or failed login keeps the affected data. If a login expires,
+one bounded login retry precedes the request retry. The worker closes any
+login it opens; the shell closes the initial login that it lends the worker.
+The connection can stay open across sessions without retaining their listings.
+On TERM, the shell forwards the signal to the worker and waits for its cleanup.
+The worker closes a renewed login through a fresh connection, even if the
+signal interrupted an HTTP response.
+
+For S3 storage, the worker uses one client and lists each session prefix again
+at its decision. Every object delete still uses the ETag from that fresh
+listing as an `If-Match` condition. It does not delete a key that appeared
+later. Discovery uses a recursive object listing and deduplicates session names
+on disk. It examines only sessions containing objects; retained empty folders
+and folder-marker keys add no per-session work. Folders stay in place because a
+filer folder removal could race with a new upload. All discovery pages must
+validate before any session is examined; discovery keys are never deletion proof.
+
+The `empty` summary field remains for compatibility. In S3 mode it normally stays
+zero; it counts only sessions that become empty between discovery and the fresh
+per-session listing. Alert rules do not use that field.
+
+These checks do not make XNAT and the source store one transaction. They
+preserve the existing per-file evidence, local writer locks and conditional
+deletes. A dry run makes the same checks and removes no data.
+
 ## Benefits
 
 - **DICOM parsing already handles our edge cases** — (missing

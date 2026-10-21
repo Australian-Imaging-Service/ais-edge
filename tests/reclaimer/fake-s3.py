@@ -86,7 +86,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # continuation token, with the last key left off it, as a server that
             # stops paginating does; botocore then ends the listing quietly.
             no_token = False
-            if fx.get("truncate_no_token") and not start and len(keys) > 1:
+            if (fx.get("truncate_no_token") and not start and len(keys) > 1
+                    and prefix == fx.get("truncate_prefix", prefix)):
                 shown, more, no_token, fx["truncate_no_token"] = keys[:-1], True, True, False
                 save(fx)
             items = common + "".join(
@@ -97,7 +98,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = (f'<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>{escape(parts[0])}</Name>'
                     f"<Prefix>{escape(prefix)}</Prefix><KeyCount>{len(shown)}</KeyCount>"
                     f"<IsTruncated>{'true' if more else 'false'}</IsTruncated>{nxt}{items}</ListBucketResult>")
-            if "after_list" in fx and not delim and not more:   # after the helper's own listing of the session
+            if "after_list" in fx and not delim and not more and prefix != "staged/":   # after the helper's own listing of the session
                 for k, v in fx.pop("after_list").items():
                     if v is None:
                         fx["objects"].pop(k, None)
