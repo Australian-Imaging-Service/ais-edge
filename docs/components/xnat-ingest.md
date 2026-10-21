@@ -428,6 +428,29 @@ Use a dry-run inventory first. Do not enable automatic deletion until the
 site approves those decisions and verifies that the required maps remain
 recoverable. This proposal changes no retention behavior.
 
+### Reclaimer connections and fresh evidence
+
+The staged reclaimer starts one Python worker for its data pass. The worker
+handles session names in sequence and keeps only the current session's file
+listing and proof in memory. Startup probes remain separate from that pass.
+It reuses connections, not response data. Each session gets a fresh listing
+when it is examined; the run-start discovery contains names only.
+
+For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+It queries the experiment endpoint before reading its file catalog and keeps
+the per-file HEAD checks. A missing experiment, missing file, failed request,
+invalid response or failed login keeps the affected data. If a login expires,
+one bounded login retry precedes the request retry. The worker closes any
+login it opens; the shell closes the initial login that it lends the worker.
+The connection can stay open across sessions without retaining their listings.
+On TERM, the shell forwards the signal to the worker and waits for its cleanup.
+The worker closes a renewed login through a fresh connection, even if the
+signal interrupted an HTTP response.
+
+These checks do not make XNAT and the source store one transaction. They
+preserve the existing per-file evidence, local writer locks and conditional
+deletes. A dry run makes the same checks and removes no data.
+
 ## Benefits
 
 - **Battle-tested DICOM parsing** — handles edge cases (missing
