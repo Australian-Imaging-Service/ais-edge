@@ -57,6 +57,12 @@
 # =============================================================================
 set -uo pipefail
 
+# PID 1 must catch stop signals. Foreground work finishes before the shell
+# runs this trap. Idle sleeps run in the background so wait is interruptible.
+# An interrupted repair claim is requeued at uploader startup.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 # Where upload.yaml's initContainer stages the rclone binary. PREPENDED, not
 # assigned: the loop still needs the GNU coreutils/findutils on the image's own
 # PATH, and prepending a directory that does not exist is harmless, so this
@@ -126,7 +132,7 @@ check_tools() {
     fi
     [ -z "$missing" ] && return 0
     jlog dependency_missing "" "this image lacks:${missing}; refusing to start upload loop. The loop needs bash, GNU find (-L, -xtype), GNU stat -c, du -sb, md5sum, sort, date and util-linux flock (-w, -E) in upload.s3.shell.image, and the rclone binary the initContainer stages in /opt/rclone"
-    sleep "$STOP_DELAY"
+    sleep "$STOP_DELAY" & wait $!
     exit 1
 }
 check_tools
@@ -242,11 +248,11 @@ until probe_endpoint; do
         # error itself goes to stderr from probe_endpoint; it can contain quotes
         # and newlines, so it must not be interpolated into this JSON.
         jlog endpoint_failed "" "bucket probe failed after 12 attempts (60s) — refusing to start upload loop. Endpoint mTLS: ${mtls_hint}. The rclone error for each attempt is on stderr above; an mTLS refusal arrives there as a 400/403 with an unparseable XML body, not as an auth error"
-        sleep "$STOP_DELAY"
+        sleep "$STOP_DELAY" & wait $!
         exit 1
     fi
     jlog endpoint_retrying "" "attempt ${attempt}/12 — endpoint not ready, retrying in 5s"
-    sleep 5
+    sleep 5 & wait $!
 done
 jlog endpoint_ready "" "bucket probe OK"
 
@@ -374,7 +380,7 @@ while true; do
         if ! { exec 8>>"$WRITER_LOCK"; } 2>/dev/null; then
             jlog lock_failed "$session_name" "cannot open the writer lock ${WRITER_LOCK}; refusing to copy without the lock, so the uploader stops"
             [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
-            sleep "$STOP_DELAY"
+            sleep "$STOP_DELAY" & wait $!
             exit 1
         fi
         flock -w "$LOCK_WAIT" -E 3 8; lock_rc=$?
@@ -387,7 +393,7 @@ while true; do
             jlog lock_failed "$session_name" "flock on ${WRITER_LOCK} failed with exit ${lock_rc}, which is not a timeout; refusing to copy without the lock, so the uploader stops"
             [ -n "$recopy" ] && mv -f "${request}.claimed" "$request" 2>/dev/null
             exec 8>&-
-            sleep "$STOP_DELAY"
+            sleep "$STOP_DELAY" & wait $!
             exit 1
         fi
         if rclone copy "$session_dir" "sw:${S3_BUCKET}/${S3_PREFIX}/${session_name}/" \
@@ -447,5 +453,5 @@ while true; do
     if [ "$PASSES" -gt 0 ]; then
         PASSES=$((PASSES - 1)); [ "$PASSES" -eq 0 ] && exit 0
     fi
-    sleep "$INTERVAL"
+    sleep "$INTERVAL" & wait $!
 done
