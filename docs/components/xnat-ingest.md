@@ -29,13 +29,17 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
-- **`xnat-ingest package`** (`<release>-package`, `component=package`) —
-  OPTIONAL and off by default (`ingest.package.enabled`); runs after
+- **`xnat-ingest package`** (`<release>-package`, `component=package`)
+  is optional and off by default (`ingest.package.enabled`); runs after
   deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
   writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
   replaced by a `DICOM-zip` resource, holding the whole series as an
-  uncompressed zip, and one DICOM sample that XNAT can read headers from. A
-  session with no `dicom-series` scan resource passes through unchanged. Each
+  uncompressed zip, and one DICOM sample that XNAT can read headers from.
+  A session with no `dicom-series` scan resource passes through unchanged only
+  with xnat-ingest PR #217 (open on 2026-10-20). Without it, the stage logs
+  `Skipping '<session>' because it has no <datatype> scan resources` at INFO
+  on every pass. The session stays in `/data/deidentified` and does not reach
+  XNAT. Each
   session is removed from `/data/deidentified` once it has been packaged
   (`dataPolicy.derived.deidentified.reclaim: onPackaged`). An empty input is
   normal while waiting for work. The stage runs the pipeline image
@@ -137,7 +141,7 @@ The DICOM ingest engine downstream of Orthanc.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 
@@ -398,6 +402,31 @@ package stage on or off moves the writer lock between `deidentified.lock` and
 `packaged.lock`; the stages themselves order that move (both hold
 `deidentified.lock` for each pass, see the writer lock above), and the fence
 follows the lock path for the reclaimer.
+
+### Reidentification maps at production sites
+
+The ingest deidentification engine writes maps under the pipeline `reid`
+directory, normally `/data/xnat-ingest/reid` on the host. Without
+`ingest.deidentify.reidEncryptKeySecret`, these maps are plaintext JSON.
+Production sites that use this engine must set this Secret reference and
+manage the key separately from the data. Restrict access to both the maps
+and the key. The Secret must contain `XINGEST_REID_ENCRYPT_KEY`, a valid
+Fernet key for the ingest command. Do not place the key in a values file.
+
+Enabling encryption affects new writes. It does not encrypt or remove
+existing `.json` maps. A later pass can leave both a plaintext map and an
+encrypted `.json.enc` map. Inventory existing maps and arrange a verified
+migration before claiming that the stored maps are encrypted. Routing labels
+can still contain original identifiers; select approved pseudonymous tags
+for the assign stage as described in the chart values.
+
+There is no retention rule for this directory. A proposed rule would retain
+each map until its delivery and retention obligations are met, then remove
+it after a site-selected interval. The site must decide that interval, the
+required restore window, backup handling, legal holds and key retention.
+Use a dry-run inventory first. Do not enable automatic deletion until the
+site approves those decisions and verifies that the required maps remain
+recoverable. This proposal changes no retention behavior.
 
 ## Benefits
 
