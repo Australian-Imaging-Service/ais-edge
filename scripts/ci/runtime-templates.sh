@@ -1053,4 +1053,23 @@ print('receiver endpoint, credentials, curl image and shell syntax checked')
 PY_GROUP
 )" && ci_pass "group startup: $group_startup_out" || ci_fail "group startup: $group_startup_out"
 
+ci_heading "Loki delete requests use its persistent volume"
+loki_path_out="$(python3 - "$CI_RENDER_DIR/mgmt-defaults.yaml" 2>&1 <<'PY_LOKI_PATH'
+import sys, yaml
+objects = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+configs = [yaml.safe_load(d["data"]["config.yaml"]) for d in objects
+           if d.get("kind") == "ConfigMap" and "config.yaml" in d.get("data", {})]
+config = next(c for c in configs if "compactor" in c)
+assert config["compactor"]["delete_request_store"] == "filesystem"
+assert config["storage_config"]["filesystem"]["directory"] == "/var/loki/delete-requests"
+loki = next(d for d in objects if d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "mgmt-loki")
+container = next(c for c in loki["spec"]["template"]["spec"]["containers"] if c["name"] == "loki")
+assert container["securityContext"]["readOnlyRootFilesystem"] is True
+mount = next(m for m in container["volumeMounts"] if m["mountPath"] == "/var/loki")
+assert not mount.get("readOnly", False)
+assert any(v["metadata"]["name"] == mount["name"] for v in loki["spec"]["volumeClaimTemplates"])
+print("filesystem delete-request store is under writable /var/loki with a read-only root")
+PY_LOKI_PATH
+)" && ci_pass "$loki_path_out" || ci_fail "$loki_path_out"
+
 ci_summary "runtime-templates"
