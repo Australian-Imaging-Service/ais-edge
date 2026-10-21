@@ -726,8 +726,6 @@ ingest:
   # index or git host each time; if it can't, the pod stays in Init. Pin git
   # refs to a commit, not a branch, or a restart can pick up different code.
   #
-  # CAUTION: the vendor package has no v0.1.2 tag yet (vendor PR #3 is open).
-  # pip cannot install a missing tag.
   #   extraPipPackages:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
@@ -955,9 +953,8 @@ ingest:
         # reproducible=true: fixed entry timestamps and sorted entries, so the
         # zip of unchanged files has the same bytes every time, and a study
         # staged again for a late series uploads nothing twice. Needs a
-        # fileformats-extras release with the option (fileformats PR #168,
-        # not released yet). An older one stops at start with ValueError:
-        # Invalid option 'reproducible'.
+        # fileformats-extras 0.22.3 or later. An older one stops at start with
+        # ValueError: Invalid option 'reproducible'.
         spec: "medimage/dicom-series+zip:compression=ZIP_STORED,reproducible=true"
       - label: auto
         spec: medimage/vnd.australianimagingservice.dicom-sample

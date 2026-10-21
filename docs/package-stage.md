@@ -30,14 +30,13 @@ with the individual DICOM files in XNAT.
 
 ## What it needs
 
-**Status on 2026-10-20:** no released xnat-ingest image runs the default package stage.
+**Status on 2026-10-21:** no released xnat-ingest image runs the default package stage.
 The latest release is 0.16.2. It lacks the library support from
 [xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
 The stage also needs xnat-ingest PRs #217, #218, #221 and #222.
 PR #219 adds a guard; the chart locks already keep the producer passes apart.
-The fileformats-extras `reproducible` option is in
-[PR #168](https://github.com/python-fileformats/fileformats/pull/168), which remains open.
-Vendor v0.1.2 is not tagged. The live tests used a local integration image
+The fileformats-extras `reproducible` option is released in fileformats-extras
+0.22.3 ([PR #168](https://github.com/python-fileformats/fileformats/pull/168)). Vendor v0.1.2 is tagged. The live tests used a local integration image
 with the pending fixes. Keep the stage off at a site until a release contains
 all required features and that release has passed the site's validation.
 
@@ -58,12 +57,10 @@ all required features and that release has passed the site's validation.
   it as a different resource. The chart installs the package with `pip` in an
   init container of the package pod and of the upload pod
   (`ingest.extraPipPackages`). The node needs access to github.com for that
-  install, or a mirror of the package. Vendor v0.1.2 is not released yet
-  (2026-10-20). The fix is in vendor PR #3. Until the tag exists, the pins below
-  fail. The live tests used commit f8daa6f of that PR. Do not pin a site to that
-  commit: a rewrite or a delete of the PR branch can make it unreachable.
-- A fileformats-extras release with the `reproducible` option of the zip
-  converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
+  install, or a mirror of the package. Vendor v0.1.2 has this fix (vendor PR #3,
+  tagged on 2026-10-21). The pins below install it from that git tag.
+- fileformats-extras 0.22.3 or later, which has the `reproducible` option of the
+  zip converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
   timestamps and sorted entries, so the zip of unchanged files has the same
   bytes every time. An older fileformats-extras does not know the option. The
   package command then stops at start, before its first pass, with `ValueError:
@@ -124,8 +121,8 @@ output resources, and `copyMode: hardlink_or_copy`.
 
    The `pip-install` init container must be `Completed`. If it is not, read its
    log: `kubectl -n xnat-ingest logs deploy/<release>-package -c pip-install`.
-   `pathspec 'v0.1.2' did not match any file(s) known to git` means that the tag
-   does not exist yet. `Could not resolve host` or a timeout means that the node
+   `pathspec '<tag>' did not match any file(s) known to git` means that the pinned
+   tag does not exist. `Could not resolve host` or a timeout means that the node
    cannot reach github.com. While the init container fails, the package
    container does not start, so `IngestStageError` does not fire. No other
    alert fires at once. `StageBacklogAgeing` fires only when the oldest
@@ -169,7 +166,7 @@ they cover every other upload.
   study is staged again. The zip of an unchanged series is byte-identical to
   the first one, so the upload stage skips it as already uploaded, and the new
   series is uploaded beside it. This needs `reproducible=true` in the
-  `DICOM-zip` spec and a fileformats-extras release that has the option (see
+  `DICOM-zip` spec and fileformats-extras 0.22.3 or later, which has the option (see
   What it needs).
   When XNAT lists no checksums, the uploader compares a zip by filename only.
   More images added to an already uploaded series can therefore leave the
