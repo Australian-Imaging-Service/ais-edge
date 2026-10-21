@@ -48,7 +48,7 @@ expressions sit close to the dashboard queries that operators already trust.
 
 ## What lives where
 
-This table is the full shipped inventory, not a sample: **21** alerts in
+This table is the full shipped inventory, not a sample: **22** alerts in
 `charts/mgmt/files/loki-ruler-rules.yaml` and **13** across the six files in
 `charts/mgmt/files/prometheus-rules/`. If you add one, add a row — an alert
 missing from here reads as coverage nobody knows about, and an alert listed
@@ -74,6 +74,7 @@ here that no longer ships reads as coverage that does not exist.
 | `XNATUploadSuccess` | Loki ruler | `info`-severity receipt: `Successfully uploaded all files in '<session>'`, grouped by session. Range `[10m]`, deliberately wider than the uploader's ~62s loop — see the duplicate-mail section. Sessions with a `Repaired` line in the last 20m are left out: those are `XNATRepairAttempted`. |
 | `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line in the `xnat-upload` namespace: XNAT already held the session with files missing, and the uploader tried to re-send them from staging. Logged whether or not that worked, so it claims only the attempt; a session that stays incomplete is never confirmed, and `SessionStagedNotConfirmedInXNAT` follows. Seen on 2026-09-23 and 2026-09-28 after XNAT restarts. One firing-only mail per edge per burst. |
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
+| `XNATUploadRetryStorm` | Loki ruler | More than 2 ERROR or traceback records from the management uploader (`component="upload"` in `xnat-upload`) in 10 minutes, for 10 minutes. The different-checksums phrase is excluded, as in tier-1's rule of the same name; `XNATResourceIncompleteAndStuck` covers that conflict per session. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log — the de-identification script failing open is a PHI risk, not a cosmetic one. |
 | `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Uses existing Vector logs; no remote-edge Kubernetes metrics are assumed. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
 | `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |

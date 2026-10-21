@@ -29,6 +29,22 @@ groups:
   - name: ais-edge-pipeline-critical
     interval: 1m
     rules:
+      - alert: XNATUploadRetryStorm
+        expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-upload\", component=\"\
+          upload\"} | json\n  | message =~ \"Traceback \\\\(most recent call last\\\\).*\"\
+          \ or level = \"ERROR\"\n  !~ \"already exists on XNAT with different checksums\"\
+          \n  [10m])) > 2\n"
+        for: 10m
+        labels:
+          severity: warning
+          source: loki-ruler
+        annotations:
+          summary: '>2 management XNAT upload errors in 10 minutes on {{ $labels.cluster
+            }}'
+          description: The management uploader is repeatedly failing. Inspect component=upload
+            logs in xnat-upload for the cause; different-checksums conflicts have their
+            own per-session alert.
+
       - alert: XNATUploadFailingForAllSessions
         # Failures appearing while no completed uploads in the same
         # window — i.e. the pipeline has stopped delivering to S3.
