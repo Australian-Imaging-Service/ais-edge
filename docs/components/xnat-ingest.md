@@ -34,8 +34,12 @@ We run them as three Deployments on the single node, all rendered by
   deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
   writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
   replaced by a `DICOM-zip` resource, holding the whole series as an
-  uncompressed zip, and one DICOM sample that XNAT can read headers from. A
-  session with no `dicom-series` scan resource passes through unchanged. Each
+  uncompressed zip, and one DICOM sample that XNAT can read headers from.
+  A session with no `dicom-series` scan resource passes through unchanged only
+  with xnat-ingest PR #217 (open on 2026-10-20). Without it, the stage logs
+  `Skipping '<session>' because it has no <datatype> scan resources` at INFO
+  on every pass. The session stays in `/data/deidentified` and does not reach
+  XNAT. Each
   session is removed from `/data/deidentified` once it has been packaged
   (`dataPolicy.derived.deidentified.reclaim: onPackaged`). An empty input is
   normal while waiting for work. The stage runs the pipeline image
@@ -137,7 +141,7 @@ The DICOM ingest engine downstream of Orthanc.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 
