@@ -57,6 +57,30 @@
 # =============================================================================
 set -uo pipefail
 
+# Run the data worker as a tracked child. TERM must reach it even when this
+# shell is PID 1. Its Python handler runs finally blocks, then the shell's
+# EXIT trap closes the borrowed XNAT login. No new session starts after a stop.
+RECLAIM_PID=""
+stop_reclaim() {
+    local sig="$1" status="$2"
+    trap '' TERM INT
+    if [ -n "$RECLAIM_PID" ]; then
+        kill -s "$sig" "$RECLAIM_PID" 2>/dev/null || true
+        wait "$RECLAIM_PID" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap 'stop_reclaim TERM 143' TERM
+trap 'stop_reclaim INT 130' INT
+run_files_helper() {
+    python3 "$FILES_HELPER" "$@" &
+    RECLAIM_PID=$!
+    local rc=0
+    wait "$RECLAIM_PID" || rc=$?
+    RECLAIM_PID=""
+    return "$rc"
+}
+
 # --- required -----------------------------------------------------------------
 # STORAGE is read HERE, before anything else, because it decides which of the
 # variables below are required at all. Reading it further down (where the rest of
@@ -559,73 +583,19 @@ numeric_or_err() {
 # reclaim-files.py, next to this script, decides per resource: a HEAD per file
 # against XNAT, then the delete. A session folder: exact files inside the
 # upload-tree writer lock. A session prefix: one DeleteObject per object with
-# If-Match, never a folder. This script lists the sessions, runs the pre-flight
-# and hands each session to it; no delete happens in this script.
+# If-Match, never a folder. This script runs the pre-flight and starts one
+# worker for the data pass; no delete happens in this script.
 
-if ! prefixes=$(st_list_prefixes); then
-    # The one abort where the fan-out probably cannot help: we could not list
-    # staging, so we do not know what is in it. It still goes through
-    # `unavailable` because the retry in there is free and a transient listing
-    # failure that succeeds on the second attempt gets the per-session events.
-    unavailable staging_list_failed "listing ${_origin} failed — nothing examined"
+# Keep pre-flight gates above. The data pass uses one worker/client per run;
+# it discovers names once, then takes a fresh snapshot for each session.
+rc=0
+STORAGE="$STORAGE" S3_BUCKET="${S3_BUCKET:-}" S3_PREFIX="$S3_PREFIX" FILER_ENDPOINT="${FILER_ENDPOINT:-}" \
+    MIN_AGE="$MIN_AGE" MIN_AGE_S="$MIN_AGE_S" MIN_AGE_KEY="$_minage_key" DRY_RUN="$DRY_RUN" \
+    VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
+    HTTP_TIMEOUT="$HTTP_TIMEOUT" MAX_REMOVALS="$MAX_REMOVALS" PROOF="$PROOF" \
+    run_files_helper --batch || rc=$?
+[ "$rc" -eq 20 ] && exit 1  # discovery abort: reclaim_unavailable was already logged
+if [ "$rc" -ne 0 ]; then
+    jlog reclaim_failed "" "reclaim-files.py stopped with exit ${rc}; the run did not finish"
 fi
-
-now=$(date +%s)
-removed=0; kept=0; skipped=0; examined=0; empty=0
-
-# Read the listing LINE by line, never `for session in $prefixes`. Word
-# splitting on a prefix containing a space turns one unknown name into several
-# tokens, each of which passes the charset check below on its own — so
-# "foo bar/" would be examined as "foo" and "bar", and a real session called
-# `foo` could be deleted on the strength of a listing entry that was never
-# about it. (Caught in test; it is the only data-loss path this script had.)
-while IFS= read -r session; do
-    [ -n "$session" ] || continue
-    examined=$((examined + 1))
-
-    # Our own state prefix, not a session. Skipped explicitly rather than
-    # being caught by the charset guard below, which would log a spurious
-    # "kept" for it on every single run and train people to ignore that event.
-    case "$session" in
-        .reclaim-state) continue ;;
-    esac
-
-    # The session name is interpolated into a remote `sh -c` a few lines below.
-    # Anything outside this charset is rejected rather than quoted: a prefix
-    # containing a quote or a semicolon would be a shell injection into a
-    # command whose whole job is recursive deletion. Leading `-` is rejected
-    # too, so a name can never be read as an option by anything downstream.
-    case "$session" in
-        *[!A-Za-z0-9._-]*|.*|-*|__*)
-            keep "$session" "unsafe_prefix_name" "prefix name is not a plain [A-Za-z0-9._-] session id — refusing to pass it on"
-            kept=$((kept + 1)); continue ;;
-    esac
-
-    if [ "$removed" -ge "$MAX_REMOVALS" ]; then
-        jlog reclaim_skipped "" "per-run removal cap of ${MAX_REMOVALS} reached — remaining sessions left for the next run"
-        break
-    fi
-
-    # THE FILESYSTEM BACKEND DECIDES IN reclaim-files.py, and nothing below runs
-    # for it: the empty-prefix path and the count-and-bytes check are S3 only.
-    rc=0
-    STORAGE="$STORAGE" S3_BUCKET="${S3_BUCKET:-}" S3_PREFIX="$S3_PREFIX" FILER_ENDPOINT="${FILER_ENDPOINT:-}" \
-        MIN_AGE="$MIN_AGE" MIN_AGE_S="$MIN_AGE_S" MIN_AGE_KEY="$_minage_key" DRY_RUN="$DRY_RUN" \
-        VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
-        HTTP_TIMEOUT="$HTTP_TIMEOUT" python3 "$FILES_HELPER" "$session" || rc=$?
-    case "$rc" in
-        0)  removed=$((removed + 1)) ;;
-        10) kept=$((kept + 1)) ;;
-        11) skipped=$((skipped + 1)) ;;
-        12) empty=$((empty + 1)) ;;   # a prefix with no objects: the uploader skips it too
-        *)  jlog reclaim_failed "$session" "reclaim-files.py stopped with exit ${rc}; nothing more was done for this session"
-            kept=$((kept + 1)) ;;
-    esac
-# A heredoc, not `printf ... | while`: a piped while runs in a subshell and
-# every counter incremented above would be discarded at the `done`.
-done <<EOF
-${prefixes}
-EOF
-
-jlog reclaim_finished "" "examined=${examined} removed=${removed} kept=${kept} skipped=${skipped} empty=${empty}" \
-    ",\"examined\":${examined},\"removed\":${removed},\"kept\":${kept},\"skipped\":${skipped},\"empty\":${empty}"
+exit "$rc"

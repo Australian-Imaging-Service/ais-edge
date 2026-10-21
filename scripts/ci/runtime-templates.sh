@@ -653,8 +653,10 @@ if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
-    if cmd != ["xnat-ingest", plain] or "--loop" not in args:
-        raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", plain] or "--loop" in args:
+        raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
+    if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
+        raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
 if serialised != "-":
     # The stage that writes the writer's INPUT tree holds its own tree lock for
     # each pass, and the writer takes that lock before the upload-tree lock for
@@ -676,7 +678,7 @@ if serialised != "-":
     if strategy.get(serialised) != "Recreate":
         raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
 print(f"{locked} under {tree[locked]}.lock, stops on TERM and INT" + (", reclaimer on the same locks" if reclaimer else "")
-      + ("" if plain == "-" else f", {plain} loops on its own")
+      + ("" if plain == "-" else f", {plain} holds its producer lock")
       + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
@@ -727,6 +729,13 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
             continue
         for c in doc["spec"]["template"]["spec"].get("containers", []):
             cmd = c.get("command") or []
+            if c["name"] in ("group", "group-fs", "assign"):
+                expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
+                tree = "assigned" if expected == "assign" else "grouped"
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", expected]:
+                    raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
+                if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
+                    raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
             if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
                 wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
 # serialised (one lock), locked (.alive + one lock), locked with the outer lock
@@ -1072,5 +1081,24 @@ for case in sys.argv[2:]:
 print("every rendered Kubernetes log source scans at a one-second interval")
 PY_VECTOR_POLL
 )" && ci_pass "$vector_poll_out" || ci_fail "$vector_poll_out"
+
+ci_heading "Loki delete requests use its persistent volume"
+loki_path_out="$(python3 - "$CI_RENDER_DIR/mgmt-defaults.yaml" 2>&1 <<'PY_LOKI_PATH'
+import sys, yaml
+objects = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+configs = [yaml.safe_load(d["data"]["config.yaml"]) for d in objects
+           if d.get("kind") == "ConfigMap" and "config.yaml" in d.get("data", {})]
+config = next(c for c in configs if "compactor" in c)
+assert config["compactor"]["delete_request_store"] == "filesystem"
+assert config["storage_config"]["filesystem"]["directory"] == "/var/loki/delete-requests"
+loki = next(d for d in objects if d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "mgmt-loki")
+container = next(c for c in loki["spec"]["template"]["spec"]["containers"] if c["name"] == "loki")
+assert container["securityContext"]["readOnlyRootFilesystem"] is True
+mount = next(m for m in container["volumeMounts"] if m["mountPath"] == "/var/loki")
+assert not mount.get("readOnly", False)
+assert any(v["metadata"]["name"] == mount["name"] for v in loki["spec"]["volumeClaimTemplates"])
+print("filesystem delete-request store is under writable /var/loki with a read-only root")
+PY_LOKI_PATH
+)" && ci_pass "$loki_path_out" || ci_fail "$loki_path_out"
 
 ci_summary "runtime-templates"

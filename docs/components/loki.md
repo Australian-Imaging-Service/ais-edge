@@ -210,3 +210,19 @@ blocks kept in step by hand.
   fit Vector's `log_to_metric` (string-pattern alerts)
 - Multi-tenant mode with per-edge tenant IDs (currently we use a single
   tenant and label-scope by `cluster=`)
+
+### Delete-request store path
+
+The management chart stores log chunks in S3 and delete requests on the Loki
+persistent volume. `compactor.working_directory` holds local compactor work;
+it does not set the root of the filesystem object store. Set
+`loki.loki.storage_config.filesystem.directory` to `/var/loki/delete-requests`.
+Without that root, the default `index/` prefix is relative to the container's
+read-only working directory and upload of the delete-request database fails
+with `mkdir index: read-only file system`.
+
+The path is under the existing `/var/loki` volume. It keeps the compactor
+metadata across restarts without granting writes to the container root. The
+tier-1 chart uses filesystem chunk storage, which already supplies
+`/var/loki/chunks` as the filesystem root; that configuration needs no change.
+See the [Loki storage and compactor configuration](https://grafana.com/docs/loki/latest/configure/).

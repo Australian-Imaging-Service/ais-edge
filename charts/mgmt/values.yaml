@@ -426,8 +426,6 @@ xnatUpload:
   # edge. Pin a tag or a commit. The management node needs access to github.com
   # for the install.
   #
-  # CAUTION: the vendor package has no v0.1.2 tag yet (vendor PR #3 is open).
-  # pip cannot install a missing tag.
   #   extraPipPackages:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
@@ -1029,6 +1027,12 @@ loki:
       # error that reads as "the bucket was never created" and is not. Full
       # explanation: docs/components/loki.md.
       delete_request_store: filesystem
+    storage_config:
+      filesystem:
+        # The S3 chunk store does not set a filesystem root. The compactor's
+        # delete-request object store otherwise tries to write ./index on the
+        # read-only container root. Keep it on the existing persistent volume.
+        directory: /var/loki/delete-requests
 
     commonConfig:
       replication_factor: 1

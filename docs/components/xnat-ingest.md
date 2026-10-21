@@ -458,6 +458,37 @@ label: `SessionStagedNotConfirmedInXNAT` counts only an XNAT proof as
 delivery, and `ReclaimerRunUnavailable` judges the edge's reclaimer apart
 from the management one.
 
+### Stopping stage loops
+
+The chart runs group, group-orthanc and assign through the same pass wrapper
+as the other producers. Each pass holds the lock of its output tree. Group and
+group-orthanc share `grouped.lock`; assign holds `assigned.lock`. These locks
+stop two writers of the same tree. They do not make the full pipeline a
+transaction.
+
+TERM and INT stop an idle wrapper at once. A busy wrapper lets the current
+pass finish, releases its lock, and starts no further pass. A pass that lasts
+longer than the pod termination grace period can still be killed.
+
+During a `helm upgrade`, the `Recreate` strategy stops the old pod before the
+new pod starts. A pod deletion or an eviction does not wait: the replacement
+can start while the old pod still stops. The lock covers that case. On the
+first upgrade to this chart the old pod has no lock, but `Recreate` stops it
+first, so the upgrade itself is safe. An old pod that ignores TERM is killed
+after the grace period, possibly during a pass, as before this change.
+
+Each pass starts a new `xnat-ingest` process. Its imports take about 1.6 s of
+CPU per pass, the same cost that the deidentify and package stages already
+have. A new process for each pass also returns its memory after the pass.
+
+The data-policy loop also stops from idle sleep and after a current foreground
+command. An external child that does not finish within the grace period can
+still be killed.
+
+The S3 uploader uses the same sleep handling. Its current copy can finish
+before the shell exits. If a repair claim remains when it exits between
+commands, the existing startup recovery returns that claim to the queue.
+
 ### Upgrade or roll back while the cleanup can delete
 
 This applies to both upload modes: the staged-reclaimer deletes from the
@@ -533,6 +564,42 @@ required restore window, backup handling, legal holds and key retention.
 Use a dry-run inventory first. Do not enable automatic deletion until the
 site approves those decisions and verifies that the required maps remain
 recoverable. This proposal changes no retention behavior.
+
+### Reclaimer connections and fresh evidence
+
+The staged reclaimer starts one Python worker for its data pass. The worker
+handles session names in sequence and keeps only the current session's file
+listing and proof in memory. Startup probes remain separate from that pass.
+It reuses connections, not response data. Each session gets a fresh listing
+when it is examined; the run-start discovery contains names only.
+
+For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+It queries the experiment endpoint before reading its file catalog and keeps
+the per-file HEAD checks. A missing experiment, missing file, failed request,
+invalid response or failed login keeps the affected data. If a login expires,
+one bounded login retry precedes the request retry. The worker closes any
+login it opens; the shell closes the initial login that it lends the worker.
+The connection can stay open across sessions without retaining their listings.
+On TERM, the shell forwards the signal to the worker and waits for its cleanup.
+The worker closes a renewed login through a fresh connection, even if the
+signal interrupted an HTTP response.
+
+For S3 storage, the worker uses one client and lists each session prefix again
+at its decision. Every object delete still uses the ETag from that fresh
+listing as an `If-Match` condition. It does not delete a key that appeared
+later. Discovery uses a recursive object listing and deduplicates session names
+on disk. It examines only sessions containing objects; retained empty folders
+and folder-marker keys add no per-session work. Folders stay in place because a
+filer folder removal could race with a new upload. All discovery pages must
+validate before any session is examined; discovery keys are never deletion proof.
+
+The `empty` summary field remains for compatibility. In S3 mode it normally stays
+zero; it counts only sessions that become empty between discovery and the fresh
+per-session listing. Alert rules do not use that field.
+
+These checks do not make XNAT and the source store one transaction. They
+preserve the existing per-file evidence, local writer locks and conditional
+deletes. A dry run makes the same checks and removes no data.
 
 ## Benefits
 
