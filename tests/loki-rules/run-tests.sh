@@ -252,6 +252,26 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed-error","level":"ERROR"}	{malformed JSON
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-error","level":"ERROR"}	{"message":"Permission denied","stage_message":"Assign completed with 1 errors"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-alias-info","level":"INFO"}	{"message":"Reading file","stage_message":"Traceback (most recent call last):"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-errors"}	{"level":"ERROR","message":"synthetic transport failure"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-errors"}	{"level":"ERROR","message":"synthetic transport failure"}
+5	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-errors"}	{"level":"ERROR","message":"synthetic transport failure"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-two"}	{"level":"ERROR","message":"synthetic transport failure"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-two"}	{"level":"ERROR","message":"synthetic transport failure"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-traceback"}	{"level":"INFO","message":"Traceback (most recent call last): synthetic"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-traceback"}	{"level":"INFO","message":"Traceback (most recent call last): synthetic"}
+5	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-traceback"}	{"level":"INFO","message":"Traceback (most recent call last): synthetic"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-info"}	{"level":"INFO","message":"ERROR is a word here"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-info"}	{"level":"INFO","message":"ERROR is a word here"}
+5	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-info"}	{"level":"INFO","message":"ERROR is a word here"}
+1	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-checksums"}	{"level":"ERROR","message":"already exists on XNAT with different checksums"}
+3	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-checksums"}	{"level":"ERROR","message":"already exists on XNAT with different checksums"}
+5	{"namespace":"xnat-upload","component":"upload","cluster":"mgmt-checksums"}	{"level":"ERROR","message":"already exists on XNAT with different checksums"}
+1	{"namespace":"xnat-upload","component":"assign","cluster":"mgmt-wrong-component"}	{"level":"ERROR","message":"synthetic"}
+3	{"namespace":"xnat-upload","component":"assign","cluster":"mgmt-wrong-component"}	{"level":"ERROR","message":"synthetic"}
+5	{"namespace":"xnat-upload","component":"assign","cluster":"mgmt-wrong-component"}	{"level":"ERROR","message":"synthetic"}
+1	{"namespace":"xnat-ingest","component":"upload","cluster":"mgmt-wrong-namespace"}	{"level":"ERROR","message":"synthetic"}
+3	{"namespace":"xnat-ingest","component":"upload","cluster":"mgmt-wrong-namespace"}	{"level":"ERROR","message":"synthetic"}
+5	{"namespace":"xnat-ingest","component":"upload","cluster":"mgmt-wrong-namespace"}	{"level":"ERROR","message":"synthetic"}
 EOF
 }
 
@@ -335,6 +355,13 @@ stage-body-component	IngestStageError	stage-body-component	fire	stream labels ar
 stage-malformed-error	IngestStageError	stage-malformed-error	nofire	stream labels are authoritative; malformed envelopes are excluded
 stage-alias-error	IngestStageError	stage-alias-error	fire	decoded message alias must not use an unrelated body field
 stage-alias-info	IngestStageError	stage-alias-info	nofire	decoded message alias must not use an unrelated body field
+mgmt-errors	XNATUploadRetryStorm	mgmt-errors	fire	management uploader retry contract
+mgmt-two	XNATUploadRetryStorm	mgmt-two	nofire	management uploader retry contract
+mgmt-traceback	XNATUploadRetryStorm	mgmt-traceback	fire	management uploader retry contract
+mgmt-info	XNATUploadRetryStorm	mgmt-info	nofire	management uploader retry contract
+mgmt-checksums	XNATUploadRetryStorm	mgmt-checksums	nofire	management uploader retry contract
+mgmt-wrong-component	XNATUploadRetryStorm	mgmt-wrong-component	nofire	management uploader retry contract
+mgmt-wrong-namespace	XNATUploadRetryStorm	mgmt-wrong-namespace	nofire	management uploader retry contract
 EOF
 }
 
