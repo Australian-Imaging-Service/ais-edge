@@ -553,6 +553,76 @@ working until something restarts it — see the note in
 > again without the original identifiers. Treat it as permanent per site, and
 > back it up with the same care as the age key.
 
+### Pointing the uploader at another XNAT
+
+The XNAT URL, account and password live in one Secret, `xnat-credentials` in
+`xnat-upload`, with the keys `server`, `username` and `password`. Only the
+management side talks to XNAT: the uploader `mgmt-upload-<edge>` and the
+reclaimer CronJob `mgmt-reclaim-<edge>`. An edge in `upload.mode: s3` holds no
+XNAT credential. The Secret is defined in the management site's
+`sites/<mgmt-site>/secrets.enc.yaml`.
+
+Work in the deploy checkout on the management host, as the operator whose age
+key is a recipient of that file:
+
+```bash
+cd ~/ais-edge
+scripts/site-secrets.sh edit <mgmt-site>     # sops: decrypts into $EDITOR only
+```
+
+Change the three values of the `xnat-credentials` document and save:
+
+```yaml
+kind: Secret
+metadata:
+  name: xnat-credentials
+  namespace: xnat-upload
+type: Opaque
+stringData:
+  server: https://xnat.example.org     # the new XNAT, with the scheme
+  username: <account>
+  password: <password>
+```
+
+The `username` and `password` can also be an XNAT alias token: put the alias in
+`username` and its secret in `password`. XNAT accepts the pair as a login, and
+the uploader and the reclaimer send it unchanged. An alias token expires, by
+default two days after creation; the uploader then gets 401 on every pass and
+`XNATAuthFailure` fires. Use a token with a long life, or plan the rotation.
+
+sops re-encrypts on save, so no plaintext reaches the disk. If nothing changed,
+sops says `File has not changed`. Then:
+
+```bash
+scripts/site-secrets.sh check                 # the file is still encrypted
+scripts/site-secrets.sh apply <mgmt-site>     # decrypt straight into the cluster
+kubectl -n xnat-upload rollout restart deploy/mgmt-upload-<edge>
+kubectl -n xnat-upload rollout status  deploy/mgmt-upload-<edge>
+```
+
+`apply` shows the kubectl context and the namespaces, and asks before it writes.
+The reclaimer CronJob reads the Secret at each run, so it needs no restart.
+Verify with the uploader log and the live check:
+
+```bash
+kubectl -n xnat-upload logs deploy/mgmt-upload-<edge> --tail=50
+make verify-live SITE=<mgmt-site>
+```
+
+A wrong URL or password shows as 401 or a connection error in the first pass,
+and `XNATAuthFailure` fires. For an XNAT with a certificate the node does not
+trust, set `xnatUpload.verifySsl: false` in the management site values and
+upgrade the release; the chart default is already `false`.
+
+Two cautions:
+
+- Commit and push the re-encrypted `secrets.enc.yaml` from that checkout. The
+  encrypted file is meant to be in git; `.gitignore` blocks only the plaintext
+  variants.
+- Sessions already staged in the bucket carry no XNAT identity. After the switch
+  the uploader delivers them to the new XNAT. To hold them back, scale the
+  uploader to zero before the switch and back to one when the new XNAT is ready.
+
 ### Turning on Orthanc's REST API authentication
 
 The shipped edge site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
