@@ -556,10 +556,15 @@ signal interrupted an HTTP response.
 For S3 storage, the worker uses one client and lists each session prefix again
 at its decision. Every object delete still uses the ETag from that fresh
 listing as an `If-Match` condition. It does not delete a key that appeared
-later. Empty prefixes need one fresh listing and no XNAT lookup. They are
-left in place: a filer folder removal could race with a new upload, and the
-S3 listing does not make that removal atomic. Reusing the worker removes the
-Python and boto3 startup cost for each retained empty prefix.
+later. Discovery uses a recursive object listing and deduplicates session names
+on disk. It examines only sessions containing objects; retained empty folders
+and folder-marker keys add no per-session work. Folders stay in place because a
+filer folder removal could race with a new upload. All discovery pages must
+validate before any session is examined; discovery keys are never deletion proof.
+
+The `empty` summary field remains for compatibility. In S3 mode it normally stays
+zero; it counts only sessions that become empty between discovery and the fresh
+per-session listing. Alert rules do not use that field.
 
 These checks do not make XNAT and the source store one transaction. They
 preserve the existing per-file evidence, local writer locks and conditional

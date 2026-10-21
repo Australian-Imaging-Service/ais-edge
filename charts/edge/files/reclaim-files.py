@@ -57,6 +57,7 @@ import json
 import os
 import re
 import ssl
+import sqlite3
 import stat
 import sys
 import time
@@ -1021,26 +1022,45 @@ def make_s3_client():
 
 
 def iter_bucket_sessions(s3):
-    """Validate discovery pages, yielding names, never session object snapshots."""
+    """Discover live session names recursively; object keys are never proof.
+
+    Deduplicate on disk, including non-adjacent keys and pagination boundaries.
+    Callers finish this validated discovery before examining any session.
+    """
     prefix = E.get("S3_PREFIX", "staged").strip("/") + "/"
     tokens, complete = set(), False
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix, Delimiter="/"):
-        if complete or not isinstance(page.get("IsTruncated"), bool):
-            raise ValueError("a page without a completion marker")
-        if page["IsTruncated"]:
-            token = page.get("NextContinuationToken")
-            if not isinstance(token, str) or not token or token in tokens:
-                raise ValueError("a truncated page without a new continuation token")
-            tokens.add(token)
-        else:
-            complete = True
-        for entry in page.get("CommonPrefixes") or []:
-            name = entry["Prefix"]
-            if not isinstance(name, str) or not name.startswith(prefix) or not name.endswith("/"):
-                raise ValueError("a prefix outside the requested staging tree")
-            yield name[len(prefix):].rstrip("/")
-    if not complete:
-        raise ValueError("the listing ended without its last page")
+    with tempfile.TemporaryDirectory(prefix="reclaim-discovery-") as scratch:
+        with contextlib.closing(sqlite3.connect(os.path.join(scratch, "names.db"))) as names:
+            names.execute("PRAGMA cache_size=-2048")
+            names.execute("CREATE TABLE names (name TEXT PRIMARY KEY)")
+            pages = s3.get_paginator("list_objects_v2").paginate(Bucket=E["S3_BUCKET"], Prefix=prefix)
+            for page in pages:
+                if complete or not isinstance(page.get("IsTruncated"), bool):
+                    raise ValueError("a page without a completion marker")
+                if page["IsTruncated"]:
+                    token = page.get("NextContinuationToken")
+                    if not isinstance(token, str) or not token or token in tokens:
+                        raise ValueError("a truncated page without a new continuation token")
+                    tokens.add(token)
+                else:
+                    complete = True
+                entries = page.get("Contents", [])
+                if not isinstance(entries, list) or page.get("CommonPrefixes"):
+                    raise ValueError("not a recursive object listing")
+                for entry in entries:
+                    key = entry["Key"]
+                    if not isinstance(key, str) or not key.startswith(prefix):
+                        raise ValueError("an object outside the requested staging tree")
+                    if key.endswith("/"):
+                        continue  # Folder markers cannot create work for an empty session.
+                    name, separator, relative = key[len(prefix):].partition("/")
+                    if not separator or not name or not relative or "\n" in name or "\r" in name:
+                        raise ValueError("an object key without a session segment")
+                    inserted = names.execute("INSERT OR IGNORE INTO names VALUES (?)", (name,))
+                    if inserted.rowcount:
+                        yield name
+            if not complete:
+                raise ValueError("the listing ended without its last page")
 
 
 def bucket_sessions():

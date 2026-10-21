@@ -1022,10 +1022,10 @@ assert_s3_batch_keeps_session()  { reason "$1" upload_batch_present && s3_has "s
 setup_s3_crash_retry()     { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "[d['objects'].pop(k) for k in ['$SR/f1.dcm','$SR/f2.dcm']]"; }
 assert_s3_crash_retry()    { [ "$(s3_deletes)" = 3 ] || { echo "want the 3 sidecars deleted, got $(s3_deletes)"; return 1; }; }
 # A prefix with no objects (an empty folder entry): nothing to do, no per-session
-# event, counted as empty in the summary.
+# event; recursive discovery does not examine it.
 setup_s3_empty_prefix()    { s3_set "d['folders']=['staged/$SESS/']"; }
 assert_s3_empty_prefix()   { ! grep -q "\"session\":\"$SESS\"" "$1" || { echo "an event names the empty session"; return 1; }
-                             grep -q '"empty":1' "$1" || { echo "the summary does not count it as empty"; return 1; }; }
+                             grep -q '"empty":0' "$1" || { echo "empty folder was unexpectedly examined"; return 1; }; }
 setup_s3_dry_run()         { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; }
 assert_s3_dry_run()        { no_deletes; }
 setup_s3_too_young()       { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_modified 3600; }
@@ -1033,10 +1033,12 @@ assert_s3_too_young()      { no_deletes; }
 setup_s3_listing_error()   { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['status']={'list':500}"; }
 assert_s3_listing_error()  { no_deletes; }
 # The first page of the session's object listing is truncated without a token (the
-# session-name listing uses a delimiter and is one page): the snapshot refuses it, the
+# recursive discovery is complete): the fresh snapshot refuses it, the
 # session is kept with listing_incomplete, and nothing is deleted (codex-193).
-setup_s3_listing_truncated() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['truncate_no_token']=True"; }
+setup_s3_listing_truncated() { s3_session "$SESS" 2; xnat_files subj EXP1 visit 2; s3_set "d['truncate_no_token']=True; d['truncate_prefix']='staged/$SESS/'"; }
 assert_s3_listing_truncated(){ reason "$1" listing_incomplete && no_deletes; }
+setup_s3_discovery_truncated() { s3_session "$SESS" 2; s3_set "d['truncate_no_token']=True"; }
+assert_s3_discovery_truncated(){ grep -q '"reason":"staging_list_failed"' "$1" && no_deletes; }
 setup_s3_pagination()      { s3_session "$SESS" 3; xnat_files subj EXP1 visit 3; s3_set "d['page']=2"; }
 assert_s3_pagination()     { [ "$(s3_deletes)" = 6 ] || { echo "want 6 deletes over 3 pages, got $(s3_deletes)"; return 1; }; }
 # The gate: both bucket attributes, or nothing is examined.
@@ -1094,6 +1096,7 @@ run_s3_case s3_dry_run             no  reclaim_skipped      DRY_RUN=true
 run_s3_case s3_too_young           no  reclaim_skipped      MIN_AGE=1d
 run_s3_case s3_listing_error       no  reclaim_unavailable
 run_s3_case s3_listing_truncated   no  reclaim_kept
+run_s3_case s3_discovery_truncated no  reclaim_unavailable
 run_s3_case s3_pagination          yes reclaim_removed
 run_s3_case s3_gate_not_disabled   no  reclaim_unavailable
 run_s3_case s3_gate_not_drained    no  reclaim_unavailable

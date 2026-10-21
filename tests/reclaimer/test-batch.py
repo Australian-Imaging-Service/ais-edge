@@ -191,7 +191,7 @@ class BatchTests(unittest.TestCase):
     def test_one_client_fresh_lists_and_proofs(self):
         self.assertEqual(self.run_batch(), 0)
         self.assertFalse(self.s3.objects)
-        self.assertEqual(sum(c == ("list", "staged/", "/") for c in self.s3.calls), 1)
+        self.assertEqual(sum(c == ("list", "staged/", None) for c in self.s3.calls), 1)
         for subject in ("first", "second"):
             paths = [p for method, p, cache in self.xnat.calls]
             self.assertIn(f"/data/experiments/{subject}", paths)
@@ -304,20 +304,78 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len(self.s3.objects), 2)
         self.assertEqual(self.events[-1]["removed"], 1)
 
-    def test_empty_prefixes_use_fresh_lists_without_xnat(self):
+    def test_empty_prefixes_are_not_discovered(self):
         self.s3.objects.clear()
         self.run_batch()
         self.assertEqual(self.xnat.calls, [])
-        self.assertEqual(self.events[-1]["empty"], 2)
-        self.assertEqual(len(self.s3.calls), 3)
+        self.assertEqual(self.events[-1]["empty"], 0)
+        self.assertEqual(len(self.s3.calls), 1)
 
     def test_incomplete_discovery_never_deletes(self):
         def pages(**kwargs):
-            yield {"IsTruncated": True, "CommonPrefixes": [{"Prefix": "staged/proj.first.visit/"}]}
+            yield {"IsTruncated": True, "NextContinuationToken": "next",
+                   "Contents": [{"Key": "staged/proj.first.visit/file"}]}
         self.s3.paginate = pages
         self.assertEqual(self.run_batch(), self.mod.BATCH_UNAVAILABLE)
         self.assertFalse(any(c[0] == "delete" for c in self.s3.calls))
         self.assertNotIn("reclaim_finished", [e["event"] for e in self.events])
+
+    def test_many_empty_folders_do_not_increase_examined_work(self):
+        # A delimiter listing would enumerate these historical folders. A recursive
+        # listing has identical objects regardless of how many folders remain.
+        listing_counts = []
+        for count in (0, 20_000):
+            with self.subTest(empty_folders=count):
+                self.s3 = FakeS3(["proj.first.visit", "proj.second.visit"])
+                self.s3.names.extend(f"proj.empty{i}.visit" for i in range(count))
+                self.run_batch()
+                self.assertEqual(self.events[-1]["examined"], 2)
+                self.assertEqual(self.events[-1]["empty"], 0)
+                listing_counts.append(sum(c[0] == "list" for c in self.s3.calls))
+        self.assertEqual(listing_counts[0], listing_counts[1])
+
+    def test_folder_markers_do_not_create_empty_session_work(self):
+        self.s3.objects["staged/old.empty.visit/"] = b""
+        self.run_batch()
+        self.assertEqual(self.events[-1]["examined"], 2)
+        self.assertIn("staged/old.empty.visit/", self.s3.objects)
+
+    def test_nonadjacent_repeated_session_keys_are_examined_once(self):
+        def pages(**kwargs):
+            if kwargs["Prefix"] == "staged/":
+                self.assertNotIn("Delimiter", kwargs)
+                yield {"IsTruncated": True, "NextContinuationToken": "next",
+                       "Contents": [{"Key": "staged/proj.first.visit/a"},
+                                    {"Key": "staged/proj.second.visit/a"}]}
+                yield {"IsTruncated": False,
+                       "Contents": [{"Key": "staged/proj.first.visit/b"}]}
+            else:
+                yield from FakeS3.paginate(self.s3, **kwargs)
+        self.s3.paginate = pages
+        self.run_batch()
+        self.assertEqual(self.events[-1]["examined"], 2)
+
+    def test_malformed_recursive_pages_examine_nothing(self):
+        pages = [
+            {"IsTruncated": False, "Contents": [{"Key": "staged/foo"}]},
+            {"IsTruncated": False, "Contents": [{"Key": "elsewhere/a/b"}]},
+            {"IsTruncated": False, "Contents": {"Key": "staged/a/b"}},
+            {"IsTruncated": False, "Contents": [{"Key": "staged//file"}]},
+            {"IsTruncated": False, "CommonPrefixes": [{"Prefix":"staged/foo/"}]},
+            {"IsTruncated": True, "NextContinuationToken": "same", "Contents": []},
+        ]
+        for page in pages:
+            with self.subTest(page=page):
+                self.s3 = FakeS3(["proj.first.visit"])
+                def listing(**kwargs):
+                    yield {"IsTruncated": True, "NextContinuationToken": "same",
+                           "Contents": [{"Key":"staged/proj.first.visit/file"}]}
+                    yield page
+                self.s3.paginate = listing
+                self.assertEqual(self.run_batch(), self.mod.BATCH_UNAVAILABLE)
+                self.assertFalse(any(c[0] == "delete" for c in self.s3.calls))
+                self.assertNotIn("reclaim_finished", [e["event"] for e in self.events])
+
 
 
 if __name__ == "__main__":
