@@ -1082,7 +1082,7 @@ installs for the running Python, so the pod passes its own image in.
      scripts/ci/runtime-templates.sh runs the rendered wrappers with dash and
      sends these signals. */}}
 {{- define "edge.serialisedStage" -}}
-{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
 - {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
@@ -1099,7 +1099,7 @@ installs for the running Python, so the pod passes its own image in.
      deidentified.lock, so the nested order cannot deadlock. */}}
 {{- define "edge.lockedStage" -}}
 {{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
-{{- $tree := dict "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 {{- $outer := "" }}
 {{- if gt (len .) 3 }}
 {{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}
