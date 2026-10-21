@@ -59,6 +59,8 @@ all required features and that release has passed the site's validation.
   (`ingest.extraPipPackages`). The node needs access to github.com for that
   install, or a mirror of the package. Vendor v0.1.2 has this fix (vendor PR #3,
   tagged on 2026-10-21). The pins below install it from that git tag.
+  PyPI has the same version (`fileformats-vendor-australianimagingservice==0.1.2`)
+  for sites that install from a package index or a mirror of it.
 - fileformats-extras 0.22.3 or later, which has the `reproducible` option of the
   zip converter. The `DICOM-zip` spec sets `reproducible=true`: fixed entry
   timestamps and sorted entries, so the zip of unchanged files has the same
