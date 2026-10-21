@@ -1129,6 +1129,8 @@ vector:
     sources:
       kubelet_logs:
         type: kubernetes_logs
+        # Include short-lived uploader/reclaimer pods before log removal.
+        glob_minimum_cooldown_ms: 1000
         auto_partial_merge: true
     transforms:
       add_cluster_label:

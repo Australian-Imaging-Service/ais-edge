@@ -184,3 +184,18 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 - A second Vector sink to a long-term archive (e.g. Glacier) for
   compliance retention beyond Loki's 30-day window
 - Unit tests for the VRL transforms (Vector has a `vector test` runner)
+
+### Short-lived pods
+
+The Kubernetes log source discovers new log files every second. The pinned
+Vector 0.49 source defaults to 60 seconds, which can miss a pod whose log file
+is created and removed between scans. The shorter interval gives a pod that
+runs for 5-10 seconds several discovery opportunities. This is best-effort
+collection: unavailable pod metadata, node failures or files removed before
+discovery can still lose logs.
+
+The setting is `glob_minimum_cooldown_ms: 1000`. It increases local filesystem
+scans and checkpoint work; it does not request an API relist every second.
+Check Vector CPU and disk activity on nodes with many pod logs before raising
+the workload. See the [pinned source configuration](https://github.com/vectordotdev/vector/blob/v0.49.0/src/sources/kubernetes_logs/mod.rs)
+and [Kubernetes log source documentation](https://vector.dev/docs/reference/configuration/sources/kubernetes_logs/#glob_minimum_cooldown_ms).
