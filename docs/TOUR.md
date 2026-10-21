@@ -245,7 +245,8 @@ dataPolicy:
     orthancStorage: {reclaim: onGrouped,       minAge: 7d}
     grouped:        {reclaim: onAssigned}      # no minAge — rejected at render
     assigned:       {reclaim: onUploaded,      minAge: 0}
-    s3Staged:       {reclaim: onXnatConfirmed, minAge: 1d, maxRemovals: 50}
+    # Keep this bucket clock above the edge stagedReclaimer.minAge (1d).
+    s3Staged:       {reclaim: onXnatConfirmed, minAge: 36h, maxRemovals: 50}
 ```
 
 **File:** `sites/<site>/values.yaml` — passed to **both** charts, so a site has
@@ -1033,7 +1034,8 @@ $EDITOR sites/<management-site>/values.yaml
 # 5. encrypt before committing anything
 scripts/site-secrets.sh encrypt edge-syd
 
-# 6. install, then prove it worked
+# 6. install, wait for all expected edge pipeline pods to be Running and ready,
+# then prove it worked. install.sh does not wait for those pods.
 ./install.sh <management-site>
 make verify-live SITE=<management-site>
 ```
@@ -1294,8 +1296,11 @@ Neither substitutes for the other.
 
 ### 7.1 Verifying an install — `make verify-live`
 
-**Run this straight after `./install.sh`, and any time you are asked "is it
-working?"** It is read-only: it creates, patches and deletes nothing.
+**Run this after the expected edge pipeline pods are Running and ready,
+and whenever you need to check the deployment.** `install.sh` does not wait
+for those pods. A check during startup can report a temporary failure.
+Do not skip the check: accepting manifests does not prove delivery.
+It is read-only: it creates, patches and deletes nothing.
 
 ```bash
 make verify-live SITE=stream-2-ab-dev
@@ -1632,6 +1637,9 @@ Two things surfaced along the way, neither in the plumbing:
   mismatch that `xnat-ingest` re-logs every loop for several minutes after
   a session first lands, before XNAT's own catalog catches up — see
   `docs/components/xnat-ingest.md`, "Known upstream defects" §3.
+  That paragraph records the 0.15.0 behavior. The empty-digest ERROR was fixed
+  in 0.15.3. Section 3 now separates that history from real content mismatches
+  and the remaining name-only comparison when XNAT has no computed digest.
 
 **12. LIVE AND UNALERTED as of 2026-08-10: XNAT lists zero files for a
 resource it says holds one, so nothing has been confirmed since

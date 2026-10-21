@@ -306,6 +306,8 @@ dataPolicy:
     # De-identified copy held inside Orthanc until group-orthanc has pulled
     # it. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
+    # CAUTION: default xnat-ingest 0.16.2 writes no export snapshot label.
+    # This backend keeps every study until the image has xnat-ingest PR #211.
     orthancStorage:
       # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
       # goes through the backend below, because Orthanc names files by UUID and
@@ -406,7 +408,6 @@ dataPolicy:
       reclaim: auto             # never | onUploaded  (auto = onUploaded)
       # The recovery window after upload, as for `deidentified` above. In both
       # upload modes the stagedReclaimer CronJob applies it.
-      minAge: 0
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -907,6 +908,8 @@ ingest:
     # Fernet.generate_key()). Set, mappings are written encrypted as
     # <session>.json.enc and are unreadable without it. Unset, they are plain
     # JSON on the same volume as the data they de-identify.
+    # Production ingest sites must set this reference. Empty means plaintext
+    # reidentification maps; existing plaintext is not migrated automatically.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
 
   # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`

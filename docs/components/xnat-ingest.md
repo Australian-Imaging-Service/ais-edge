@@ -4,9 +4,9 @@
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
 is the AIS-maintained Python tool that turns deid'd DICOMs into
-XNAT-ready sessions and uploads them. Upstream **0.15.0** is the pinned
+XNAT-ready sessions and uploads them. Upstream **0.16.2** is the pinned
 version. The old single `sort` command was split into these stages:
-1. **`group-orthanc`** — REST-pulls deid'd studies from Orthanc and
+1. **`group-orthanc`**: REST-pulls studies from Orthanc and
    groups their DICOMs into per-session directories
 2. **`assign`** — extracts the XNAT project/subject/session/scan IDs from
    the grouped DICOMs and stages them as a structured directory
@@ -23,7 +23,7 @@ node:
   the destination and `aws s3 sync` does not
 - **`xnat-ingest upload`** on the management node, rendered **once per
   edge site** rather than once for the fleet
-- **`xnat-ingest package`** on each edge VM — OPTIONAL and off by default
+- **`xnat-ingest package`** runs on each edge VM. It is optional and off by default
   (`ingest.package.enabled`, under `deid.engine: ingest` only). Reads
   `/data/deidentified` and writes `/data/packaged`: each DICOM series becomes
   one `DICOM-zip` resource (`archive.zip`) plus one DICOM sample. The
@@ -177,8 +177,8 @@ and no CA plumbing. The two modes are mutually exclusive and the chart
 refuses to render both — enabling both would push every session into
 XNAT twice.
 
-The `0.15.0` tag is the **merged-upstream** AIS build pulled from
-`ghcr.io/australian-imaging-service/xnat-ingest` — it replaces the earlier
+The `0.16.2` tag is the current **merged-upstream** AIS build pulled from
+`ghcr.io/australian-imaging-service/xnat-ingest`. It replaces the earlier
 local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
 structured-log output and the `upload --loop` reconnect fix) is now all
 upstream, so no local rebuild is needed — and no image-import step
@@ -509,6 +509,31 @@ package stage on or off moves the writer lock between `deidentified.lock` and
 `deidentified.lock` for each pass, see the writer lock above), and the fence
 follows the lock path for the reclaimer.
 
+### Reidentification maps at production sites
+
+The ingest deidentification engine writes maps under the pipeline `reid`
+directory, normally `/data/xnat-ingest/reid` on the host. Without
+`ingest.deidentify.reidEncryptKeySecret`, these maps are plaintext JSON.
+Production sites that use this engine must set this Secret reference and
+manage the key separately from the data. Restrict access to both the maps
+and the key. The Secret must contain `XINGEST_REID_ENCRYPT_KEY`, a valid
+Fernet key for the ingest command. Do not place the key in a values file.
+
+Enabling encryption affects new writes. It does not encrypt or remove
+existing `.json` maps. A later pass can leave both a plaintext map and an
+encrypted `.json.enc` map. Inventory existing maps and arrange a verified
+migration before claiming that the stored maps are encrypted. Routing labels
+can still contain original identifiers; select approved pseudonymous tags
+for the assign stage as described in the chart values.
+
+There is no retention rule for this directory. A proposed rule would retain
+each map until its delivery and retention obligations are met, then remove
+it after a site-selected interval. The site must decide that interval, the
+required restore window, backup handling, legal holds and key retention.
+Use a dry-run inventory first. Do not enable automatic deletion until the
+site approves those decisions and verifies that the required maps remain
+recoverable. This proposal changes no retention behavior.
+
 ## Benefits
 
 - **DICOM parsing already handles our edge cases** — (missing
@@ -533,7 +558,7 @@ follows the lock path for the reclaimer.
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
-| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.15.0` keeps starting pods with no registry at all. There is deliberately no image-import step in `install.sh` — a genuinely air-gapped site has to seed the tag into each node's container runtime itself |
+| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.16.2` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)
@@ -606,6 +631,23 @@ everything staged, and report success while doing it.
 expose the cache TTL as a flag.
 
 ### 3. A benign checksum mismatch logs at ERROR, every loop, until XNAT catches up
+
+**Status on 2026-10-20: fixed in 0.15.3.** Since 0.15.3, the upload compares a
+file by name only when XNAT lists it without a digest. So the ERROR `... already
+exists on XNAT with different checksums` now means a real difference. XNAT holds
+a file that staging does not, or a file with other content.
+`XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2 the upload logs this
+ERROR and continues. A later `Successfully uploaded all files in` line does not
+prove the content. The record below is the 0.15.0 measurement. Its statement
+that no alert rule matches the phrase is out of date.
+
+The opposite gap remains. When XNAT lists no digests (site checksums off, as on
+the AIS test XNAT, or digests not computed yet), the upload compares file names
+only. 0.16.2 logs this at DEBUG only. xnat-ingest PR #227 (open on 2026-10-20)
+logs one WARNING per resource and upload attempt. Content comparison needs
+computed XNAT digests. A site administrator must configure checksums and
+populate the catalogs. Do not treat a name-only check as proof of unchanged
+bytes.
 
 Measured with a synthetic drop (`scripts/site-secrets.sh` §"synthetic DICOM
 drop" in `docs/TOUR.md`): for several minutes right after a session first
