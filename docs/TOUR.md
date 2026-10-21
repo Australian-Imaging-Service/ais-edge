@@ -584,6 +584,12 @@ stringData:
   password: <password>
 ```
 
+The `username` and `password` can also be an XNAT alias token: put the alias in
+`username` and its secret in `password`. XNAT accepts the pair as a login, and
+the uploader and the reclaimer send it unchanged. An alias token expires, by
+default two days after creation; the uploader then gets 401 on every pass and
+`XNATAuthFailure` fires. Use a token with a long life, or plan the rotation.
+
 sops re-encrypts on save, so no plaintext reaches the disk. If nothing changed,
 sops says `File has not changed`. Then:
 
