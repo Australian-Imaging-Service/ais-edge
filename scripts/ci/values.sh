@@ -42,8 +42,8 @@ mkdir -p "$V"
 cat >"$V/mgmt-upload-extrapip.yaml" <<'EOF'
 xnatUpload:
   extraPipPackages:
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
 EOF
 
 cat >"$V/mgmt-base.yaml" <<'EOF'
@@ -401,8 +401,8 @@ ingest:
   package:
     enabled: true
   extraPipPackages:
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1"
-    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.1#subdirectory=extras"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+    - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
 EOF
 
 cat >"$V/edge-cloud.yaml" <<'EOF'
