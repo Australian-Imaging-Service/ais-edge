@@ -153,8 +153,11 @@ dataPolicy:
       # needs its python3 and boto3, and the uploader's own label rule. Pinned:
       # an unpinned tag is worst on the job that deletes data.
       image:
-        repository: ghcr.io/australian-imaging-service/xnat-ingest
-        tag: "0.16.2"
+        # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
+        # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
+        # repository when an upstream release contains them.
+        repository: ghcr.io/akshitbeniwal/xnat-ingest
+        tag: "0.16.2.post1"
         pullPolicy: IfNotPresent
 
   telemetry:
@@ -410,8 +413,11 @@ xnatUpload:
   enabled: true
   namespace: xnat-upload
   image:
-    repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.16.2"
+    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
+    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
+    # repository when an upstream release contains them.
+    repository: ghcr.io/akshitbeniwal/xnat-ingest
+    tag: "0.16.2.post1"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password
