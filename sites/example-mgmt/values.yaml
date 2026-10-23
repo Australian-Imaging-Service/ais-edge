@@ -291,6 +291,15 @@ certSync:
     #     name: s3-client-tls
     #     type: kubernetes.io/tls
 
+# OPTIONAL: needed when an edge in upload.mode s3 turns the package stage on.
+# The management uploader then reads the zips, so it needs the same DICOM
+# sample datatype as the edge (ingest.extraPipPackages in the edge site file).
+# See docs/package-stage.md, "Turn it on".
+# xnatUpload:
+#   extraPipPackages:
+#     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+#     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+
 # =============================================================================
 # Data policy — WRITTEN ONCE, HERE, FOR THE WHOLE SITE
 # =============================================================================
