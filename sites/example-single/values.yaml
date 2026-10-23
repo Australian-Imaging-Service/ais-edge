@@ -344,6 +344,19 @@ ingest:
 #         This is what makes tier-1 a single node: no staging bucket, no
 #         management-side reclaimer, no S3 credential to distribute.
 # s3      tier-2 only. Requires SeaweedFS and a management plane.
+  # OPTIONAL: the package stage. One zip per DICOM series plus one sample DICOM,
+  # in place of the individual files. Off by default. Turn it on only when the
+  # XNAT project wants zips. See docs/package-stage.md: "What it needs" names
+  # the image and library versions, "Turn it on" the steps.
+  # package:
+  #   enabled: true
+  # The DICOM sample datatype, installed by pip in an init container at every
+  # pod start of the package pod and of the upload pod. The node needs access
+  # to github.com, or to a mirror of the package.
+  # extraPipPackages:
+  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+
 upload:
   mode: direct
   direct:

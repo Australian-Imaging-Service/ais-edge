@@ -71,7 +71,8 @@ all required features and that release has passed the site's validation.
 
 ## Turn it on
 
-Add this to `sites/<site>/values.yaml`:
+Add this to `sites/<site>/values.yaml`. The example site files under `sites/`
+carry the same block, commented out, next to the other ingest settings:
 
 ```yaml
 ingest:
