@@ -165,6 +165,8 @@ spec:
             - "--dont-verify-ssl"
             {{- end }}
           env:
+            - name: TQDM_DISABLE
+              value: "1"
             - name: XINGEST_HOST
               valueFrom:
                 secretKeyRef:
