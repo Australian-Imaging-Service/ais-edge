@@ -239,6 +239,11 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-message","level":"ERROR"}	{}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-severity"}	{"message":"ERROR appears only in this message"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed","level":"unknown"}	{malformed JSON
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"invalid-info","level":"INFO"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"invalid-wrong-component","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"other","component":"assign","cluster":"invalid-wrong-app","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-upload","app":"xnat-ingest","component":"assign","cluster":"invalid-wrong-namespace","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"invalid-old","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-id","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/__invalid__/example' for manual review instead"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-summary","level":"ERROR"}	{"message":"Assign completed with 1 errors"}
 11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-old","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
@@ -338,6 +343,16 @@ stage-wrong-namespace	IngestStageError	stage-wrong-namespace	nofire	stage severi
 stage-missing-message	IngestStageError	stage-missing-message	fire	stage severity or traceback contract
 stage-missing-severity	IngestStageError	stage-missing-severity	nofire	stage severity or traceback contract
 stage-malformed	IngestStageError	stage-malformed	nofire	stage severity or traceback contract
+invalid-single	InvalidSessionAssigned	stage-invalid-id	fire	one missing-ID error is sufficient
+invalid-summary-only	InvalidSessionAssigned	stage-invalid-summary	nofire	a pass summary is not a session error
+invalid-empty	InvalidSessionAssigned	no-invalid-events	nofire	no event gives no alert
+invalid-single-holds	InvalidSessionAssigned	stage-invalid-id	fire	one event survives the one-minute hold	120
+invalid-single-expires	InvalidSessionAssigned	stage-invalid-id	nofire	one event leaves the ten-minute window	540
+invalid-info	InvalidSessionAssigned	invalid-info	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-component	InvalidSessionAssigned	invalid-wrong-component	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-app	InvalidSessionAssigned	invalid-wrong-app	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-namespace	InvalidSessionAssigned	invalid-wrong-namespace	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-old	InvalidSessionAssigned	invalid-old	nofire	only a recent assign ERROR in the ingest namespace matches
 stage-invalid-id	IngestStageError	stage-invalid-id	nofire	stage severity or traceback contract
 stage-invalid-summary	IngestStageError	stage-invalid-summary	nofire	stage severity or traceback contract
 stage-old	IngestStageError	stage-old	nofire	stage severity or traceback contract
