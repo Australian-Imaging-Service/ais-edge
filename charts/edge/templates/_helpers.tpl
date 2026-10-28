@@ -771,7 +771,7 @@ the two cannot drift and the alert can never name a directory nothing writes to.
        because its storage is UUID-named — a directory walk cannot tell which
        files belong to which session — and putting that knowledge inline would
        undo the independence that lets the de-identifier be replaced. */ -}}
-{{- if .Values.dataPolicy.originals.facilityBackup.enabled }}
+{{- if and .Values.storage.facilityBackup.enabled .Values.dataPolicy.originals.facilityBackup.enabled }}
 originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
 originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
 {{- end }}
