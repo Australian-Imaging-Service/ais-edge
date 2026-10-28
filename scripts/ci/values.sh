@@ -91,6 +91,19 @@ EOF
 
 # =============================================================================
 # POSITIVE overlays — combinations that must RENDER.
+
+cat >"$V/edge-backup-off.yaml" <<'EOF'
+deid: {engine: none, policyReviewed: true}
+storage:
+  facilityBackup: {enabled: false}
+dataPolicy: {enabled: true}
+EOF
+cat >"$V/edge-backup-policy-off.yaml" <<'EOF'
+dataPolicy:
+  enabled: true
+  originals:
+    facilityBackup: {enabled: false}
+EOF
 # =============================================================================
 
 # -- mgmt ---------------------------------------------------------------------
@@ -1275,6 +1288,8 @@ edge-observability-on	charts/edge	edge-base.yaml edge-observability-on.yaml
 edge-samba-on	charts/edge	edge-base.yaml edge-samba-on.yaml
 edge-filedrop-on	charts/edge	edge-base.yaml edge-filedrop-on.yaml
 edge-assign-filedrop-only	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-assign-filedrop-only.yaml
+edge-backup-off	charts/edge	edge-base.yaml edge-backup-off.yaml
+edge-backup-policy-off	charts/edge	edge-base.yaml edge-backup-policy-off.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-duration-base10	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-duration-base10.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml

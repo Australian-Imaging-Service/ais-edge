@@ -1028,4 +1028,19 @@ print("every rendered Kubernetes log source scans at a one-second interval")
 PY_VECTOR_POLL
 )" && ci_pass "$vector_poll_out" || ci_fail "$vector_poll_out"
 
+ci_heading "facility backup policy follows its mounted volume"
+if out="$(python3 - "$CI_RENDER_DIR" <<'PYBACKUP'
+import sys, pathlib, yaml
+for case, want in (("edge-datapolicy-on", True), ("edge-backup-off", False), ("edge-backup-policy-off", False)):
+    docs = [d for d in yaml.safe_load_all((pathlib.Path(sys.argv[1]) / (case + ".yaml")).read_text()) if d]
+    tables = [d["data"]["stages.tsv"] for d in docs if d.get("kind") == "ConfigMap" and "stages.tsv" in d.get("data", {})]
+    assert len(tables) == 1, (case, "missing policy table")
+    rows = {line.split("\t")[0] for line in tables[0].splitlines() if line.strip()}
+    for name in ("originals.facilityBackup", "originals.quarantine"):
+        assert (name in rows) == want, (case, name, "wrong policy row presence")
+    assert "derived.assigned" in rows, (case, "unrelated stage removed")
+print("backup on, volume off, and policy off rows match")
+PYBACKUP
+)"; then ci_pass "$out"; else ci_fail "$out"; fi
+
 ci_summary "runtime-templates"
