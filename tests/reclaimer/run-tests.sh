@@ -708,6 +708,12 @@ assert_fs_one_xnat_session() {
         || { echo "want 1 session opened and closed, got: $(tr '\n' ' ' < "$log")"; return 1; }
     ! grep -q '"event":"xnat_session_close_failed"' "$1" || { echo "the logout failed"; return 1; }
 }
+# A redirect must retain the data and name the URL correction.
+setup_fs_xnat_redirect() {
+    fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2
+    printf '301' > "$CASE_DIR/xnat-probe-status"
+}
+assert_fs_xnat_redirect() { grep '"event":"reclaim_unavailable"' "$1" | grep -q '"reason":"xnat_probe_failed"' && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && grep -q 'final HTTPS URL' "$1"; }
 # The login fails: the run still decides, with a login per request, and says so.
 setup_fs_session_fallback() { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; : > "$CASE_DIR/xnat-jsession.fail"; }
 assert_fs_session_fallback() { grep -q '"event":"xnat_session_fallback"' "$1" || { echo "no xnat_session_fallback event"; return 1; }; }
@@ -770,6 +776,7 @@ run_fs_case fs_lock_paths_unset        no  reclaim_unavailable WRITER_LOCK=
 run_fs_case fs_dry_run                 no  reclaim_skipped    DRY_RUN=true
 run_fs_case fs_build_dir_ignored       yes reclaim_removed
 run_fs_case fs_one_xnat_session        yes reclaim_removed
+run_fs_case fs_xnat_redirect           no  reclaim_unavailable
 run_fs_case fs_session_fallback        yes reclaim_removed
 run_fs_case fs_xnat_tls_verified       yes reclaim_removed      XNAT_VERIFY_SSL=true
 run_fs_case fs_session_close_failed    yes reclaim_removed

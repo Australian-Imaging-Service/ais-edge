@@ -91,6 +91,7 @@ except Exception: sys.exit(0)
 for p in d.get("items", []):
     st = p.get("status", {}); phase = st.get("phase")
     if phase == "Succeeded": continue
+    if any(o.get("kind") == "Job" for o in (p.get("metadata", {}).get("ownerReferences") or [])): continue
     cs = st.get("containerStatuses") or []
     ready = bool(cs) and all(c.get("ready") for c in cs)
     if phase == "Running" and ready: continue
@@ -208,19 +209,28 @@ if [ -z "$up" ]; then
 else
     code=$($K exec -n "$NS" "$up" -- env AIS_VERIFY_SSL="$VERIFY_SSL" sh -c '
         python3 - <<'"'"'PY'"'"' 2>/dev/null
-import os, ssl, urllib.request, base64
+import os, ssl, urllib.request, urllib.parse, base64
 host=os.environ.get("XINGEST_HOST",""); u=os.environ.get("XINGEST_USER",""); p=os.environ.get("XINGEST_PASS","")
 if not host: print("000"); raise SystemExit
+if urllib.parse.urlsplit(host).scheme.lower() != "https":
+    print("INSECURE_URL"); raise SystemExit
 ctx=ssl.create_default_context()
 if os.environ.get("AIS_VERIFY_SSL","true").lower()=="false":
     ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+# Match the reclaimer: do not follow a redirect with credentials.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener=urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ctx))
 r=urllib.request.Request(host.rstrip("/")+"/data/JSESSION")
 r.add_header("Authorization","Basic "+base64.b64encode(("%s:%s"%(u,p)).encode()).decode())
 try:
-    with urllib.request.urlopen(r, timeout=15, context=ctx) as resp: print(resp.status)
+    with opener.open(r, timeout=15) as resp: print(resp.status)
 except Exception as e: print(getattr(e,"code","000"))
 PY' 2>/dev/null | tr -d '[:space:]')
     case "$code" in
+        INSECURE_URL) bad "XNAT URL must use HTTPS" "set the server in xnat-credentials to its final HTTPS URL; HTTP sends credentials in clear text" ;;
+        301|302|303|307|308) bad "XNAT returned a redirect (HTTP $code)" "set the server in xnat-credentials to its final HTTPS URL; the reclaimer does not follow redirects" ;;
         200) ok "XNAT reachable and credentials accepted" ;;
         401|403) bad "XNAT rejected the credentials (HTTP $code)" "check xnat-credentials for ${SITE}" ;;
         000|"") bad "XNAT unreachable from the uploader" "no session can be delivered; check egress and XINGEST_HOST (this probe verified TLS: upload.direct.verifySsl=${VERIFY_SSL})" ;;
@@ -338,6 +348,41 @@ section "observability"
 if [ "$STACK" != "true" ] && [ "$STACK" != "True" ]; then
     skip "local stack disabled (observability.stack.enabled=false) — the pipeline is unaffected"
 else
+# Check site settings only. This does not prove that a test email was delivered.
+email_settings=$(python3 - "$VALUES" "${SCRIPT_DIR}/charts/edge/values.yaml" "observability.stack.alerting" <<'PYEMAIL'
+import re, sys, yaml
+from email.utils import getaddresses
+site, defaults = [yaml.safe_load(open(p)) or {} for p in sys.argv[1:3]]
+def lookup(values, key):
+    for part in key.split("."):
+        values = values.get(part, {}) if isinstance(values, dict) else {}
+    return values
+path = sys.argv[3]
+settings = dict(lookup(defaults, path))
+settings.update(lookup(site, path))
+if path == "observability.alerting" and site.get("observability", {}).get("enabled", True) is False:
+    print("DISABLED"); raise SystemExit
+def placeholder(value):
+    value = value.lower().strip().rstrip(".")
+    return bool(re.search(r"(^|\.)example\.(com|org|net)$|(^|\.)example$|change[ _-]?me", value))
+bad = []
+host = str(settings.get("smtpHost") or "").strip()
+if not host or placeholder(host.rsplit(":", 1)[0]) or any(c.isspace() for c in host):
+    bad.append("smtpHost")
+for key in ("emailTo", "emailFrom"):
+    addresses = getaddresses([str(settings.get(key) or "")])
+    if not addresses or any("@" not in addr or not addr.rsplit("@", 1)[0] or not addr.rsplit("@", 1)[1] or placeholder(addr.rsplit("@", 1)[1]) for _, addr in addresses):
+        bad.append(key)
+print("FAIL " + ", ".join(bad) if bad else "OK")
+PYEMAIL
+)
+case "$email_settings" in
+    OK) ok "alert email settings are populated and contain no example domains" ;;
+    DISABLED) skip "alert email settings: observability is disabled" ;;
+    FAIL*) bad "alert email settings need real values: ${email_settings#FAIL }" "edit the site's observability.stack.alerting settings; placeholder addresses do not deliver alerts" ;;
+    *) bad "could not read alert email settings" ;;
+esac
+
     # CHECK EACH BY ITS OWN KIND AND NAME, and require non-empty output.
     # This was `get statefulset X || get prometheus` — an `||` that let ANY
     # Prometheus CRD in the cluster satisfy both checks, so it reported
