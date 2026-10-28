@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers
+FAST_STAGES := render negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -145,6 +145,10 @@ duplicate-names: $(RENDER_DEP)
 
 runtime-templates: $(RENDER_DEP)
 	@scripts/ci/runtime-templates.sh
+
+# NOTES.txt renders only at install, so no other stage reads it.
+notes:
+	@scripts/ci/notes.sh
 
 # The only stage that needs no render.
 shell-syntax:
