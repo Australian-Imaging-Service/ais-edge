@@ -4,6 +4,8 @@ config/edge-nodes.env
 *.key
 *.pem
 *.token
+# k0s join tokens that scripts/05 writes into the repository root.
+join-token-*
 secrets/
 
 # SOPS. sites/*/secrets.enc.yaml IS committed — that is the point, it is
