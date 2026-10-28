@@ -1066,9 +1066,11 @@ observability:
   # THE STACK IS TUNED IN THE SUBCHART BLOCKS AT THE BOTTOM OF THIS FILE
   # (`loki:` and `kube-prometheus-stack:`), NOT HERE.
   #
-  # There were friendly parent keys here — stack.retentionDays,
-  # stack.grafana.nodePort, stack.lokiStorage.size, stack.alerting.* — and every
-  # one of them was DEAD. Helm cannot template subchart values, so no template in
+  # There were friendly parent keys here (stack.retentionDays,
+  # stack.grafana.nodePort, stack.lokiStorage.size) and every one of them was
+  # DEAD. stack.alerting.* is the exception: emailTo, smtpHost and
+  # existingSecret are live, read by templates/observability.yaml, and emailTo
+  # is required. Helm cannot template subchart values, so no template in
   # this chart can read a parent key and push it down into a subchart; the
   # subchart reads its own block or nothing. Measured before removing them:
   # `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.

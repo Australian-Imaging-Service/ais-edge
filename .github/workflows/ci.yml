@@ -133,6 +133,10 @@ jobs:
       # invoked here, so they had never run on a push. duplicate-names catches two
       # objects rendering to the same (kind, namespace, name); secrets-encrypted
       # is the guard that no plaintext secret is ever committed.
+      - name: NOTES.txt claims (helm template never renders it)
+        if: ${{ !cancelled() }}
+        run: make notes
+
       - name: Duplicate rendered object names
         if: ${{ !cancelled() }}
         run: make duplicate-names
