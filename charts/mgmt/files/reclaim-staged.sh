@@ -529,6 +529,10 @@ elif [ "$VERIFY_XNAT" = "true" ]; then
     probe_timings=$(printf '%s' "$probe" | tail -n2 | head -n1)
     probe_err_text=$(tr '\n' ' ' < "$probe_err" 2>/dev/null)
     rm -f "$probe_err"
+    case "$code" in
+        301|302|303|307|308)
+            unavailable xnat_probe_failed "XNAT returned HTTP ${code}: set the server in xnat-credentials to its final HTTPS URL. The reclaimer does not follow redirects; HTTP sends credentials in clear text. Nothing was removed" ;;
+    esac
     if [ "$code" != "200" ]; then
         # Not a data-loss condition — but every session would come back
         # unconfirmed, so the run would be a very expensive no-op.

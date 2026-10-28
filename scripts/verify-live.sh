@@ -98,6 +98,41 @@ for p in d.get("items", []):
 
 printf '%s=== verify-live: site %s ===%s\n' "$_B" "$SITE" "$_O"
 
+# Check site settings only. This does not prove that a test email was delivered.
+email_settings=$(python3 - "$VALUES" "${REPO_DIR}/charts/mgmt/values.yaml" "observability.alerting" <<'PYEMAIL'
+import re, sys, yaml
+from email.utils import getaddresses
+site, defaults = [yaml.safe_load(open(p)) or {} for p in sys.argv[1:3]]
+def lookup(values, key):
+    for part in key.split("."):
+        values = values.get(part, {}) if isinstance(values, dict) else {}
+    return values
+path = sys.argv[3]
+settings = dict(lookup(defaults, path))
+settings.update(lookup(site, path))
+if path == "observability.alerting" and site.get("observability", {}).get("enabled", True) is False:
+    print("DISABLED"); raise SystemExit
+def placeholder(value):
+    value = value.lower().strip().rstrip(".")
+    return bool(re.search(r"(^|\.)example\.(com|org|net)$|(^|\.)example$|change[ _-]?me", value))
+bad = []
+host = str(settings.get("smtpHost") or "").strip()
+if not host or placeholder(host.rsplit(":", 1)[0]) or any(c.isspace() for c in host):
+    bad.append("smtpHost")
+for key in ("emailTo", "emailFrom"):
+    addresses = getaddresses([str(settings.get(key) or "")])
+    if not addresses or any("@" not in addr or not addr.rsplit("@", 1)[0] or not addr.rsplit("@", 1)[1] or placeholder(addr.rsplit("@", 1)[1]) for _, addr in addresses):
+        bad.append(key)
+print("FAIL " + ", ".join(bad) if bad else "OK")
+PYEMAIL
+)
+case "$email_settings" in
+    OK) ok "alert email settings are populated and contain no example domains" ;;
+    DISABLED) skip "alert email settings: observability is disabled" ;;
+    FAIL*) bad "alert email settings need real values: ${email_settings#FAIL }" "edit the site's observability.alerting settings; placeholder addresses do not deliver alerts" ;;
+    *) bad "could not read alert email settings" ;;
+esac
+
 head_ "management cluster"
 if ! $KUBECTL get --raw /readyz >/dev/null 2>&1; then
     bad "management API server not reachable" "everything below depends on it"
@@ -468,19 +503,30 @@ PYEOF
         skip "XNAT delivery sample" "no aetMap project found in any site file — nothing to scope the check to"
     else
     res=$($KUBECTL -n "$NS_UPLOAD" exec "$UP" -- python3 -c '
-import os, json, base64, ssl, urllib.request
+import os, json, base64, ssl, urllib.request, urllib.parse
 h=os.environ["XINGEST_HOST"].rstrip("/"); u=os.environ["XINGEST_USER"]; p=os.environ["XINGEST_PASS"]
+if urllib.parse.urlsplit(h).scheme.lower() != "https":
+    print("INSECURE_URL"); raise SystemExit
 ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE
+# Match the reclaimer: a redirect is not a successful XNAT response.
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+opener=urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=ctx))
 def get(path):
     r=urllib.request.Request(h+path)
     r.add_header("Authorization","Basic "+base64.b64encode(f"{u}:{p}".encode()).decode())
-    with urllib.request.urlopen(r,timeout=30,context=ctx) as resp: return resp.status, resp.read().decode()
+    with opener.open(r,timeout=30) as resp: return resp.status, resp.read().decode()
 try:
     s,_=get("/data/projects?format=json")
     if s!=200: print("AUTH_FAIL",s); raise SystemExit
     print("AUTH_OK")
 except Exception as e:
-    print("UNREACHABLE",str(e)[:120]); raise SystemExit
+    if getattr(e,"code",None) in (301,302,303,307,308):
+        print("REDIRECT",e.code)
+    else:
+        print("UNREACHABLE",str(e)[:120])
+    raise SystemExit
 try:
     projects=[q for q in "'"$AIS_PROJECTS"'".split(",") if q]
     ex=[]
@@ -502,6 +548,8 @@ except Exception as e:
     fi
 
     case "$res" in
+        REDIRECT*) bad "XNAT returned a redirect (${res#REDIRECT })" "set the server in xnat-credentials to its final HTTPS URL; the reclaimer does not follow redirects" ;;
+        INSECURE_URL*) bad "XNAT URL must use HTTPS" "set the server in xnat-credentials to its final HTTPS URL; HTTP sends credentials in clear text" ;;
         AUTH_OK*)     ok "XNAT reachable and credentials accepted" ;;
         AUTH_FAIL*)   bad "XNAT rejected the uploader's credentials" ;;
         UNREACHABLE*) bad "XNAT unreachable from the uploader pod" "${res#UNREACHABLE }" ;;
