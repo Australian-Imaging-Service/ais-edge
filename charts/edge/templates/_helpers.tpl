@@ -560,6 +560,9 @@ affinity:
 {{/* Structured logging. The alert rules and dashboards parse these fields
      directly, so this is a functional setting, not a formatting one. */}}
 {{- define "edge.logEnv" -}}
+# GUIDING: progress bars obscure the stage logs in unattended containers.
+- name: TQDM_DISABLE
+  value: "1"
 - name: AIS_LOG_FORMAT
   value: {{ .Values.ingest.logFormat | quote }}
 {{- end }}
