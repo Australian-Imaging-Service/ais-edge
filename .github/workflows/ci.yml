@@ -104,6 +104,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: make shell-syntax
 
+      - name: Verification probe regressions
+        if: ${{ !cancelled() }}
+        run: make verify-live-checks
+
       - name: PVC retention (nothing holding data may be auto-deleted)
         if: ${{ !cancelled() }}
         run: make pvc-retention RENDER_DEP=
