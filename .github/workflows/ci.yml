@@ -132,6 +132,10 @@ jobs:
       # Listed in the Makefile's FAST_STAGES but never invoked here, so it had
       # never run on a push. Catches two objects rendering to the same
       # (kind, namespace, name).
+      - name: NOTES.txt claims (helm template never renders it)
+        if: ${{ !cancelled() }}
+        run: make notes
+
       - name: Duplicate rendered object names
         if: ${{ !cancelled() }}
         run: make duplicate-names

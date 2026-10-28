@@ -743,6 +743,17 @@ for i in $(seq 0 $((EDGE_COUNT - 1))); do
     echo "  kubectl --kubeconfig kubeconfig-${n} get pods -A"
 done
 echo
-echo "  Data retention is OFF on a fresh install (dataPolicy.enabled: false,"
-echo "  dryRun: true). Nothing is expired or reclaimed until you turn it on."
-echo "  Watch a week of dryRun decisions in the logs before you do."
+# Say what the site file sets. Chart defaults: enabled false, dryRun true.
+DP_ENABLED="$(cfg dataPolicy.enabled false | tr '[:upper:]' '[:lower:]')"
+DP_DRYRUN="$(cfg dataPolicy.dryRun true | tr '[:upper:]' '[:lower:]')"
+if [ "$DP_ENABLED" != "true" ]; then
+echo "  Data retention is OFF (dataPolicy.enabled: false). Nothing is expired or"
+echo "  reclaimed until you turn it on. Read a week of dryRun decisions first."
+elif [ "$DP_DRYRUN" != "false" ]; then
+echo "  Data retention is in DRY RUN (dataPolicy.dryRun: true). The data policy"
+echo "  and the reclaimers log their decisions and remove nothing. Read a week of"
+echo "  decisions before you set dryRun: false."
+else
+echo "  Data retention is ON (dataPolicy.enabled: true, dryRun: false). The data"
+echo "  policy and the reclaimers remove copies that are proven somewhere else."
+fi

@@ -78,6 +78,24 @@ DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun 
   dryRun is true: reclaim decisions are logged but not acted on. Watch a few
   days of logs, confirm they match your expectations, then set dryRun: false.
 {{- end }}
+{{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
+  dataPolicy.enabled and dryRun govern the data policy and the reclaimers
+  only. assign still removes /data/grouped/<session> after it writes the
+  session to /data/assigned, because grouped is onAssigned. That moves data
+  along the pipeline. It does not remove the last copy.
+{{- end }}
+{{- if not .Values.storage.facilityBackup.enabled }}
+
+  ⚠  FACILITY BACKUP IS OFF
+    No original is kept outside the pipeline, so Orthanc and the pipeline
+    folders hold the only copy of each study.
+{{- if eq .Values.dataPolicy.derived.orthancStorage.reclaim "onGrouped" }}
+    derived.orthancStorage.reclaim is onGrouped, so an armed data policy
+    deletes the Orthanc copy of a staged study after its minAge. A session in
+    assigned/__invalid__/ is then the only copy.
+{{- end }}
+    Turn the backup on unless the site keeps its originals somewhere else.
+{{- end }}
   originals   facility backup {{ .Values.dataPolicy.originals.facilityBackup.retain }} | quarantine {{ .Values.dataPolicy.originals.quarantine.retain }} | file drop reclaim {{ .Values.dataPolicy.originals.fileDrop.reclaim }}
   derived     orthanc {{ .Values.dataPolicy.derived.orthancStorage.reclaim }} (min age {{ .Values.dataPolicy.derived.orthancStorage.minAge }}) | grouped {{ .Values.dataPolicy.derived.grouped.reclaim }} | assigned {{ .Values.dataPolicy.derived.assigned.reclaim }}
 {{- if eq .Values.dataPolicy.derived.grouped.reclaim "never" }}
@@ -114,8 +132,12 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
   {{ .Values.samba.existingSecret }}   keys: username, password
 {{- end }}
 {{- if .Values.observability.enabled }}
-  {{ .Values.observability.loki.clientCertSecret }}   keys: tls.crt, tls.key
-  {{ .Values.observability.loki.caBundleSecret }}   key: {{ .Values.observability.loki.caBundleKey }}
+{{- with .Values.observability.loki.clientCertSecret }}
+  {{ . }}   keys: tls.crt, tls.key
+{{- end }}
+{{- with .Values.observability.loki.caBundleSecret }}
+  {{ . }}   key: {{ $.Values.observability.loki.caBundleKey }}
+{{- end }}
 {{- end }}
 
 CHECK IT IS WORKING
@@ -132,7 +154,13 @@ CHECK IT IS WORKING
     dcmsend <node-ip> {{ .Values.orthanc.dicomPort }} -aec {{ .Values.orthanc.aet }} /path/to/study/
 
 NOT REMOVED BY `helm uninstall`
-  The namespace, both PersistentVolumes and both PersistentVolumeClaims carry
+  The namespace, the PersistentVolumes and their claims carry
   helm.sh/resource-policy: keep and Retain. Uninstalling this release leaves
   every received study, and the Secrets above, in place. Removing data is a
   separate deliberate act.
+{{- if .Values.storage.storageClass.create }}
+  The cluster-scoped StorageClass {{ .Values.storage.storageClass.name }} is kept too. A release
+  with another name cannot take it over: set storage.storageClass.create: false,
+  or delete it (kubectl delete storageclass {{ .Values.storage.storageClass.name }})
+  when no PersistentVolume uses it.
+{{- end }}
