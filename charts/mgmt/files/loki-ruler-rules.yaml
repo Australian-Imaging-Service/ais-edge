@@ -844,6 +844,31 @@ groups:
             then re-send from the quarantine directory. The offending AE title
             is in the DICOMRejectedUnmappedAET mail for the original rejection.
 
+      - alert: InvalidSessionAssigned
+        # GUIDING: one assign failure needs review, even below the spike threshold.
+        expr: |
+          sum by (cluster) (count_over_time(
+            {namespace="xnat-ingest", app="xnat-ingest", component="assign", level="ERROR"}
+            | json | __error__=""
+            | json stage_message="message" | __error__=""
+            | stage_message =~ "(?s)^Could not resolve project/subject/session IDs for .*"
+            [10m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          source: loki-ruler
+          category: edge-pipeline
+        annotations:
+          summary: "Assign reported missing routing IDs on {{ $labels.cluster }}"
+          description: |
+            Assign reported a session with missing project, subject, or session IDs.
+            Check the assign logs and assigned/__invalid__ on the edge node under storage.pipeline.hostPath.
+            Keep these files for manual review. If facility backup is off, they can be
+            the only copy. Do not delete them to clear this alert.
+              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} -n xnat-ingest logs -l app=xnat-ingest,component=assign --since=15m
+            The alert clears when the log leaves the 10-minute window. This does not
+            prove that the session has recovered.
+
       - alert: DICOMValidationFailureSpike
         expr: |
           sum by (cluster) (count_over_time(
