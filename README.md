@@ -958,12 +958,14 @@ changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
 **4. Verify.**
 
 ```bash
-# from inside the cluster — should now be 401 without credentials
-KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# The Orthanc image has no curl, so reach the API through a port-forward.
+# Run it in a second terminal, wait for "Forwarding from 127.0.0.1:8042",
+# and stop it with Ctrl-C afterwards:
+#   KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest port-forward deploy/<release>-orthanc 8042:8042
+# should now be 401 without credentials
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 # and 200 with them
-KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
 Then confirm the pipeline still moves: `group-orthanc`'s log should keep
