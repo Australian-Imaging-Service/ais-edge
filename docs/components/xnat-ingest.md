@@ -366,16 +366,169 @@ kubectl logs -n xnat-upload -l component=upload,edge=edge-dev -f | jq
 # /data/incoming; the normal path is a C-STORE into Orthanc)
 ssh ubuntu@<edge-ip> "cp /home/ubuntu/MRBRAIN.DCM /data/xnat-ingest/incoming/"
 
-# Manually rename an invalid session to test promotion. On the host these
-# live under the pipeline volume's hostPath, /data/xnat-ingest, which the
-# pods see as /data — so /data/assigned is /data/xnat-ingest/assigned.
-ssh ubuntu@<edge-ip> "sudo mv /data/xnat-ingest/assigned/__invalid__/<dir> \
-                              /data/xnat-ingest/assigned/<project>.<subject>.<visit>"
+# Promote an invalid session: follow the guarded steps in "Recovering an
+# invalid session" below. On the host these live under the pipeline
+# volume's hostPath, /data/xnat-ingest, which the pods see as /data, so
+# /data/assigned is /data/xnat-ingest/assigned. A plain mv into an
+# existing folder nests the session instead of promoting it.
 ```
 
 `__invalid__` is one of the reserved directory names the s3-uploader
 skips (alongside `__build__` and `__metadata__`), so a session sitting
 there is never uploaded — that is what makes the rename a promotion.
+
+### Holding folders
+
+Two folders on the edge node hold data that a stage could not pass on. No
+stage, reclaimer or data policy removes either of them.
+
+| Folder | What puts data there | What to do |
+|---|---|---|
+| `/facility-backup/__unmapped_aet__/<AET>/`, the quarantine | Orthanc's Lua hook, for a study sent to an AE title that `aetMap` does not map | Add the AE title to `aetMap` |
+| `/data/assigned/__invalid__/`, the invalid sessions | `assign`, when it cannot resolve the project, subject or session ID | Follow "Recovering an invalid session" below |
+
+### A study that group-orthanc refuses
+
+`group-orthanc` stages each study on its own. When it cannot stage a study, it
+logs this line at ERROR, removes the study's scratch folders, and stages the
+other studies:
+
+```
+Skipping Orthanc study '<orthanc-study-id>': <reason>
+```
+
+`IngestStageError` fires. The study stays in Orthanc without the processed
+label, and the stage tries it again on every pass. The data policy does not
+remove a study without the processed label, so the study waits in Orthanc.
+
+Read the reason first. The stage refuses a study when two of its series would
+share one scan:
+
+- `SeriesNumber '<n>' is used by series with different descriptions`
+- `series '<id>' maps to '<scan>/<resource>' like another series of the study`
+
+The scan ID comes from the SeriesNumber, so the stage cannot keep both series
+in one session. It refuses the study, so that no series is merged or dropped.
+To clear it, from the management host:
+
+1. List the series of the study with their number, description and count of
+   instances. The Orthanc container has no `curl`, so use a port-forward in a
+   second terminal. Wait for `Forwarding from 127.0.0.1:8042`, and stop it with
+   Ctrl-C when you are done. Leave out `-u` if Orthanc authentication is off.
+
+   ```bash
+   # second terminal
+   KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest port-forward deploy/<release>-orthanc 8042:8042
+   ```
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> \
+       "http://localhost:8042/studies/<orthanc-study-id>/series?expand" \
+     | jq -r '.[] | [.ID, .MainDicomTags.SeriesNumber,
+                     .MainDicomTags.SeriesDescription, (.Instances | length)] | @tsv'
+   ```
+
+2. With the site's imaging team, decide which series to keep.
+3. If one series is not necessary, save a copy of it and check the copy:
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> -o <orthanc-series-id>.zip \
+       http://localhost:8042/series/<orthanc-series-id>/archive
+   unzip -tq <orthanc-series-id>.zip                  # must report no errors
+   unzip -Z1 <orthanc-series-id>.zip | grep -vc '/$'  # must equal the count in step 1
+   ```
+
+   Do not go on unless the download, the test and the count are all correct.
+   Do not rely on the facility backup instead: some sites turn it off, and the
+   configuration does not prove that it holds this series.
+4. Delete only that series. The next pass stages the study.
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> -X DELETE \
+       http://localhost:8042/series/<orthanc-series-id>
+   ```
+
+   The deleted series does not go to XNAT. Keep its ZIP file as the site's
+   retention rules say.
+
+5. If both series are necessary, keep the study in Orthanc and report it to the
+   AIS team. The stage cannot stage two different series under one scan number.
+
+Do not delete the whole study from Orthanc. That removes every series of the
+study and, on a site without the facility backup, the only copy.
+
+Other reasons name their cause, for example a file that cannot be read or a
+conversion that failed. Correct the cause. The stage tries the study again on
+the next pass.
+
+### Recovering an invalid session
+
+`assign` puts a session in `/data/assigned/__invalid__/` on the edge when it
+cannot resolve the project, subject or session ID from the tags. It logs this
+line at ERROR:
+
+```
+Could not resolve project/subject/session IDs for '<name>', due to missing metadata fields [...]. Saved to '/data/assigned/__invalid__/<folder>' for manual review instead
+```
+
+`InvalidSessionAssigned` fires when assign reports such a line. It counts
+reports per cluster, not sessions, and it clears when the line leaves its
+10-minute window, which does not mean that the session was recovered. The line
+is logged before the session is saved, so check that the folder exists.
+
+The folder name shows which IDs are missing. Each one is
+`INVALID_MISSING_<FIELD>_<suffix>`, for example
+`<project>.<subject>.INVALID_MISSING_ACCESSIONNUMBER_<suffix>`.
+
+What happens to the copies:
+
+- `assign` removes its input from `/data/grouped/` after it saves the session
+  in `__invalid__/` (`dataPolicy.derived.grouped.reclaim: onAssigned`).
+- Nothing removes `__invalid__/`: not the stages, not the reclaimers, not the
+  data policy. The s3-uploader skips it, so the session does not reach the
+  bucket.
+- The study stays in Orthanc with the processed label. When the data policy is
+  armed, it can delete that Orthanc copy after
+  `dataPolicy.derived.orthancStorage.minAge`. If the facility backup is on, it
+  also keeps the original. **Keep the facility backup on.** Without it, the
+  folder in `__invalid__/` can be the only copy.
+- If the same study is staged again, `assign` skips it and logs
+  `already saved as invalid` at WARNING, until the folder leaves `__invalid__/`.
+
+To recover the session:
+
+1. Find the correct IDs: the values that the site's ID mapping (`ingest.assign`)
+   would have produced, from the hospital's records. Make sure that the XNAT
+   project does not already have a session with that label.
+2. On the edge node, rename the folder to `<project>.<subject>.<session>` and
+   move it up into `assigned/`. `/data` is the pipeline hostPath,
+   `/data/xnat-ingest` by default. The commands stop if a folder of that name
+   exists. `mv -nT` never replaces a folder and never moves into one, and the
+   last `test` checks that the folder really left `__invalid__/`:
+
+   ```bash
+   ssh <edge-node>
+   cd /data/xnat-ingest/assigned
+   sudo test ! -e <project>.<subject>.<session> \
+     && sudo mv -nT __invalid__/<folder> <project>.<subject>.<session> \
+     && sudo test ! -e __invalid__/<folder> \
+     && sudo ls -d <project>.<subject>.<session>
+   ```
+
+   If a check fails, look at both paths and the stage logs before you do
+   anything else: a session with that name may already be waiting, or the next
+   stage may already have taken the moved folder. Never repeat the move blindly.
+
+   The upload takes the three IDs from the folder name. Do not edit the files.
+   This procedure does not change the DICOM files. The session then goes on as
+   any other session: deidentify under `deid.engine: ingest`, the s3-uploader,
+   the bucket, and the management uploader.
+3. Look for the session in the log of `mgmt-upload-<edge>`, then in XNAT. When
+   the data policy is armed, the reclaimers remove the edge and bucket copies
+   after their proof.
+
+Do not send the study again to correct it. Orthanc keeps the instances that it
+already has, and it ignores a copy with the same SOPInstanceUID.
 
 ### S3 mode: prove, then delete
 
@@ -619,7 +772,7 @@ deletes. A dry run makes the same checks and removes no data.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | Routes to `__invalid__/` | Manual rename + move; alert (`DICOMValidationFailureSpike`) fires when this happens >10x/h |
+| DICOM missing AccessionNumber | Routes to `__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one, and `DICOMValidationFailureSpike` when this happens >10x/h |
 | XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
