@@ -105,7 +105,7 @@ storage:
   # THE ARCHIVE OF RECORD. Originals with real patient identifiers, written
   # before de-identification, and the only copy that is never uploaded anywhere.
   facilityBackup:
-    enabled: true
+    enabled: false
     hostPath: /home/ais-edge/facility-backup
     capacity: 500Gi
 
