@@ -458,6 +458,44 @@ PY
 fi
 
 # -----------------------------------------------------------------------------
+# The parser trims a value before it reads it, so retain: " 1h " renders 3600.
+# The stage table carried the RAW word next to those seconds. The engine's word
+# check (expire_original) then saw " 1h " as a non-duration and kept the
+# original for ever, while the site believed it expired. Helm's trim strips
+# Unicode blanks (U+00A0, U+2003) that a shell loop does not, so the table has
+# to trim with the same `toString | trim` as the parser. This checks the two
+# rows the engine reads against the padded values of the fixture.
+ci_heading "padded durations render trimmed"
+
+pad_render="$CI_RENDER_DIR/edge-duration-padded.yaml"
+if [ ! -s "$pad_render" ]; then
+  ci_fail "no render at $pad_render: the edge-duration-padded case is missing from ci_positive_cases"
+else
+  pad_out="$(python3 - "$pad_render" 2>&1 <<'PY'
+import sys, yaml
+# stage, 1-based word column, 1-based seconds column
+WANT = [("originals.facilityBackup", 6, 7), ("originals.quarantine", 6, 7)]
+rows = None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+        rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+if rows is None:
+    raise SystemExit("no stages.tsv in the render, so nothing was checked")
+bad = []
+for stage, wcol, scol in WANT:
+    row = rows.get(stage) or []
+    word = row[wcol - 1] if len(row) >= wcol else None
+    secs = row[scol - 1] if len(row) >= scol else None
+    if word != "1h" or secs != "3600":
+        bad.append("%s: word %r seconds %r, expected '1h' and '3600'" % (stage, word, secs))
+if bad:
+    raise SystemExit("; ".join(bad) + ". The engine reads the word: an untrimmed word is not a duration to it, and the original is kept for ever.")
+print("%d padded retain values render as the trimmed word next to their seconds" % len(WANT))
+PY
+)" && ci_pass "$pad_out" || ci_fail "padded durations: $pad_out"
+fi
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control
