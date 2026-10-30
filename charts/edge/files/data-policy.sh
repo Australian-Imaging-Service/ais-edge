@@ -448,14 +448,24 @@ expire_original() {   # expire_original <name> <location> <retain_seconds> <poli
     # column is a reclaim word (never | onIngested) and whose age column is
     # its minAge, not a retain duration. Read by age alone, `reclaim: never`
     # became a 30-day expiry of the only copy once allowExpiry was on.
-    case "$e_policy" in never|forever|-|"") return 0 ;; esac
+    # The table carries the raw values word; the chart trims it before it
+    # parses it (edge.durationSeconds). Trim here too, or " 1h " is kept.
+    e_word=$e_policy
+    while :; do
+        case "$e_word" in
+            ' '*|'	'*) e_word=${e_word#?} ;;
+            *' '|*'	') e_word=${e_word%?} ;;
+            *) break ;;
+        esac
+    done
+    case "$e_word" in never|forever|-|"") return 0 ;; esac
     # Only a duration (a number, with or without one unit letter) may expire
     # an original. Any other word is a condition this engine does not
     # implement for originals, so it keeps and says so.
-    case "${e_policy%[smhdwy]}" in
+    case "${e_word%[smhdwy]}" in
         ''|*[!0-9]*)
-            jlog expiry_kept "$e_name" "policy '${e_policy}' is not a retain duration and this engine implements no reclaim condition for originals, so nothing in this stage is expired" \
-                 ",\"policy\":\"$(jsan "$e_policy")\""
+            jlog expiry_kept "$e_name" "policy '${e_word}' is not a retain duration and this engine implements no reclaim condition for originals, so nothing in this stage is expired" \
+                 ",\"policy\":\"$(jsan "$e_word")\""
             return 0 ;;
     esac
 

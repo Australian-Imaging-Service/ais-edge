@@ -131,6 +131,12 @@ logged() {  # logged <name> <root> <event> <present|absent> <desc>
     fi
 }
 
+check_file() {  # check_file <name> <root> <file> <expected-content> <desc>
+    # The directory surviving is not enough: a mutation that removes the files
+    # and keeps the directories passed every directory-level check.
+    if [ "$(cat "$2/$3" 2>/dev/null)" = "$4" ]; then pass "$1" "$5"; else fail "$1" "$5 — $3 missing or changed"; fi
+}
+
 check() {  # check <name> <root> <path-that-should-be> <exist|gone> <desc>
     if [ "$4" = "gone" ]; then
         [ ! -d "$2/$3" ] && pass "$1" "$5" || fail "$1" "$5 — $3 STILL EXISTS"
@@ -370,15 +376,33 @@ FD_NEVER="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TA
 R="$WORK/c17b"; build_case "$R"; mk_session "$R" incoming drop1 57600
 ALLOW_EXPIRY=true run_engine "$R" "$FD_NEVER" true false
 check filedrop_never_kept "$R" incoming/drop1 exist "reclaim=never, minAge 30d, 40 days old, every switch on"
+check_file filedrop_never_file "$R" incoming/drop1/img.dcm data "and the dropped file is still there, unchanged"
 logged filedrop_never_silent "$R" expiry_removed absent "and no expiry_removed event"
 
-# 17c — onIngested is a word the chart accepts and nothing implements. It must
-#       keep, and say that it keeps, rather than fall back to the age.
+# 17c — onIngested: a defensive test of a word nothing implements. The chart
+#       lets it render only while the policy is off (with the policy on and
+#       the file drop enabled it refuses). If it ever reaches the engine, the
+#       engine must keep, and say which stage and word it kept, rather than
+#       fall back to the age.
 FD_ING="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}onIngested${TAB}2592000${TAB}filesystem"
 R="$WORK/c17c"; build_case "$R"; mk_session "$R" incoming drop1 57600
 ALLOW_EXPIRY=true run_engine "$R" "$FD_ING" true false
 check filedrop_oningested_kept "$R" incoming/drop1 exist "reclaim=onIngested is not implemented: kept"
-logged filedrop_oningested_said "$R" expiry_kept present "and expiry_kept names the unimplemented word"
+check_file filedrop_oningested_file "$R" incoming/drop1/img.dcm data "and the dropped file is still there, unchanged"
+if grep -E '"event":"expiry_kept".*"stage":"originals.fileDrop".*"policy":"onIngested"' "$R/out.jsonl" >/dev/null 2>&1; then
+    pass filedrop_oningested_said "expiry_kept names the stage and the unimplemented word"
+else
+    fail filedrop_oningested_said "expected expiry_kept with stage=originals.fileDrop and policy=onIngested; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+fi
+
+# 17d — THE RAW WORD MAY CARRY SPACES. The chart trims a value before it parses
+#       it, but the stage table renders the raw word, so retain: " 1h " reaches
+#       the engine padded, next to its parsed 3600. A word check that does not
+#       trim keeps the original for ever while the site believes it expires.
+FB_PADDED="originals.facilityBackup${TAB}original${TAB}/data/fb${TAB}-${TAB}-${TAB} 1h ${TAB}3600${TAB}filesystem"
+R="$WORK/c17d"; build_case "$R"; mk_session "$R" fb p1 600
+ALLOW_EXPIRY=true run_engine "$R" "$FB_PADDED" true false
+check originals_padded_duration "$R" fb/p1 gone "retain written as ' 1h ' still expires after 1h"
 
 # ---------------------------------------------------------------------------
 # backends
