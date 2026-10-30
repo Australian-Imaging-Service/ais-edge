@@ -499,16 +499,18 @@ dataPolicy:
     # WHICH tree this is depends on the engine: /data/assigned under
     # deid.engine=orthanc, /data/deidentified under ingest. The chart derives it.
     #
-    # THE RIGHT VALUE DEPENDS ON THE ENGINE, and the chart refuses the wrong one
-    # rather than letting it read as a policy that is quietly never applied:
+    # THE RIGHT VALUE DEPENDS ON THE ENGINE. `auto` (set here and above) lets
+    # the chart pick it, and an explicit word is still checked: the chart
+    # refuses a wrong one rather than letting it read as a policy that is
+    # quietly never applied.
     #
-    #   deid.engine: orthanc  (the default here)
-    #     the terminal tree is /data/assigned, so THIS key must stay `never` and
-    #     `assigned.reclaim: onUploaded` above is the one that does the work.
+    #   deid.engine: ingest  (the default, and what this file sets)
+    #     the uploader reads /data/deidentified, so auto resolves THIS key to
+    #     onUploaded and `assigned.reclaim` above to onDeidentified.
     #
-    #   deid.engine: ingest
-    #     the uploader reads /data/deidentified instead, so set THIS to onUploaded
-    #     and set `assigned.reclaim: onDeidentified` above.
+    #   deid.engine: orthanc
+    #     the terminal tree is /data/assigned, so auto resolves THIS key to
+    #     `never` and `assigned.reclaim` above to onUploaded, which does the work.
     deidentified:
       reclaim: auto
 
@@ -518,15 +520,16 @@ dataPolicy:
     # landed. Without it `onUploaded` can never come true and the tree above is
     # kept whatever you set.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is the
-      # slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by the
       # XNAT check regardless, so this is about noise, not safety.
       minAge: 1d
-      # Ask XNAT whether it holds the session, complete, before deleting the only
-      # remaining copy. Off means trusting local state alone.
-      # CAUTION: `false` removes the last independent check before deletion.
+      # Ask XNAT for each local file (present, same size) before deleting the
+      # only remaining copy.
+      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
+      # XNAT proves, file by file.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes this
       # many and stops, leaving the rest to inspect.

@@ -332,8 +332,14 @@ dataPolicy:
     fileDrop:
       # Root of ingest.fileDrop.inputGlob. Only read when that path is enabled.
       location: /data/incoming
+      # never       keep every drop (the default).
+      # onIngested  reserved. Nothing implements it yet: the engine keeps the
+      #             drops and logs expiry_kept. With the policy on, the chart
+      #             refuses any word but never while the file drop is enabled.
       reclaim: never             # never | onIngested
-      minAge: 30d                # additionally required when not 'never'
+      # Reserved with onIngested. Under `never` the engine does not read it: a
+      # drop is never expired by this age alone.
+      minAge: 30d
 
   # ---------------------------------------------------------------------
   # DERIVED
@@ -343,8 +349,10 @@ dataPolicy:
     # De-identified copy held inside Orthanc until group-orthanc has pulled
     # it. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
-    # CAUTION: default xnat-ingest 0.16.2 writes no export snapshot label.
-    # This backend keeps every study until the image has xnat-ingest PR #211.
+    # CAUTION: needs an xnat-ingest that writes the export snapshot label
+    # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
+    # The default image, our fork build 0.16.2.post1, writes it. With an older
+    # image this backend keeps every study and logs export_state_unknown.
     orthancStorage:
       # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
       # goes through the backend below, because Orthanc names files by UUID and
@@ -813,8 +821,8 @@ ingest:
     #
     # SET IT ONLY IF YOUR MODALITIES CARRY THE IDS SOMEWHERE ELSE, which is a
     # real case under deid.engine=ingest: the radiographer enters these at the
-    # console, so CAI uses ReferringPhysicianName for project and PatientID for
-    # subject, and other sites use StudyComments or StudyDescription. Whatever
+    # console, so cai-lfs3 uses StudyDescription for project and PatientID for
+    # subject, and other sites use StudyComments or ReferringPhysicianName. Whatever
     # is named is checked against the engine at render time, in both directions.
     #
     # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT

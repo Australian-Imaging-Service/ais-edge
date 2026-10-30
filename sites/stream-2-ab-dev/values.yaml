@@ -324,15 +324,16 @@ dataPolicy:
     # landed. Without it `onUploaded` can never come true and the tree above is
     # kept whatever you set.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is the
-      # slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by the
       # XNAT check regardless, so this is about noise, not safety.
       minAge: 1d
-      # Ask XNAT whether it holds the session, complete, before deleting the only
-      # remaining copy. Off means trusting local state alone.
-      # CAUTION: `false` removes the last independent check before deletion.
+      # Ask XNAT for each local file (present, same size) before deleting the
+      # only remaining copy.
+      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
+      # XNAT proves, file by file.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes this
       # many and stops, leaving the rest to inspect.
