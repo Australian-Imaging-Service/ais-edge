@@ -821,8 +821,8 @@ ingest:
     #
     # SET IT ONLY IF YOUR MODALITIES CARRY THE IDS SOMEWHERE ELSE, which is a
     # real case under deid.engine=ingest: the radiographer enters these at the
-    # console, so CAI uses ReferringPhysicianName for project and PatientID for
-    # subject, and other sites use StudyComments or StudyDescription. Whatever
+    # console, so cai-lfs3 uses StudyDescription for project and PatientID for
+    # subject, and other sites use StudyComments or ReferringPhysicianName. Whatever
     # is named is checked against the engine at render time, in both directions.
     #
     # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT
