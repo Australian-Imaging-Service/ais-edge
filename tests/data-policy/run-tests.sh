@@ -134,7 +134,7 @@ logged() {  # logged <name> <root> <event> <present|absent> <desc>
 check_file() {  # check_file <name> <root> <file> <expected-content> <desc>
     # The directory surviving is not enough: a mutation that removes the files
     # and keeps the directories passed every directory-level check.
-    if [ "$(cat "$2/$3" 2>/dev/null)" = "$4" ]; then pass "$1" "$5"; else fail "$1" "$5 — $3 missing or changed"; fi
+    if cmp -s "$2/$3" <(printf '%s\n' "$4"); then pass "$1" "$5"; else fail "$1" "$5 — $3 missing or changed"; fi
 }
 
 check() {  # check <name> <root> <path-that-should-be> <exist|gone> <desc>

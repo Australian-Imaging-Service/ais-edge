@@ -390,6 +390,22 @@ dataPolicy:
       minAge: "08d"
 EOF
 
+# WHITESPACE AROUND A DURATION. The parser (edge.durationSeconds) trims a value
+# before it reads it, so retain: " 1h " is accepted and gives 3600. The stage
+# table must hand the engine the SAME trimmed word next to those seconds, or
+# the engine's own word check sees a non-duration and keeps the original for
+# ever. Helm's trim strips Unicode blanks too, which a shell loop does not:
+# U+00A0 (no-break space) and U+2003 (em space) are the cases here.
+# runtime-templates.sh asserts the word and the seconds of both rows.
+cat >"$V/edge-duration-padded.yaml" <<'EOF'
+dataPolicy:
+  originals:
+    facilityBackup:
+      retain: "\u00a01h\u00a0"
+    quarantine:
+      retain: "\u20031h\u2003"
+EOF
+
 # De-identification off. One key now, and the group label needs no clearing:
 # the chart derives it from the engine, so it cannot be left dangling.
 # policyReviewed is what acknowledges that identifiable data would reach XNAT.
@@ -1416,6 +1432,7 @@ edge-backup-off	charts/edge	edge-base.yaml edge-backup-off.yaml
 edge-backup-policy-off	charts/edge	edge-base.yaml edge-backup-policy-off.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
 edge-duration-base10	charts/edge	edge-base.yaml edge-duration-base10.yaml
+edge-duration-padded	charts/edge	edge-base.yaml edge-duration-padded.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
 edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml
