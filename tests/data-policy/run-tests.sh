@@ -362,6 +362,25 @@ R="$WORK/c17"; build_case "$R"; mk_session "$R" fb p1 600
 ALLOW_EXPIRY=true run_engine "$R" "$FB_1H" true true
 check originals_dry_run "$R" fb/p1 exist "allowExpiry=true but dryRun"
 
+# 17b — THE FILE-DROP ROW IS AN ORIGINAL WITH A RECLAIM WORD. Its policy
+#       column is `never` and its age column is minAge, not retain. The engine
+#       read the age alone, so with every switch on a 40-day-old drop was
+#       expired as if `never` were a 30-day retention. The drop is the only
+#       copy of those files.
+FD_NEVER="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}never${TAB}2592000${TAB}filesystem"
+R="$WORK/c17b"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_NEVER" true false
+check filedrop_never_kept "$R" incoming/drop1 exist "reclaim=never, minAge 30d, 40 days old, every switch on"
+logged filedrop_never_silent "$R" expiry_removed absent "and no expiry_removed event"
+
+# 17c — onIngested is a word the chart accepts and nothing implements. It must
+#       keep, and say that it keeps, rather than fall back to the age.
+FD_ING="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}onIngested${TAB}2592000${TAB}filesystem"
+R="$WORK/c17c"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_ING" true false
+check filedrop_oningested_kept "$R" incoming/drop1 exist "reclaim=onIngested is not implemented: kept"
+logged filedrop_oningested_said "$R" expiry_kept present "and expiry_kept names the unimplemented word"
+
 # ---------------------------------------------------------------------------
 # backends
 # ---------------------------------------------------------------------------

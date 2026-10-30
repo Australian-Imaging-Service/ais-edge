@@ -478,6 +478,21 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
 expire_original() {   # expire_original <name> <location> <retain_seconds> <policy>
     e_name="$1" e_loc="$2" e_age="$3" e_policy="$4"
 
+    # THE WORD BEFORE THE AGE. The file-drop row is an original whose policy
+    # column is a reclaim word (never | onIngested) and whose age column is
+    # its minAge, not a retain duration. Read by age alone, `reclaim: never`
+    # became a 30-day expiry of the only copy once allowExpiry was on.
+    case "$e_policy" in never|forever|-|"") return 0 ;; esac
+    # Only a duration (a number, with or without one unit letter) may expire
+    # an original. Any other word is a condition this engine does not
+    # implement for originals, so it keeps and says so.
+    case "${e_policy%[smhdwy]}" in
+        ''|*[!0-9]*)
+            jlog expiry_kept "$e_name" "policy '${e_policy}' is not a retain duration and this engine implements no reclaim condition for originals, so nothing in this stage is expired" \
+                 ",\"policy\":\"$(jsan "$e_policy")\""
+            return 0 ;;
+    esac
+
     # `forever` renders as `-`; anything non-numeric means "no expiry rule", and
     # is treated as forever rather than as 0. A malformed duration must never
     # become "expire immediately".
