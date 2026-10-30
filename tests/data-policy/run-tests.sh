@@ -122,6 +122,15 @@ run_engine() {
 STAGES_ASSIGNED="derived.assigned${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem"
 STAGES_GROUPED="derived.grouped${TAB}derived${TAB}/data/grouped${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem"
 
+logged() {  # logged <name> <root> <event> <present|absent> <desc>
+    if grep -q "\"event\": *\"$3\"" "$2/out.jsonl" 2>/dev/null; then found=yes; else found=no; fi
+    if [ "$4" = "present" ]; then
+        [ "$found" = yes ] && pass "$1" "$5" || fail "$1" "$5 — $3 NOT logged"
+    else
+        [ "$found" = no ] && pass "$1" "$5" || fail "$1" "$5 — $3 WAS logged"
+    fi
+}
+
 check() {  # check <name> <root> <path-that-should-be> <exist|gone> <desc>
     if [ "$4" = "gone" ]; then
         [ ! -d "$2/$3" ] && pass "$1" "$5" || fail "$1" "$5 — $3 STILL EXISTS"
@@ -351,6 +360,25 @@ check originals_forever "$R" fb/p1 exist "retain=forever, every switch on"
 R="$WORK/c17"; build_case "$R"; mk_session "$R" fb p1 600
 ALLOW_EXPIRY=true run_engine "$R" "$FB_1H" true true
 check originals_dry_run "$R" fb/p1 exist "allowExpiry=true but dryRun"
+
+# 17b — THE FILE-DROP ROW IS AN ORIGINAL WITH A RECLAIM WORD. Its policy
+#       column is `never` and its age column is minAge, not retain. The engine
+#       read the age alone, so with every switch on a 40-day-old drop was
+#       expired as if `never` were a 30-day retention. The drop is the only
+#       copy of those files.
+FD_NEVER="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}never${TAB}2592000${TAB}filesystem"
+R="$WORK/c17b"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_NEVER" true false
+check filedrop_never_kept "$R" incoming/drop1 exist "reclaim=never, minAge 30d, 40 days old, every switch on"
+logged filedrop_never_silent "$R" expiry_removed absent "and no expiry_removed event"
+
+# 17c — onIngested is a word the chart accepts and nothing implements. It must
+#       keep, and say that it keeps, rather than fall back to the age.
+FD_ING="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}onIngested${TAB}2592000${TAB}filesystem"
+R="$WORK/c17c"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_ING" true false
+check filedrop_oningested_kept "$R" incoming/drop1 exist "reclaim=onIngested is not implemented: kept"
+logged filedrop_oningested_said "$R" expiry_kept present "and expiry_kept names the unimplemented word"
 
 # ---------------------------------------------------------------------------
 # backends
