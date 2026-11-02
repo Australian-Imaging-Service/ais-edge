@@ -2,9 +2,9 @@
 THIS CHART DOES NOT CREATE ITS NAMESPACE, DELIBERATELY.
 
 The namespace holds credentials this chart references but does not create:
-orthanc-deid-salt and s3-edge-credentials arrive SOPS-encrypted from
-sites/<edge>/secrets.enc.yaml, and ca-bundle / loki-push-client-tls are
-delivered by cert-sync from the management cluster.
+orthanc-deid-salt (and the reid key, where set) arrive SOPS-encrypted from
+sites/<edge>/secrets.enc.yaml, and ca-bundle, loki-push-client-tls and
+s3-edge-credentials are delivered by cert-sync from the management cluster.
 
 A Secret must exist BEFORE the workload that mounts it starts, or the pod sits
 in CreateContainerConfigError. That ordering is only possible if the namespace

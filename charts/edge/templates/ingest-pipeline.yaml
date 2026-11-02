@@ -284,9 +284,9 @@ spec:
           args:
             - "/data/grouped"
             - "/data/assigned"
-            # project/subject/session come from the DICOM tags the de-id hook
-            # writes. routing.json's AETMap is the single source of truth for
-            # project — there is no hardcoded project ID anywhere.
+            # project/subject/session come from the DICOM tags that
+            # ingest.assign.tagMapping names (derived from deid.engine). Under
+            # ingest the modality fills them in: there is no AE-title routing.
             - "--project"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "project" | quote }}
             - "--subject"

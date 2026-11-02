@@ -3,9 +3,12 @@
 # Site secret management with SOPS + age.
 # =============================================================================
 #   site-secrets.sh init-key                 create this operator's age key
-#   site-secrets.sh add-recipient <agekey>   add a public key to .sops.yaml
-#   site-secrets.sh new <site>               scaffold sites/<site>/
-#   site-secrets.sh encrypt <site>           encrypt sites/<site>/secrets.enc.yaml
+#   site-secrets.sh add-recipient <agekey>   add a public key to .sops.yaml, then
+#                                            run sops updatekeys on each file
+#   site-secrets.sh new <site> <mgmt|edge>   scaffold sites/<site>/
+#   site-secrets.sh add-edge <mgmt> <edge>   scaffold an edge, mint its S3 key pair
+#   site-secrets.sh encrypt <site>           encrypt a PLAINTEXT secrets.enc.yaml
+#                                            (on an encrypted file, use edit)
 #   site-secrets.sh edit <site>              decrypt to $EDITOR, re-encrypt on save
 #   site-secrets.sh view <site>              print decrypted (careful: terminal)
 #   site-secrets.sh apply <site>             decrypt straight into the cluster
@@ -84,8 +87,8 @@ new)
     # two need entirely different files. The management side configures
     # SeaweedFS, the observability stack, the hosted control planes and the
     # fleet-wide data policy, and holds eight Secrets. An edge configures
-    # Orthanc, the de-identification profile and its AE-title-to-XNAT-project
-    # map, and holds two.
+    # Orthanc, the de-identification recipe and the tags that give the XNAT
+    # labels. It holds one Secret, or two at a production site (the reid key).
     #
     # Defaulting to either one would scaffold a file that renders — Helm ignores
     # values a chart does not declare — and then fails much later, in the least
@@ -100,8 +103,8 @@ new)
   mgmt   the management node — SeaweedFS, observability, control planes,
          the XNAT uploader, the reclaimer, and the fleet-wide data policy.
          ONE per deployment.
-  edge   one facility node — Orthanc, de-identification, the AE-title to
-         XNAT-project map, the S3 uploader. ONE per site.
+  edge   one facility node: Orthanc, the facility backup, the xnat-ingest
+         de-identification recipe, the S3 uploader. ONE per site.
 
   A new edge also needs an entry under \`edges:\` in the management site's
   values.yaml. That entry is the whole registration: the S3 identity, the
@@ -300,12 +303,14 @@ EOF2
 
   Still needed by hand:
 
-  1. Fill in sites/${EDGE}/values.yaml — the AE-title map, de-identification
-     profile and disk paths are facts only you have; nothing generates them.
-  2. Fill in sites/${EDGE}/secrets.enc.yaml — orthanc-deid-salt still needs
-     'openssl rand -hex 32' (deliberately NOT auto-generated: this salt must
-     survive reinstalls, and a command that silently regenerates it on a
-     second run would quietly re-pseudonymise every existing patient).
+  1. Fill in sites/${EDGE}/values.yaml. Only you know these facts, so nothing
+     generates them: the de-identification recipe (ingest.deidentify.specs),
+     the tags that give the XNAT labels (ingest.assign.tagMapping) and the
+     disk paths. Read the recipe, then set deid.policyReviewed: true.
+  2. Fill in sites/${EDGE}/secrets.enc.yaml. Replace the orthanc-deid-salt
+     placeholder with the output of 'openssl rand -hex 32'. The Orthanc pod
+     needs this Secret. Under deid.engine: ingest nothing uses its value.
+     At a production site, also add the reid key Secret from the template.
   3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':
 
        - name: ${EDGE}

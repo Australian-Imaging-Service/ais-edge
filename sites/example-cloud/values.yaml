@@ -201,10 +201,10 @@ observability:
 # identity, uploader and reclaimer on this node.
 #
 # ADDING A SECOND EDGE: add an entry here, create sites/<edge>/ from
-# sites/example-edge/, then re-run install.sh. Nothing else changes — the new
-# edge can differ from the first in every edge-local respect (AE titles, XNAT
-# project mapping, de-identification profile, disk paths) because those live in
-# its own file.
+# sites/example-edge/, then re-run install.sh. Nothing else changes. The new
+# edge can differ from the first in every edge-local respect (the
+# de-identification recipe, the tags that give the XNAT labels, disk paths)
+# because those live in its own file.
 #
 # Measured cost: ~231Mi per uploader. On a 16Gi management node that is a
 # practical ceiling around 15 sites.
@@ -379,8 +379,9 @@ dataPolicy:
       retain: forever             # forever | 30d | 90d | 1y | 7y  (any duration)
       minFreeDiskPercent: 10      # 0 disables the free-space guard
 
-    # Studies whose calling AE title is not in the aetMap. They are HELD, not
-    # dropped, so an operator can map the AET and re-send them.
+    # Written only by the deprecated Lua engine (deid.engine: orthanc): studies
+    # whose called AE title is not in its aetMap, HELD so an operator can map
+    # the AET and re-send them. Under ingest, the default, nothing writes here.
     quarantine:
       retain: forever             # forever | <duration>
       alertAfter: 24h             # <duration> — how long before it nags
@@ -414,6 +415,9 @@ dataPolicy:
       reclaim: onAssigned         # never | onAssigned
 
     # /data/assigned, once the s3-uploader has shipped it.
+    # CAUTION: onUploaded fails the edge render under deid.engine: ingest, the
+    # default. Use auto, as sites/example-mgmt does: it resolves to
+    # onDeidentified under ingest.
     assigned:
       reclaim: onUploaded         # never | onUploaded
       minAge: 0                   # <duration>
@@ -425,9 +429,12 @@ dataPolicy:
     # creates it on the first resource POST, so that is true of a PARTIAL upload.
     s3Staged:
       reclaim: onXnatConfirmed    # never | onXnatConfirmed
-      minAge: 1d                  # <duration> — also gates the
-                                  #   SessionStagedNotConfirmedInXNAT alert;
-                                  #   raise that alert's offset if you raise this
+      minAge: 1d                  # <duration>, at most 36h: the chart refuses
+                                  #   more (SessionStagedNotConfirmedInXNAT).
+                                  #   CAUTION: keep it LONGER than the edge's
+                                  #   stagedReclaimer.minAge (1d by default):
+                                  #   "the two clocks" in charts/edge/values.yaml.
+                                  #   The chart default is 36h.
       verifyAgainstXnat: true     # true | false — false removes the only proof
                                   #   of delivery; do not
       schedule: "17 * * * *"      # cron — how often the reclaimer runs
