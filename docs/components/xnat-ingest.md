@@ -250,9 +250,11 @@ xnat-ingest group-orthanc \
 
 Under ingest, the chart omits `--to-process-label`. The stored
 `ingest.orthancGroup.toProcessLabel` default can still read `xnat-ingest-ready`,
-but the engine helper clears its effective value. No ingest callback applies
-a Lua ready label. Inspect the rendered arguments, not only the raw values,
-when diagnosing study selection.
+but the engine helper clears its effective value. The separate Lua
+`OnStableStudy` callback still applies the configured ready label when the
+backup feature loads the script. It can also clear a processed label. Ingest
+grouping does not require this ready label. Inspect the rendered arguments,
+not only the raw values, when diagnosing study selection.
 
 `--wait-period` governs stable-input selection. It reduces the chance of
 processing a study while it is being sent, but does not establish that a later
@@ -261,10 +263,11 @@ a changed state can cause grouping to run again. Keep the source while handling
 an error; a processed label without matching snapshot evidence is not sufficient
 for the data-policy backend to delete a study.
 
-Do not insert a custom ready-label filter into a running ingest Deployment. It
-would create a dependency on a producer that is absent. Keep the generated
-arguments aligned with the selected engine. The existing deprecated producer
-is described in the single deprecated reference, not as an ingest setup step.
+Keep the generated group arguments aligned with the selected engine. A custom
+ready-label filter introduces a dependency on the stable-study callback and
+its configuration. The script is not loaded for ingest when the facility backup
+is off, and an empty ready-label setting suppresses the label write. In either
+case such a filter can block selection. A label is not evidence of recipe output.
 
 `processedLabel` carries no such constraint, and the difference is worth knowing
 before you assume symmetry: group-orthanc applies that one itself via
@@ -661,7 +664,7 @@ deletes. A dry run makes the same checks and removes no data.
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
-| A custom ready-label filter is added to the running group command | Ingest has no Lua ready-label producer, so the filter can prevent selection | Keep the chart-derived arguments. Under ingest the chart clears this filter; inspect the rendered Deployment rather than only the raw value. |
+| A custom ready-label filter is added to the running group command | Selection now depends on a configured stable-study label callback, which need not be loaded under ingest | Keep the chart-derived arguments. Ingest clears this filter even though the backup-loaded Lua script can still label stable studies. Inspect the rendered Deployment and callback settings. |
 | Assigned reclaim is set to `onUploaded` under ingest | Assigned is an intermediate tree, not the upload source | Use `auto`, which resolves to `onDeidentified`. The terminal tree is verified by the direct-upload staged reclaimer. Do not disable its writer lock or XNAT checks to clear a backlog. |
 
 ## Replacements / future

@@ -569,10 +569,11 @@ orthanc:
   dicomPort: 4242
   httpPort: 8042
 
-  # How long a study must be silent before OnStableStudy fires and the
-  # xnat-ingest-ready label is applied. LOAD-BEARING: with no StableAge the
-  # label is never applied, group-orthanc filters everything out, and the
-  # pipeline stalls with data sitting in Orthanc and no error anywhere.
+  # Seconds of silence before OnStableStudy fires. If the Lua script is
+  # loaded, this callback can apply the ready label and clear a processed
+  # label under ingest too. The chart clears the ingest group's ready-label
+  # filter, so that pipeline does not wait for this label. A ready label
+  # alone does not prove that the ingest recipe has run.
   stableAge: 30
 
   # hostPort  — bind 4242 on the node IP. Standard DICOM port; modalities are
@@ -705,9 +706,10 @@ ingest:
     resources: {}
     enabled: true
     interval: 60
-    # Only studies carrying this label are pulled. Applied by the Lua hook
-    # after de-identification, which is what makes the label the gate that
-    # stops identifiable data leaving Orthanc.
+    # The configured ready label for the Lua stable-study callback. Under
+    # ingest the chart clears the effective group filter even though the
+    # loaded script can still apply this label. It is not a de-identification
+    # receipt. See docs/components/deidentification.md, "The label coupling".
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-ingest-processed
     waitPeriod: 60

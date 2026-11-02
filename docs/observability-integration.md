@@ -88,11 +88,14 @@ Any collector you swap in should preserve at least `namespace`/`app`/`component`
 ### 2b. Per-component emitted schema (as actually emitted today)
 
 **Orthanc receiver** (`app=orthanc`, `component=dicom-receiver`) emits server
-and backup-script logs. Under ingest the callback returns before routing,
-header modification and ready-label production. Do not use
-`instance_deidentified` or `study_labeled_ready` as an ingest success signal.
-Those are legacy-engine events; their reference is in
-[deidentification.md](components/deidentification.md#deprecated-orthanc-lua-engine).
+and Lua callback logs. Under ingest, `OnStoredInstance` returns after the backup
+step, before routing or header modification. It does not emit the legacy
+`instance_deidentified` event. The separate `OnStableStudy` callback has no
+engine guard. When the backup feature loads the script, it can emit
+`study_labeled_ready` and `study_reopened` under ingest too. These label events
+do not prove that the ingest recipe ran. See the
+[label coupling reference](components/deidentification.md#the-label-coupling)
+for the difference between producing a label and filtering on it.
 
 Use native receive logs to establish that Orthanc accepted input. Check backup
 errors separately, then follow group, assign, deidentify and upload. A receive

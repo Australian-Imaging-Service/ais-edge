@@ -29,7 +29,11 @@ Three jobs apply to the default ingest pipeline:
 3. **Provide the grouping source.** group-orthanc reads the REST API and the
    shared storage tree. It waits for stable input, publishes grouped studies,
    and records processed labels and an export snapshot. The chart clears the
-   effective ready-label filter under ingest because no Lua producer applies it.
+   effective ready-label filter under ingest, so selection does not depend on
+   the Lua ready label. When the backup feature loads the script, its separate
+   `OnStableStudy` callback can still apply that label and clear an existing
+   processed label. This callback has no `DeidEnabled` guard. The label does
+   not mean the ingest recipe has run.
 
 ```
 Modality --C-STORE--> Orthanc :4242 (called AET=AISEDGE)
@@ -82,8 +86,9 @@ UUID-named files directly would bypass Orthanc's index and the export checks.
 
 The deprecated Lua de-identification mode is documented only in
 [Deprecated Orthanc Lua engine](deidentification.md#deprecated-orthanc-lua-engine).
-Its project map, hash, ready-label producer and quarantine behavior do not
-describe the ingest callback. Keep ingest for new sites.
+Its project map, hash and quarantine path do not run in the ingest
+`OnStoredInstance` callback. The stable-study label callback is shared when
+the script is loaded. Keep ingest for new sites.
 
 ## What Orthanc has access to
 

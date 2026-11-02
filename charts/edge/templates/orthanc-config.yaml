@@ -124,8 +124,9 @@ data:
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
 {{- /* Rendered whenever the script is loaded, which is now also the case with
-       ingest selected, because the script still archives originals. It returns
-       before AET routing and does not quarantine unknown AETs in ingest mode. Loading a script whose configuration file
+       ingest selected, because the script still archives originals. Its
+       OnStoredInstance callback returns before AET routing in ingest mode.
+       OnStableStudy still uses the label settings. Loading a script whose configuration file
        does not exist would abort every instance at the first read. */}}
 {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
@@ -147,7 +148,7 @@ data:
         "FacilityBackupDir": "/facility-backup",
         "_DeidEnabledREADME": "False under ingest. The enabled callback writes the facility backup, then returns before AET routing, quarantine and header modification. De-identification runs in xnat-ingest after assignment.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
-        "_LabelsREADME": "Legacy callback label settings. Under ingest the callback does not apply a ready label; the chart clears the group ready-label filter. group-orthanc manages its processed and snapshot labels.",
+        "_LabelsREADME": "Stable-study callback settings. When the script is loaded, OnStableStudy can apply ReadyLabel and clear ProcessedLabel under ingest too. The chart clears the ingest group ready-label filter. These labels do not prove that de-identification ran.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},
         "ProcessedLabel": {{ .Values.ingest.orthancGroup.processedLabel | default "" | toJson }}
       }

@@ -241,17 +241,22 @@ review and does not compare the output to an ethics or institutional policy.
 
 ## The label coupling
 
-Ingest does not use the Lua ready-label producer. The chart therefore clears
-the effective `--to-process-label` argument for group-orthanc under ingest,
-even if the stored `ingest.orthancGroup.toProcessLabel` value is
-`xnat-ingest-ready`. It selects stable studies through the group's wait period
+Under ingest, the chart clears the effective `--to-process-label` argument
+for group-orthanc. The stored `ingest.orthancGroup.toProcessLabel` value can
+still be `xnat-ingest-ready`. Grouping uses its wait period for study selection
 and tracks successful processing with `ingest.orthancGroup.processedLabel`.
 
-Do not manually add a ready-label filter to an ingest deployment. No ingest
-stage applies that label. A filter with no producer can leave every pod healthy
-while no study moves. Inspect the rendered group arguments when diagnosing a
-stalled pipeline, and check the group's own errors and stable-study selection.
-The deprecated engine's label producer is described in the next section.
+The Lua callbacks have different roles. `OnStoredInstance` returns before
+routing or header changes under ingest. The separate `OnStableStudy` callback
+has no `DeidEnabled` guard. When the backup feature loads the script, this
+callback can still apply a non-empty ready label and remove an existing
+processed label when a study becomes stable again. A ready label under ingest
+therefore does not establish that de-identification has run.
+
+Keep the chart-derived group arguments. Adding a ready-label filter makes
+ingest depend on that callback and its label settings, including whether the
+script is loaded at all. Inspect the rendered arguments and both callback logs
+when diagnosing study selection. Check recipe output separately from labels.
 
 ## Deprecated Orthanc Lua engine
 
