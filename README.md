@@ -1,6 +1,6 @@
 # AIS Edge — medical imaging ingest from hospital to XNAT
 
-Receives DICOM inside a hospital, de-identifies it at the point of capture, and
+Receives DICOM inside a hospital, de-identifies it on the edge in that hospital, and
 delivers it to XNAT — without the hospital network ever needing an inbound
 route, and without XNAT credentials ever leaving the management node.
 
@@ -92,10 +92,11 @@ chart is not needed.
 
 | Component | Where | Role |
 |---|---|---|
-| **Orthanc** | edge | DICOM C-STORE receiver on :4242. Runs the de-identification Lua hook on every stored instance. |
-| **deidentify-and-forward.lua** | edge | Writes the untouched original to the facility backup, then rewrites identity tags per the site's profile, then labels the study for pickup. |
-| **group-orthanc** | edge | Pulls studies labelled `xnat-ingest-ready` out of Orthanc into `/data/grouped`, then labels them `xnat-ingest-processed` so they are not pulled twice. |
+| **Orthanc** | edge | DICOM C-STORE receiver on :4242. Runs the Lua hook on every stored instance. Under the default `deid.engine: ingest` the hook only writes the facility backup and labels the study. |
+| **deidentify-and-forward.lua** | edge | Writes the untouched original to the facility backup and labels a stable study. Under `ingest` it does not change the instance. Only the deprecated `deid.engine: orthanc` makes it rewrite identity tags per a profile. |
+| **group-orthanc** | edge | Pulls each study that has been quiet for `waitPeriod` out of Orthanc into `/data/grouped`, then labels it `xnat-ingest-processed` so it is not pulled twice. Under the deprecated `orthanc` engine it pulls only the studies labelled `xnat-ingest-ready`. |
 | **assign** | edge | Groups instances into XNAT sessions under `/data/assigned`, writing `__MANIFEST__.json` (per-resource, with MD5 checksums) and `__METADATA__.json`. |
+| **deidentify** | edge | The default de-identification engine (`deid.engine: ingest`). Applies the site's pydicom `deid` recipe (`ingest.deidentify.specs`) to each session in `/data/assigned`, and writes the result to `/data/deidentified`, with a re-identification map in `/data/reid`. The uploader reads only its output. |
 | **s3-uploader** | edge | `rclone copy` each settled session to `s3://ingest-<edge>/staged/`, inside the upload-tree writer lock. Copies only: it never deletes the local copy, and it copies a session again when the staged-reclaimer leaves a repair request for it. Emits a JSON event schema that the alert rules consume. |
 | **Vector** | edge | Ships pod logs to Loki on the management node over TLS. |
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
@@ -123,26 +124,29 @@ server on the management node means:
 ```
  1. modality ──C-STORE──▶ Orthanc :4242
                              │
- 2.                          ├──▶ /data/facility-backup/<study>/…    ORIGINAL
+ 2.                          ├──▶ /data/facility-backup/<patient>/<study>/…   ORIGINAL
  3.                          │     written FIRST, before de-identification
                              │     governed by dataPolicy.originals (forever)
                              ▼
- 4.              de-identify in place (Lua, OnStoredInstance)
-                             │   identity tags replaced per site profile
-                             │   UIDs retained so a study stays coherent
+ 4.              the instance stays in Orthanc, unchanged
+                             │   (deid.engine: ingest strips a copy at step 8)
                              ▼
- 5.              label study `xnat-ingest-ready`
+ 5.              label study `xnat-ingest-ready` when stable (no stage waits for it)
                              │
- 6.  group-orthanc ──────────┘   (waits for IsStable; skips already-processed)
+ 6.  group-orthanc ──────────┘   (waits waitPeriod; skips already-processed)
         │
         ▼
  7.  /data/grouped/<session>/
         │
- 8.  assign
+ 8.  assign, then deidentify   ids from ingest.assign.tagMapping, verbatim;
+        │                      the recipe strips the tags it names; UIDs kept;
+        │                      re-identification map in /data/reid
         ▼
- 9.  /data/assigned/<project>.<subject>.<visit>/
+ 9.  /data/deidentified/<project>.<subject>.<visit>/
         │   + __MANIFEST__.json  (filenames + MD5 per resource)
         │   + __METADATA__.json
+        │   (assign writes /data/assigned first; deidentify removes each
+        │    session there once its de-identified copy is complete)
         │
 10.  s3-uploader   waits settleMinutes, fingerprints the tree, copies
         │          HTTPS, per-site credential, custom CA; never deletes
@@ -219,8 +223,8 @@ scripts/site-secrets.sh add-edge my-site my-edge
 
 # 5. Edit them. The management file carries everything shared — domain,
 #    hostnames, node IPs, the edges list, the fleet-wide data policy. Each edge
-#    file carries only what is local to that site: its AE-title to XNAT-project
-#    map, its de-identification profile, its disk paths.
+#    file carries only what is local to that site: its de-identification
+#    recipe, the tags that give the XNAT labels, its disk paths.
 $EDITOR sites/my-site/values.yaml        $EDITOR sites/my-site/secrets.enc.yaml
 $EDITOR sites/my-edge/values.yaml        $EDITOR sites/my-edge/secrets.enc.yaml
 
@@ -413,8 +417,8 @@ practical ceiling around **15 sites**.
 
 ### Edge-local configuration
 
-`sites/<edge>/values.yaml` carries only what is genuinely local — the AE-title
-map, the de-identification profile, and storage paths. Everything else is
+`sites/<edge>/values.yaml` carries only what is genuinely local: the
+de-identification recipe, the tag mapping, and storage paths. Everything else is
 **derived** from the management site file, which is passed to the edge release
 as well:
 
@@ -433,33 +437,52 @@ arrivals rather than absences, reports nothing wrong.
 ### De-identification
 
 ```yaml
-orthanc:
-  aet: AISEDGE
-  deid:
-    enabled: true
-    existingSaltSecret: orthanc-deid-salt
-    aetMap:
-      AISEDGE: {project: my_project}
-    profile:
-      DeidMode: modify
-      RemovePrivateTags: false
-      Keep: [StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID, FrameOfReferenceUID]
-      Replace:
-        PatientIdentityRemoved: 'YES'
-        PatientName: ANONYMOUS
-        PatientID: ${ProjectCode}-${SubjectHash}
+deid:
+  engine: ingest                # the default, and the only engine for a new site
+  policyReviewed: false         # no safe default: set it after you read the recipe
+
+ingest:
+  deidentify:
+    specs:                      # the pydicom deid recipe, per project
+      __default__/medimage/dicom-series: |
+        FORMAT dicom
+
+        %header
+
+        REMOVE PatientName
+        REMOVE PatientID
+        REMOVE PatientBirthDate
+        REMOVE AccessionNumber
+        ADD PatientIdentityRemoved YES
+    # reidEncryptKeySecret: reid-key   # production: encrypt the re-identification maps
+  assign:
+    tagMapping:                 # these tag VALUES become the XNAT labels
+      project: StudyID
+      subject: PatientID
+      session: AccessionNumber
+    # constantProjectId: my_project    # or: file every session under one project
 ```
 
-* **`deid.policyReviewed` has no default.** The chart refuses to render until a
-  human asserts they have read the profile and the AE-title map for this site. It
-  lives at the top level next to `deid.engine`, not under `orthanc:`, because it
-  gates every engine and not just the Lua one.
-* **UIDs are retained** so a study stays internally consistent across series.
-* **An unmapped AE title is quarantined, not dropped** — see
-  `dataPolicy.originals.quarantine`.
-* **The HMAC salt must survive reinstalls.** The same patient hashed with a
-  different salt becomes a different pseudonym, so rotating it splits one
-  subject into two in XNAT.
+* **`deid.policyReviewed` has no safe default.** The chart refuses to render
+  until a human asserts they have read the recipe for this site. It lives at
+  the top level next to `deid.engine`, not under `orthanc:`, because it gates
+  every engine.
+* **Only the tags the recipe names change.** Every other tag reaches XNAT
+  unchanged, so UIDs are retained and a study stays internally consistent
+  across series. A recipe for a project replaces `__default__` for that
+  project. `sites/example-edge/values.yaml` has the full shipped recipe.
+* **The XNAT labels are the tag values, verbatim.** `assign` reads them before
+  the recipe runs, so no recipe can change them. `subject: PatientID` puts the
+  medical record number into XNAT in the clear, so choose pseudonymous tags.
+  There is no AE-title routing. A study with an empty tag goes to
+  `/data/assigned/__invalid__`, still identifiable.
+* **The re-identification maps are plain JSON without a key.** They are in
+  `/data/reid` on the edge. Set `ingest.deidentify.reidEncryptKeySecret` at a
+  production site. The Secret needs the key `XINGEST_REID_ENCRYPT_KEY`, a
+  Fernet key.
+* **`deid.engine: orthanc` is deprecated.** Do not use it. Its reference
+  material is in `docs/components/deidentification.md`, "Deprecated: Orthanc
+  Lua engine".
 
 ---
 
@@ -469,9 +492,10 @@ The charts never contain credentials. They reference Secrets by name, and those
 Secrets are created separately from a SOPS-encrypted file.
 
 ```bash
+scripts/site-secrets.sh add-recipient <age1...>      # add a key; then `sops updatekeys` each existing file
 scripts/site-secrets.sh new <site> <mgmt|edge>       # scaffold; the ROLE is required
 scripts/site-secrets.sh add-edge <mgmt-site> <edge>  # scaffold an edge AND mint its S3 key pair
-scripts/site-secrets.sh encrypt <site>               # before committing
+scripts/site-secrets.sh encrypt <site>               # before committing; does nothing on an encrypted file
 scripts/site-secrets.sh edit <site>                  # decrypt → $EDITOR → re-encrypt
 scripts/site-secrets.sh view <site>                  # print decrypted (careful: terminal)
 scripts/site-secrets.sh apply <site>                 # decrypt straight into the cluster
@@ -526,7 +550,7 @@ dataPolicy:
     allowExpiry: false  # the THIRD switch — while false the facility-backup
                         # volume is mounted read-only and no original is removed
     facilityBackup: {retain: forever, minFreeDiskPercent: 10}
-    quarantine:     {retain: forever, alertAfter: 24h}
+    quarantine:     {retain: forever, alertAfter: 24h}   # only the deprecated orthanc engine writes here
     fileDrop:       {reclaim: never,  minAge: 30d}
 
   derived:                                     # reproducible from the originals
@@ -535,7 +559,7 @@ dataPolicy:
                                                #   assign time, so only orphans
                                                #   reach the engine; setting it
                                                #   is rejected at render
-    assigned:       {reclaim: onUploaded,      minAge: 0}
+    assigned:       {reclaim: auto,            minAge: 0}   # auto = onDeidentified under ingest
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 36h,
                      verifyAgainstXnat: true, maxRemovals: 50,
                      schedule: "17 * * * *"}
@@ -618,7 +642,7 @@ Full truth table: `docs/TOUR.md` §5c.
 | Edge → XNAT | The edge has **no XNAT credential**. Only the management uploader does. This is the main operational advantage of `upload.mode: s3`. |
 | S3 ingestion | Per-edge **SigV4 key pair**, scoped to that site's bucket (the row above). Optionally a second factor: `seaweedfs.ingress.clientCerts` adds a per-edge **client certificate**, verified at the SeaweedFS Ingress with the same `auth-tls-*` annotations the Loki path uses — the key pair is a bearer secret usable from anywhere, the certificate is a private key that never leaves the site and rotates every 90 days. **Ships off**, and turning it on is a four-step rollout (`issue` → confirm `s3-client-tls` landed → edge `requireClientCert` → `require`): flipping verification on before the certificates arrive breaks every upload with an error that names nothing — measured, the handshake succeeds, nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure, so it reads as a dead endpoint. See `docs/components/seaweedfs.md`. |
 | Loki ingestion | Per-edge **client certificate (mTLS)**, verified at the Ingress (`auth-tls-verify-client: on`, with `auth-tls-match-cn` pinned to the names in `edges`). cert-manager issues one `<edge>-loki-client` certificate per site and cert-sync delivers it as `loki-push-client-tls`. Loki itself runs `auth_enabled: false`, so the Ingress is the only place it is checked. The CN pin admits every site on the one push hostname, so it bounds *which* certificates are accepted, not one edge writing under another's name. |
-| TLS | Internal CA via cert-manager. An https S3 endpoint with no CA bundle is **refused at render time** — an empty `AWS_CA_BUNDLE` silently disables verification rather than falling back to the system store. |
+| TLS | Internal CA via cert-manager. An https S3 endpoint with no CA bundle is **refused at render time**. The uploader is rclone, and an empty `RCLONE_CA_CERT` falls back to the system store, which does not hold the internal CA, so every transfer would fail the handshake. (The older client, the AWS CLI, was worse: an empty `AWS_CA_BUNDLE` silently disabled verification.) |
 | Credentials at rest | SOPS + age. Never in a values file, never in a ConfigMap, never in git. |
 | CA private key | `tls.key` can never be copied to an edge — cert-sync refuses to render it. |
 
@@ -725,8 +749,8 @@ docs/                          component guides, CA ceremony, alerting design
 
 ```bash
 make ci-fast     # no cluster, no docker
-make ci          # adds the three docker-based stages: loki-rules, data-policy,
-                 # greenfield
+make ci          # adds the four docker-based stages: loki-rules, data-policy,
+                 # s3-uploader-image, greenfield
 
 make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
                                # deployment. See "Then verify, every time".
@@ -736,7 +760,7 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 |---|---|
 | `render` | both charts render across 40 value combinations |
 | `negative` | 114 render-time guards each fire on the condition they claim to detect, plus a census that fails if a guard is added without a case |
-| `promtool` | 16 alert-rule unit tests — each rule fires on the condition it describes |
+| `promtool` | 47 unit-test groups (85 alert assertions) over the 13 Prometheus alert rules: each rule fires on the condition it describes |
 | `shell-syntax` | every script parses; no `yes \|` pipeline under `pipefail` |
 | `pvc-retention` | nothing holding data can be auto-deleted |
 | `runtime-templates` | scripts survive Helm rendering |
@@ -749,13 +773,14 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |
 | `data-policy` | the edge retention engine, run under the real busybox image the chart deploys, asserting on **what survived** |
+| `s3-uploader-image` | the uploader loop inside the pinned shell image, with rclone lifted in as the initContainer does it: one real copy |
 | `greenfield` | the charts install onto an empty cluster |
 
-The last three need docker. They **skip loudly** without it, and the skip is
+The last four need docker. They **skip loudly** without it, and the skip is
 reported separately from a pass, so a docker-less run never reads as "the charts
-are installable". `CI_REQUIRE_LOKI_TESTS`, `CI_REQUIRE_DATAPOLICY_TESTS` and
-`CI_REQUIRE_GREENFIELD` turn each skip into a failure, which is what the GitHub
-workflow sets.
+are installable". `CI_REQUIRE_LOKI_TESTS`, `CI_REQUIRE_DATAPOLICY_TESTS`,
+`CI_REQUIRE_UPLOADER_IMAGE` and `CI_REQUIRE_GREENFIELD` turn each skip into a
+failure, which is what the GitHub workflow sets.
 
 Two of these exist because of specific classes of silent failure:
 
@@ -801,9 +826,9 @@ kubectl -n cert-manager get certificate
 dcmsend <orthanc-pod-ip> 4242 -aec AISEDGE study.dcm
 ```
 
-Then follow it: Orthanc logs (`Lua says: {"backupPath": …}`) →
-`/data/facility-backup` → study labelled `xnat-ingest-ready` → `/data/grouped` →
-`/data/assigned` → `upload_completed` in the s3-uploader log →
+Then follow it: Orthanc logs (the `instance_archived` event, with its
+`backupPath`) → `/data/facility-backup` → `/data/grouped` → `/data/assigned` →
+`/data/deidentified` → `upload_completed` in the s3-uploader log →
 `s3://ingest-<edge>/staged/` → the management uploader log.
 
 Note that **re-sending the same file produces no upload notification**. DICOM
@@ -826,14 +851,15 @@ plane is up and the worker has joined, which is the expensive half.
 #    'edges:' block to paste.
 scripts/site-secrets.sh add-edge <site> <edge>
 
-# 2. the AE-title map, de-identification profile and disk paths — facts only
-#    you have, so nothing generates them
+# 2. the de-identification recipe, the tags that give the XNAT labels, and
+#    the disk paths: facts only you have, so nothing generates them. Read the
+#    recipe, then set deid.policyReviewed: true.
 $EDITOR sites/<edge>/values.yaml
 
-# 3. the de-identification salt. The template ships
-#    AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS, and it is deliberately NOT
-#    auto-generated: it must survive reinstalls, and silently regenerating it
-#    would re-pseudonymise every existing patient.
+# 3. the salt Secret. The template ships AIS_DEID_HMAC_SALT:
+#    REPLACE_64_HEX_CHARS. The Orthanc pod needs the Secret. Under
+#    deid.engine: ingest nothing uses its value. Fill it in so that encrypt
+#    does not warn. At a production site, also add the reid key Secret.
 openssl rand -hex 32
 $EDITOR sites/<edge>/secrets.enc.yaml
 
@@ -890,17 +916,18 @@ accident of network placement, not a control. Anything running *inside* the
 cluster can call that API, and it can **delete studies**. Turn it on for any
 deployment where that matters.
 
-Three keys, all required, because two different things read this Secret:
+Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
-| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
-| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
-| `orthanc-password` | `group-orthanc` | as above |
+| `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
-`users.json`. They are separate keys because Orthanc wants a file and
-`group-orthanc` wants environment variables; nothing reconciles them for you.
+`users.json`. They are separate keys because Orthanc wants a configuration file,
+and `group-orthanc` and the data-policy engine want environment variables.
+Nothing reconciles them for you.
 
 **1. Generate a password and add the Secret.**
 
@@ -946,14 +973,17 @@ as a confusing volume error rather than an auth one.
 **3. Apply, and restart what reads it.**
 
 ```bash
-scripts/site-secrets.sh apply <site>
-./install.sh <site>
+./install.sh <mgmt-site>      # step 7 applies the edge's Secrets to the edge cluster, then upgrades the edge chart
 KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
 KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart ds/<release>-data-policy
 ```
 
-Both restarts are needed: Kubernetes does not restart a pod when a Secret
-changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+`<release>` is `edge` when `install.sh` installed the chart. Do not run
+`site-secrets.sh apply <edge>` while `KUBECONFIG` points at the management
+cluster: it would create the edge's Secrets there. All three restarts are
+needed: Kubernetes does not restart a pod when a Secret changes, and none of
+these pods re-reads one at runtime.
 
 **4. Verify.**
 
@@ -1024,7 +1054,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| xnat-ingest | `0.16.2` |
+| xnat-ingest | `0.16.2.post1`: the fork build `ghcr.io/akshitbeniwal/xnat-ingest`, upstream 0.16.2 plus AIS fixes that upstream has not released, in both charts |
 
 Every one is what is **verified working**, read out of a live deployment rather
 than chosen from a changelog. The previous installer used `/latest/` and

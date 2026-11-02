@@ -12,9 +12,10 @@ when it runs**, **what can go wrong**, and **what happens to the data**.
 ## 0. The shape of the thing, in one paragraph
 
 A hospital sends DICOM to a machine in its own building (the **edge**). That
-machine de-identifies the images immediately, keeps the untouched original in a
-local archive, and pushes the de-identified copy out to a **management node**
-over HTTPS. The management node stages it in S3, then writes it into XNAT, then
+machine keeps the untouched original in a local archive. Its ingest pipeline
+de-identifies a copy on the edge, and the edge pushes that copy out to a
+**management node** over HTTPS. The management node stages it in S3, then
+writes it into XNAT, then
 — only after re-checking that XNAT really holds every file — deletes the staged
 copy. The hospital never accepts an inbound connection, and no XNAT credential
 ever exists inside the hospital.
@@ -31,7 +32,7 @@ Everything else in this repo is in service of that sentence.
 | Chart       | `charts/mgmt`                                  | `charts/edge`                                                          |
 | Kubernetes  | a full k0s cluster                               | **only a worker** — its control plane runs on the management node |
 | Holds       | S3 staging, XNAT uploader, observability, the CA | Orthanc, the ingest pipeline                                             |
-| Credentials | XNAT, SMTP, S3 admin                             | its own S3 key, its own Loki key, the de-id salt                         |
+| Credentials | XNAT, SMTP, S3 admin                             | its own S3 key, its own Loki key, the salt Secret, the reid key          |
 
 The unusual part is that **the edge's Kubernetes control plane physically runs on
 the management node**, via k0smotron. The hospital gets a Kubernetes node without
@@ -188,47 +189,62 @@ ever dialled the node port from outside. It buys nothing here.
 ### 2.3 De-identification — the one you must actually read
 
 ```yaml
-orthanc:
-  aet: AISEDGE
-  deid:
-    enabled: true
-    aetMap:
-      AISEDGE: {project: my_project}
-    profile:
-      Keep: [StudyInstanceUID, SeriesInstanceUID, SOPInstanceUID, FrameOfReferenceUID]
-      Replace:
-        PatientName: ANONYMOUS
-        PatientID: ${ProjectCode}-${SubjectHash}
-```
-
-**File:** `sites/<edge>/values.yaml`
-
-`deid.policyReviewed` has **no default and the chart refuses to render without
-it.** It sits at the top level beside `deid.engine`, not under `orthanc:`,
-because it gates every engine rather than only the Lua hook:
-
-```yaml
 deid:
-  engine: orthanc              # ingest | orthanc | none
-  policyReviewed: false        # NO DEFAULT. You must set this to true.
+  engine: ingest               # the default: the xnat-ingest deidentify stage
+  policyReviewed: false        # NO SAFE DEFAULT. You must set this to true.
+
+ingest:
+  deidentify:
+    specs:                     # THE RECIPE. Only the tags it names change.
+      __default__/medimage/dicom-series: |
+        FORMAT dicom
+
+        %header
+
+        REMOVE PatientName
+        REMOVE PatientID
+        REMOVE PatientBirthDate
+        REMOVE AccessionNumber
+  assign:
+    tagMapping:                # the tags whose VALUES become the XNAT labels
+      project: StudyID
+      subject: PatientID       # read the first point below before you keep this
+      session: AccessionNumber
+    # constantProjectId: MY_PROJECT   # or: file every session under one project
 ```
 
-It is not a feature flag. It is an assertion that a human has read the recipe the
-selected engine applies, `orthanc.deid.profile` here and
-`ingest.deidentify.specs` under the `ingest` engine, plus this AE-title map, and
-accepts what they do and do not remove.
+**File:** `sites/<edge>/values.yaml`. `sites/example-edge/values.yaml` has the
+full recipe.
+
+`deid.policyReviewed` has **no safe default, and the chart refuses to render
+while it is false.** It sits at the top level beside `deid.engine`, not under
+`orthanc:`, because it gates every engine.
+
+It is not a feature flag. It is an assertion that a human has read the recipe
+in `ingest.deidentify.specs` and accepts what it does and does not remove.
 
 Three things worth understanding:
 
-* **`aetMap` is the routing table.** The calling AE title decides which XNAT
-  project the study lands in. An unmapped AE title is **quarantined, not
-  dropped** — it goes to `__unmapped_aet__` and raises an alert after 24h.
-* **UIDs are retained** so a study stays internally consistent across series.
-  That is a deliberate research-data choice, not an oversight.
-* **The pseudonym salt must survive reinstalls.** The same patient hashed with a
-  different salt becomes a different pseudonym, so rotating it splits one person
-  into two subjects in XNAT. It lives in `secrets.enc.yaml` and
-  `uninstall.sh` deliberately never deletes it.
+* **The XNAT labels are the tag values, verbatim.** `assign` reads the tags
+  that `tagMapping` names before the recipe runs, so no recipe can change a
+  label. `subject: PatientID` puts the medical record number into XNAT in the
+  clear. Choose tags that hold pseudonyms. There is no AE-title routing: a
+  study is filed by its tags only. A study with an empty tag goes to
+  `/data/assigned/__invalid__`, still identifiable.
+* **Only the tags that the recipe names change.** Every other tag goes to XNAT
+  unchanged. So the UIDs are retained, and a study stays consistent across
+  series. That is a deliberate research-data choice, not an oversight. A recipe
+  at `<PROJECT_ID>/medimage/dicom-series` replaces the `__default__` recipe for
+  that project.
+* **The re-identification map is sensitive.** The stage writes a map back to
+  the removed values for each session, in `/data/reid` on the edge. It is plain
+  JSON unless `ingest.deidentify.reidEncryptKeySecret` names a Secret with the
+  key `XINGEST_REID_ENCRYPT_KEY`. Set it at a production site (§3).
+
+`deid.engine: orthanc`, the Orthanc Lua engine, is **deprecated**. Do not use
+it. Its reference material is in one place:
+[components/deidentification.md](components/deidentification.md), "Deprecated:
+Orthanc Lua engine".
 
 ### 2.4 Data policy — what is kept, for how long
 
@@ -239,12 +255,12 @@ dataPolicy:
 
   originals:
     facilityBackup: {retain: forever, minFreeDiskPercent: 10}
-    quarantine:     {retain: forever, alertAfter: 24h}
+    quarantine:     {retain: forever, alertAfter: 24h}   # only the deprecated orthanc engine writes here
 
   derived:
     orthancStorage: {reclaim: onGrouped,       minAge: 7d}
     grouped:        {reclaim: onAssigned}      # no minAge — rejected at render
-    assigned:       {reclaim: onUploaded,      minAge: 0}
+    assigned:       {reclaim: auto,            minAge: 0}   # auto = onDeidentified under ingest
     # Keep this bucket clock above the edge stagedReclaimer.minAge (1d).
     s3Staged:       {reclaim: onXnatConfirmed, minAge: 36h, maxRemovals: 50}
 ```
@@ -282,8 +298,9 @@ either way; step 7 is where you would see it.)
 decisions in the logs, then enable.
 
 **A `staged-reclaimer` CronJob retires the upload tree in both upload modes**
-(`/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
-`ingest`, `/data/packaged` when the optional package stage is on). Under
+(`/data/deidentified` under the default `ingest` engine, `/data/packaged` when
+the optional package stage is on, `/data/assigned` under the deprecated
+`orthanc` engine). Under
 `upload.mode: s3` it proves each local file against the
 bucket: the object must be there with the same size and an ETag equal to the
 MD5 of the bytes read from disk now (or the multipart form of it for
@@ -310,9 +327,11 @@ margin, or the bucket copy goes before the edge has proven its own against it
 
 Secrets live in git, encrypted. You hold an age keypair; the private half stays
 at `~/.config/sops/age/keys.txt` and is never committed, the public half goes in
-`.sops.yaml`. Any key listed there can decrypt, which is why adding a colleague
-is one command. Only the **values** are encrypted, so `git diff` still shows
-*which* secret changed without showing what it changed to.
+`.sops.yaml`. Any key listed there can decrypt a file that was encrypted, or
+re-keyed, after the key was added. Adding a colleague is two commands (see
+"Adding or removing a colleague"). Only the **values** are encrypted, so
+`git diff` still shows *which* secret changed without showing what it changed
+to.
 
 **One file per machine:** `sites/<name>/secrets.enc.yaml`. They are not
 interchangeable — `apply` pushes a whole file into whatever cluster
@@ -330,12 +349,13 @@ admin key on a hospital machine.
 |                        | Management site (one)                                    | Each edge site                        |
 | ---------------------- | -------------------------------------------------------- | ------------------------------------- |
 | Namespaces             | `ais-mgmt`, `xnat-upload`                                | `xnat-ingest`                         |
-| You fill in            | 6 credentials — 7 Secret *documents*, because `seaweedfs-upload` is created twice — plus one `<edge>-s3` per edge | **1 Secret** — the de-id salt         |
+| You fill in            | 6 credentials in 7 Secret *documents* (`seaweedfs-upload` is created twice), plus one `<edge>-s3` per edge | **1 Secret**, the salt. A production site adds the reid key |
 | Delivered for you      | —                                                        | CA bundle, Loki client cert, S3 key   |
 
-That last row is the part people get wrong: an edge has **exactly one** secret
-you write by hand. Everything else arrives via cert-sync (see "Three secrets you
-must NOT create by hand" below).
+That last row is the part people get wrong: an edge has **one** secret that
+you must write by hand, two at a production site with the reid key. Everything
+else arrives via cert-sync (see "Three secrets you must NOT create by hand"
+below).
 
 **Management site** (`sites/example-mgmt/secrets.example.yaml`):
 
@@ -376,11 +396,13 @@ must NOT create by hand" below).
 
 | Secret                | Keys                                  | What it is                                                                                                                              |
 | --------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the salt that turns a patient identifier into `${SubjectHash}`. Despite the variable's name this is a salted djb2, NOT an HMAC — see components/deidentification.md, *Pseudonym strength*. **Effectively permanent** — see the rotation warning below |
+| `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the salt of the Orthanc Lua script. The Orthanc pod needs this Secret whenever the facility backup is on, and the script stops at load without it. Under `deid.engine: ingest` nothing uses the value, so a new value changes no XNAT label. See components/deidentification.md, *Pseudonym strength* |
+| `reid-key` (you choose the name) | `XINGEST_REID_ENCRYPT_KEY` (a Fernet key) | encrypts the re-identification maps in `/data/reid`. Optional for the chart, required at a production site. Name it in `ingest.deidentify.reidEncryptKeySecret`. Keep a copy off the edge: a map needs the key that wrote it |
 
-Everything else in the edge template is commented out and optional (Orthanc
-auth, Samba). `s3-edge-credentials` is deliberately absent — see "Three secrets
-you must NOT create by hand on an edge" below.
+Everything else in the edge template is commented out and optional: the reid
+key above, Orthanc auth, direct-mode XNAT credentials and Samba.
+`s3-edge-credentials` is deliberately absent. See "Three secrets you must NOT
+create by hand on an edge" below.
 
 ### Step A — once per operator, on a new machine
 
@@ -427,8 +449,8 @@ twice and both copies must carry the same value — then encrypt.
 
 Use `add-edge`, not `new`: it generates the S3 key pair instead of making you
 invent one and type it into two files that must match. It is the **first of six
-steps**, not a replacement for them — you still fill in the salt, and you still
-encrypt.
+steps**, not a replacement for them. You still fill in the recipe and the salt,
+and you still encrypt.
 
 ```bash
 scripts/site-secrets.sh add-edge my-deployment hospital-a
@@ -443,10 +465,14 @@ It does three things and then tells you the other five, including the exact
 
   Still needed by hand:
 
-  1. Fill in sites/hospital-a/values.yaml — the AE-title map, de-identification
-     profile and disk paths are facts only you have; nothing generates them.
-  2. Fill in sites/hospital-a/secrets.enc.yaml — orthanc-deid-salt still needs
-     'openssl rand -hex 32'
+  1. Fill in sites/hospital-a/values.yaml. Only you know these facts, so nothing
+     generates them: the de-identification recipe (ingest.deidentify.specs),
+     the tags that give the XNAT labels (ingest.assign.tagMapping) and the
+     disk paths. Read the recipe, then set deid.policyReviewed: true.
+  2. Fill in sites/hospital-a/secrets.enc.yaml. Replace the orthanc-deid-salt
+     placeholder with the output of 'openssl rand -hex 32'. The Orthanc pod
+     needs this Secret. Under deid.engine: ingest nothing uses its value.
+     At a production site, also add the reid key Secret from the template.
   3. Paste this into sites/my-deployment/values.yaml, under 'edges:':
 
        - name: hospital-a
@@ -464,22 +490,23 @@ It does three things and then tells you the other five, including the exact
 secrets at its step 3 and this edge's into the child cluster at step 7. You only
 run `apply` by hand to change a secret on an already-running system.
 
-> **Step 2 is the one that bites — do not skip the salt.** `add-edge` scaffolds
-> the edge's secrets from the template, so `orthanc-deid-salt` arrives as the
-> literal placeholder `REPLACE_64_HEX_CHARS`. **Nothing rejects that value**: the
-> chart checks only that a salt Secret is *named*, never that its contents are
-> real. An edge installed with the placeholder starts cleanly and derives every
-> `${SubjectHash}` and `${SessionHash}` from a string published in this
-> repository.
+> **Step 2: fill in the salt anyway.** `add-edge` scaffolds the edge's secrets
+> from the template, so `orthanc-deid-salt` arrives as the literal placeholder
+> `REPLACE_64_HEX_CHARS`. **Nothing rejects that value**: the chart checks only
+> that a salt Secret is *named*, never that its contents are real. Under
+> `deid.engine: ingest` the value has no effect, because only the deprecated Lua
+> engine makes pseudonyms from it. But the Orthanc pod needs the Secret, and
+> `encrypt` warns about the placeholder. Fill it in, so that a warning always
+> means a real problem.
 >
-> `encrypt` now catches this — so do not train yourself to click past it. It
+> `encrypt` catches this. Do not train yourself to click past it. It
 > matches only unfilled **values** (`<key>: REPLACE_...` on a line that is not
 > commented out), never the templates' own comments, and it names the offending
 > keys:
 >
 > ```
 > WARNING: sites/<edge-name>/secrets.enc.yaml has unfilled placeholder VALUES:
->     38:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS
+>     42:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS
 >   Encrypt anyway? [y/N]:
 > ```
 >
@@ -501,8 +528,8 @@ run `apply` by hand to change a secret on an already-running system.
 > That covers the **management** site only: an edge's secrets are applied at
 > step 7 without a placeholder check, so `encrypt` is the one gate an edge gets.
 >
-> Treat the salt as permanent once set: rotating it gives the same patient a
-> different pseudonym and breaks linkage to everything already in XNAT.
+> Under `deid.engine: ingest` you can rotate the salt without an effect on
+> XNAT. Restart Orthanc after you apply a new value.
 
 Both `add-edge` and `new` leave the same two things to you deliberately: the
 `edges:` block (that file is the most heavily hand-annotated in the repo, and a
@@ -546,12 +573,22 @@ Secret changes no pod spec, so Helm does not roll the pod and the old key keeps
 working until something restarts it — see the note in
 `charts/mgmt/templates/seaweedfs.yaml`.
 
-> **`orthanc-deid-salt` is not rotatable in practice.** It is the pseudonym salt
-> behind `${SubjectHash}` and `${SessionHash}`, so changing it gives every
-> future study a *different* pseudonymous PatientID for the same real patient.
-> Sessions already in XNAT keep the old hash, and the two can never be linked
-> again without the original identifiers. Treat it as permanent per site, and
-> back it up with the same care as the age key.
+> **`orthanc-deid-salt` under `ingest`.** Only the deprecated Lua engine makes
+> pseudonyms from this salt. Under `deid.engine: ingest` nothing uses the value,
+> so a rotation changes no XNAT label. Orthanc reads it only at start, so
+> restart Orthanc after you apply it:
+>
+> ```bash
+> KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/edge-orthanc
+> ```
+>
+> **The reid key is different.** A map that the stage wrote with the old key
+> needs the old key. Keep the old key as long as you keep those maps. Restart
+> the stage after you apply a new key, because it reads the key only at start:
+>
+> ```bash
+> KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/edge-deidentify
+> ```
 
 ### Pointing the uploader at another XNAT
 
@@ -631,17 +668,18 @@ accident of network placement, not a control. Anything running *inside* the
 cluster can call that API, and it can **delete studies**. Turn it on for any
 deployment where that matters.
 
-Three keys, all required, because two different things read this Secret:
+Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
-| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
-| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
-| `orthanc-password` | `group-orthanc` | as above |
+| `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
-`users.json`. They are separate keys because Orthanc wants a file and
-`group-orthanc` wants environment variables; nothing reconciles them for you.
+`users.json`. They are separate keys because Orthanc wants a configuration file,
+and `group-orthanc` and the data-policy engine want environment variables.
+Nothing reconciles them for you.
 
 **1. Generate a password and add the Secret.**
 
@@ -687,14 +725,17 @@ as a confusing volume error rather than an auth one.
 **3. Apply, and restart what reads it.**
 
 ```bash
-scripts/site-secrets.sh apply <site>
-./install.sh <site>
+./install.sh <mgmt-site>      # step 7 applies the edge's Secrets to the edge cluster, then upgrades the edge chart
 KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
 KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+KUBECONFIG=kubeconfig-<edge> kubectl -n xnat-ingest rollout restart ds/<release>-data-policy
 ```
 
-Both restarts are needed: Kubernetes does not restart a pod when a Secret
-changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+`<release>` is `edge` when `install.sh` installed the chart. Do not run
+`site-secrets.sh apply <edge>` while `KUBECONFIG` points at the management
+cluster: it would create the edge's Secrets there. All three restarts are
+needed: Kubernetes does not restart a pod when a Secret changes, and none of
+these pods re-reads one at runtime.
 
 **4. Verify.**
 
@@ -729,6 +770,9 @@ so the new key cannot read anything yet** — rotate each file explicitly:
 ```bash
 for f in sites/*/secrets.enc.yaml; do sops updatekeys "$f"; done
 ```
+
+`scripts/site-secrets.sh encrypt` does not do this. It stops on a file that is
+already encrypted and changes nothing.
 
 Removing someone is the mirror image with one caveat that matters: dropping them
 from `.sops.yaml` and re-running `updatekeys` stops them reading *future*
@@ -812,6 +856,14 @@ be the identical string:
    management secrets file — conventionally `hospital-a-s3`. There is no fourth
    string to keep in step any more: the Loki push identity is derived from
    `edges[].name`, not written down a second time.
+
+The edge name must be a DNS-1123 label: lowercase letters, digits and `-`, with
+a letter or a digit at the start and at the end. The management chart refuses
+any other name (`charts/mgmt/templates/_helpers.tpl:244-245`). The name becomes
+the k0smotron Cluster name and its namespace, and it is part of the derived
+names: the bucket `ingest-<edge>`, the Secret `<edge>-s3` and the uploader
+`mgmt-upload-<edge>`. The Helm release names do not come from the site name on
+this tier: `install.sh` always names them `mgmt` and `edge`.
 
 > This is friction the tool should absorb rather than the operator, and that is
 > being addressed. Until it is, `docs/TOUR.md` §5b walks the whole sequence.
@@ -1023,12 +1075,13 @@ lives in it.
 ```
  1. modality ──C-STORE──▶ Orthanc :4242
  2.   Lua hook writes the ORIGINAL to /data/facility-backup/     ← archive of record
- 3.   then de-identifies in place
- 4.   then labels the study `xnat-ingest-ready`
- 5. group-orthanc pulls it to /data/grouped, relabels `xnat-ingest-processed`
- 6. assign builds an XNAT session in /data/assigned
+ 3.   the instance stays in Orthanc unchanged (deid.engine: ingest)
+ 4.   the hook labels the stable study `xnat-ingest-ready` (no stage waits for it)
+ 5. group-orthanc pulls each quiet study to /data/grouped, labels it `xnat-ingest-processed`
+ 6. assign builds an XNAT session in /data/assigned (ids from ingest.assign.tagMapping),
+    then deidentify applies the recipe into /data/deidentified (map in /data/reid)
        + __MANIFEST__.json  (filenames + MD5 per resource)
- 7. s3-uploader waits settleMinutes, then copies to s3://ingest-<edge>/staged/
+ 7. s3-uploader waits settleMinutes, then copies /data/deidentified to s3://ingest-<edge>/staged/
        (a copy: the edge keeps its own until step 9)
  8. mgmt-upload-<edge> writes it into XNAT
  9. staged-reclaimer (edge), after stagedReclaimer.minAge, proves each local
@@ -1044,6 +1097,11 @@ lives in it.
 **Order matters at step 2.** The original is written to the facility backup
 *before* de-identification, so the archive of record is the wire original, not a
 processed derivative.
+
+**Identifiable data stays on the edge until step 6.** Orthanc storage,
+`/data/grouped` and `/data/assigned` hold it as it arrived. Only the
+de-identified copy leaves the site. With the optional package stage, step 7
+copies `/data/packaged` instead.
 
 **Step 7's settle window** (`settleMinutes`, default 5) exists because a session
 being written to is not a session ready to ship. The uploader waits for the tree
@@ -1078,6 +1136,7 @@ deliberately paranoid:
   capped, leaving the rest for someone to notice.
 
 **Files:** `charts/edge/files/deidentify-and-forward.lua`,
+`charts/edge/templates/ingest-pipeline.yaml` (group, assign, deidentify),
 `charts/edge/files/s3-uploader.sh`, `charts/edge/templates/staged-reclaimer.yaml`,
 `charts/mgmt/files/reclaim-staged.sh`, `charts/mgmt/files/reclaim-files.py` (the
 edge runs the same two files from `charts/edge/files/`)
@@ -1093,10 +1152,10 @@ have, plus one command you must not skip.
 # 1. generate + scaffold
 scripts/site-secrets.sh add-edge <management-site> edge-syd
 
-# 2. the AE-title map, de-identification profile and disk paths
+# 2. the de-identification recipe, the tag mapping and the disk paths
 $EDITOR sites/edge-syd/values.yaml
 
-# 3. the de-identification salt — THIS IS NOT OPTIONAL, see the warning below
+# 3. the salt Secret: the Orthanc pod needs it, see the note below
 openssl rand -hex 32                       # paste as AIS_DEID_HMAC_SALT
 $EDITOR sites/edge-syd/secrets.enc.yaml    # still PLAINTEXT despite the name
 
@@ -1116,16 +1175,15 @@ make verify-live SITE=<management-site>
 > `sites/edge-syd/secrets.enc.yaml` from the template, so `orthanc-deid-salt`
 > arrives as the literal placeholder `REPLACE_64_HEX_CHARS`. Nothing rejects
 > it: the chart only checks that a salt Secret is *named*, not that its value
-> is real, so the edge installs, Orthanc starts, and every `${SubjectHash}` and
-> `${SessionHash}` on that site is derived from a string published in this
-> repository. `encrypt` catches it and names the key —
-> `WARNING: sites/edge-syd/secrets.enc.yaml has unfilled placeholder VALUES:`
-> followed by `38:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS` — then asks
-> `Encrypt anyway? [y/N]`, and answering `y` there is the whole failure. A
+> is real. Under `deid.engine: ingest` the value has no effect, because only the
+> deprecated Lua engine makes pseudonyms from it. But the Orthanc pod needs the
+> Secret. `encrypt` catches the placeholder and names the key. It prints
+> `WARNING: sites/edge-syd/secrets.enc.yaml has unfilled placeholder VALUES:`,
+> then `42:  AIS_DEID_HMAC_SALT: REPLACE_64_HEX_CHARS`, then asks
+> `Encrypt anyway? [y/N]`. Answer `n` and fill in the value. A
 > correctly filled edge produces no warning at all, so a prompt here always
-> means a real unfilled value. The salt is also effectively permanent: rotating it later gives the
-> same patient a different pseudonym and breaks linkage to everything already
-> in XNAT (§3, "Rotating a secret").
+> means a real unfilled value. Under `ingest` you can rotate the salt later
+> without an effect on XNAT (§3, "Rotating a secret").
 
 ### 1. Add the entry
 
@@ -1163,8 +1221,8 @@ That generates the S3 key pair, appends the `edge-syd-s3` Secret to the
 management site's `secrets.enc.yaml` (decrypting and re-encrypting it if it is
 already sealed), and scaffolds `sites/edge-syd/` from `sites/example-edge`.
 
-Then fill in the edge's own site file — the AE-title map, the de-identification
-profile, the storage paths — and encrypt it:
+Then fill in the edge's own site file: the de-identification recipe, the tag
+mapping and the storage paths. Then encrypt it:
 
 ```bash
 $EDITOR sites/edge-syd/values.yaml
@@ -1293,7 +1351,7 @@ refuses the write, so a bug in the engine cannot remove an original.
 ### What a `retain` duration deletes
 
 The unit is the **top-level entry** under the stage's location. For the facility
-backup that tree is `<PatientID>/<StudyUID>/<SOPUID>.dcm`, so the entry is one
+backup that tree is `<PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm`, so the entry is one
 PATIENT, and the age used is the **newest file anywhere beneath it**. With
 `retain: 30d`:
 
@@ -1311,9 +1369,11 @@ holding a 60-day-old study *and* a 2-day-old one was kept in both.
 
 ### Derived stages need a condition AND an age — with one exception
 
-`assigned` is reclaimed only when something downstream proves the copy is
-reconstructible — the uploader's own fingerprint file — **and** `minAge` has
-elapsed. `grouped` is the exception: assign's `--unlink-source all` has already
+The upload tree (`/data/deidentified` under the default `ingest` engine) is
+reclaimed only when the staged-reclaimer proves each file (§2.4) **and**
+`minAge` has elapsed. Under `ingest`, `/data/assigned` is not an upload tree:
+the `deidentify` stage removes each session from it when it has written a
+complete copy (`onDeidentified`). `grouped` is the exception: assign's `--unlink-source all` has already
 removed each tree, so the only thing left to reclaim is an orphan assign failed
 to unlink, and there is no age to wait out. It runs on the condition alone, and
 the chart rejects a `minAge` there at render rather than ignoring it (§2.4).
@@ -1406,15 +1466,16 @@ smoke-test or a cron.
 
 ```bash
 make ci-fast     # no cluster needed
-make ci          # adds the three stages that need docker
+make ci          # adds the four stages that need docker
 ```
 
-Thirteen stages; `ci-fast` runs ten of them, skipping the three that need docker
-— `loki-rules` (evaluates the real rules against the pinned Loki), `data-policy`
-(runs the real engine under the image the chart ships) and `greenfield` (a
-kind-based install from nothing). Each of those skips loudly rather than
-silently, so a run without docker never reads as a full pass. Three of the ten
-are worth explaining:
+23 stages (`Makefile`, `ALL_STAGES`). `ci-fast` runs 19 of them. It skips the
+four that need docker: `loki-rules` (evaluates the real rules against the
+pinned Loki), `data-policy` (runs the real engine under the image the chart
+ships), `s3-uploader-image` (one real copy inside the pinned uploader image)
+and `greenfield` (a kind-based install from nothing). Each of those skips loudly
+rather than silently, so a run without docker never reads as a full pass. Three
+of the 19 are worth explaining:
 
 **`reclaimer`** — 31 cases that assert on **what was deleted**, not on log text.
 A run that logs `reclaim_kept` and issues a DELETE anyway passes a log-only test
@@ -1680,7 +1741,8 @@ three, check whether the k0smotron `Cluster` spec's API server
 name, rather than assuming it always will.
 
 **11. The full pipeline was run end-to-end with a synthetic DICOM drop, and
-it works.** `storescu` against `edge-orthanc:4242` with AE title `AISEDGE` →
+it works.** That run used the Lua engine, which is now deprecated. The steps
+below record it as it was. `storescu` against `edge-orthanc:4242` with AE title `AISEDGE` →
 synchronous de-identification (`PatientIdentityRemoved: YES`, name/ID/
 accession replaced per the profile) → `group-orthanc` labels it within one
 60s pass → `assign` stages it under the mapped project within the next →
