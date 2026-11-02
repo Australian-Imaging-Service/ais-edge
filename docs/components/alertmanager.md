@@ -151,9 +151,10 @@ by giving it an `email_configs` block.
 
 **Two routes deliberately never send a `[RESOLVED]` follow-up**, because for them
 "resolved" would be a lie. `DICOMRejectedUnmappedAET` clears when no *new*
-rejection has been seen for five minutes — the quarantined studies are still
-sitting in `<FacilityBackupDir>/__unmapped_aet__/<AET>/` until someone maps the
-AET and re-sends them. `SessionStagedNotConfirmedInXNAT` clears when its window
+rejection has been seen for five minutes. It is a legacy-engine event, not an
+ingest routing signal. Retained quarantine data can remain after that window
+expires. See the [deprecated reference](deidentification.md#deprecated-orthanc-lua-engine)
+for existing sites; do not infer recovery from an alert clearing. `SessionStagedNotConfirmedInXNAT` clears when its window
 slides past the last time the reclaimer saw the session, whether or not the data
 ever arrived; a resolve mail went out for a session that was, and remains, absent
 from XNAT. Alertmanager and the Loki ruler only ever see logs, never the

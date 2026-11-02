@@ -1,14 +1,14 @@
 -- AIS-Edge Orthanc deidentify-and-forward hook.
 --
--- OnStoredInstance: facility-backup the original, /modify against the
---   deidentification profile, delete the original (keep the deid'd one).
--- OnStableStudy:    PUT the ready label; remove the processed label if the
---   study changed after group-orthanc staged it (a late series).
+-- OnStoredInstance: back up the original, then return under ingest. Routing
+--   and /modify run only with the deprecated Lua de-identification engine.
+-- OnStableStudy: apply the ready label and clear an existing processed label.
+--   This separate callback has no DeidEnabled guard.
 --
--- Inputs (mounted at /etc/orthanc/):
---   routing.json                     AET -> { project } map + default paths
---   deidentification-profile.json    Replace / Keep blocks for /modify
---   AIS_DEID_HMAC_SALT (env)         secret salt for SubjectHash/SessionHash
+-- Inputs (mounted at /etc/ais-edge/):
+--   routing.json                    default paths, label settings, legacy AET map
+--   deidentification-profile.json   legacy Replace / Keep blocks for /modify
+--   AIS_DEID_HMAC_SALT (env)        required at load; unused for ingest output
 --
 -- See docs/components/orthanc.md for failure-recovery + operations notes.
 
@@ -263,12 +263,11 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
 end
 
 function OnStableStudy(studyId, tags, metadata)
-  -- Fires StableAge seconds after the last instance arrives. By now
-  -- OnStoredInstance has run for every instance; the study contains only
-  -- deid'd copies. Label idempotently so group-orthanc picks it up (its
-  -- --to-process-label and --processed-label). The names come from
-  -- routing.json (ingest.orthancGroup in the site values); the literals are
-  -- the fallback for a routing file written before they were published.
+  -- Fires StableAge seconds after the last instance arrives. Under ingest,
+  -- the stored instances remain unchanged; this label is not a recipe receipt.
+  -- The callback runs whenever the script is loaded. Ingest grouping omits the
+  -- ready-label filter. Names come from routing.json (ingest.orthancGroup);
+  -- the literals support older routing files without those settings.
   local routing   = loadJsonFile(ROUTING_FILE)
   local defaults  = routing.Defaults or {}
   local ready     = defaults.ReadyLabel

@@ -161,7 +161,7 @@ cannot reach.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field — on this chart that is the three `ClinicalTrial*` tags the de-identification profile writes. Each invalid session contributes exactly 1: we anchor on the per-session error message and ignore the secondary "Staging completed with N errors" summary line, which repeats the same content. |
+| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. This older matcher does not cover the current assignment-error prefix. A zero count can miss failures. Read the assign logs and `InvalidSessionAssigned` alert; see the correction note below. |
 | **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "(?s)^Staging completed with.*" [1h])) or vector(0)` | Per-cycle counter: each `assign` loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
 | **Pipeline liveness** | `(count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > bool 0) or vector(0)` | `1` while the assign loop is logging = the pipeline is alive. `0` means assign has stopped emitting (pod down, crash-looping, or Vector not shipping). |
 
@@ -181,13 +181,17 @@ LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | me
 form is not LogQL and renders literally, which looks like a data problem rather
 than a query one.
 
-Each line is a session `assign` placed in `__invalid__/`. Site-admin action:
-rename the directory to `PROJECT.SUBJECT.SESSION` and move it back one level, out
-of `__invalid__/` and into the assigned directory — on the node,
-`<storage.pipeline.hostPath>/assigned/__invalid__/<dir>` →
-`<storage.pipeline.hostPath>/assigned/`, so `/data/xnat-ingest/assigned/` with
-the default paths. The upload loop picks it up on its next pass
-(`upload.direct.loop` seconds).
+The query still uses the older error prefix. The current alert uses
+`Could not resolve project/subject/session IDs for ...`, so a blank panel can
+miss a real assignment failure. Inspect the assign logs and
+`InvalidSessionAssigned` alert as well.
+
+Held input is under `<storage.pipeline.hostPath>/assigned/__invalid__/`. It has
+not passed de-identification. Use the guarded recovery procedure in
+[the xnat-ingest reference](components/xnat-ingest.md). It protects the worker
+lock, updates the manifest labels and checks for destination conflicts. A
+directory rename alone is not sufficient. With ingest, recovered assigned
+input must pass deidentify before upload reads it from `/data/deidentified`.
 
 ### Time series
 
@@ -233,7 +237,7 @@ are what a fleet pushing into one Loki needs unchanged.
 | **Completed uploads (last 10m)** | `sum(count_over_time({cluster="$cluster",node=~"$node",component="upload"} \|~ "Successfully uploaded all files in" [10m])) or vector(0)` | Last-10-min session count for the selected scope. Threshold red below 1, green above. 0 while scanners are sending means the pipeline is stuck — but 0 overnight is also normal, so read it next to the throughput graph, never alone. |
 | **Assign errors (last 1h)** | Same shape as "Invalid sessions" above, but selected on `cluster`/`node` **instead of** `namespace` | DICOM metadata validation failures. |
 | **Upload errors (last 1h)** | Same shape as Pipeline Overview's "Upload errors", but selected on `cluster`/`node` **instead of** `namespace` | Error-level noise from the uploader. |
-| **DICOM rejected — unmapped AE title (last 1h)** | `sum(count_over_time({cluster="$cluster",node=~"$node",app="orthanc"} \|~ "REJECT: no project mapped for CalledAET" [1h])) or vector(0)` | Studies whose calling AE title is not in `orthanc.deid.aetMap`. They are QUARANTINED, not dropped, so a non-zero count is a mapping to add and re-send — not data lost. Selects `app="orthanc"` because the line comes from the de-identification Lua hook, not a pipeline stage. |
+| **DICOM rejected; unmapped AE title (last 1h)** | `sum(count_over_time({cluster="$cluster",node=~"$node",app="orthanc"} \|~ "REJECT: no project mapped for CalledAET" [1h])) or vector(0)` | Legacy receiver event, absent from the ingest routing path. Under ingest there is no unknown-AET quarantine. A historical non-zero count needs review of the retained input; see the [deprecated-engine reference](components/deidentification.md#deprecated-orthanc-lua-engine). Do not use a zero count to prove sender authorization or successful de-identification. |
 
 Note the asymmetry with Pipeline Overview: none of the four stat panels carries a
 `namespace` matcher. `cluster` + `node` + `component` (or `app`) is the whole
@@ -272,13 +276,24 @@ that may be absent is safe in a `line_format`, because Go templates render a
 missing key as the empty string. *Counting* one is not, which is why no panel
 does.
 
-The name to paste is `PROJECT.SUBJECT.SESSION` **as assign derived it** from
-`ClinicalTrialProtocolID` / `ClinicalTrialSubjectID` / `ClinicalTrialTimePointID`
-(`ingest.assign.tagMapping`). Those tags are written by the de-identification
-profile, so on a de-identified site they are the pseudonyms —
-`<project>.<subject hash>.<session hash>` — and not the scanner's original IDs.
-Searching this dashboard for a real patient name returns nothing, by design; go
-from the XNAT session label or the invalid-sessions panel instead.
+The name to paste is `PROJECT.SUBJECT.SESSION` as assignment resolved it from
+`ingest.assign.tagMapping` or the optional constant project. Ingest defaults to
+StudyID, PatientID and AccessionNumber. These values can still be clinical
+identifiers. They are not automatically subject/session hashes. A later recipe
+cannot change labels already stored in session metadata.
+
+Use the actual XNAT session label or a controlled local session record to find
+the trace. Do not assume that a log or dashboard export is free of identifying
+information. Review access and sharing accordingly. A missing result is also
+not proof that the session never existed: the query can be narrower than the
+current log schema or outside its time window.
+
+The shipped invalid-session panels still match `^Invalid IDs found.*`. The
+current `InvalidSessionAssigned` alert instead matches
+`Could not resolve project/subject/session IDs for ...`. A zero panel count is
+therefore not a reliable check for that newer error. Read the assign logs and
+the alert when investigating missing labels. This documentation update does not
+change the dashboard queries; their matcher needs a separate correction.
 
 Sort order is Ascending so the trace reads top-to-bottom in time order.
 

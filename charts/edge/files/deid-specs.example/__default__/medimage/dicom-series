@@ -1,21 +1,21 @@
 # Example de-identification recipe for medimage/dicom-series.
 #
 # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
-# xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+# xnat-ingest's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
 # is the category and the FILE is the format: medimage/dicom-series. It skips
 # anything at the top level that is not a directory, so a flat file named
 # `medimage@dicom-series.json` is never read and every session fails with
-# "No deidentification specs found".
+# "No deidentification recipe files found".
 #
 # Copy this directory, rename __default__ to your project ID for a
 # project-specific policy, and edit to match your site's approved profile.
 # __default__ is the fallback for any project without its own directory.
 #
 # ONLY THE TAGS NAMED HERE ARE REMOVED. Anything not listed passes through
-# untouched, so this list IS the policy — review it as such.
+# untouched, so this list IS the policy; review it as such.
 #
-# Compare with files/deidentification-profile.example.json, which is the
-# equivalent for the Orthanc Lua engine and has a different syntax.
+# Use this ingest recipe for new sites. The deprecated engine reference is
+# in docs/components/deidentification.md; its profile syntax is different.
 
 FORMAT dicom
 
@@ -42,8 +42,8 @@ REMOVE AccessionNumber
 # MARK THE RESULT AS DE-IDENTIFIED. Without these two tags an instance that has
 # been through this stage is indistinguishable, by its own metadata, from one
 # that was never processed, and some downstream tooling keys on them. The
-# Orthanc engine already sets PatientIdentityRemoved in its profile; this is the
-# same assertion for this engine, so the two are not asymmetric.
+# markers describe the intended policy. They do not prove that all patient
+# information has been removed from headers, private fields or pixel content.
 #
 # ADD, not REPLACE: the source instance does not carry these, and REPLACE only
 # rewrites a tag that is already present.

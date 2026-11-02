@@ -114,10 +114,11 @@ new)
     else
         ROLE_USAGE="usage: $0 new <name> single
 
-  single   this machine — Orthanc, de-identification, the AE-title to
-           XNAT-project map, and the uploader that PUTs straight to XNAT.
+  single   selects sites/example-single: Orthanc receive, xnat-ingest assign
+           and deidentify, then direct upload to XNAT. Use ingest for new sites.
            Tier-1 is one box, so this is the only role and one file is the
-           whole configuration.
+           whole configuration. Use a lowercase site name with letters,
+           digits and hyphens, starting with a letter. No underscores.
 
   'mgmt' and 'edge' are TIER-2 roles and are refused here. sites/example-edge
   is kept for reference only: it sets upload.mode: s3, which needs a SeaweedFS
@@ -168,14 +169,16 @@ ${ROLE_USAGE}" ;;
         echo "  4. ./install.sh ${SITE}"
         echo
         echo "  Two things nothing generates for you, both in the secrets file:"
-        echo "    * AIS_DEID_HMAC_SALT — openssl rand -hex 32, then keep it forever."
-        echo "      Rotating it re-pseudonymises every patient and silently breaks"
-        echo "      linkage to everything already in XNAT."
+        echo "    * AIS_DEID_HMAC_SALT: set once with openssl rand -hex 32."
+        echo "      Required by the backup script at startup. Its value is unused"
+        echo "      for ingest labels and recipes; rotation does not change them."
         echo "    * the XNAT account. Tier-1 uploads to XNAT from this machine, so"
-        echo "      scope that account to the projects in this site's aetMap only."
+        echo "      limit access to projects selected by tagMapping or the project constant."
         echo
         echo "  And one in values.yaml: deid.policyReviewed must be set to"
-        echo "  true, deliberately, once you have read the profile and the AET map."
+        echo "  true after reviewing the ingest recipe, source labels and reid maps."
+        echo "  Set ingest.deidentify.reidEncryptKeySecret for production input."
+        echo "  Without that reference the reid maps are plain JSON on the pipeline disk."
     fi
     ;;
 

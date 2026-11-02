@@ -27,12 +27,15 @@ env-var-shaped configuration to keep in step with it.
 
 ### Data plane
 
-- [`orthanc.md`](components/orthanc.md) — DICOM SCP on the node; the only
-  DICOM network receiver. Runs the deid Lua hook when that engine is enabled
-- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload
-  pods, plus the optional deidentify stage
-- [`deidentification.md`](components/deidentification.md) — the two de-identification
-  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up (see also [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
+- [`orthanc.md`](components/orthanc.md): the DICOM network receiver and original
+  backup callback. Under ingest, it does not modify headers or route by AET.
+- [`xnat-ingest.md`](components/xnat-ingest.md): group-orthanc, assign, deidentify
+  and direct upload, plus optional file-drop, associate and package stages.
+- [`deidentification.md`](components/deidentification.md): the default ingest
+  recipe, source-label review and reid-map encryption. It also holds the single
+  deprecated Orthanc-engine reference for existing sites. Use ingest for new
+  sites; [choosing-a-deid-engine.md](choosing-a-deid-engine.md) explains how to
+  prepare source labels without changing the engine.
 
 ### Observability stack (optional)
 
