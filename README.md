@@ -682,13 +682,13 @@ accident of network placement, not a control. Anything running *inside* the
 cluster can call that API, and it can **delete studies**. Turn it on for any
 deployment where that matters.
 
-Three keys, all required, because two different things read this Secret:
+Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
-| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
-| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
-| `orthanc-password` | `group-orthanc` | as above |
+| `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
 `users.json`. They are separate keys because Orthanc wants a file and
