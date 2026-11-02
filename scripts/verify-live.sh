@@ -479,6 +479,10 @@ else
     # Not every site file in the repo: example-edge, cloud-edge and the rest are
     # shipped samples that are not installed here, and scoping to them would put
     # projects in the list that this fleet never writes to.
+    # CAUTION: only the deprecated deid.engine: orthanc reads an AE-title map.
+    # Under ingest, the default, the project comes from a DICOM tag or from
+    # ingest.assign.constantProjectId, and this scan reads neither. So for an
+    # ingest edge the list can name an unused project, or be empty (a SKIP).
     AIS_PROJECTS="$(python3 - "$VALUES" <<'PYEOF'
 import yaml, sys, os
 v = sys.argv[1]
@@ -500,7 +504,7 @@ print(",".join(sorted(projs)))
 PYEOF
     )"
     if [ -z "$AIS_PROJECTS" ]; then
-        skip "XNAT delivery sample" "no aetMap project found in any site file — nothing to scope the check to"
+        skip "XNAT delivery sample" "no aetMap project found in any edge site file, so nothing to scope the check to (deid.engine: ingest has no AE-title map)"
     else
     res=$($KUBECTL -n "$NS_UPLOAD" exec "$UP" -- python3 -c '
 import os, json, base64, ssl, urllib.request, urllib.parse

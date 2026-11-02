@@ -18,7 +18,10 @@
 #              lives in the team password manager.
 #   site key   held by that site's admin, so a site can decrypt and install
 #              its own secrets without holding the keys to the whole fleet.
-# Both are listed as recipients, so either can decrypt independently.
+# When both are listed as recipients, either can decrypt independently.
+# TODAY both rules below list the team key only. add-recipient adds a key to
+# BOTH rules, so a key that it adds can decrypt every site. A per-site key
+# needs its own path_regex rule, written by hand.
 #
 # ENCRYPTED VS NOT
 #   Only the VALUES are encrypted; keys stay readable (encrypted_regex below).
@@ -27,16 +30,22 @@
 #
 # SETUP
 #   scripts/site-secrets.sh init-key            create your age key
-#   scripts/site-secrets.sh add-recipient <pub> add a key to this file
-#   scripts/site-secrets.sh encrypt <site>      encrypt a site's secrets
+#   scripts/site-secrets.sh add-recipient <pub> add a key to this file, then
+#   sops updatekeys sites/<site>/secrets.enc.yaml  re-encrypt each existing file
+#   scripts/site-secrets.sh encrypt <site>      encrypt a NEW (plaintext) file
 #   scripts/site-secrets.sh apply <site>        decrypt straight into the cluster
 #
-# REPLACE THE PLACEHOLDER BELOW before committing anything real. A file
-# encrypted to a placeholder recipient cannot be decrypted by anyone.
+# The recipient below is the team key. A file is readable only by the keys that
+# were recipients when it was encrypted or last re-keyed. A new key here does
+# not re-encrypt anything: run sops updatekeys on each file. `encrypt` does not
+# do it either: it stops on a file that is already encrypted.
+# A DEPLOYMENT FOR ANOTHER TEAM: replace the key below with your own team key
+# before you encrypt anything. add-recipient only adds keys. It does not remove
+# this one, so every file would stay readable by this team key too.
 # =============================================================================
 
 creation_rules:
-  # Per-site secrets: readable by the team key and by that site's own key.
+  # Per-site secrets: readable by every key listed here (today, the team key).
   # The regex captures the site name so a new site needs no new rule.
   - path_regex: sites/[^/]+/secrets\.enc\.ya?ml$
     encrypted_regex: '^(data|stringData)$'

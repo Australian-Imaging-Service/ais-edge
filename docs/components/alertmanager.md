@@ -80,7 +80,8 @@ route (root) ──► email-primary             every alert no branch below cla
  ├─ alertname = "DICOMRejectedUnmappedAET" ──► email-no-resolved
  │     firing mail, never a "[RESOLVED]" one: the expression only measures
  │     "no new rejections in 5m", while the rejected studies sit in the
- │     quarantine directory until an operator maps the AET.
+ │     quarantine directory until an operator maps the AET. Only the
+ │     deprecated deid.engine: orthanc rejects; under ingest it never fires.
  ├─ alertname = "XNATUploadSuccess" ────────► email-upload-success
  │     group_by session, group_wait 10s, repeat_interval 720h. One mail per
  │     session that lands in XNAT; the uploader re-logs success on every

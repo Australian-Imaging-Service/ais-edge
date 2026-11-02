@@ -76,7 +76,7 @@ dataPolicy:
     # the facility backup) once its NEWEST file is older than that. See
     # charts/edge/values.yaml for the full semantics; it is not per-study.
     facilityBackup: {enabled: true, location: /facility-backup, retain: forever, minFreeDiskPercent: 10}
-    quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}
+    quarantine:     {subPath: __unmapped_aet__, retain: forever, alertAfter: 24h}   # written only by the deprecated orthanc engine
     fileDrop:       {location: /data/incoming, reclaim: never, minAge: 30d}
 
   # WHEN A STAGE ITSELF HAS BEEN SITTING TOO LONG.
@@ -84,9 +84,9 @@ dataPolicy:
   # Read by StageBacklogAgeing. PipelineSessionStuck is per session and fires
   # only on one whose reclaim condition keeps failing; reclaim_stage returns at
   # its `never` guard before that check is reached, so a stage with
-  # reclaim: never can never raise it -- and `never` is the default for the
-  # deidentified tree, which is the one that grows once de-identification moves
-  # into the pipeline. This is the question that needs no reclaim condition:
+  # reclaim: never can never raise it. A site may set `never` on the
+  # deidentified tree, which is the tree that grows under the default
+  # deid.engine=ingest. This is the question that needs no reclaim condition:
   # has the oldest entry here been here longer than it should be.
   #
   # Lives here rather than in charts/edge because this chart renders the Loki

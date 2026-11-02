@@ -671,7 +671,7 @@ PY
     fi
 
     if step "7/7  ${EDGE_NAME}: helm: edge chart (Orthanc, de-id, pipeline, uploader, Vector)"; then
-        [ -f "$EDGE_VALUES" ] || die "missing sites/${EDGE_NAME}/values.yaml — the edge's own AET map, de-identification profile and storage paths live there"
+        [ -f "$EDGE_VALUES" ] || die "missing sites/${EDGE_NAME}/values.yaml: the edge's own de-identification recipe, tag mapping and storage paths live there"
         EDGE_KC="${SCRIPT_DIR}/kubeconfig-${EDGE_NAME}"
         [ -f "$EDGE_KC" ] || die "missing ${EDGE_KC} (step 5 produces it)"
 

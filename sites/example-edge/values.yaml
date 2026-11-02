@@ -2,7 +2,7 @@
 # EXAMPLE EDGE SITE — what is LOCAL to one edge
 # =============================================================================
 # This is the config for ONE edge node: the machine inside a facility that runs
-# Orthanc, the de-identification hook, the grouper and assigner, the S3
+# Orthanc, the grouper and assigner, the de-identification stage, the S3
 # uploader, Vector and (optionally) Samba.
 #
 # There is one of these PER EDGE. Copy it once per site:
@@ -42,8 +42,11 @@
 # what the push Ingress pins the CN to.
 clusterLabel: example-edge
 
-# The de-identification engine. One key; the chart derives the Lua hook,
-# the xnat-ingest stage, the group label and the reclaim condition from it.
+# The de-identification engine. ingest is the default and the only engine for
+# a new site: the xnat-ingest deidentify stage applies the recipe under
+# ingest.deidentify.specs below. The chart derives the stage, the group label
+# and the reclaim condition from this one key. orthanc, the Lua engine, is
+# deprecated (docs/components/deidentification.md).
 deid:
   engine: ingest
 
@@ -63,13 +66,15 @@ storage:
   storageClass:
     create: true
     name: hostpath-pipeline
-  # Working space for the pipeline: received, grouped, assigned.
+  # Working space for the pipeline: received, grouped, assigned, de-identified,
+  # and the re-identification maps. Keep it one filesystem: the stages hardlink.
   pipeline:
     hostPath: /data/xnat-ingest
     capacity: 500Gi
   # THE ARCHIVE OF RECORD. Originals land here before anything else touches
   # them, and before de-identification. dataPolicy.originals.facilityBackup in
-  # the management file governs how long they stay.
+  # the management file governs how long they stay. It can be on its own disk:
+  # the Orthanc hook writes a byte copy, not a hardlink.
   facilityBackup:
     enabled: true
     hostPath: /data/facility-backup
@@ -83,17 +88,20 @@ orthanc:
     # DICOM network is already isolated.
     enabled: false
   deid:
+    # The Orthanc pod needs this Secret whenever the facility backup is on.
+    # Under deid.engine: ingest nothing uses its value.
     existingSaltSecret: orthanc-deid-salt
 
-    # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
-    # This is the most site-specific thing in the whole deployment and the main
-    # reason each edge has its own file. A study whose calling AE is not listed
-    # here is QUARANTINED, not dropped — map the AET and re-send it.
+    # NOT USED UNDER deid.engine: ingest. aetMap and profile are read only by
+    # the deprecated Lua engine (deid.engine: orthanc). Under ingest the Lua
+    # script returns before it reads them, so there is no AE-title routing and
+    # no quarantine. The XNAT project, subject and session come from
+    # ingest.assign below. Do not edit these for a new site.
     aetMap:
       AISEDGE:
         project: example_project
 
-    # The de-identification profile applied to every incoming study.
+    # Deprecated engine only, as above.
     profile:
       DeidMode: modify
       Force: true
@@ -109,10 +117,8 @@ orthanc:
         PatientIdentityRemoved: 'YES'
         DeidentificationMethod: AIS-Edge research-default v1; Retain UIDs Option
         PatientName: ANONYMOUS
-        # ${SubjectHash} and ${SessionHash} are HMACs keyed by the salt in the
-        # orthanc-deid-salt Secret. Rotating that salt gives the same patient a
-        # different pseudonym, so they appear in XNAT as two subjects — see the
-        # warning on that Secret before you touch it.
+        # Deprecated engine only. ${SubjectHash} and ${SessionHash} are salted
+        # djb2 hashes (not HMACs) keyed by the salt in orthanc-deid-salt.
         PatientID: ${ProjectCode}-${SubjectHash}
         PatientBirthDate: ${BirthYearOnly}0101
         AccessionNumber: ${SessionHash}
@@ -137,16 +143,23 @@ orthanc:
         StudyDescription: ''
 
 ingest:
-  # Pulls studies Orthanc has labelled as ready, and clears the label after.
+  # Pulls each study that has been quiet for the wait period out of Orthanc,
+  # and labels it processed so that it is not pulled twice. Under
+  # deid.engine: ingest no study waits for the ready label.
   orthancGroup:
     enabled: true
     interval: 60
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-ingest-processed
-  # Builds an XNAT session out of a grouped study.
+  # THE DE-IDENTIFICATION STAGE. It runs between assign and upload, and the
+  # uploader reads only its output.
   deidentify:
-    # THE POLICY. Nothing downstream re-checks what was removed, so read it
+    # THE POLICY. Only the tags it names change: every other tag goes to XNAT
+    # unchanged. Nothing downstream re-checks what was removed, so read it
     # before you install. Copied from charts/edge/files/deid-specs.example/.
+    # Edit this complete recipe to your approved policy. A short recipe at this
+    # key replaces all of it. A recipe at "<PROJECT_ID>/medimage/dicom-series"
+    # replaces this default for that project.
     specs:
       __default__/medimage/dicom-series: |
         # Example de-identification recipe for medimage/dicom-series.
@@ -272,9 +285,21 @@ ingest:
         # rather than omitted so that deciding is not the same as forgetting.
         #   PatientSex
         #   PatientAge
+    # PRODUCTION: encrypt the re-identification maps in /data/reid. Name a
+    # Secret with the key XINGEST_REID_ENCRYPT_KEY (secrets.example.yaml has
+    # a template). Without it the maps are plain JSON.
+    # reidEncryptKeySecret: reid-key
   assign:
-    # The Lua hook is off under deid.engine: ingest, so nothing writes the
-    # ClinicalTrial* tags. These must be tags your modalities populate.
+    # THE XNAT LABELS. Each value names the DICOM tag whose VALUE becomes that
+    # label: assign reads them before deidentify runs, so no recipe can change
+    # them (assign only turns each run of other characters into "_"). These
+    # are tags your modalities populate: nothing else writes them under
+    # deid.engine: ingest. PatientID often holds a hospital medical record
+    # number. If it does, subject: PatientID puts that number into XNAT in the
+    # clear, so name a pseudonym tag instead. An approved research identifier
+    # in PatientID is fine. A study with an empty tag goes to
+    # assigned/__invalid__, still identifiable.
+    # constantProjectId: example_project   # OPTION: file every session here
     tagMapping:
       project: StudyID
       subject: PatientID
