@@ -1,14 +1,14 @@
 -- AIS-Edge Orthanc deidentify-and-forward hook.
 --
--- OnStoredInstance: facility-backup the original, /modify against the
---   deidentification profile, delete the original (keep the deid'd one).
--- OnStableStudy:    PUT the ready label; remove the processed label if the
---   study changed after group-orthanc staged it (a late series).
+-- OnStoredInstance: back up the original. Under ingest (DeidEnabled false)
+--   it stops there; only the deprecated engine runs routing and /modify.
+-- OnStableStudy: PUT the ready label, and remove the processed label after a
+--   late series. No DeidEnabled guard: it also runs under ingest.
 --
--- Inputs (mounted at /etc/orthanc/):
---   routing.json                     AET -> { project } map + default paths
---   deidentification-profile.json    Replace / Keep blocks for /modify
---   AIS_DEID_HMAC_SALT (env)         secret salt for SubjectHash/SessionHash
+-- Inputs (the chart mounts them at /etc/ais-edge/, see AIS_ROUTING_FILE):
+--   routing.json                     defaults, label names, legacy AET map
+--   deidentification-profile.json    legacy Replace / Keep blocks for /modify
+--   AIS_DEID_HMAC_SALT (env)         required at load; hashes: legacy only
 --
 -- See docs/components/orthanc.md for failure-recovery + operations notes.
 
@@ -263,12 +263,12 @@ function OnStoredInstance(instanceId, tags, metadata, origin)
 end
 
 function OnStableStudy(studyId, tags, metadata)
-  -- Fires StableAge seconds after the last instance arrives. By now
-  -- OnStoredInstance has run for every instance; the study contains only
-  -- deid'd copies. Label idempotently so group-orthanc picks it up (its
-  -- --to-process-label and --processed-label). The names come from
-  -- routing.json (ingest.orthancGroup in the site values); the literals are
-  -- the fallback for a routing file written before they were published.
+  -- Fires StableAge seconds after the last instance arrives, under EVERY
+  -- engine (no DeidEnabled check). Under ingest the instances are the
+  -- originals, and a failed /modify also leaves one, so a ready label is not
+  -- proof of de-identification. group-orthanc filters on it only under the
+  -- deprecated engine. Names come from routing.json (ingest.orthancGroup);
+  -- the literals are the fallback for an older routing file without them.
   local routing   = loadJsonFile(ROUTING_FILE)
   local defaults  = routing.Defaults or {}
   local ready     = defaults.ReadyLabel

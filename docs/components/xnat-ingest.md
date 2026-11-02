@@ -50,7 +50,9 @@ This checks HTTP availability, not response JSON; redirects and failed transfers
 ## Role in this stack
 
 The DICOM ingest engine. On each edge worker Orthanc receives studies and
-writes the facility backup (see [orthanc.md](orthanc.md)). `group-orthanc`
+writes the facility backup (see [orthanc.md](orthanc.md)). Its Lua hook also
+labels each stable study `xnat-ingest-ready`, under `ingest` too. That label
+does not show that the study is de-identified. `group-orthanc`
 REST-pulls each study that has been quiet for its wait period (under the
 deprecated `orthanc` engine, only the studies labelled `xnat-ingest-ready`)
 and groups their DICOMs into `/data/grouped/<session>/`. Then `assign`

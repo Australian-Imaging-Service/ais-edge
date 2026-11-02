@@ -248,14 +248,28 @@ study that has no `processedLabel` and has been quiet for
 `ingest.orthancGroup.waitPeriod` seconds. After it stages a study, it applies
 `processedLabel` and a snapshot label.
 
-When the facility backup is on, the Lua script still runs `OnStableStudy`. It
-applies `toProcessLabel` to a stable study, and it removes `processedLabel`
-when a stable study gets new instances. Under `ingest` no stage filters on the
-ready label, so that label has no effect.
+When the facility backup is on, the chart loads the Lua script, and its
+`OnStableStudy` callback runs under `ingest` too. Under `ingest` the chart
+requires the facility backup (`_helpers.tpl:90-94`), so the script is always
+loaded there. `OnStableStudy` has no `DeidEnabled` guard. Only
+`OnStoredInstance` returns early (`deidentify-and-forward.lua:167`).
+`OnStableStudy` (`:265-309`) applies the ready label to a stable study. It
+removes `processedLabel` when a stable study gets new instances, and logs
+`study_reopened`. The ready label is `Defaults.ReadyLabel` in `routing.json`.
+The chart takes it from the raw `ingest.orthancGroup.toProcessLabel` value,
+`xnat-ingest-ready` by default (`orthanc-config.yaml:151`). An empty value
+stops the label write.
 
-The chart derives all of this from `deid.engine`. You do not clear
-`toProcessLabel` by hand. The coupling under the deprecated engine is described
-in the deprecated section below.
+Under `ingest` no stage filters on the ready label. **So a ready label does
+not prove that de-identification ran.** It marks a stable study. To check the
+de-identification, read the `deidentify` log and the output in
+`/data/deidentified`.
+
+The chart derives the filter from `deid.engine`. You do not clear
+`toProcessLabel` by hand. Do not add a ready-label filter to an `ingest` site:
+study selection would then depend on this callback and its label setting. The
+coupling under the deprecated engine is described in the deprecated section
+below.
 
 ## Deprecated: Orthanc Lua engine (`deid.engine: orthanc`)
 
@@ -416,8 +430,11 @@ Under this engine the hook does two jobs. It de-identifies, **and** it applies
 the `xnat-ingest-ready` label in `OnStableStudy`. The chart then gives
 `group-orthanc` `--to-process-label xnat-ingest-ready`
 (`charts/edge/templates/ingest-pipeline.yaml:99-106`). So `group-orthanc` takes
-only labelled studies. The label is the gate that stops identifiable data from
-leaving Orthanc before the hook has stripped it.
+only labelled studies. The label is meant to hold a study back until the hook
+has stripped it. It is not a receipt. `OnStableStudy` does not check each
+instance. If `/modify` fails for an instance, the hook keeps the original in
+Orthanc unchanged (`deidentify-and-forward.lua:233-236`), and the stable study
+still gets the ready label.
 
 If the hook does not apply the label, `group-orthanc` filters out every study,
 and the pipeline stops with no error. That is why the chart derives the flag
@@ -627,7 +644,7 @@ pipeline with one of these out of step rendered cleanly and then did not work:
 
 | derived | what it becomes under `ingest` |
 |---|---|
-| the Lua hook's `DeidEnabled` | `false`. The hook still writes the original to the facility backup. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`deidentify-and-forward.lua:167`) |
+| the Lua hook's `DeidEnabled` | `false`. The hook still writes the original to the facility backup. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`deidentify-and-forward.lua:167`). `OnStableStudy` does not read this flag: it still labels stable studies |
 | `ingest.orthancGroup.toProcessLabel` | not given to `group-orthanc`, because no stage filters on the label under `ingest` |
 | `ingest.assign.tagMapping` | `StudyID`, `PatientID`, `AccessionNumber` when you leave it empty |
 | the `deidentify` stage | rendered |
@@ -729,7 +746,8 @@ trusted enclave.
 # Which engine is actually running
 kubectl -n xnat-ingest get deploy | grep -E 'orthanc|deidentify'
 
-# Lua hook events. Under ingest: instance_archived and study_labeled_ready.
+# Lua hook events. Under ingest: instance_archived, study_labeled_ready and
+# study_reopened. The label events do not prove that de-identification ran.
 # Under the deprecated orthanc engine: instance_deidentified as well.
 kubectl -n xnat-ingest logs deploy/edge-orthanc | grep -E 'instance_archived|instance_deidentified'
 

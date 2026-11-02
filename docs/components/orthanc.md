@@ -5,9 +5,10 @@
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
 open-source DICOM server. In ais-edge it sits at the edge of each site,
 acts as the **DICOM receiver** for local modalities, and runs the AIS
-**Lua hook**, which writes the facility backup before xnat-ingest groups and
-stages the data. Under the default `deid.engine: ingest` the hook does not
-de-identify: the xnat-ingest `deidentify` stage does that later. The Lua
+**Lua hook**, which writes the facility backup and labels stable studies
+before xnat-ingest groups and stages the data. Under the default
+`deid.engine: ingest` the hook does not de-identify: the xnat-ingest
+`deidentify` stage does that later. The Lua
 de-identification engine (`deid.engine: orthanc`) is deprecated. See
 [deidentification.md](deidentification.md).
 
@@ -32,7 +33,9 @@ Three jobs at each edge:
    stage waits for it: `group-orthanc` pulls each study that has been quiet
    for `ingest.orthancGroup.waitPeriod`. Under the deprecated `orthanc` engine
    the label is the signal for `xnat-ingest group-orthanc` to REST-pull the
-   study.
+   study. This callback has no `DeidEnabled` guard, so it also runs under
+   `ingest` whenever the script is loaded. The label shows that a study is
+   stable. It does not show that the recipe ran.
 
 After `group-orthanc` hardlinks the instances into `/data/grouped/`, it
 PUTs the `xnat-ingest-processed` label on the study so subsequent

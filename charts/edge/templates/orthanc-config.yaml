@@ -51,10 +51,10 @@ data:
       "MaximumStorageSize": {{ .Values.dataPolicy.derived.orthancStorage.maximumStorageSizeMB }},
       "MaximumPatientCount": {{ .Values.dataPolicy.derived.orthancStorage.maximumPatientCount }},
 
-      {{- /* LOAD-BEARING. OnStableStudy fires only after a study has been
-             silent this long, and that is what applies the label group-orthanc
-             filters on. Drop it and the pipeline stalls with data sitting in
-             Orthanc and no error anywhere. */}}
+      {{- /* OnStableStudy fires only after a study has been silent this long.
+             It applies the ready label under every engine while the script is
+             loaded. LOAD-BEARING for the deprecated orthanc engine only, whose
+             group-orthanc filters on that label: drop it and that stalls. */}}
       "StableAge": {{ .Values.orthanc.stableAge }},
 
       "RemoteAccessAllowed": true,
@@ -98,11 +98,11 @@ data:
              it only when it was the de-identification engine meant that
              choosing deid.engine=ingest silently gave up the archive: it had no
              writer, which produces no error and no log line, because an absent
-             writer is indistinguishable from a quiet site.
-      
-             It now loads whenever it has any job left to do. The script turns off
-             the de-identification half, AE-title lookup and quarantine included,
-             when Defaults.DeidEnabled is false. */}}
+             writer is indistinguishable from a quiet site. It now loads whenever
+             it has any job left to do. When Defaults.DeidEnabled is false,
+             OnStoredInstance stops after the backup. OnStableStudy has no such
+             guard: it still applies and clears labels under ingest, so a ready
+             label is not proof that de-identification ran. */}}
       {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else }}
@@ -123,10 +123,10 @@ data:
          a real file means it stays lintable and diffable. */}}
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
-{{- /* Rendered whenever the script is loaded, which is now also the case with
-       another engine selected, because the script still archives originals.
-       (It reads AETMap and quarantines only under deid.engine=orthanc.) Loading
-       a script whose configuration file does not exist aborts every instance. */}}
+{{- /* Rendered whenever the script is loaded, also under another engine: the
+       script still archives originals and still labels stable studies. (It
+       reads AETMap and quarantines only under deid.engine=orthanc.) Loading a
+       script whose configuration file does not exist aborts every instance. */}}
 {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
 apiVersion: v1
@@ -145,9 +145,9 @@ data:
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
-        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script then writes the original to FacilityBackupDir and returns. It does not read AETMap, it quarantines nothing and it does not modify the instance. Under deid.engine: ingest the xnat-ingest deidentify stage de-identifies instead.",
+        "_DeidEnabledREADME": "false when deid.engine is not orthanc. OnStoredInstance then writes the original to FacilityBackupDir and returns. It does not read AETMap, it quarantines nothing and it does not modify the instance. Under deid.engine: ingest the xnat-ingest deidentify stage de-identifies instead. OnStableStudy does not read this flag.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
-        "_LabelsREADME": "The study labels group-orthanc uses, from ingest.orthancGroup. The hook applies ReadyLabel when a study is stable and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again.",
+        "_LabelsREADME": "Label names from ingest.orthancGroup. OnStableStudy runs under every engine while this script is loaded. It applies ReadyLabel to a stable study (an empty value stops that) and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again. group-orthanc filters on ReadyLabel only under deid.engine: orthanc. A ReadyLabel does not prove that de-identification ran.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},
         "ProcessedLabel": {{ .Values.ingest.orthancGroup.processedLabel | default "" | toJson }}
       }

@@ -90,17 +90,17 @@ spec:
             - "/data/grouped"
             - "$(ORTHANC_USER)"
             - "$(ORTHANC_PASSWORD)"
-            {{- /* ONLY when the Lua hook is the engine, because the hook is
-                   what applies this label. Under any other engine nothing
-                   applies it, and filtering on it would make group-orthanc skip
-                   every study and stall the pipeline with no error. Derived
-                   rather than declared so an operator cannot leave it set by
-                   mistake while switching engines. */}}
+            {{- /* ONLY under the deprecated orthanc engine. Ingest does not need
+                   a ready label. The Lua OnStableStudy callback still applies
+                   one under ingest, because the script loads for the facility
+                   backup, but that label does not prove de-identification ran.
+                   Derived rather than declared, so ingest selection never
+                   depends on that callback or on its label setting. */}}
             {{- with (eq (include "edge.deidEngine" $) "orthanc") | ternary .Values.ingest.orthancGroup.toProcessLabel "" }}
-            # Only studies carrying this label are pulled. The de-id hook
-            # applies it in OnStableStudy, AFTER the original has been backed
-            # up and the instance de-identified — which is what makes the
-            # label the gate that stops identifiable data leaving Orthanc.
+            # Only studies carrying this label are pulled (deprecated orthanc
+            # engine). The hook applies it in OnStableStudy when the study is
+            # stable. It does not check each instance, so the label is not
+            # proof that every instance was de-identified.
             - "--to-process-label"
             - {{ . | quote }}
             {{- end }}

@@ -594,10 +594,14 @@ orthanc:
   dicomPort: 4242
   httpPort: 8042
 
-  # How long a study must be silent before OnStableStudy fires and the
-  # xnat-ingest-ready label is applied. LOAD-BEARING: with no StableAge the
-  # label is never applied, group-orthanc filters everything out, and the
-  # pipeline stalls with data sitting in Orthanc and no error anywhere.
+  # How long a study must be silent before OnStableStudy fires. The Lua
+  # callback then applies the ready label (ingest.orthancGroup.toProcessLabel)
+  # and, after a late series, removes the processed label. It runs under
+  # every engine while the script is loaded. LOAD-BEARING only for the
+  # deprecated orthanc engine: there group-orthanc pulls labelled studies
+  # only, so with no StableAge the pipeline stalls with data sitting in
+  # Orthanc and no error anywhere. Under ingest group-orthanc does not wait
+  # for the label, and a ready label does not prove de-identification ran.
   stableAge: 30
 
   # hostPort  — bind 4242 on the node IP. Standard DICOM port; modalities are
@@ -673,7 +677,9 @@ orthanc:
   # ---------------------------------------------------------------------
   # The Orthanc Lua hook. Under the default deid.engine=ingest it only writes
   # the facility backup and labels a stable study. It returns before its
-  # AE-title lookup, so it does not read aetMap or profile below.
+  # AE-title lookup, so it does not read aetMap or profile below. The label
+  # callback, OnStableStudy, has no DeidEnabled guard, so a ready label does
+  # not prove that de-identification ran.
   #
   # DEPRECATED ENGINE: under deid.engine=orthanc the hook also de-identifies.
   # On each stored instance it writes the original to the facility backup,
@@ -770,10 +776,11 @@ ingest:
     interval: 60
     # Under the default deid.engine=ingest the chart does NOT give this label
     # to group-orthanc, which then pulls each study that has been quiet for
-    # waitPeriod. The Lua hook still applies the label to a stable study.
-    # Under the deprecated orthanc engine only labelled studies are pulled:
-    # the hook applies the label after de-identification, which makes it the
-    # gate that stops identifiable data leaving Orthanc.
+    # waitPeriod. The Lua hook still applies the label to a stable study: this
+    # value is Defaults.ReadyLabel in routing.json, and "" stops that write.
+    # Under the deprecated orthanc engine only labelled studies are pulled.
+    # Under either engine the label marks a stable study, NOT a de-identified
+    # one: OnStableStudy does not check each instance.
     toProcessLabel: xnat-ingest-ready
     processedLabel: xnat-ingest-processed
     waitPeriod: 60
