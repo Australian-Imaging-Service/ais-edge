@@ -4,19 +4,24 @@
 
 [xnat-ingest](https://github.com/Australian-Imaging-Service/xnat-ingest)
 is the AIS-maintained Python tool that turns deid'd DICOMs into
-XNAT-ready sessions and uploads them. Upstream **0.16.2** is the pinned
-version. The old single `sort` command was split into these stages:
+XNAT-ready sessions and uploads them. The pinned version is **0.16.2.post1**,
+a fork build: upstream 0.16.2 plus AIS fixes that upstream has not released
+(`ingest.image` in `charts/edge/values.yaml`). The old single `sort` command
+was split into these stages:
 1. **`group-orthanc`**: REST-pulls studies from Orthanc and
    groups their DICOMs into per-session directories
 2. **`assign`** — extracts the XNAT project/subject/session/scan IDs from
    the grouped DICOMs and stages them as a structured directory
-3. **`upload`** — pushes staged sessions to an XNAT server via REST
+3. **`deidentify`**: applies the site's de-identification recipe to each
+   assigned session. It is the default de-identification engine
+   (`deid.engine: ingest`)
+4. **`upload`**: pushes staged sessions to an XNAT server via REST
 
-We run these as three xnat-ingest pods, plus one non-xnat-ingest
+We run these as xnat-ingest pods, plus one non-xnat-ingest
 uploader that carries the sessions between the edge and the management
 node:
-- **`xnat-ingest group-orthanc`** and **`xnat-ingest assign`** on each
-  edge VM
+- **`xnat-ingest group-orthanc`**, **`xnat-ingest assign`** and
+  **`xnat-ingest deidentify`** on each edge VM
 - **`s3-uploader`** on each edge VM — an `rclone copy` loop, not
   xnat-ingest at all (see "Where it runs"). It was `aws s3 sync` until the
   rclone port; `rclone copy` is deliberate, because `rclone sync` deletes at
@@ -31,26 +36,31 @@ node:
   the vendor datatype package (`xnatUpload.extraPipPackages`). See
   [package-stage.md](../package-stage.md).
 
-> **De-identification is done in Orthanc by default** (the Lua hook), not in
-> xnat-ingest. The optional `deidentify` stage is also wired into this chart
-> (`ingest.deidentify.enabled`, off by default) — it suits pipelines where
-> studies arrive already carrying their project/subject/session identifiers,
-> and it writes reversible re-identification metadata, which the Lua hook does
-> not. See [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
+> **De-identification is done in xnat-ingest by default** (`deid.engine:
+> ingest`). The `deidentify` stage runs between `assign` and the upload. It
+> expects the studies to carry their project/subject/session identifiers in
+> tags, and it writes reversible re-identification metadata. The Orthanc Lua
+> hook engine (`deid.engine: orthanc`) is deprecated. See
+> [deidentification.md](deidentification.md) and
+> [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
 
 The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
 This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
 
 ## Role in this stack
 
-The DICOM ingest engine. On each edge worker Orthanc receives and
-de-identifies studies (see [orthanc.md](orthanc.md)); `group-orthanc`
-REST-pulls the studies Orthanc has labelled `xnat-ingest-ready` and
-groups their DICOMs into `/data/grouped/<session>/`, then `assign`
-produces the `/data/assigned/<project>.<subject>.<visit>/` hierarchy —
+The DICOM ingest engine. On each edge worker Orthanc receives studies and
+writes the facility backup (see [orthanc.md](orthanc.md)). `group-orthanc`
+REST-pulls each study that has been quiet for its wait period (under the
+deprecated `orthanc` engine, only the studies labelled `xnat-ingest-ready`)
+and groups their DICOMs into `/data/grouped/<session>/`. Then `assign`
+produces the `/data/assigned/<project>.<subject>.<visit>/` hierarchy:
 `xnat-ingest assign /data/grouped /data/assigned`
 (`charts/edge/templates/ingest-pipeline.yaml`), declared as
-`dataPolicy.derived.assigned.location` in `charts/edge/values.yaml`.
+`dataPolicy.derived.assigned.location` in `charts/edge/values.yaml`. Then
+`deidentify` writes the de-identified copy to
+`/data/deidentified/<project>.<subject>.<visit>/`, which the edge uploader
+reads.
 There is **no `staging/` directory on the edge**: "staged" is the
 *S3-side* word for those same sessions once the s3-uploader has synced
 them under `s3://<bucket>/staged/`. The management upload pod pulls
@@ -66,7 +76,8 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   filesystem boundary, so splitting them makes `hardlink_or_copy`
   silently degrade to a full byte copy of every study. group-orthanc
   reads `orthanc-storage/` and writes `grouped/`; assign reads
-  `grouped/` and writes `assigned/`
+  `grouped/` and writes `assigned/`; deidentify reads `assigned/` and
+  writes `deidentified/` and `reid/`
 - **In-cluster HTTP to Orthanc** — group-orthanc REST-pulls from
   `edge-orthanc.xnat-ingest.svc.cluster.local:8042` (release-prefixed —
   see [orthanc.md](orthanc.md)); assign is purely local filesystem work
@@ -101,9 +112,9 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   still gets SIGKILL.
 
 ### s3-uploader pod (edge)
-- **The same pipeline PVC** — reads the terminal tree (`assigned/`, or
-  `deidentified/` under `deid.engine: ingest`, or `packaged/` when the package
-  stage is on) and copies each settled
+- **The same pipeline PVC**: reads the terminal tree (`deidentified/` under
+  the default `deid.engine: ingest`, `packaged/` when the package stage is
+  on, `assigned/` under the deprecated `orthanc` engine) and copies each settled
   session, inside the upload-tree writer lock. It never removes a session:
   the staged-reclaimer CronJob does that, after it has proved each file in
   the bucket (see "S3 mode: prove, then delete" below). Its state
@@ -111,7 +122,7 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 - **Outbound HTTPS to SeaweedFS** — the `https://seaweedfs.<domain>`
   Ingress on the management node, not the in-cluster Service; it
   therefore needs the CA bundle (`ca-bundle` Secret, key `ca.crt`,
-  delivered by the cert-sync CronJob) as `AWS_CA_BUNDLE`
+  delivered by the cert-sync CronJob) as `RCLONE_CA_CERT`
 - **One Secret** — `s3-edge-credentials` (`upload.s3.existingSecret`),
   keys `access-key` / `secret-key`, scoped to this site's own bucket
 
@@ -146,17 +157,18 @@ $(S3_SECRET_KEY)`. That is the only way to seed it.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
-| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` |
+| `edge-deidentify` | edge | `xnat-ingest` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` |
 | `edge-s3-uploader` | edge | `xnat-ingest` | `ubuntu:noble-20260917` (`upload.s3.shell.image`, NOT xnat-ingest), with rclone lifted from `rclone/rclone:1.75.0` by an initContainer |
-| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
 `install.sh` installs the edge chart as release `edge` and the management
 chart as release `mgmt` — so the objects are `edge-assign` and
 `mgmt-upload-<edge>`, not the bare `xnat-ingest-*` names the imperative
 installer used. A site installed under a different release name shifts
-all four.
+them all.
 
 The management uploader is **one Deployment per edge site**, not one for
 the fleet. Correctness first: with one staging bucket per site, a single
@@ -177,12 +189,13 @@ and no CA plumbing. The two modes are mutually exclusive and the chart
 refuses to render both — enabling both would push every session into
 XNAT twice.
 
-The `0.16.2` tag is the current **merged-upstream** AIS build pulled from
-`ghcr.io/australian-imaging-service/xnat-ingest`. It replaces the earlier
-local fork. The AIS-Edge patch set (including the `AIS_LOG_FORMAT=json`
-structured-log output and the `upload --loop` reconnect fix) is now all
-upstream, so no local rebuild is needed — and no image-import step
-either. Both charts set `imagePullPolicy: IfNotPresent`
+The `0.16.2.post1` tag is a **fork build**, pulled from
+`ghcr.io/akshitbeniwal/xnat-ingest`: upstream 0.16.2 plus the AIS fixes that
+upstream has not released yet (xnat-ingest PRs #210-#231, see the comment on
+`ingest.image`). Go back to the upstream repository when an upstream release
+contains them. The earlier AIS-Edge patch set (including the
+`AIS_LOG_FORMAT=json` structured-log output and the `upload --loop` reconnect
+fix) is upstream. There is no image-import step. Both charts set `imagePullPolicy: IfNotPresent`
 (`ingest.image.pullPolicy` in `charts/edge/values.yaml`,
 `xnatUpload.image.pullPolicy` in `charts/mgmt/values.yaml`), so each node
 pulls the tag from ghcr.io the first time a pod lands on it and reuses
@@ -196,12 +209,12 @@ side-loads the image into the container runtime. Override the tag via
 | File | Purpose |
 |---|---|
 | `charts/mgmt/templates/xnat-upload.yaml` | one upload Deployment per `edges[]` entry, env vars, AIS_LOG_FORMAT=json |
-| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc + assign Deployments, hostAliases |
+| `charts/edge/templates/ingest-pipeline.yaml` | group-orthanc, assign, deidentify and package Deployments, hostAliases |
 | `charts/edge/templates/upload.yaml` | the edge uploader — `edge-s3-uploader` (mode `s3`) or `edge-upload` (mode `direct`); exactly one renders |
 | `charts/edge/files/s3-uploader.sh` | the `rclone copy` loop itself (copy only, under the writer lock, with the repair-request claim), plus the `jlog()` event schema below. A real file, not inline YAML, so `bash -n` can lint it in CI |
 | `install.sh` | installs both charts; cert-sync (CronJob) pushes the CA bundle into each edge |
 | `sites/<site>/secrets.enc.yaml` (`xnat-credentials`) | server URL, username, password — SOPS-encrypted |
-| `sites/<edge>/values.yaml` (`ingest:`) | per-edge loop intervals; the AET-to-project map is `orthanc.deid.aetMap` in the same file |
+| `sites/<edge>/values.yaml` (`ingest:`) | per-edge loop intervals, the de-identification recipe (`ingest.deidentify.specs`) and the tags that give the XNAT labels (`ingest.assign.tagMapping`) |
 
 Important env vars on each pod:
 - `AIS_LOG_FORMAT=json` — enable JSON structured log output (now
@@ -384,7 +397,7 @@ stage, reclaimer or data policy removes either of them.
 
 | Folder | What puts data there | What to do |
 |---|---|---|
-| `/facility-backup/__unmapped_aet__/<AET>/`, the quarantine | Orthanc's Lua hook, for a study sent to an AE title that `aetMap` does not map | Add the AE title to `aetMap` |
+| `/facility-backup/__unmapped_aet__/<AET>/`, the quarantine | Only the deprecated Lua engine (`deid.engine: orthanc`), for a study sent to an AE title that `aetMap` does not map. Under `ingest` nothing writes here | Add the AE title to `aetMap` |
 | `/data/assigned/__invalid__/`, the invalid sessions | `assign`, when it cannot resolve the project, subject or session ID | Follow "Recovering an invalid session" below |
 
 ### A study that group-orthanc refuses
@@ -778,7 +791,7 @@ deletes. A dry run makes the same checks and removes no data.
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
-| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.16.2` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
+| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.16.2.post1` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)
@@ -856,15 +869,16 @@ expose the cache TTL as a flag.
 file by name only when XNAT lists it without a digest. So the ERROR `... already
 exists on XNAT with different checksums` now means a real difference. XNAT holds
 a file that staging does not, or a file with other content.
-`XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2 the upload logs this
-ERROR and continues. A later `Successfully uploaded all files in` line does not
+`XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2, and in the pinned
+fork build 0.16.2.post1, the upload logs this ERROR and continues. A later `Successfully uploaded all files in` line does not
 prove the content. The record below is the 0.15.0 measurement. Its statement
 that no alert rule matches the phrase is out of date.
 
 The opposite gap remains. When XNAT lists no digests (site checksums off, as on
 the AIS test XNAT, or digests not computed yet), the upload compares file names
-only. 0.16.2 logs this at DEBUG only. xnat-ingest PR #227 (open on 2026-10-20)
-logs one WARNING per resource and upload attempt. Content comparison needs
+only. Upstream 0.16.2 logs this at DEBUG only. xnat-ingest PR #227 logs one
+WARNING per resource and upload attempt. Upstream merged it on 2026-10-27, and
+the pinned fork build 0.16.2.post1 contains it. Content comparison needs
 computed XNAT digests. A site administrator must configure checksums and
 populate the catalogs. Do not treat a name-only check as proof of unchanged
 bytes.

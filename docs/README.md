@@ -15,14 +15,17 @@ Operations → Risks → Replacements / Future).
 
 ### Data plane
 
-- [`orthanc.md`](components/orthanc.md) — DICOM SCP at the edge; runs
-  the deid Lua hook before xnat-ingest sees the data
+- [`orthanc.md`](components/orthanc.md): DICOM SCP at the edge. It runs
+  the Lua hook that writes the facility backup before xnat-ingest sees the
+  data
 - [`seaweedfs.md`](components/seaweedfs.md) — S3-compatible storage for
   staged DICOM files
 - [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
-- [`xnat-ingest.md`](components/xnat-ingest.md) — group-orthanc + assign + upload pods
-- [`deidentification.md`](components/deidentification.md) — the two de-identification
-  engines (Orthanc Lua hook, xnat-ingest deidentify), how to pick one and set it up (see also [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
+- [`xnat-ingest.md`](components/xnat-ingest.md): group-orthanc, assign, deidentify and upload pods
+- [`deidentification.md`](components/deidentification.md): how to set up the
+  default engine, the xnat-ingest `deidentify` stage (`deid.engine: ingest`),
+  and the reference for the deprecated Orthanc Lua engine (see also
+  [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
 
 ### Control plane / networking
 
