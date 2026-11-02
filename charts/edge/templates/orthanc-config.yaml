@@ -92,17 +92,12 @@ data:
       "Plugins": {{ toJson . }},
       {{- end }}
 
-      {{- /* THE HOOK DOES MORE THAN DE-IDENTIFY. It also writes the facility
-             backup (the archive of record, with original identifiers) and
-             quarantines instances from unmapped AE titles. Loading it only when
-             it is the de-identification engine meant that choosing
-             deid.engine=ingest silently gave up BOTH: the archive stopped having
-             a writer, which produces no error and no log line, because an absent
-             writer is indistinguishable from a quiet site.
-      
-             It now loads whenever it has any job left to do, and the
-             de-identification half is switched off from inside the script by
-             Defaults.DeidEnabled. */}}
+      {{- /* The script also writes the facility backup. Load it when that
+             feature is enabled, including under ingest. Otherwise the archive
+             would have no writer. Under ingest, OnStoredInstance returns after
+             the backup step, before AET routing, quarantine or modification.
+             OnStableStudy is separate and can still apply or clear labels.
+             See the component guide for the deprecated engine reference. */}}
       {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else }}
