@@ -194,17 +194,8 @@ deid:
   policyReviewed: false        # NO SAFE DEFAULT. You must set this to true.
 
 ingest:
-  deidentify:
-    specs:                     # THE RECIPE. Only the tags it names change.
-      __default__/medimage/dicom-series: |
-        FORMAT dicom
-
-        %header
-
-        REMOVE PatientName
-        REMOVE PatientID
-        REMOVE PatientBirthDate
-        REMOVE AccessionNumber
+  # deidentify.specs is THE RECIPE. Copy the COMPLETE recipe from
+  # sites/example-edge/values.yaml. Do not type a short one here.
   assign:
     tagMapping:                # the tags whose VALUES become the XNAT labels
       project: StudyID
@@ -213,8 +204,9 @@ ingest:
     # constantProjectId: MY_PROJECT   # or: file every session under one project
 ```
 
-**File:** `sites/<edge>/values.yaml`. `sites/example-edge/values.yaml` has the
-full recipe.
+**File:** `sites/<edge>/values.yaml`. Start from
+`sites/example-edge/values.yaml`, which has the complete recipe.
+`site-secrets.sh add-edge` copies it for you.
 
 `deid.policyReviewed` has **no safe default, and the chart refuses to render
 while it is false.** It sits at the top level beside `deid.engine`, not under
@@ -228,15 +220,22 @@ Three things worth understanding:
 * **The XNAT labels are the tag values, verbatim.** `assign` reads the tags
   that `tagMapping` names before the recipe runs, so no recipe can change a
   label. `assign` changes only spaces and symbols: each run of them becomes
-  `_`, so `SMITH^ALEX` becomes `SMITH_ALEX`. `subject: PatientID` puts the
-  medical record number into XNAT in the clear. Choose tags that hold
-  pseudonyms. There is no AE-title routing: a
+  `_`, so `SMITH^ALEX` becomes `SMITH_ALEX`. PatientID often holds a hospital
+  medical record number (MRN). If it does, `subject: PatientID` puts that MRN
+  into XNAT in the clear. An approved research identifier in PatientID is
+  fine. Choose tags that hold pseudonyms. There is no AE-title routing: a
   study is filed by its tags only. A study with an empty tag goes to
   `/data/assigned/__invalid__`, still identifiable.
 * **Only the tags that the recipe names change.** Every other tag goes to XNAT
-  unchanged. So the UIDs are retained, and a study stays consistent across
-  series. That is a deliberate research-data choice, not an oversight. A recipe
-  at `<PROJECT_ID>/medimage/dicom-series` replaces the `__default__` recipe for
+  unchanged. So start from the complete recipe in
+  `sites/example-edge/values.yaml`. It removes 17 tags, among them the address,
+  telephone, care-team and institution fields, `StationName` and
+  `DeviceSerialNumber`, and it adds two de-identification markers. A short
+  fragment at the same key replaces all of that. A short fragment is not a
+  full policy. Edit the complete recipe to your site's approved policy. The
+  UIDs are retained, and a study stays consistent across series. That is a
+  deliberate research-data choice, not an oversight. A recipe at
+  `<PROJECT_ID>/medimage/dicom-series` replaces the `__default__` recipe for
   that project.
 * **The re-identification map is sensitive.** The stage writes a map back to
   the removed values for each session, in `/data/reid` on the edge. It is plain

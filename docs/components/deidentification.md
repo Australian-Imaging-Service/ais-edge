@@ -141,10 +141,11 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 > digits, `_` and `-` into one `_` (`IDSpec.xnat_id_escape_re` in xnat-ingest),
 > so `SMITH^ALEX` becomes `SMITH_ALEX`. The identity stays.
 >
-> Under `ingest` no step makes a pseudonym from these values. If `subject`
-> reads `PatientID`, the raw medical record number goes into the XNAT metadata.
-> The pixel data and headers are correctly stripped, so the data looks clean,
-> but the identifier is in the label.
+> Under `ingest` no step makes a pseudonym from these values. PatientID often
+> holds a hospital medical record number. If it does and `subject` reads
+> `PatientID`, that raw number goes into the XNAT metadata. The pixel data and
+> headers are correctly stripped, so the data looks clean, but the identifier
+> is in the label. An approved research identifier in PatientID is fine.
 >
 > Choose tags that are ALREADY pseudonymous at the modality, or make the
 > modality send one. Examine a real study before you enable the engine:
@@ -195,9 +196,9 @@ it. Both halves were false. `assign` reads tag values to resolve ids and then
 copies or hardlinks files unchanged — it never writes a dataset. And upload
 places the session from the session object's ids, not from this header. The
 example now removes it. If you write your own recipe, decide about `PatientID`
-explicitly: leaving it means the real medical record number travels with every
-instance while `PatientName`, birth date and institution are stripped, so the
-result passes a spot check.
+explicitly. If it holds a real medical record number, leaving it means that
+number travels with every instance while `PatientName`, birth date and
+institution are stripped, so the result passes a spot check.
 
 That matters more than it looks, because upload finishes with:
 
@@ -465,6 +466,8 @@ REMOVE PatientBirthDate
 REMOVE AccessionNumber
 ```
 
+This sample shows the syntax only. It is not a policy.
+
 **Only the tags a recipe names are removed.** Anything not listed passes
 through untouched, so the recipe *is* the policy — review it as one. A session
 whose format has no applicable recipe is skipped and logged rather than
@@ -490,7 +493,9 @@ absent. The shipped recipe now ends `REMOVE PatientID`.
 
 The recipes go in `sites/<site>/values.yaml`. The chart builds the ConfigMap
 and mounts it. So a new install needs no `kubectl`, and nothing has to exist
-before the install:
+before the install. The recipes below show the format only. They are not a
+policy. Start from the complete recipe in `sites/example-edge/values.yaml`. A
+short recipe at a key replaces the complete one there:
 
 ```yaml
 # ingest IS THE DEFAULT ENGINE, so you need not set deid.engine. The chart

@@ -811,8 +811,10 @@ ingest:
     # ClinicalTrial* is named while the engine is ingest.
     #
     # CAUTION: `subject` becomes the XNAT subject label, and assign runs BEFORE
-    # deidentify. PatientID here means the medical record number becomes that
-    # label in the clear. Point it at a pseudonym tag if your modality writes one.
+    # deidentify. PatientID often holds a hospital medical record number. If
+    # it does, PatientID here puts that number into the label in the clear.
+    # Point it at a pseudonym tag if your modality writes one. An approved
+    # research identifier in PatientID is fine.
     # DERIVED FROM deid.engine. Leave it empty and the chart names the triple
     # that engine actually populates:
     #
@@ -849,10 +851,10 @@ ingest:
     # changes the shape of that label, so see the migration note in
     # docs/components/deidentification.md before moving an existing site.
     #
-    # CAUTION: under deid.engine=ingest, subject: PatientID means the medical
-    # record number becomes that label in the clear. Point it at a pseudonym tag
-    # if your modality writes one. Hashing at this step is a known second-pass
-    # item, not an oversight.
+    # CAUTION: under deid.engine=ingest, if PatientID holds a medical record
+    # number, subject: PatientID puts that number into the label in the clear.
+    # Point it at a pseudonym tag if your modality writes one. Hashing at this
+    # step is a known second-pass item, not an oversight.
     tagMapping: {}
 
   # THE DE-IDENTIFICATION ENGINE - xnat-ingest's own deidentify stage. It is
@@ -876,10 +878,10 @@ ingest:
   # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
   # values out before this stage runs, and ImagingSession.new_empty copies them
   # into the de-identified session unchanged, so no recipe can alter them.
-  # They are whatever the modality sent. Pointing subject at PatientID puts the
-  # raw medical record number into XNAT while the headers and pixels are
-  # correctly stripped. Choose tags that are already pseudonymous at the
-  # modality.
+  # They are whatever the modality sent. If PatientID holds a medical record
+  # number, pointing subject at it puts that raw number into XNAT while the
+  # headers and pixels are correctly stripped. Choose tags that are already
+  # pseudonymous at the modality.
   #
   # WHY IT IS THE DEFAULT. It writes a re-identification mapping per session,
   # so the process can be reversed later (a clinical follow-up needing to find

@@ -157,8 +157,9 @@ ingest:
     # THE POLICY. Only the tags it names change: every other tag goes to XNAT
     # unchanged. Nothing downstream re-checks what was removed, so read it
     # before you install. Copied from charts/edge/files/deid-specs.example/.
-    # A recipe at "<PROJECT_ID>/medimage/dicom-series" replaces this default
-    # for that project.
+    # Edit this complete recipe to your approved policy. A short recipe at this
+    # key replaces all of it. A recipe at "<PROJECT_ID>/medimage/dicom-series"
+    # replaces this default for that project.
     specs:
       __default__/medimage/dicom-series: |
         # Example de-identification recipe for medimage/dicom-series.
@@ -290,11 +291,13 @@ ingest:
     # reidEncryptKeySecret: reid-key
   assign:
     # THE XNAT LABELS. Each value names the DICOM tag whose VALUE becomes that
-    # label, verbatim: assign reads them before deidentify runs, so no recipe
-    # can change them. These are tags your modalities populate: nothing else
-    # writes them under deid.engine: ingest. subject: PatientID puts the
-    # medical record number into XNAT in the clear, so name a pseudonym tag if
-    # your modality writes one. A study with an empty tag goes to
+    # label: assign reads them before deidentify runs, so no recipe can change
+    # them (assign only turns each run of other characters into "_"). These
+    # are tags your modalities populate: nothing else writes them under
+    # deid.engine: ingest. PatientID often holds a hospital medical record
+    # number. If it does, subject: PatientID puts that number into XNAT in the
+    # clear, so name a pseudonym tag instead. An approved research identifier
+    # in PatientID is fine. A study with an empty tag goes to
     # assigned/__invalid__, still identifiable.
     # constantProjectId: example_project   # OPTION: file every session here
     tagMapping:

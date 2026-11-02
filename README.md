@@ -442,19 +442,10 @@ deid:
   policyReviewed: false         # no safe default: set it after you read the recipe
 
 ingest:
-  deidentify:
-    specs:                      # the pydicom deid recipe, per project
-      __default__/medimage/dicom-series: |
-        FORMAT dicom
-
-        %header
-
-        REMOVE PatientName
-        REMOVE PatientID
-        REMOVE PatientBirthDate
-        REMOVE AccessionNumber
-        ADD PatientIdentityRemoved YES
-    # reidEncryptKeySecret: reid-key   # production: encrypt the re-identification maps
+  # deidentify.specs is THE RECIPE: a pydicom deid recipe per project. Copy
+  # the COMPLETE recipe from sites/example-edge/values.yaml. A short fragment
+  # is not a full policy.
+  # deidentify.reidEncryptKeySecret: reid-key   # production: encrypt the maps
   assign:
     tagMapping:                 # these tag VALUES become the XNAT labels
       project: StudyID
@@ -470,13 +461,16 @@ ingest:
 * **Only the tags the recipe names change.** Every other tag reaches XNAT
   unchanged, so UIDs are retained and a study stays internally consistent
   across series. A recipe for a project replaces `__default__` for that
-  project. `sites/example-edge/values.yaml` has the full shipped recipe.
+  project. Start from the complete recipe in `sites/example-edge/values.yaml`.
+  It removes 17 tags and adds two de-identification markers. A short fragment
+  at the same key replaces all of that, so a fragment is not a full policy.
 * **The XNAT labels are the tag values, verbatim.** `assign` reads them before
   the recipe runs, so no recipe can change them. `assign` changes only spaces
-  and symbols, each run of them to `_`. `subject: PatientID` puts the
-  medical record number into XNAT in the clear, so choose pseudonymous tags.
-  There is no AE-title routing. A study with an empty tag goes to
-  `/data/assigned/__invalid__`, still identifiable.
+  and symbols, each run of them to `_`. PatientID often holds a hospital
+  medical record number. If it does, `subject: PatientID` puts that number
+  into XNAT in the clear, so choose pseudonymous tags. An approved research
+  identifier in PatientID is fine. There is no AE-title routing. A study with
+  an empty tag goes to `/data/assigned/__invalid__`, still identifiable.
 * **The re-identification maps are plain JSON without a key.** They are in
   `/data/reid` on the edge. Set `ingest.deidentify.reidEncryptKeySecret` at a
   production site. The Secret needs the key `XINGEST_REID_ENCRYPT_KEY`, a
