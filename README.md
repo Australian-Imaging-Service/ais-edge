@@ -472,7 +472,8 @@ ingest:
   across series. A recipe for a project replaces `__default__` for that
   project. `sites/example-edge/values.yaml` has the full shipped recipe.
 * **The XNAT labels are the tag values, verbatim.** `assign` reads them before
-  the recipe runs, so no recipe can change them. `subject: PatientID` puts the
+  the recipe runs, so no recipe can change them. `assign` changes only spaces
+  and symbols, each run of them to `_`. `subject: PatientID` puts the
   medical record number into XNAT in the clear, so choose pseudonymous tags.
   There is no AE-title routing. A study with an empty tag goes to
   `/data/assigned/__invalid__`, still identifiable.

@@ -227,8 +227,10 @@ Three things worth understanding:
 
 * **The XNAT labels are the tag values, verbatim.** `assign` reads the tags
   that `tagMapping` names before the recipe runs, so no recipe can change a
-  label. `subject: PatientID` puts the medical record number into XNAT in the
-  clear. Choose tags that hold pseudonyms. There is no AE-title routing: a
+  label. `assign` changes only spaces and symbols: each run of them becomes
+  `_`, so `SMITH^ALEX` becomes `SMITH_ALEX`. `subject: PatientID` puts the
+  medical record number into XNAT in the clear. Choose tags that hold
+  pseudonyms. There is no AE-title routing: a
   study is filed by its tags only. A study with an empty tag goes to
   `/data/assigned/__invalid__`, still identifiable.
 * **Only the tags that the recipe names change.** Every other tag goes to XNAT

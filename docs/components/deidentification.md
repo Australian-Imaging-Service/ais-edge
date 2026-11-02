@@ -136,8 +136,10 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 >
 > **A recipe cannot change them.** The recipe changes DICOM tags. But `assign`
 > has already read the values before `deidentify` runs. So the tag that you
-> name in `subject` becomes the XNAT subject label exactly as the modality sent
-> it.
+> name in `subject` becomes the XNAT subject label as the modality sent it.
+> The only change: `assign` turns each run of characters other than letters,
+> digits, `_` and `-` into one `_` (`IDSpec.xnat_id_escape_re` in xnat-ingest),
+> so `SMITH^ALEX` becomes `SMITH_ALEX`. The identity stays.
 >
 > Under `ingest` no step makes a pseudonym from these values. If `subject`
 > reads `PatientID`, the raw medical record number goes into the XNAT metadata.
