@@ -93,16 +93,16 @@ data:
       {{- end }}
 
       {{- /* THE HOOK DOES MORE THAN DE-IDENTIFY. It also writes the facility
-             backup (the archive of record, with original identifiers) and
-             quarantines instances from unmapped AE titles. Loading it only when
-             it is the de-identification engine meant that choosing
-             deid.engine=ingest silently gave up BOTH: the archive stopped having
-             a writer, which produces no error and no log line, because an absent
+             backup (the archive of record, with original identifiers). Under
+             deid.engine=orthanc it also quarantines unmapped AE titles. Loading
+             it only when it was the de-identification engine meant that
+             choosing deid.engine=ingest silently gave up the archive: it had no
+             writer, which produces no error and no log line, because an absent
              writer is indistinguishable from a quiet site.
       
-             It now loads whenever it has any job left to do, and the
-             de-identification half is switched off from inside the script by
-             Defaults.DeidEnabled. */}}
+             It now loads whenever it has any job left to do. The script turns off
+             the de-identification half, AE-title lookup and quarantine included,
+             when Defaults.DeidEnabled is false. */}}
       {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
       "LuaScripts": ["/etc/orthanc/scripts/deidentify-and-forward.lua"]
       {{- else }}
@@ -124,9 +124,9 @@ data:
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
 {{- /* Rendered whenever the script is loaded, which is now also the case with
-       another engine selected, because the script still archives originals and
-       quarantines unmapped AE titles. Loading a script whose configuration file
-       does not exist would abort every instance at the first read. */}}
+       another engine selected, because the script still archives originals.
+       (It reads AETMap and quarantines only under deid.engine=orthanc.) Loading
+       a script whose configuration file does not exist aborts every instance. */}}
 {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
 apiVersion: v1
@@ -140,12 +140,12 @@ data:
   {{- /* Mounted at /etc/ais-edge, NOT /etc/orthanc — see the header. */}}
   routing.json: |
     {
-      "_README": "Generated from orthanc.deid.aetMap. An AE title that is not listed here is REJECTED for ingest but NOT discarded: the original instance is written under FacilityBackupDir/__unmapped_aet__/<AET>/... and only then removed from Orthanc, and if that write fails the instance is kept. Add the AET here and re-send to ingest it.",
+      "_README": "Generated from orthanc.deid.aetMap. The script reads AETMap only when DeidEnabled is true (deid.engine: orthanc, which is deprecated). Then an AE title that is not listed here is REJECTED for ingest but NOT discarded: the original instance is written under FacilityBackupDir/__unmapped_aet__/<AET>/... and only then removed from Orthanc, and if that write fails the instance is kept. Add the AET here and re-send to ingest it.",
       "AETMap": {{ toJson .Values.orthanc.deid.aetMap }},
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
-        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script still archives the original and quarantines unmapped AE titles; it just does not modify the instance, because another stage does that instead.",
+        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script then writes the original to FacilityBackupDir and returns. It does not read AETMap, it quarantines nothing and it does not modify the instance. Under deid.engine: ingest the xnat-ingest deidentify stage de-identifies instead.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
         "_LabelsREADME": "The study labels group-orthanc uses, from ingest.orthancGroup. The hook applies ReadyLabel when a study is stable and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},
