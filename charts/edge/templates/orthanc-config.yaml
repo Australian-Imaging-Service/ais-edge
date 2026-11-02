@@ -124,8 +124,8 @@ data:
   deidentify-and-forward.lua: |
     {{- .Files.Get "files/deidentify-and-forward.lua" | nindent 4 }}
 {{- /* Rendered whenever the script is loaded, which is now also the case with
-       another engine selected, because the script still archives originals and
-       quarantines unmapped AE titles. Loading a script whose configuration file
+       ingest selected, because the script still archives originals. It returns
+       before AET routing and does not quarantine unknown AETs in ingest mode. Loading a script whose configuration file
        does not exist would abort every instance at the first read. */}}
 {{- if or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
 ---
@@ -140,14 +140,14 @@ data:
   {{- /* Mounted at /etc/ais-edge, NOT /etc/orthanc — see the header. */}}
   routing.json: |
     {
-      "_README": "Generated from orthanc.deid.aetMap. An AE title that is not listed here is REJECTED for ingest but NOT discarded: the original instance is written under FacilityBackupDir/__unmapped_aet__/<AET>/... and only then removed from Orthanc, and if that write fails the instance is kept. Add the AET here and re-send to ingest it.",
+      "_README": "Legacy map from orthanc.deid.aetMap. Ingest does not consult it for routing or quarantine. Use ingest.assign tagMapping or constantProjectId for XNAT placement. See docs/components/deidentification.md for the deprecated engine reference.",
       "AETMap": {{ toJson .Values.orthanc.deid.aetMap }},
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
-        "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script still archives the original and quarantines unmapped AE titles; it just does not modify the instance, because another stage does that instead.",
+        "_DeidEnabledREADME": "False under ingest. The enabled callback writes the facility backup, then returns before AET routing, quarantine and header modification. De-identification runs in xnat-ingest after assignment.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
-        "_LabelsREADME": "The study labels group-orthanc uses, from ingest.orthancGroup. The hook applies ReadyLabel when a study is stable and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again.",
+        "_LabelsREADME": "Legacy callback label settings. Under ingest the callback does not apply a ready label; the chart clears the group ready-label filter. group-orthanc manages its processed and snapshot labels.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},
         "ProcessedLabel": {{ .Values.ingest.orthancGroup.processedLabel | default "" | toJson }}
       }

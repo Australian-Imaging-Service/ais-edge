@@ -63,57 +63,24 @@ topology: onprem
 # assigned/__invalid__ with PHI intact and the stage reporting "Found 0
 # sessions" for ever, because one of the five was still on its old value.
 deid:
-  # DEFAULT: ingest. xnat-ingest's own deidentify stage, between assign and
-  # upload, driven by ingest.deidentify.specs (pydicom-deid recipes). It can do
-  # things the Lua profile cannot, JITTER on dates among them.
+  # Use ingest for new sites. Orthanc receives and stores original DICOM.
+  # With facility backup enabled, its Lua callback copies the original and
+  # returns before AET routing. There is no unknown-AET quarantine in this mode.
+  # xnat-ingest assign selects labels before the deidentify recipe runs.
+  # Review both the source labels and the recipe before enabling upload.
   #
-  # ORTHANC IS STILL THE DICOM RECEIVER either way. This key chooses only which
-  # component de-identifies. Modalities still C-STORE to Orthanc on 4242, and the
-  # Lua script still writes the facility backup and quarantines unmapped AE
-  # titles; under `ingest` it simply stops modifying the instance.
-  #
-  # Setting this to `orthanc` moves stripping to the front door, before group or
-  # assign sees anything, and tagMapping below must then go back to the
-  # ClinicalTrial* tags the hook writes.
-  # SWITCHING TO deid.engine: orthanc IS FIVE EDITS, NOT ONE. The chart refuses
-  # each wrong combination rather than installing something that quietly does
-  # nothing, so you will be told, one at a time. Doing them together is quicker:
-  #
-  #   1. deid.engine: orthanc
-  #   2. DELETE the ingest.deidentify.specs block below. Recipes belong to the
-  #      stage that no longer renders; left in place the chart refuses, because
-  #      silently ignoring them is how a reviewed policy stops being applied.
-  #   3. ingest.assign.tagMapping back to the ClinicalTrial* tags: the Lua hook
-  #      writes those from the AET map, and they are the pseudonymised ids.
-  #   4. dataPolicy.derived.assigned.reclaim: onUploaded
-  #      (under orthanc the uploader reads /data/assigned, so that tree is the
-  #      terminal one)
-  #   5. dataPolicy.derived.deidentified.reclaim: never
-  #      (nothing writes that tree, so any other value can never be satisfied)
-  #
-  # And orthanc.deid.profile becomes the recipe that matters. It is already
-  # filled in below, so it needs reading, not writing.
+  # deid.engine: orthanc is deprecated. Its reference is in
+  # docs/components/deidentification.md, "Deprecated Orthanc Lua engine".
+  # Keep this default; do not change engines to work around missing source tags.
+
   engine: ingest             # ingest | orthanc | none
 
-  # THE GATE. The chart refuses to render until a human confirms this site's
-  # de-identification policy. Deliberately has no safe default.
-  #
-  # It gates EVERY value of `engine`, which is why it lives here and not under
-  # the component that happens to apply the recipe. What you are confirming
-  # follows from `engine`:
-  #
-  #   ingest    ingest.deidentify.specs   (the default)
-  #   orthanc   orthanc.deid.profile
-  #   none      nothing here de-identifies; you are confirming the modalities
-  #             already did it upstream
-  #
-  # You are confirming the POLICY, not the component. Nothing downstream
-  # re-checks what was removed, under any engine.
-  #
-  # MOVED from orthanc.deid.policyReviewed. It was never Orthanc's: under
-  # `engine: ingest` it asked an operator to confirm the Lua profile while the
-  # recipe that actually ran was ingest.deidentify.specs. The old path now
-  # fails the render with a message naming this one.
+  # The chart refuses to render until a person reviews the selected policy.
+  # Under ingest, review ingest.assign.tagMapping and ingest.deidentify.specs.
+  # A recipe cannot change labels already taken from source tags by assign.
+  # Review retained private fields, dates, sex/age and reid-map protection too.
+  # The gate also applies to an explicit no-deid configuration.
+
   policyReviewed: false
 
 # =============================================================================
@@ -313,11 +280,11 @@ dataPolicy:
       # operational problem, not a licence to discard originals.
       minFreeDiskPercent: 10
 
-    # Studies received on an AE title that routing.json does not map to a
-    # project. They are originals too, and clearing them needs a HUMAN: an
-    # operator adds the AET to the map and re-sends. A time-based rule here
-    # would silently discard precisely the data nobody has dealt with yet,
-    # so the default is forever and we nag instead.
+    # A retained legacy quarantine can contain original data. Ingest does not
+    # create unknown-AET entries. Keep existing contents until an operator has
+    # resolved them; see the single deprecated-engine reference for old sites.
+    # This subtree is reported separately and defaults to indefinite retention.
+
     quarantine:
       # RELATIVE to facilityBackup.location, deliberately — the quarantine is
       # a subtree of the archive, so one absolute path would let the two drift
@@ -346,8 +313,8 @@ dataPolicy:
   # ---------------------------------------------------------------------
   derived:
 
-    # De-identified copy held inside Orthanc until group-orthanc has pulled
-    # it. onGrouped keys off the processed label that group-orthanc already
+    # Receiver copy held until group-orthanc has exported it. Under ingest
+    # this is original, identifiable DICOM. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
     # CAUTION: needs an xnat-ingest that writes the export snapshot label
     # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
@@ -397,7 +364,7 @@ dataPolicy:
       # backup. Setting minAge here is rejected at render rather than ignored.
       reclaim: onAssigned        # never | onAssigned (orphan cleanup)
 
-    # Output of assign; input to whichever upload mode is enabled.
+    # Output of assign; input to deidentify under the default ingest engine.
     assigned:
       location: /data/assigned
       # never | onUploaded | onDeidentified
@@ -408,7 +375,7 @@ dataPolicy:
       #               Orthanc.
       # onDeidentified  the deidentify STAGE removes each session itself, as soon
       #               as it has written a complete de-identified copy. Only
-      #               meaningful with ingest.deidentify.enabled.
+      #               meaningful with deid.engine set to ingest.
       #
       # WHY onUploaded IS NOT ENOUGH UNDER ais-deid. The uploader then reads
       # /data/deidentified, so its markers describe THAT tree. Nothing ever
@@ -661,30 +628,17 @@ orthanc:
     - /usr/local/share/orthanc/plugins/libOrthancGdcm.so
 
   # ---------------------------------------------------------------------
-  # De-identification (our Lua hook — NOT xnat-ingest --deidentify, which is
-  # non-functional for DICOM in 0.12.x).
-  #
-  # On each stored instance the hook: writes the original to the facility
-  # backup, applies the profile via Orthanc /modify, deletes the original and
-  # keeps the de-identified copy. On a stable study it applies the
-  # xnat-ingest-ready label that group-orthanc filters on.
+  # Legacy engine settings remain for compatibility. Under ingest only the
+  # named salt Secret is needed when the facility-backup script is loaded.
+  # Its value does not affect ingest output. Set the placeholder once with
+  # openssl rand -hex 32; install and verify checks reject the placeholder.
+  # See docs/components/deidentification.md for the deprecated engine details.
   # ---------------------------------------------------------------------
   deid:
-
-    # Salt for the subject/session pseudonym hashes. Changing it re-links
-    # every pseudonym, so existing XNAT subjects stop matching new arrivals.
-    # Preserve it across reinstalls; never rotate casually.
     existingSaltSecret: orthanc-deid-salt   # key: AIS_DEID_HMAC_SALT
-
-    # AE title -> XNAT project. THE routing table. An AE title that is not
-    # listed here is quarantined under the facility backup, not discarded.
-    # Keep project IDs within [A-Za-z0-9_]: assign normalises to that set.
+    # Inactive for routing under ingest; select XNAT labels in ingest.assign.
     aetMap: {}
-    #  SIEMENS_3T_AET: {project: MYSITE_RESEARCH}
-    #  BRUKER_PET_AET: {project: MYSITE_PET}
-
-    # Passed verbatim to Orthanc /modify. Copy from
-    # files/deidentification-profile.example.json and edit to your policy.
+    # Inactive for header changes under ingest; use ingest.deidentify.specs.
     profile: {}
 
   podSecurityContext:
@@ -772,9 +726,9 @@ ingest:
     datatypes: "medimage/dicom-series"
     copyMode: hardlink_or_copy
 
-  # Derive project/subject/session from the DICOM tags the Lua hook writes.
-  # routing.json's AETMap is the single source of truth for project; there is
-  # no hardcoded project ID anywhere.
+  # Select project, subject and session from supported source tags.
+  # AET routing is not used under ingest. constantProjectId can supply one
+  # destination project for every session at a single-project site.
   assign:
     resources: {}
     interval: 60
@@ -784,105 +738,53 @@ ingest:
     # is then ignored). For an edge that only ever feeds one project. Empty:
     # the project comes from tagMapping.project.
     constantProjectId: ""
-    # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
-    # modify instances, so nothing writes the ClinicalTrial* tags and assign must
-    # read tags the modality itself populates. The chart refuses to render if
-    # ClinicalTrial* is named while the engine is ingest.
+    # Empty fields are derived from the engine. Ingest defaults:
+    #   project: StudyID, subject: PatientID, session: AccessionNumber.
+    # The example site states these values explicitly. Choose other supported
+    # tags only after checking what each modality actually sends.
+    # The chart rejects any ClinicalTrial-prefixed tag under ingest.
     #
-    # Under deid.engine: orthanc set these back to ClinicalTrialProtocolID /
-    # ClinicalTrialSubjectID / ClinicalTrialTimePointID: the hook writes them from
-    # the AET map and they are the pseudonymised ids.
+    # assign reads these values BEFORE deidentify. A raw MRN selected through
+    # PatientID becomes the XNAT subject label in clear text. Removing the tag
+    # in the later recipe cannot change that label. Select approved research
+    # identifiers at the source. A project constant changes only the project.
+    # Missing or empty required labels go to assigned/__invalid__; that input
+    # still contains patient information and is not processed automatically.
+    # Use the guarded recovery procedure in docs/components/xnat-ingest.md.
     #
-    # CAUTION: `subject` becomes the XNAT subject label, and assign runs BEFORE
-    # deidentify. PatientID here means the medical record number becomes that
-    # label in the clear. Point it at a pseudonym tag if your modality writes one.
-    # DERIVED FROM deid.engine. Leave it empty and the chart names the triple
-    # that engine actually populates:
-    #
-    #   orthanc  ClinicalTrialProtocolID / ClinicalTrialSubjectID /
-    #            ClinicalTrialTimePointID, written by the Lua hook from the AET
-    #            map. NOT a site decision under this engine: the hook always
-    #            writes them, and the chart already refuses to render if the
-    #            profile does not.
-    #   ingest   StudyID / PatientID / AccessionNumber, tags a modality
-    #            populates itself, because with the hook off nothing writes the
-    #            ClinicalTrial* triple.
-    #
-    # WHY IT IS DERIVED RATHER THAN FIXED. A fixed default is wrong for one
-    # engine whichever one it names, and both mistakes have been made here. It
-    # was the ClinicalTrial* triple, which filed every ingest-engine study under
-    # __invalid__ still carrying its PHI. It was then changed to the modality
-    # tags, which is where this ended up: MEASURED on a fresh tier-1 install,
-    # 531 instances staged as
-    #   assigned/A9BB5B6D36EE.test_project-0A326BB4F373.A9BB5B6D36EE
-    # because the orthanc profile rewrites StudyID to ${SessionHash}, and the
-    # uploader then failed every pass with "Project 'A9BB5B6D36EE' does not
-    # exist on XNAT".
-    #
-    # SET IT ONLY IF YOUR MODALITIES CARRY THE IDS SOMEWHERE ELSE, which is a
-    # real case under deid.engine=ingest: the radiographer enters these at the
-    # console, so cai-lfs3 uses StudyDescription for project and PatientID for
-    # subject, and other sites use StudyComments or ReferringPhysicianName. Whatever
-    # is named is checked against the engine at render time, in both directions.
-    #
-    # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT
-    # LABEL verbatim. assign reads it and files the session BEFORE deidentify
-    # runs, so no recipe can rename it afterwards. De-identification still works
-    # on the file contents; it just cannot reach the label. Switching engines
-    # changes the shape of that label, so see the migration note in
-    # docs/components/deidentification.md before moving an existing site.
-    #
-    # CAUTION: under deid.engine=ingest, subject: PatientID means the medical
-    # record number becomes that label in the clear. Point it at a pseudonym tag
-    # if your modality writes one. Hashing at this step is a known second-pass
-    # item, not an oversight.
+    # A mapping change can change destination placement without any recipe
+    # change. Check the resulting labels and output headers on synthetic input
+    # before receiving patient data. Keep existing originals while resolving
+    # a source-label error. Legacy mappings are described in the deprecated
+    # reference rather than as a setup procedure for new sites.
+
     tagMapping: {}
 
-  # DE-IDENTIFICATION ENGINE 2 OF 2 — xnat-ingest's own, OFF by default.
+  # DEFAULT DE-IDENTIFICATION: xnat-ingest, between assign and upload.
+  # Recipes are in specs below or an external ConfigMap with specFiles.
+  # Under ingest, Orthanc receives original data and writes the enabled backup.
+  # It does not route by AET, quarantine unknown AETs or modify the headers.
   #
-  # The default engine is the Orthanc Lua hook (orthanc.deid above), which
-  # strips each instance as it arrives. This one runs as its own stage between
-  # assign and upload instead. Pick ONE; the chart refuses both.
+  # assign has already selected the XNAT labels. A recipe changes DICOM fields,
+  # not those labels. Review mapping values separately from the recipe output.
+  # The shipped recipe removes named tags and adds result markers. It hashes
+  # nothing. Private tags, PatientSex and PatientAge remain by example policy.
   #
-  # CAUTION: THIS ENGINE GIVES UP AE-TITLE ROUTING. Mapping a calling AE title
-  # to a project is an Orthanc Lua feature (orthanc.deid.aetMap). This stage
-  # never sees the AE title, so with the hook off there is no way to derive the
-  # project from which machine sent the study. Your modalities must populate
-  # project/subject/session in tags they actually send, and ingest.assign
-  # .tagMapping must point at those tags. The chart derives them from the engine,
-  # so under this one it names StudyID / PatientID / AccessionNumber rather than
-  # the ClinicalTrial* triple only the Lua hook writes, and it refuses an
-  # explicit mapping that names the triple. What it cannot detect is a mapping
-  # that names real tags this site's modalities do not populate, which looks
-  # correct and ends with every study in __invalid__ still carrying its PHI.
+  # The chart always requests a reid map under /data/reid. Without a key Secret
+  # it is plaintext JSON. Configure reidEncryptKeySecret for production input
+  # and keep its recovery key separately from the maps. This does not encrypt
+  # old plaintext maps automatically.
   #
-  # AND THE TAGS YOU NAME BECOME THE XNAT LABELS, VERBATIM. assign lifts the
-  # values out before this stage runs, and ImagingSession.new_empty copies them
-  # into the de-identified session unchanged, so no recipe can alter them. Under
-  # the Lua hook they are already pseudonyms (salted djb2, not an HMAC despite
-  # the salt's name); here they are whatever the
-  # modality sent. Pointing subject at PatientID puts the raw medical record
-  # number into XNAT while the headers and pixels are correctly stripped. Choose
-  # tags that are already pseudonymous at the modality.
-  #
-  # WHEN TO PREFER THIS ONE. It writes a re-identification mapping per session,
-  # so the process can be reversed later (a clinical follow-up needing to find
-  # the original scan). The Lua hook is one-way by design and cannot do that.
-  #
-  # WHAT IT COSTS. Identifiable data passes through group and assign before it
-  # is cleaned, so it exists on the pipeline volume for longer and in more
-  # places. The Lua hook cleans at the front door and everything downstream only
-  # ever sees stripped data. That is why the Lua hook stays the default.
-  #
-  # The reid mapping is the sensitive part: it is the map BACK to the identities
-  # that were removed. Set reidEncryptKeySecret and keep that key somewhere
-  # other than the volume the mappings are written to.
+  # The CLI also supports recipe transform/salt sidecars. This chart has no
+  # dedicated secret-backed wiring for them. AIS_DEID_HMAC_SALT is only the
+  # backup script's startup prerequisite under ingest; it is not this salt.
+
   deidentify:
     resources: {}
     interval: 60
     copyMode: hardlink_or_copy
-    # THE RECIPES. Written here, in the site file, exactly like
-    # orthanc.deid.profile — the chart builds the ConfigMap and mounts it, so a
+    # THE RECIPES. Write the complete site policy here. The chart builds the
+    # ConfigMap and mounts it at the required project/format paths, so a
     # fresh install needs no kubectl and no pre-existing namespace.
     #
     # Key is the path under SPEC_DIR, value is the recipe:
@@ -909,7 +811,7 @@ ingest:
     specConfigMap: ""
 
     # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
-    # restricted to [-._a-zA-Z0-9], so the '@' xnat-ingest needs is illegal,
+    # restricted to [-._a-zA-Z0-9], so the '/' in a recipe path is illegal,
     # and a ConfigMap mounts flat, so the per-project directory would be lost
     # too. Both are fixed by mapping each key to the path it must appear at,
     # which is why this cannot be built with `kubectl create configmap

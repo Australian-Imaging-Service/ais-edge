@@ -188,8 +188,11 @@ Example LogQL queries:
 # Free disk on each declared data-policy stage:
 {component="data-policy"} | json | event="stage_report"
 
-# De-identified instances, with project and calling AET:
-{app="orthanc"} | json | event="instance_deidentified"
+# Default ingest recipe-stage logs. Inspect results and errors, not just count.
+{namespace="xnat-ingest",component="deidentify"} | json
+
+# Receiver Lua deid events belong to the deprecated engine. They are not an
+# ingest success signal; use the component reference for legacy log analysis.
 
 # Anything containing "401" anywhere in the pipeline:
 {namespace="xnat-ingest"} |~ "(?i)\\b401\\b"

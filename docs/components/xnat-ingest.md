@@ -8,27 +8,28 @@ is the AIS-maintained Python tool that:
    (`group-orthanc`)
 2. **Assigns** each study an XNAT project/subject/session identity and stages it
    as a structured directory (`assign`)
-3. **Uploads** staged sessions to an XNAT server via REST (`upload`)
+3. **De-identifies** assigned sessions with the site recipe (`deidentify`).
+4. **Uploads** the result to XNAT over HTTPS (`upload`).
 
-An optional fourth stage, `deidentify`, can sit between 2 and 3 for sites whose
-studies arrive already identified.
+The default `deid.engine: ingest` renders the deidentify stage. Use it for new
+sites. Review the selected source labels before the recipe runs.
 
 Upstream ≥ 0.12 split the old single `sort` command into these discrete stages.
-We run them as three Deployments on the single node, all rendered by
+We run the default stages as four Deployments on the single node, all rendered by
 `charts/edge`:
 - **`xnat-ingest group-orthanc`** (`<release>-group-orthanc`, `component=group`)
-  — REST-pulls de-identified studies from Orthanc and hardlinks them into
+ ; REST-pulls original studies from Orthanc and hardlinks them into
   `/data/grouped`
 - **`xnat-ingest assign`** (`<release>-assign`, `component=assign`) — reads
   `/data/grouped`, assigns project/subject/session IDs, and collates into
   `/data/assigned`
 - **`xnat-ingest deidentify`** (`<release>-deidentify`, `component=deidentify`) —
-  OPTIONAL and off by default (`ingest.deidentify.enabled`). Reads
-  `/data/assigned`, writes de-identified sessions to `/data/deidentified` and a
-  re-identification mapping to `/data/reid`. Only for pipelines where studies
-  arrive already carrying their `ClinicalTrial*` identifiers — see
-  [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
-  `upload` follows it to `/data/deidentified`.
+  enabled by the default `deid.engine: ingest`. Reads `/data/assigned`, writes
+  `/data/deidentified`, and writes sensitive mappings under `/data/reid`.
+  The obsolete `ingest.deidentify.enabled` key is rejected. Supply the site's
+  recipes and configure mapping encryption before receiving patient data.
+  See [deidentification.md](deidentification.md) for label and recipe checks.
+
 - **`xnat-ingest package`** (`<release>-package`, `component=package`)
   is optional and off by default (`ingest.package.enabled`); runs after
   deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
@@ -50,7 +51,7 @@ We run them as three Deployments on the single node, all rendered by
   `/data/assigned`, `/data/deidentified` when the deidentify stage is on, or
   `/data/packaged` when the package stage is on, and uploads sessions to XNAT
 
-All three run in ONE namespace — `namespace:` in `sites/<site>/values.yaml`,
+All stages run in one namespace; `namespace:` in `sites/<site>/values.yaml`,
 `xnat-ingest`. Tier-2 splits ingest (edge cluster) from upload (management
 cluster) because they are different machines; on one node there is nothing to
 split.
@@ -64,7 +65,8 @@ both refuse anything else, because `s3` needs the tier-2 management plane
 (SeaweedFS, a staging bucket, a management-side reclaimer) that does not exist
 here. The chart no longer contains the S3 uploader. Every stage reads
 and writes directories on one shared volume; upload reads the same
-`/data/assigned` that `assign` wrote.
+`/data/deidentified` that deidentify wrote, or `/data/packaged` when packaging
+is enabled. Assignment output remains an intermediate tree under ingest.
 
 The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
 This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
@@ -73,23 +75,27 @@ This checks HTTP availability, not response JSON; redirects and failed transfers
 
 The DICOM ingest engine downstream of Orthanc.
 
-- **group-orthanc** polls Orthanc's REST API on the node
-  (`http://<release>-orthanc.<namespace>.svc.cluster.local:8042`), selects
-  studies labelled `xnat-ingest-ready` (and not yet `xnat-ingest-processed`), and
-  hardlinks the deid'd instances from Orthanc's storage tree
-  (`/data/orthanc-storage`) into grouped studies under `/data/grouped`. Same
-  filesystem ⇒ hardlink, not copy. It then labels the study
-  `xnat-ingest-processed` so later cycles skip it.
-- **assign** reads `/data/grouped`, derives the XNAT project/subject/session IDs
-  from the DICOM clinical-trial tags the Orthanc deid hook writes, and collates
-  each study into `/data/assigned/<project>.<subject>.<session>/`. Project comes
-  from `ClinicalTrialProtocolID` (= the `orthanc.deid.aetMap.<AET>.project` entry
-  for the sending AET), subject from `ClinicalTrialSubjectID`, session from
-  `ClinicalTrialTimePointID` — no hardcoded project constant.
-- **upload** reads that same `/data/assigned` directory (every stage mounts the
-  one `<release>-pipeline` PVC at `/data`, backed by hostPath
-  `storage.pipeline.hostPath` = `/data/xnat-ingest`) and pushes each session to
-  XNAT over HTTPS.
+- **group-orthanc** polls the receiver's REST API and waits for stable input.
+  Under ingest the chart clears the Lua ready-label filter. It hardlinks
+  original instances from `/data/orthanc-storage` into `/data/grouped`, then
+  records processed and snapshot labels. Changed input can be staged again.
+- **assign** reads the configured tags and writes
+  `/data/assigned/<project>.<subject>.<session>/`. The derived ingest mapping
+  is StudyID, PatientID and AccessionNumber. A project constant can replace
+  the project source. A raw clinical identifier becomes an XNAT label if the
+  site selects it; later recipe processing cannot change that assigned label.
+- **deidentify** reads the assigned sessions and the project or fallback recipe.
+  It writes `/data/deidentified` and the requested re-identification map.
+  Private tags, sex and age remain in the example policy. Review the actual
+  modality output and encrypt the maps for production input.
+- **upload** reads `/data/deidentified`, or `/data/packaged` when the optional
+  package stage is on. It uses the same pipeline PVC mounted at `/data` and
+  sends the result over HTTPS with the local XNAT credentials.
+
+File-drop input can join this chain without Orthanc. It does not receive a
+facility-backup copy from the Lua callback. Keep those originals and verify
+that their format and label metadata are handled by the same approved recipe.
+No AET routing or unknown-AET quarantine applies to either ingest input path.
 
 ## What xnat-ingest has access to
 
@@ -97,7 +103,7 @@ The DICOM ingest engine downstream of Orthanc.
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/orthanc-storage`,
   writes `/data/grouped`
 - **Orthanc REST API** in-cluster at
-  `http://<release>-orthanc.<namespace>.svc.cluster.local:8042` (to list labelled
+  `http://<release>-orthanc.<namespace>.svc.cluster.local:8042` (to list stable
   studies and pull instances). Credentials come from the `orthanc-credentials`
   Secret when `orthanc.auth.enabled` is true; with auth off the chart still
   passes the literal `orthanc`/`orthanc`, because `group-orthanc` requires the
@@ -127,34 +133,39 @@ The DICOM ingest engine downstream of Orthanc.
   or off (see [package-stage.md](../package-stage.md))
 
 ### upload pod (`component=upload`)
-- **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
-  SAME claim `assign` writes to. One claim for every stage is what makes that
+- **PVC `<release>-pipeline`** mounted at `/data`: reads `/data/deidentified`,
+  or `/data/packaged` when packaging is enabled. It is the same claim that
+  the producing stage writes to. One claim for every stage is what makes that
   guaranteed rather than a convention; split them and upload sees an empty dir.
 - **Outbound HTTPS** to the configured XNAT server
 - **One Secret** `xnat-credentials` (keys `server`, `username`, `password`) —
   `upload.direct.existingSecret`. Tier-1 is the tier that holds an XNAT
   credential at all: a tier-2 edge writes to a bucket-scoped S3 key and never
-  reaches XNAT. Scope this account to the projects in this site's `aetMap` and
+  reaches XNAT. Scope this account to the projects selected by the site's tag mapping or project constant and
   nothing else.
 
 ## Where it runs
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`) |
 | `<release>-assign` | `xnat-ingest` | same image |
+| `<release>-deidentify` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 
 `<release>` is the Helm release name, which `install.sh` sets to the site name.
 
-The image is the **upstream** one on `ghcr.io` — all the AIS-Edge changes (JSON
-log output via `AIS_LOG_FORMAT=json`, the `group-orthanc` Orthanc REST-pull, the
-`assign` ID-assignment stage, and a local-filesystem upload source where the
-first positional arg to `upload` is a local path, not an `s3://` URL) are now
-merged upstream. Pin or bump it with `ingest.image.tag` in
-`sites/<site>/values.yaml`. `charts/edge/Chart.yaml`'s `appVersion` records the
-version the pipeline arguments are written against — not cosmetic, because the
-CLI changed shape at 0.12.
+The chart pins the fork image shown above. Its locally inspected package
+version is `0.16.3.dev49+ais.20261021.r13.g3182cc6`, which differs from the image
+tag. Record the deployed digest and chart values when comparing a site to a
+source review. A tag name alone is not a receipt for a running deployment.
+
+The image includes JSON log output, REST grouping, assignment, de-identification
+and a local upload source. Pin or change it with `ingest.image.repository` and
+`ingest.image.tag` in the site file. Check all rendered CLI arguments and the
+synthetic end-to-end result after a change. An upstream release can differ from
+the fork even when its version number is higher. The deprecated-engine reference
+is in [deidentification.md](deidentification.md#deprecated-orthanc-lua-engine).
 
 ## Configuration
 
@@ -169,9 +180,10 @@ with `scripts/site-secrets.sh new <name> single`). You never edit
 | `ingest.orthancGroup.{interval,waitPeriod,copyMode,toProcessLabel,processedLabel}` | group-orthanc |
 | `ingest.assign.{interval,copyMode,tagMapping.*}` | assign |
 | `upload.direct.{loop,waitPeriod,alwaysInclude,requireManifest,verifySsl,tempDir,existingSecret}` | upload |
-| `orthanc.deid.aetMap.<AET>.project` | the AE title → XNAT project map `assign` ultimately reads, via `ClinicalTrialProtocolID` |
+| `ingest.assign.constantProjectId` | Optional destination for all sessions at a single-project site; it overrides project-tag resolution only |
+| `ingest.deidentify.{specs,specConfigMap,specFiles,reidEncryptKeySecret}` | Recipe source and reid-map encryption. A missing key reference leaves plaintext maps. |
 | Secret `xnat-credentials` (namespace `xnat-ingest`) | `server`, `username`, `password` — SOPS-encrypted in `sites/<site>/secrets.enc.yaml`, applied by `scripts/site-secrets.sh apply <site>` before the chart |
-| `charts/edge/templates/ingest-pipeline.yaml` | the group + assign Deployments (and the optional `group-fs` / `associate` stages) |
+| `charts/edge/templates/ingest-pipeline.yaml` | the group, assign and deidentify Deployments, plus optional group-fs, associate and package stages |
 | `charts/edge/templates/upload.yaml` | the upload Deployment (the `direct` branch) |
 
 ### Ingest stage CPU and memory
@@ -230,35 +242,29 @@ xnat-ingest group-orthanc \
   /data/orthanc-storage                    # Orthanc storage dir (as mounted)
   /data/grouped                            # output: grouped studies
   $(ORTHANC_USER) $(ORTHANC_PASSWORD)      # orthanc-credentials, or literal orthanc/orthanc when auth is off
-  --to-process-label   xnat-ingest-ready         # ingest.orthancGroup.toProcessLabel (fixed string — see below)
   --processed-label    xnat-ingest-processed     # ingest.orthancGroup.processedLabel
   --copy-mode          hardlink_or_copy          # ingest.orthancGroup.copyMode
   --wait-period        60                        # ingest.orthancGroup.waitPeriod
   --loop               60                        # ingest.orthancGroup.interval
 ```
 
-`--to-process-label` is the gate that stops identifiable data leaving Orthanc:
-the Lua hook applies it in `OnStableStudy`, *after* the original has been backed
-up and the instance de-identified. Clearing it while deid is on would pull
-everything; leaving it set while deid is **off** means nothing applies the label
-and the pipeline stalls with data sitting in Orthanc and no error anywhere —
-which the chart refuses to render.
+Under ingest, the chart omits `--to-process-label`. The stored
+`ingest.orthancGroup.toProcessLabel` default can still read `xnat-ingest-ready`,
+but the engine helper clears its effective value. No ingest callback applies
+a Lua ready label. Inspect the rendered arguments, not only the raw values,
+when diagnosing study selection.
 
-**It is a two-state switch, not a free-text value.** Only the CONSUMER reads the
-key: `charts/edge/templates/ingest-pipeline.yaml` renders
-`--to-process-label <ingest.orthancGroup.toProcessLabel>` into the group-orthanc
-args. The PRODUCER does not — the Lua hook PUTs the literal string
-(`RestApiPut("/studies/" .. studyId .. "/labels/xnat-ingest-ready", "")` in
-`charts/edge/files/deidentify-and-forward.lua`), with no env var and no
-`routing.json` key behind it. Set `toProcessLabel` to any other string and you
-get exactly the silent stall described above — Orthanc keeps labelling studies
-`xnat-ingest-ready` while group-orthanc filters for something else, so every
-pod is healthy and nothing moves — except that this time the render-time guard
-in `charts/edge/templates/_helpers.tpl` does **not** catch it: it only tests
-empty-vs-non-empty against `orthanc.deid.enabled`, never the value. The two
-supported values are therefore `xnat-ingest-ready` (deid on, the chart default)
-and `""` (deid off — `scripts/ci/values.sh` clears it for the no-deid CI case).
-Changing the string means editing the Lua hook in the same commit.
+`--wait-period` governs stable-input selection. It reduces the chance of
+processing a study while it is being sent, but does not establish that a later
+series cannot arrive. The processed snapshot records the exported state, and
+a changed state can cause grouping to run again. Keep the source while handling
+an error; a processed label without matching snapshot evidence is not sufficient
+for the data-policy backend to delete a study.
+
+Do not insert a custom ready-label filter into a running ingest Deployment. It
+would create a dependency on a producer that is absent. Keep the generated
+arguments aligned with the selected engine. The existing deprecated producer
+is described in the single deprecated reference, not as an ingest setup step.
 
 `processedLabel` carries no such constraint, and the difference is worth knowing
 before you assume symmetry: group-orthanc applies that one itself via
@@ -271,16 +277,17 @@ handshake read the one values key and stay in step by construction.
 ```
 xnat-ingest assign \
   /data/grouped                          # input: group-orthanc output
-  /data/assigned                         # output: upload reads this
-  --project  ClinicalTrialProtocolID     # ingest.assign.tagMapping.project
-  --subject  ClinicalTrialSubjectID      # ingest.assign.tagMapping.subject
-  --session  ClinicalTrialTimePointID    # ingest.assign.tagMapping.session
+  /data/assigned                         # output: deidentify reads this
+  --project  StudyID     # ingest.assign.tagMapping.project
+  --subject  PatientID      # ingest.assign.tagMapping.subject
+  --session  AccessionNumber    # ingest.assign.tagMapping.session
   --copy-mode      hardlink_or_copy      # ingest.assign.copyMode
   --unlink-source  all                   # only when dataPolicy.derived.grouped.reclaim = onAssigned
 ```
 
-The chart runs these arguments one pass at a time inside the upload-tree writer
-lock, with no `--loop`:
+With ingest, assign uses its configured `--loop`; deidentify owns the terminal
+writer lock. The following existing-site wrapper applies only when assigned is
+the upload source. It explains the lock protocol used by the reclaimer:
 
 ```
 sh -c 'trap exit TERM INT; mkdir -p /data/.locks && exec 9>>/data/.locks/assigned.alive && flock -s 9 && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60 & wait $!; done' \
@@ -311,17 +318,23 @@ the upload-success alert re-fires (that produced two days of duplicate mail). It
 deletes HARDLINKS, not data — the bytes remain in Orthanc storage and in the
 facility backup.
 
-The `ClinicalTrial*` tags are written by the Orthanc deid hook
-(`ClinicalTrialProtocolID` = project, `ClinicalTrialSubjectID` = SubjectHash,
-`ClinicalTrialTimePointID` = SessionHash), so `assign` reads them directly — the
-project comes from `orthanc.deid.aetMap`, not a config constant. IDs are
-normalised to `[A-Za-z0-9_]`, so keep XNAT project IDs in that set (a hyphen
-becomes `_`).
+The derived ingest mapping selects StudyID, PatientID and AccessionNumber.
+An explicit mapping can select other supported tags. The chart rejects tags
+whose names begin with ClinicalTrial under ingest. `constantProjectId` supplies
+one project for every session when configured. It does not supply missing
+subject/session values or hash any value.
+
+Assignment preserves the selected labels in session metadata. Removing their
+source tags later in the recipe cannot remove the labels from XNAT. In
+particular, PatientID can contain a raw MRN. Check the source values and use
+approved research labels before enabling patient upload. Keep project IDs in
+`[A-Za-z0-9_]` to avoid normalization surprises, and verify the actual result.
+A missing or empty required field goes to the invalid holding directory.
 
 ### upload arguments
 
 ```
-xnat-ingest upload /data/assigned $(XINGEST_HOST)   # LOCAL source dir (no s3://)
+xnat-ingest upload /data/deidentified $(XINGEST_HOST)   # LOCAL source dir (no s3://)
   --always-include        all       # upload.direct.alwaysInclude
   --loop                  60        # upload.direct.loop
   --wait-period           60        # upload.direct.waitPeriod
@@ -344,7 +357,7 @@ Important env vars:
 ## Operations
 
 ```bash
-# All three stages are in the one release namespace (JSON when AIS_LOG_FORMAT=json)
+# All stages are in the one release namespace (JSON when AIS_LOG_FORMAT=json)
 kubectl logs -n xnat-ingest -l component=group  -f | jq
 kubectl logs -n xnat-ingest -l component=assign -f | jq
 kubectl logs -n xnat-ingest -l component=upload -f | jq
@@ -367,7 +380,7 @@ data policy removes either of them.
 
 | Folder | What puts data there | What to do |
 |---|---|---|
-| `/facility-backup/__unmapped_aet__/<AET>/`, the quarantine | Orthanc's Lua hook, for a study sent to an AE title that `aetMap` does not map | Add the AE title to `aetMap`, as in the README "Failure Scenarios" |
+| `/facility-backup/__unmapped_aet__/<AET>/`, a legacy quarantine | Not populated by ingest; retained content can predate an engine change | Preserve it and consult the deprecated-engine reference in [deidentification.md](deidentification.md#deprecated-orthanc-lua-engine) |
 | `/data/assigned/__invalid__/`, the invalid sessions | `assign`, when it cannot resolve the project, subject or session ID | Follow "Recovering an invalid session" below |
 
 ### A study that group-orthanc refuses
@@ -643,13 +656,13 @@ deletes. A dry run makes the same checks and removes no data.
 | DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
 | Secret missing at install | pod sits in `CreateContainerConfigError` with nothing saying why | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
 | XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
-| XNAT down | uploads fail; assigned sessions accumulate in `/data/assigned` | the upload loop clears the backlog when XNAT returns. CAUTION: no shipped rule watches this on tier-1 — the backlog and stall rules in `loki-ruler-rules.yaml` (`SessionUploadStalled`, `SessionStagedNotConfirmedInXNAT`) all select `component="s3-uploader"`, which does not exist in `direct` mode. Watch the `component=upload` logs and free disk |
+| XNAT down | Output accumulates in `/data/deidentified`, or `/data/packaged` when packaging is on | Check direct-upload logs, current delivery alerts and free disk. The retained source is retried; a quiet log or a later success line does not prove that a conflicting resource was repaired. |
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
-| `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
-| `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
+| A custom ready-label filter is added to the running group command | Ingest has no Lua ready-label producer, so the filter can prevent selection | Keep the chart-derived arguments. Under ingest the chart clears this filter; inspect the rendered Deployment rather than only the raw value. |
+| Assigned reclaim is set to `onUploaded` under ingest | Assigned is an intermediate tree, not the upload source | Use `auto`, which resolves to `onDeidentified`. The terminal tree is verified by the direct-upload staged reclaimer. Do not disable its writer lock or XNAT checks to clear a backlog. |
 
 ## Replacements / future
 
