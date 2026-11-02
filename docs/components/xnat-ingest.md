@@ -29,9 +29,26 @@ We run them as three Deployments on the single node, all rendered by
   arrive already carrying their `ClinicalTrial*` identifiers — see
   [choosing-a-deid-engine.md](../choosing-a-deid-engine.md). When enabled,
   `upload` follows it to `/data/deidentified`.
+- **`xnat-ingest package`** (`<release>-package`, `component=package`)
+  is optional and off by default (`ingest.package.enabled`); runs after
+  deidentify, under `deid.engine: ingest` only. Reads `/data/deidentified` and
+  writes `/data/packaged`. Each `medimage/dicom-series` scan resource is
+  replaced by a `DICOM-zip` resource, holding the whole series as an
+  uncompressed zip, and one DICOM sample that XNAT can read headers from.
+  A session with no `dicom-series` scan resource passes through unchanged only
+  with xnat-ingest PR #217 (open on 2026-10-20). Without it, the stage logs
+  `Skipping '<session>' because it has no <datatype> scan resources` at INFO
+  on every pass. The session stays in `/data/deidentified` and does not reach
+  XNAT. Each
+  session is removed from `/data/deidentified` once it has been packaged
+  (`dataPolicy.derived.deidentified.reclaim: onPackaged`). An empty input is
+  normal while waiting for work. The stage runs the pipeline image
+  (`ingest.image.tag`), which needs fileformats 0.22.1 or later; 0.16.2 does
+  not have it. See [package-stage.md](../package-stage.md) for the versions,
+  the vendor package and how a site turns the stage on.
 - **`xnat-ingest upload`** (`<release>-upload`, `component=upload`) — reads
-  `/data/assigned`, or `/data/deidentified` when the deidentify stage is on, and
-  uploads sessions to XNAT
+  `/data/assigned`, `/data/deidentified` when the deidentify stage is on, or
+  `/data/packaged` when the package stage is on, and uploads sessions to XNAT
 
 All three run in ONE namespace — `namespace:` in `sites/<site>/values.yaml`,
 `xnat-ingest`. Tier-2 splits ingest (edge cluster) from upload (management
@@ -42,11 +59,15 @@ Two further stages exist in the chart and are off by default: `group-fs`
 (`ingest.fileDrop.enabled` — a watched directory instead of a modality) and
 `associate` (`ingest.associate.enabled` — Siemens twix/rda/puls side files).
 
-There is **no S3 hop**: `upload.mode: direct`, and `install.sh` refuses anything
-else, because `s3` needs the tier-2 management plane (SeaweedFS, a staging
-bucket, a management-side reclaimer) that does not exist here. Every stage reads
+There is **no S3 hop**: `upload.mode: direct`, and the chart and `install.sh`
+both refuse anything else, because `s3` needs the tier-2 management plane
+(SeaweedFS, a staging bucket, a management-side reclaimer) that does not exist
+here. The chart no longer contains the S3 uploader. Every stage reads
 and writes directories on one shared volume; upload reads the same
 `/data/assigned` that `assign` wrote.
+
+The group initializer tries Orthanc `/system` up to 18 times, with a five-second curl timeout and five-second pauses after failed attempts (up to about 180 seconds).
+This checks HTTP availability, not response JSON; redirects and failed transfers do not count as ready.
 
 ## Role in this stack
 
@@ -87,6 +108,23 @@ The DICOM ingest engine downstream of Orthanc.
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/grouped`,
   writes `/data/assigned`
 - **No Orthanc or XNAT access** — it only reshapes local directories
+- **The upload-tree writer lock, `/data/.locks/assigned.lock`**: `assign`
+  writes the tree the uploader reads (deid.engine orthanc or none), so it runs
+  one pass at a time and holds this lock for each pass (`edge.lockedStage` in
+  `charts/edge/templates/_helpers.tpl`). The staged-reclaimer takes the same
+  lock around each delete, and deletes only while the writer holds
+  `/data/.locks/assigned.alive`, a shared lock the writer keeps for its whole
+  life. This does not change how a stage removes its own input
+  (`--unlink-source`). Under deid.engine
+  ingest, `deidentify` writes the upload tree and takes
+  `/data/.locks/deidentified.lock` instead. With the package stage on
+  (`ingest.package.enabled`), `package` writes the upload tree and takes
+  `/data/.locks/packaged.lock`; `deidentify` then takes turns on that same
+  lock, one pass per turn and without `--loop`: `deidentify` keeps holding
+  `/data/.locks/deidentified.lock` for each pass, and `package` takes that lock
+  and then `packaged.lock` for each of its passes, so a pass of one never runs
+  beside a pass of the other, also during the upgrade that turns the stage on
+  or off (see [package-stage.md](../package-stage.md))
 
 ### upload pod (`component=upload`)
 - **PVC `<release>-pipeline`** mounted at `/data` — reads `/data/assigned`, the
@@ -103,7 +141,7 @@ The DICOM ingest engine downstream of Orthanc.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 
@@ -135,6 +173,54 @@ with `scripts/site-secrets.sh new <name> single`). You never edit
 | Secret `xnat-credentials` (namespace `xnat-ingest`) | `server`, `username`, `password` — SOPS-encrypted in `sites/<site>/secrets.enc.yaml`, applied by `scripts/site-secrets.sh apply <site>` before the chart |
 | `charts/edge/templates/ingest-pipeline.yaml` | the group + assign Deployments (and the optional `group-fs` / `associate` stages) |
 | `charts/edge/templates/upload.yaml` | the upload Deployment (the `direct` branch) |
+
+### Ingest stage CPU and memory
+
+Set each stage's Kubernetes `resources` in the site's values file. The keys
+are independent, including the two group inputs:
+
+| Values key | Container |
+|---|---|
+| `ingest.orthancGroup.resources` | `group` in the group-orthanc Deployment |
+| `ingest.fileDrop.resources` | `group-fs` in the optional file-drop Deployment |
+| `ingest.assign.resources` | `assign` |
+| `ingest.deidentify.resources` | `deidentify`, when `deid.engine=ingest` |
+
+Each key accepts Kubernetes `requests` and `limits` for CPU and memory.
+An omitted key, `{}`, or `null` adds no resources to that container. These
+empty defaults preserve the existing behavior: the chart does not reserve CPU
+or memory for these stages and does not cap their use. A namespace LimitRange
+can still apply defaults. Installing this chart change alone does not establish
+a memory limit or a tested production capacity.
+
+This example shows the format for one stage. The numbers are illustrative;
+they are not a tested site profile or recommended production limits:
+
+```yaml
+ingest:
+  assign:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 2Gi
+```
+
+Use the other keys to size the other stages separately. Keep uploader settings
+under `upload.direct.resources` or, on main in S3 mode, `upload.s3.resources`.
+Orthanc remains the DICOM receiver; size the `deidentify` stage for the
+xnat-ingest recipes used at the site.
+
+Before setting a production profile, measure CPU and memory with the largest
+supported studies, the site's recipes, and concurrent stages. Allow memory
+headroom above observed peaks and check the total requests against node
+allocatable capacity, including Orthanc and the other services. Short synthetic
+runs and idle snapshots do not establish a safe upper bound. A memory limit
+that is too low can stop a stage with OOMKilled; CPU limits can slow the
+pipeline. Verify throughput, restarts, and recovery on the test deployment
+before applying a site profile.
 
 ### group-orthanc arguments
 
@@ -191,12 +277,35 @@ xnat-ingest assign \
   --session  ClinicalTrialTimePointID    # ingest.assign.tagMapping.session
   --copy-mode      hardlink_or_copy      # ingest.assign.copyMode
   --unlink-source  all                   # only when dataPolicy.derived.grouped.reclaim = onAssigned
-  --loop           60                    # ingest.assign.interval
 ```
 
+The chart runs these arguments one pass at a time inside the upload-tree writer
+lock, with no `--loop`:
+
+```
+sh -c 'trap exit TERM INT; mkdir -p /data/.locks && exec 9>>/data/.locks/assigned.alive && flock -s 9 && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60 & wait $!; done' \
+  xnat-ingest assign <the arguments above>   # sleep: ingest.assign.interval
+```
+
+The sleep after each pass is the same full interval that `--loop` sleeps. A
+pass that fails stops the container, as an exception out of `--loop` did.
+fd 9 holds the shared lock on `assigned.alive` for the life of the container.
+The shell is PID 1, and PID 1 has no default action for a signal, so the
+`trap` is necessary. A stop (SIGTERM or SIGINT) ends the loop at once in the
+sleep: the sleep runs in the background, and `wait` returns on the signal. In
+a pass, it ends the loop when the pass ends: the pass is not stopped during a
+write, and no pass starts from the sleep after the signal. A stop that comes
+while the stage waits for its lock runs that one pass first. A pass that is
+longer than the grace period (30 s) still gets SIGKILL. Under
+deid.engine ingest, `assign` does not write the upload tree, so it keeps
+`--loop 60` and `deidentify` runs inside the lock. With the package stage on,
+`package` runs inside `deidentified.lock` and then `packaged.lock` for each
+pass, and `deidentify` keeps its own `deidentified.lock` per pass with the same
+loop, without the `.alive` handle and without `--loop`.
+
 `--unlink-source all` drops each grouped session once it has been assigned, and
-it is not an optimisation. `assign --loop` rebuilds its work list from a live
-listing of `/data/grouped` every cycle, so without it the same sessions are
+it is not an optimisation. `assign` rebuilds its work list from a live
+listing of `/data/grouped` every pass, so without it the same sessions are
 re-assigned forever: `/data/assigned` is repopulated, the uploader re-stages, and
 the upload-success alert re-fires (that produced two days of duplicate mail). It
 deletes HARDLINKS, not data — the bytes remain in Orthanc storage and in the
@@ -216,7 +325,9 @@ xnat-ingest upload /data/assigned $(XINGEST_HOST)   # LOCAL source dir (no s3://
   --always-include        all       # upload.direct.alwaysInclude
   --loop                  60        # upload.direct.loop
   --wait-period           60        # upload.direct.waitPeriod
-  --dont-require-manifest           # rendered when upload.direct.requireManifest = false
+  --require-manifest                # upload.direct.requireManifest = true (default):
+                                    #   a half-written resource waits for the next pass
+  --dont-require-manifest           # instead, when upload.direct.requireManifest = false
   --dont-verify-ssl                 # rendered when upload.direct.verifySsl = false
                                     #   (only for an XNAT with a private/self-signed cert)
 ```
@@ -241,13 +352,280 @@ kubectl logs -n xnat-ingest -l component=upload -f | jq
 # Inspect the assigned sessions on the node (storage.pipeline.hostPath)
 sudo ls -R /data/xnat-ingest/assigned/
 
-# Manually promote an invalid session to test upload
-sudo mv /data/xnat-ingest/assigned/__invalid__/<dir> \
-        /data/xnat-ingest/assigned/<project>.<subject>.<session>
+# Recover an invalid session: follow the guarded steps in "Recovering an
+# invalid session" below. A plain mv into an existing folder nests the
+# session instead of promoting it.
 
 # Re-render what the release will run, without installing
 helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 ```
+
+### Holding folders
+
+Two folders hold data that a stage could not pass on. No stage, reclaimer or
+data policy removes either of them.
+
+| Folder | What puts data there | What to do |
+|---|---|---|
+| `/facility-backup/__unmapped_aet__/<AET>/`, the quarantine | Orthanc's Lua hook, for a study sent to an AE title that `aetMap` does not map | Add the AE title to `aetMap`, as in the README "Failure Scenarios" |
+| `/data/assigned/__invalid__/`, the invalid sessions | `assign`, when it cannot resolve the project, subject or session ID | Follow "Recovering an invalid session" below |
+
+### A study that group-orthanc refuses
+
+`group-orthanc` stages each study on its own. When it cannot stage a study, it
+logs this line at ERROR, removes the study's scratch folders, and stages the
+other studies:
+
+```
+Skipping Orthanc study '<orthanc-study-id>': <reason>
+```
+
+`IngestStageError` fires. The study stays in Orthanc without the processed
+label, and the stage tries it again on every pass. The data policy does not
+remove a study without the processed label, so the study waits in Orthanc.
+
+Read the reason first. The stage refuses a study when two of its series would
+share one scan:
+
+- `SeriesNumber '<n>' is used by series with different descriptions`
+- `series '<id>' maps to '<scan>/<resource>' like another series of the study`
+
+The scan ID comes from the SeriesNumber, so the stage cannot keep both series
+in one session. It refuses the study, so that no series is merged or dropped.
+To clear it:
+
+1. List the series of the study with their number, description and count of
+   instances. The Orthanc container has no `curl`, so use a port-forward in a
+   second terminal. Wait for `Forwarding from 127.0.0.1:8042`, and stop it with
+   Ctrl-C when you are done. Leave out `-u` if Orthanc authentication is off.
+
+   ```bash
+   # second terminal
+   kubectl -n xnat-ingest port-forward deploy/<release>-orthanc 8042:8042
+   ```
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> \
+       "http://localhost:8042/studies/<orthanc-study-id>/series?expand" \
+     | jq -r '.[] | [.ID, .MainDicomTags.SeriesNumber,
+                     .MainDicomTags.SeriesDescription, (.Instances | length)] | @tsv'
+   ```
+
+2. With the site's imaging team, decide which series to keep.
+3. If one series is not necessary, save a copy of it and check the copy:
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> -o <orthanc-series-id>.zip \
+       http://localhost:8042/series/<orthanc-series-id>/archive
+   unzip -tq <orthanc-series-id>.zip                  # must report no errors
+   unzip -Z1 <orthanc-series-id>.zip | grep -vc '/$'  # must equal the count in step 1
+   ```
+
+   Do not go on unless the download, the test and the count are all correct.
+   Do not rely on the facility backup instead: some sites turn it off, and the
+   configuration does not prove that it holds this series.
+4. Delete only that series. The next pass stages the study.
+
+   ```bash
+   curl -sf -u <orthanc-user>:<password> -X DELETE \
+       http://localhost:8042/series/<orthanc-series-id>
+   ```
+
+   The deleted series does not go to XNAT. Keep its ZIP file as the site's
+   retention rules say.
+
+5. If both series are necessary, keep the study in Orthanc and report it to the
+   AIS team. The stage cannot stage two different series under one scan number.
+
+Do not delete the whole study from Orthanc. That removes every series of the
+study and, on a site without the facility backup, the only copy.
+
+Other reasons name their cause, for example a file that cannot be read or a
+conversion that failed. Correct the cause. The stage tries the study again on
+the next pass.
+
+### Recovering an invalid session
+
+`assign` puts a session in `/data/assigned/__invalid__/` when it cannot resolve
+the project, subject or session ID from the tags. It logs this line at ERROR:
+
+```
+Could not resolve project/subject/session IDs for '<name>', due to missing metadata fields [...]. Saved to '/data/assigned/__invalid__/<folder>' for manual review instead
+```
+
+`InvalidSessionAssigned` fires when assign reports such a line. It counts
+reports per cluster, not sessions, and it clears when the line leaves its
+10-minute window, which does not mean that the session was recovered. The line
+is logged before the session is saved, so check that the folder exists.
+
+The folder name shows which IDs are missing. Each one is
+`INVALID_MISSING_<FIELD>_<suffix>`, for example
+`<project>.<subject>.INVALID_MISSING_ACCESSIONNUMBER_<suffix>`.
+
+What happens to the copies:
+
+- `assign` removes its input from `/data/grouped/` after it saves the session
+  in `__invalid__/` (`dataPolicy.derived.grouped.reclaim: onAssigned`).
+- Nothing removes `__invalid__/`: not the stages, not the reclaimers, not the
+  data policy.
+- The study stays in Orthanc with the processed label. When the data policy is
+  armed, it can delete that Orthanc copy after
+  `dataPolicy.derived.orthancStorage.minAge`. If the facility backup is on, it
+  also keeps the original. **Keep the facility backup on.** Without it, the
+  folder in `__invalid__/` can be the only copy.
+- If the same study is staged again, `assign` skips it and logs
+  `already saved as invalid` at WARNING, until the folder leaves `__invalid__/`.
+
+To recover the session:
+
+1. Find the correct IDs: the values that the site's ID mapping (`ingest.assign`)
+   would have produced, from the hospital's records. Make sure that the XNAT
+   project does not already have a session with that label.
+2. Rename the folder to `<project>.<subject>.<session>` and move it up into
+   `assigned/`. On the node, `/data` is the pipeline hostPath,
+   `/data/xnat-ingest` by default. The commands stop if a folder of that name
+   exists. `mv -nT` never replaces a folder and never moves into one, and the
+   last `test` checks that the folder really left `__invalid__/`:
+
+   ```bash
+   cd /data/xnat-ingest/assigned
+   sudo test ! -e <project>.<subject>.<session> \
+     && sudo mv -nT __invalid__/<folder> <project>.<subject>.<session> \
+     && sudo test ! -e __invalid__/<folder> \
+     && sudo ls -d <project>.<subject>.<session>
+   ```
+
+   If a check fails, look at both paths and the stage logs before you do
+   anything else: a session with that name may already be waiting, or the next
+   stage may already have taken the moved folder. Never repeat the move blindly.
+
+   The upload takes the three IDs from the folder name. Do not edit the files.
+   This procedure does not change the DICOM files. Under
+   `deid.engine: ingest`, the deidentify stage takes the session from
+   `assigned/` first, as for any other session.
+3. Look for the session in the upload log, then in XNAT. When the data policy
+   is armed, the reclaimer removes the local copy after XNAT holds every file.
+
+Do not send the study again to correct it. Orthanc keeps the instances that it
+already has, and it ignores a copy with the same SOPInstanceUID.
+
+### Stopping stage loops
+
+The chart runs group, group-orthanc and assign through the same pass wrapper
+as the other producers. Each pass holds the lock of its output tree. Group and
+group-orthanc share `grouped.lock`; assign holds `assigned.lock`. These locks
+stop two writers of the same tree. They do not make the full pipeline a
+transaction.
+
+TERM and INT stop an idle wrapper at once. A busy wrapper lets the current
+pass finish, releases its lock, and starts no further pass. A pass that lasts
+longer than the pod termination grace period can still be killed.
+
+During a `helm upgrade`, the `Recreate` strategy stops the old pod before the
+new pod starts. A pod deletion or an eviction does not wait: the replacement
+can start while the old pod still stops. The lock covers that case. On the
+first upgrade to this chart the old pod has no lock, but `Recreate` stops it
+first, so the upgrade itself is safe. An old pod that ignores TERM is killed
+after the grace period, possibly during a pass, as before this change.
+
+Each pass starts a new `xnat-ingest` process. Its imports take about 1.6 s of
+CPU per pass, the same cost that the deidentify and package stages already
+have. A new process for each pass also returns its memory after the pass.
+
+The data-policy loop also stops from idle sleep and after a current foreground
+command. An external child that does not finish within the grace period can
+still be killed.
+
+### Upgrade or roll back while the cleanup can delete
+
+The staged-reclaimer deletes only inside the upload-tree writer lock, and only
+while a writer that takes the lock is running (it holds `<tree>.alive`). That
+check is safe for an upgrade, because Recreate stops the old writer before the
+new one starts. Two moves need a drain first, on a site where
+`dataPolicy.enabled: true` and `dataPolicy.dryRun: false`:
+
+- the FIRST upgrade to a release in which the staged-reclaimer takes the lock.
+  Before it, the cleanup ran `rm -rf` without the lock, and a Job that has
+  started keeps its old behaviour after its CronJob changes. That includes the
+  release that added only the writer lock: its deleter does not take the lock;
+- a rollback to a release in which the writer or the deleter does not take the
+  lock. This rollback is not supported without the drain, and the cleanup then
+  stays suspended.
+
+`suspend` does not stop a Job that has started. `scripts/reclaimer-fence.sh`
+waits for it, and fails on any API error instead of reading it as "nothing
+runs". Give it the upgrade or rollback command:
+
+```bash
+scripts/reclaimer-fence.sh around <release> -- \
+    helm upgrade <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
+```
+
+It suspends the CronJob and waits until no cleanup Job or pod is active (also a
+pod whose Job is already deleted), runs the command, and resumes only if the
+command succeeded and the checks below pass. At the first failure it stops,
+exits non-zero, and the CronJob stays suspended. Do not run the steps as
+separate shell lines: a failed step does not stop the next one. (`drain` and
+`resume` exist on their own for an operator who checks each exit status.)
+
+The resume step refuses, and leaves the CronJob suspended, when the CronJob's
+deleter has no `WRITER_LOCK`/`WRITER_ALIVE`, when the writer's rollout is not
+complete, or when any writer pod (`assign`, `deidentify` or `package`, from the
+lock path: `packaged.lock` means the `package` writer) lacks the wrapper or is
+still terminating. An upgrade or a rollback between two releases in which BOTH
+the writer and the staged-reclaimer take the lock needs no drain. Turning the
+package stage on or off moves the writer lock between `deidentified.lock` and
+`packaged.lock`; the stages themselves order that move (both hold
+`deidentified.lock` for each pass, see the writer lock above), and the fence
+follows the lock path for the reclaimer.
+
+### Reidentification maps at production sites
+
+The ingest deidentification engine writes maps under the pipeline `reid`
+directory, normally `/data/xnat-ingest/reid` on the host. Without
+`ingest.deidentify.reidEncryptKeySecret`, these maps are plaintext JSON.
+Production sites that use this engine must set this Secret reference and
+manage the key separately from the data. Restrict access to both the maps
+and the key. The Secret must contain `XINGEST_REID_ENCRYPT_KEY`, a valid
+Fernet key for the ingest command. Do not place the key in a values file.
+
+Enabling encryption affects new writes. It does not encrypt or remove
+existing `.json` maps. A later pass can leave both a plaintext map and an
+encrypted `.json.enc` map. Inventory existing maps and arrange a verified
+migration before claiming that the stored maps are encrypted. Routing labels
+can still contain original identifiers; select approved pseudonymous tags
+for the assign stage as described in the chart values.
+
+There is no retention rule for this directory. A proposed rule would retain
+each map until its delivery and retention obligations are met, then remove
+it after a site-selected interval. The site must decide that interval, the
+required restore window, backup handling, legal holds and key retention.
+Use a dry-run inventory first. Do not enable automatic deletion until the
+site approves those decisions and verifies that the required maps remain
+recoverable. This proposal changes no retention behavior.
+
+### Reclaimer connections and fresh evidence
+
+The staged reclaimer starts one Python worker for its data pass. The worker
+handles session names in sequence and keeps only the current session's file
+listing and proof in memory. Startup probes remain separate from that pass.
+It reuses connections, not response data. Each session gets a fresh listing
+when it is examined; the run-start discovery contains names only.
+
+For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+It queries the experiment endpoint before reading its file catalog and keeps
+the per-file HEAD checks. A missing experiment, missing file, failed request,
+invalid response or failed login keeps the affected data. If a login expires,
+one bounded login retry precedes the request retry. The worker closes any
+login it opens; the shell closes the initial login that it lends the worker.
+The connection can stay open across sessions without retaining their listings.
+On TERM, the shell forwards the signal to the worker and waits for its cleanup.
+The worker closes a renewed login through a fresh connection, even if the
+signal interrupted an HTTP response.
+
+These checks do not make XNAT and the source store one transaction. They
+preserve the existing per-file evidence, local writer locks and conditional
+deletes. A dry run makes the same checks and removes no data.
 
 ## Benefits
 
@@ -262,13 +640,14 @@ helm template <release> charts/edge -n xnat-ingest -f sites/<site>/values.yaml
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Manual rename + move (see Operations). `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case — it selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
 | Secret missing at install | pod sits in `CreateContainerConfigError` with nothing saying why | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
 | XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down | uploads fail; assigned sessions accumulate in `/data/assigned` | the upload loop clears the backlog when XNAT returns. CAUTION: no shipped rule watches this on tier-1 — the backlog and stall rules in `loki-ruler-rules.yaml` (`SessionUploadStalled`, `SessionStagedNotConfirmedInXNAT`) all select `component="s3-uploader"`, which does not exist in `direct` mode. Watch the `component=upload` logs and free disk |
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
+| A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | `ingest.orthancGroup.toProcessLabel` set to a custom string | group-orthanc matches no study; data accumulates in Orthanc with every pod Running and no alert. The chart renders and installs cleanly | the Lua hook hardcodes `xnat-ingest-ready`, and the `_helpers.tpl` guard only checks empty-vs-set — treat the key as `xnat-ingest-ready` or `""` only, and edit `charts/edge/files/deidentify-and-forward.lua` too if a different string is genuinely needed |
 | `dataPolicy.derived.assigned.reclaim: onUploaded` with `upload.mode: direct` | `/data/assigned` is never reclaimed; disk grows silently even with the data policy fully enabled | the `onUploaded` condition looks for a per-session fingerprint under `/data/LOGS/s3-uploader-state`, which only the **s3** uploader writes — `xnat-ingest upload` has no equivalent. Watch free disk yourself: the only disk warning in the system is `dataPolicy.originals.facilityBackup.minFreeDiskPercent`, which measures the facility-backup location and warns rather than deletes |
 

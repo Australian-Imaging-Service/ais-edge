@@ -323,24 +323,34 @@ has no s3-uploader**, so nothing would ever write it, and for a long time nothin
 did: the condition could not come true, the tree was kept for ever, and the
 uploader re-sent the same session every loop while XNAT answered *"already exists
 with different checksums"*. A `staged-reclaimer` CronJob now closes that. It runs
-hourly, asks XNAT whether the session is really there and complete, and only then
-removes it.
+hourly. For each resource of a session it finds every local file in XNAT's file
+listing and checks it with a HEAD request: present, with the same size (no
+download, so content is not compared). It removes only the files it proved, inside
+the upload-tree writer lock, and keeps everything it cannot prove.
 
 Two consequences worth knowing before you change anything here:
 
 - **Which tree it watches depends on the de-identification engine.**
   `/data/assigned` under `deid.engine: orthanc`, `/data/deidentified` under
-  `ingest`. The chart derives that, and refuses a combination where the reclaim
+  `ingest`, and `/data/packaged` when the optional package stage is on (its
+  zips are proved under their folder label, `DICOM-zip`). The chart derives
+  that, and refuses a combination where the reclaim
   condition could never be satisfied rather than letting the policy read as
   though it were cleaning something.
 - **`dataPolicy.enabled: false` leaves it inert.** The CronJob still renders, but
   with `DRY_RUN` set: it reports what it would remove and removes nothing. A site
   that never turns the data policy on will fill up, and the alert for it fires
   long after the uploader has started looping.
+- **It deletes only inside the writer lock.** The stage that writes the tree
+  holds `/data/.locks/<tree>.lock` for each pass, and the CronJob takes the same
+  lock to delete. The first upgrade to this check, and any rollback to a release
+  without the lock, need the drain in
+  [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
 
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
-minimum age, whether it verifies against XNAT, and how many sessions one run may
-remove.
+minimum age (counted from when the newest file reached the tree), whether it
+verifies against XNAT (with `false` it removes nothing), and how many sessions one
+run may remove.
 
 `minFreeDiskPercent: 10` and `quarantine.alertAfter: 24h` are read by the
 alerting rules as well as the policy engine, so changing them changes when you
@@ -442,6 +452,75 @@ scripts/site-secrets.sh apply my-hospital
 kubectl -n xnat-ingest rollout restart deploy/<the consumer>
 ```
 
+### Pointing the uploader at another XNAT
+
+The XNAT URL, account and password live in one Secret, `xnat-credentials` in
+`xnat-ingest`, with the keys `server`, `username` and `password`
+(`upload.direct.existingSecret`). Two things read it: the uploader
+`<release>-upload` and the staged-reclaimer CronJob. The Secret is defined in
+the site's `sites/<site>/secrets.enc.yaml`.
+
+Work in the deploy checkout on the node, as the operator whose age key is a
+recipient of that file:
+
+```bash
+cd ~/ais-edge
+scripts/site-secrets.sh edit <site>           # sops: decrypts into $EDITOR only
+```
+
+Change the three values of the `xnat-credentials` document and save:
+
+```yaml
+kind: Secret
+metadata:
+  name: xnat-credentials
+  namespace: xnat-ingest
+type: Opaque
+stringData:
+  server: https://xnat.example.org     # the new XNAT, with the scheme
+  username: <account>
+  password: <password>
+```
+
+The `username` and `password` can also be an XNAT alias token: put the alias in
+`username` and its secret in `password`. XNAT accepts the pair as a login, and
+the uploader and the reclaimer send it unchanged. An alias token expires, by
+default two days after creation; the uploader then gets 401 on every pass and
+`XNATAuthFailure` fires. Use a token with a long life, or plan the rotation.
+
+sops re-encrypts on save, so no plaintext reaches the disk. If nothing changed,
+sops says `File has not changed`. Then:
+
+```bash
+scripts/site-secrets.sh check                 # the file is still encrypted
+scripts/site-secrets.sh apply <site>          # decrypt straight into the cluster
+kubectl -n xnat-ingest rollout restart deploy/<release>-upload
+kubectl -n xnat-ingest rollout status  deploy/<release>-upload
+```
+
+`apply` shows the kubectl context and the namespaces, and asks before it writes.
+The reclaimer CronJob reads the Secret at each run, so it needs no restart.
+Verify with the uploader log and the live check:
+
+```bash
+kubectl -n xnat-ingest logs deploy/<release>-upload --tail=50
+scripts/verify-live.sh <site>
+```
+
+A wrong URL or password shows as 401 or a connection error in the first pass,
+and `XNATAuthFailure` fires. For an XNAT with a certificate the node does not
+trust, set `upload.direct.verifySsl: false` in the site values and upgrade the
+release.
+
+Two cautions:
+
+- Commit and push the re-encrypted `secrets.enc.yaml` from that checkout. The
+  encrypted file is meant to be in git; `.gitignore` blocks only the plaintext
+  variants.
+- Sessions already in the upload tree carry no XNAT identity. After the switch
+  the uploader delivers them to the new XNAT. To hold them back, scale the
+  uploader to zero before the switch and back to one when the new XNAT is ready.
+
 ### Turning on Orthanc's REST API authentication
 
 The shipped site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
@@ -518,12 +597,14 @@ changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
 **4. Verify.**
 
 ```bash
-# from inside the cluster — should now be 401 without credentials
-kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# The Orthanc image has no curl, so reach the API through a port-forward.
+# Run it in a second terminal, wait for "Forwarding from 127.0.0.1:8042",
+# and stop it with Ctrl-C afterwards:
+#   kubectl -n xnat-ingest port-forward deploy/<release>-orthanc 8042:8042
+# should now be 401 without credentials
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 # and 200 with them
-kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
 Then confirm the pipeline still moves: `group-orthanc`'s log should keep
@@ -638,9 +719,11 @@ matter. The exit code is the number of failures.
 | Pod in `CreateContainerConfigError` | A Secret name or namespace does not match. Section 3. |
 | Grouping fails per study, EXDEV in the logs | Pipeline and facility-backup paths on different filesystems. Section 2.1. |
 | Studies stall at assign, "missing metadata fields" | A `ClinicalTrial*` field was removed from the profile. Section 2.3. |
-| Sessions land in `assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...` | **Read the group stage's log before touching the profile.** This name is also what you get when *grouping* failed and handed assign an empty session, and the two causes look identical from here. Grouping raises `ImagingSessionParseError: Did not find 'SeriesDescription' field` on a study missing a tag it needs — the DICOM never reaches assign, so assign correctly reports no metadata. Confirm which it is by checking Orthanc directly: `curl localhost:8042/instances/<id>/simplified-tags` on the receiver pod shows whether de-identification really did set the three tags. |
+| Sessions land in `assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...` | assign did not find a tag that the ID mapping reads. **Check the tags in Orthanc before you change the profile**: list them with `/instances/<id>/simplified-tags` through a port-forward, as in "A study that group-orthanc refuses" in `docs/components/xnat-ingest.md`. If de-identification did not set the `ClinicalTrial*` tags, the cause is the profile (Section 2.3). If the modality did not send a field, recover the session by hand ("Recovering an invalid session" in the same file). A failed grouping no longer gives this name: `group-orthanc` builds each study in a private folder and publishes it only when it is complete. |
+| `IngestStageError` for `group`, with `Skipping Orthanc study '<id>'` | One study cannot be staged, and the other studies go on. See "A study that group-orthanc refuses" in `docs/components/xnat-ingest.md`. |
 | Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` — `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Set `upload.direct.verifySsl: false` for the site, and set it back the moment XNAT gets a real one. |
-| `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | Usually benign: the uploader runs on a loop, and a session already delivered is found again on the next pass. It is logged at ERROR, so it inflates the "Upload errors (last 1h)" panel without anything being wrong. Look for a matching "Successfully uploaded all files in" line for the same session — if it is there, the session is delivered. |
+| `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | The empty-digest false ERROR was fixed in 0.15.3. This now indicates a real resource conflict. Compare staged and remote files; a later success line does not prove content equality. Preserve the source while resolving the conflict. |
+| `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT lists one or more files without computed checksums. Their names match, but their content was not compared. Ask the administrator to configure and compute catalog checksums. This warning can recur on each upload attempt. |
 | Nothing arrives at all | Firewall on port 4242, or the **called** AE title the modality is sending to is not in `aetMap` — that is this Orthanc's `orthanc.aet`, not the scanner's own AET. Check the quarantine directory. |
 | Vector in `CreateContainerConfigError` | `observability.loki.clientCertSecret` is not empty. Section 6. |
 | Loki `CrashLoopBackOff`, `mkdir ...: read-only file system` / `error initialising module: ruler-storage` | The ruler's `storage.local.directory` must be the path the chart's rules sidecar mounts (`/rules`), and the sidecar must write into the tenant subdirectory (`/rules/fake`, since `auth_enabled` is false). Both are set in `charts/edge/values.yaml`; if you override either, override both. Loki refusing to start means no log storage **and** no pipeline alerts, since every *pipeline* alert on this tier is Loki-sourced — the four K8s-state alerts in `files/prometheus-rules/` keep evaluating in Prometheus, so a green Alertmanager is not evidence that Loki is up. |
@@ -749,20 +832,30 @@ simply unused — but **the Secret itself must still exist**, because it is
 mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
-Dashboards and alert rules ship with the chart. It defines **fifteen** alerts of
-its own — eleven log-derived rules evaluated by Loki's ruler
-(`files/loki-ruler-rules.yaml`) and four metric rules evaluated by Prometheus
+Dashboards and alert rules ship with the chart. It defines **twenty-six**
+alerts of its own: twenty log-derived rules evaluated by Loki's ruler
+(`files/loki-ruler-rules.yaml`) and six metric rules evaluated by Prometheus
 (`files/prometheus-rules/{critical,warning,info}.yaml`:
-`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`,
-`NodeCountChanged`) — on top of kube-prometheus-stack's own default rule set,
-which contributes roughly another 130 and is left enabled. The ones specific to
-this tier are:
+`KubernetesAPIServerDown`, `NodeNotReady`, `IngestPodCrashLoop`, `KubeJobFailed`,
+`ReclaimerNotSucceeding`, `NodeCountChanged`). They come on top of
+kube-prometheus-stack's own default rule set, which contributes roughly another 130 and is left enabled
+apart from `KubeJobFailed`, which the chart replaces with a copy that leaves out
+the staged-reclaimer's own Jobs. Upstream's `CPUThrottlingHigh` runs unmodified:
+the data-policy reporter has no CPU limit, so the kernel never throttles it and
+the rule has no series to read for it. The ones specific to this tier are:
 
 - **`EdgeDiskLow`** — free space below `minFreeDiskPercent`. On tier-1 this is
   the only disk-exhaustion warning, and the disk holds the only copy of the
   originals. Do not ignore it.
 - **`QuarantinedDataUnresolved`** — something has sat in quarantine longer than
   `alertAfter`. Almost always an AE title missing from `aetMap`.
+- **`DataPolicyReporterSilent`**: the data-policy reporter has stopped sending
+  `stage_report`. The two alerts above read only those lines, so while this
+  fires a filling disk would go unreported.
+- **`XNATRepairAttempted`**: XNAT already held a session with files missing,
+  and the uploader tried to re-send them. It normally stands in for the
+  "upload completed" mail for that session, and does not say whether the
+  re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
 - **`OrthancDeidLuaError`** — de-identification itself is failing (Orthanc Lua
@@ -773,9 +866,25 @@ The alert expressions are unit-tested against recorded log fixtures
 (`tests/loki-rules/`), including the case that asserts a tqdm progress bar
 reading `401.71it/s` does **not** raise a credential alert.
 
-Two tier-2 alerts — `ReclaimerRunUnavailable` and
-`SessionStagedNotConfirmedInXNAT` — are deliberately absent, because there is no
-S3 reclaimer and no staging bucket on a single node.
+`ReclaimerRunUnavailable` and `SessionStagedNotConfirmedInXNAT` are shared with
+tier-2. Under `upload.mode=direct` the staged-reclaimer CronJob runs the same
+`reclaim-staged.sh` against the local upload tree instead of a bucket, so a
+reclaimer that keeps failing, or a session XNAT never confirms, raises the same
+two alerts. One failed run does not: the next hourly run finishing clears it.
+
+`ReclaimerRunUnavailable` only sees runs that log why they stopped. A run killed
+at its deadline, OOM-killed, crashing, stuck on an image pull or never scheduled
+logs nothing, so **`ReclaimerNotSucceeding`** watches the CronJob itself: no
+successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h) raises
+it, counted from creation if it has never succeeded. One failed run never fires
+it, even when the next run takes its full deadline to succeed; two failed runs,
+then a third not succeeding within 15 minutes, do, about 3h15m after the last
+success. It clears on the next good run, however many failed Jobs history
+keeps. While `ReclaimerRunUnavailable` is firing it is held back, so one XNAT
+outage raises one alert rather than two: its firing mail and its resolve, one
+pair per logged reason. If you slow the schedule, raise `alertAfter` with it: it
+must exceed two periods plus `deadlineSeconds`, and the chart refuses less for
+the usual schedule forms (hourly, every N hours, daily).
 
 ---
 

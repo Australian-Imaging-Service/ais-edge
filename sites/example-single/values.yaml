@@ -344,6 +344,19 @@ ingest:
 #         This is what makes tier-1 a single node: no staging bucket, no
 #         management-side reclaimer, no S3 credential to distribute.
 # s3      tier-2 only. Requires SeaweedFS and a management plane.
+  # OPTIONAL: the package stage. One zip per DICOM series plus one sample DICOM,
+  # in place of the individual files. Off by default. Turn it on only when the
+  # XNAT project wants zips. See docs/package-stage.md: "What it needs" names
+  # the image and library versions, "Turn it on" the steps.
+  # package:
+  #   enabled: true
+  # The DICOM sample datatype, installed by pip in an init container at every
+  # pod start of the package pod and of the upload pod. The node needs access
+  # to github.com, or to a mirror of the package.
+  # extraPipPackages:
+  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+
 upload:
   mode: direct
   direct:
@@ -354,7 +367,9 @@ upload:
     # Quiet period before a session is considered complete.
     waitPeriod: 60
     alwaysInclude: all
-    requireManifest: false
+    # true: a half-written resource waits for the next pass instead of being
+    # uploaded in part.
+    requireManifest: true
     # true unless your XNAT presents a private or self-signed certificate.
     verifySsl: true
 
@@ -484,16 +499,18 @@ dataPolicy:
     # WHICH tree this is depends on the engine: /data/assigned under
     # deid.engine=orthanc, /data/deidentified under ingest. The chart derives it.
     #
-    # THE RIGHT VALUE DEPENDS ON THE ENGINE, and the chart refuses the wrong one
-    # rather than letting it read as a policy that is quietly never applied:
+    # THE RIGHT VALUE DEPENDS ON THE ENGINE. `auto` (set here and above) lets
+    # the chart pick it, and an explicit word is still checked: the chart
+    # refuses a wrong one rather than letting it read as a policy that is
+    # quietly never applied.
     #
-    #   deid.engine: orthanc  (the default here)
-    #     the terminal tree is /data/assigned, so THIS key must stay `never` and
-    #     `assigned.reclaim: onUploaded` above is the one that does the work.
+    #   deid.engine: ingest  (the default, and what this file sets)
+    #     the uploader reads /data/deidentified, so auto resolves THIS key to
+    #     onUploaded and `assigned.reclaim` above to onDeidentified.
     #
-    #   deid.engine: ingest
-    #     the uploader reads /data/deidentified instead, so set THIS to onUploaded
-    #     and set `assigned.reclaim: onDeidentified` above.
+    #   deid.engine: orthanc
+    #     the terminal tree is /data/assigned, so auto resolves THIS key to
+    #     `never` and `assigned.reclaim` above to onUploaded, which does the work.
     deidentified:
       reclaim: auto
 
@@ -503,18 +520,24 @@ dataPolicy:
     # landed. Without it `onUploaded` can never come true and the tree above is
     # kept whatever you set.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is the
-      # slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by the
       # XNAT check regardless, so this is about noise, not safety.
       minAge: 1d
-      # Ask XNAT whether it holds the session, complete, before deleting the only
-      # remaining copy. Off means trusting local state alone.
-      # CAUTION: `false` removes the last independent check before deletion.
+      # Ask XNAT for each local file (present, same size) before deleting the
+      # only remaining copy.
+      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
+      # XNAT proves, file by file.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes this
       # many and stops, leaving the rest to inspect.
       maxRemovals: 50
       # Killed if a run hangs on an unreachable XNAT, before the next is due.
       deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run,
+      # whatever the cause: failed, killed at the deadline, crashed, not started.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it; the chart refuses less. Raise it when you slow the schedule.
+      alertAfter: 3h

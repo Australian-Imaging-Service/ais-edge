@@ -1,0 +1,109 @@
+# Uploader process health. These selectors cover only this release's
+# xnat-ingest upload containers; they do not inspect the remote XNAT server.
+# The template supplies the namespace, release and exact deployment names.
+# Follow Kubernetes ownership rather than assuming generated pod-name lengths.
+groups:
+  - name: ais-edge-xnat-uploader
+    interval: 30s
+    rules:
+      - record: ais_edge:xnat_uploader_pod
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod) (
+            label_replace(
+              max by (namespace, pod, owner_name) (
+                kube_pod_owner{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", owner_kind="ReplicaSet", owner_is_controller="true"} == 1
+              ), "replicaset", "$1", "owner_name", "(.+)"
+            )
+            * on (namespace, replicaset) group_left()
+            max by (namespace, replicaset) (
+              kube_replicaset_owner{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", owner_kind="Deployment", owner_is_controller="true", owner_name=~"__UPLOADER_DEPLOYMENT_REGEX__"} == 1
+            )
+          )
+      # Drop scrape-target labels so duplicate KSM/kubelet scrapes do not create
+      # duplicate alerts or many-to-many joins.
+      - record: ais_edge:xnat_uploader_restarts_15m
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod, container) (
+            increase(kube_pod_container_status_restarts_total{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", container="upload"}[15m])
+          )
+          and on (namespace, pod) ais_edge:xnat_uploader_pod{uploader_release="__UPLOADER_RELEASE__"}
+      - record: ais_edge:xnat_uploader_memory_rss_bytes
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod, container) (
+            container_memory_rss{job="kubelet", metrics_path="/metrics/cadvisor", namespace="__UPLOADER_NAMESPACE__", container="upload"}
+          )
+          and on (namespace, pod) ais_edge:xnat_uploader_pod{uploader_release="__UPLOADER_RELEASE__"}
+      - record: ais_edge:xnat_uploader_memory_limit_bytes
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod, container) (
+            kube_pod_container_resource_limits{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", container="upload", resource="memory", unit="byte"} > 0
+          )
+          and on (namespace, pod) ais_edge:xnat_uploader_pod{uploader_release="__UPLOADER_RELEASE__"}
+      - record: ais_edge:xnat_uploader_started_seconds
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod, container) (
+            kube_pod_container_state_started{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", container="upload"}
+          )
+          and on (namespace, pod) ais_edge:xnat_uploader_pod{uploader_release="__UPLOADER_RELEASE__"}
+      - record: ais_edge:xnat_uploader_last_termination_reason
+        labels: {uploader_release: "__UPLOADER_RELEASE__"}
+        expr: |
+          max by (namespace, pod, container, reason) (
+            kube_pod_container_status_last_terminated_reason{job="kube-state-metrics", namespace="__UPLOADER_NAMESPACE__", container="upload"} == 1
+          )
+          and on (namespace, pod) ais_edge:xnat_uploader_pod{uploader_release="__UPLOADER_RELEASE__"}
+      - alert: XNATUploaderRestarted
+        # A recovered OOM still matters. A readiness condition would miss it.
+        # The counter increase makes a retained OOMKilled reason go quiet after
+        # 15m. Keep the alert when the reason is absent or KSM replicas disagree.
+        expr: |
+          (
+            (ais_edge:xnat_uploader_restarts_15m{uploader_release="__UPLOADER_RELEASE__"} > 0)
+            * on (namespace, pod, container) group_left(reason)
+            (
+              ais_edge:xnat_uploader_last_termination_reason{uploader_release="__UPLOADER_RELEASE__"}
+              and on (namespace, pod, container)
+              (count by (namespace, pod, container) (ais_edge:xnat_uploader_last_termination_reason{uploader_release="__UPLOADER_RELEASE__"}) == 1)
+            )
+          )
+          or on (namespace, pod, container)
+          (ais_edge:xnat_uploader_restarts_15m{uploader_release="__UPLOADER_RELEASE__"} > 0)
+        labels: {severity: warning}
+        annotations:
+          summary: "XNAT uploader {{ $labels.pod }} restarted"
+          description: |
+            Kubernetes observed an uploader restart within the last 15 minutes.
+            Last reported termination reason: {{ if $labels.reason }}{{ $labels.reason }}{{ else }}unknown{{ end }}.
+            OOMKilled means the container exceeded its memory limit or the node ran out of memory.
+            Check the previous container logs and its termination details:
+              kubectl -n {{ $labels.namespace }} logs {{ $labels.pod }} -c {{ $labels.container }} --previous
+              kubectl -n {{ $labels.namespace }} describe pod {{ $labels.pod }}
+            This is a restart event, even if the uploader is ready again. A rollout
+            creates a new pod and does not increase this counter.
+      - alert: XNATUploaderMemoryGrowing
+        # RSS excludes the filesystem cache. Require growth across both a long
+        # and recent window, then hold for an hour to reject brief upload peaks.
+        # Six hours of container uptime excludes warmup and resets after restart.
+        # Also require six hours of observation after Prometheus starts.
+        expr: |
+          (deriv(ais_edge:xnat_uploader_memory_rss_bytes{uploader_release="__UPLOADER_RELEASE__"}[6h]) > 32 * 1024 * 1024 / (6 * 3600))
+          and (deriv(ais_edge:xnat_uploader_memory_rss_bytes{uploader_release="__UPLOADER_RELEASE__"}[15m]) > 32 * 1024 * 1024 / (6 * 3600))
+          and (ais_edge:xnat_uploader_memory_rss_bytes{uploader_release="__UPLOADER_RELEASE__"} / ais_edge:xnat_uploader_memory_limit_bytes{uploader_release="__UPLOADER_RELEASE__"} > 0.25)
+          and (time() - ais_edge:xnat_uploader_started_seconds{uploader_release="__UPLOADER_RELEASE__"} > 6 * 3600)
+          and present_over_time(ais_edge:xnat_uploader_memory_rss_bytes{uploader_release="__UPLOADER_RELEASE__"}[5m] offset 6h)
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "XNAT uploader {{ $labels.pod }} memory keeps growing"
+          description: |
+            Resident memory is growing faster than 32 MiB per six hours, in both
+            the six-hour and fifteen-minute trends, and is above 25% of the memory limit.
+            This has held for one hour after at least six hours of container uptime.
+            Compare memory with upload activity and inspect the uploader logs.
+            Sustained growth can exhaust memory, but this alert alone does not prove a leak.
+              kubectl -n {{ $labels.namespace }} logs {{ $labels.pod }} -c {{ $labels.container }} --since=1h

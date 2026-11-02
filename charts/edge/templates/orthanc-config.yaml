@@ -146,7 +146,10 @@ data:
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
         "_DeidEnabledREADME": "false when deid.engine is not orthanc. The script still archives the original and quarantines unmapped AE titles; it just does not modify the instance, because another stage does that instead.",
-        "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }}
+        "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
+        "_LabelsREADME": "The study labels group-orthanc uses, from ingest.orthancGroup. The hook applies ReadyLabel when a study is stable and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again.",
+        "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},
+        "ProcessedLabel": {{ .Values.ingest.orthancGroup.processedLabel | default "" | toJson }}
       }
     }
   deidentification-profile.json: |

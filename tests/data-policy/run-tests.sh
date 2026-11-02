@@ -52,13 +52,13 @@ TAB="$(printf '\t')"
 # `old` is backdated well past any settle window or minAge under test.
 build_case() {
     root="$1"
-    rm -rf "$root"; mkdir -p "$root/assigned" "$root/grouped" "$root/LOGS/s3-uploader-state" "$root/fb"
+    rm -rf "$root"; mkdir -p "$root/assigned" "$root/deidentified" "$root/grouped" "$root/LOGS/s3-uploader-state" "$root/fb"
 }
 mk_session() {  # mk_session <root> <stage-dir> <name> <age-minutes>
     d="$1/$2/$3"; mkdir -p "$d"; echo data > "$d/img.dcm"
     touch -d "$4 minutes ago" "$d/img.dcm" "$d"
 }
-mk_uploaded() {  # mk_uploaded <root> <name>
+mk_uploaded() {  # mk_uploaded <root> <name> [tree the uploader read, default assigned]
     # THE MARKER CARRIES A FINGERPRINT, NOT MERELY EXISTENCE. The uploader
     # writes a fingerprint of exactly the bytes it uploaded, and condition_met
     # recomputes it and compares. Existence alone was safe only while the marker
@@ -72,13 +72,19 @@ mk_uploaded() {  # mk_uploaded <root> <name>
     # step with each other; this is the third copy and it is deliberate,
     # because a test that computed it a different way would pass while the
     # engine failed.
-    if [ -d "$1/assigned/$2" ]; then
-        ( cd "$1/assigned/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
-            | sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
+    # LC_ALL=C: busybox sort in the engine image orders bytes, and a host locale
+    # would order a multi-file tree differently and fail on a correct engine.
+    # Under deid.engine=ingest the uploader reads /data/deidentified, so the
+    # marker fingerprints THAT tree. Pass it as the third argument.
+    t="${3:-assigned}"
+    if [ -d "$1/$t/$2" ]; then
+        ( cd "$1/$t/$2" && find -L . -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null \
+            | LC_ALL=C sort | md5sum | cut -d' ' -f1 ) > "$1/LOGS/s3-uploader-state/$2"
     else
-        # The session has already moved past the assigned stage. The engine
-        # returns "satisfied" before it compares anything, so the content here
-        # is irrelevant -- but the marker must still exist.
+        # The session has already moved past that stage. Only onAssigned reads
+        # a marker without comparing it (it asks whether the session got further),
+        # so the content is irrelevant there. onUploaded now REFUSES when the
+        # uploaded tree does not hold the session: see cases 2e and 2f.
         echo "moved-on" > "$1/LOGS/s3-uploader-state/$2"
     fi
 }
@@ -101,10 +107,12 @@ run_engine() {
         -e EDGE_NAME=test -e STAGES_FILE=/data/stages.tsv -e ONESHOT=true \
         -e RECLAIM_ENABLED="$en" -e DRY_RUN="$dry" -e MAX_REMOVALS="$maxrm" \
         -e SETTLE_MINUTES=5 \
+        -e INTERVAL="${INTERVAL_T:-300}" \
         -e STUCK_AFTER_S="${STUCK_AFTER_S_T:-0}" \
         -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         -e UPLOAD_STATE_DIR=/data/LOGS/s3-uploader-state \
         -e ASSIGNED_DIR=/data/assigned \
+        -e UPLOAD_SOURCE_DIR="${UPLOAD_SOURCE_T-/data/assigned}" \
         -e ALLOW_ORIGINAL_EXPIRY="${ALLOW_EXPIRY:-false}" \
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
         -e ORTHANC_USER="${ORTHANC_USER_T:-}" \
@@ -122,6 +130,12 @@ logged() {  # logged <name> <root> <event> <present|absent> <desc>
     else
         [ "$found" = no ] && pass "$1" "$5" || fail "$1" "$5 — $3 WAS logged"
     fi
+}
+
+check_file() {  # check_file <name> <root> <file> <expected-content> <desc>
+    # The directory surviving is not enough: a mutation that removes the files
+    # and keeps the directories passed every directory-level check.
+    if cmp -s "$2/$3" <(printf '%s\n' "$4"); then pass "$1" "$5"; else fail "$1" "$5 — $3 missing or changed"; fi
 }
 
 check() {  # check <name> <root> <path-that-should-be> <exist|gone> <desc>
@@ -155,6 +169,118 @@ echo "a supplementary study, different bytes" > "$R/assigned/s1/img.dcm"
 touch -d "60 minutes ago" "$R/assigned/s1/img.dcm" "$R/assigned/s1"
 run_engine "$R" "$STAGES_ASSIGNED" true false
 check kept_stale_fingerprint "$R" assigned/s1 exist "marker describes an earlier upload of different bytes"
+
+# 2c - THE SAME CASE UNDER deid.engine=ingest, and the one that was missing.
+# The uploader reads /data/deidentified and fingerprints THAT tree; the deidentify
+# stage has already unlinked assign's copy. The engine used to test ASSIGNED_DIR,
+# find it gone, call the condition met without comparing anything, and remove a
+# re-staged deidentified session on a marker describing different bytes.
+STAGES_DEID="derived.deidentified${TAB}derived${TAB}/data/deidentified${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem"
+R="$WORK/c2c"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+echo "a re-sent study, different bytes" > "$R/deidentified/s1/img.dcm"
+touch -d "60 minutes ago" "$R/deidentified/s1/img.dcm" "$R/deidentified/s1"
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_DEID" true false
+check ingest_kept_stale_fp "$R" deidentified/s1 exist "ingest: marker describes an earlier upload of different bytes"
+
+# 2d - the positive half. Without it, 2c could pass because the stage is simply
+# never reclaimed under ingest.
+R="$WORK/c2d"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_DEID" true false
+check ingest_removed_eligible "$R" deidentified/s1 gone "ingest: uploaded bytes verified, past minAge, armed"
+
+# 2e - nothing to compare is not proof. The stage holds the session but the tree
+# the uploader read does not, e.g. a stage location moved away from where the
+# uploader reads. This used to be "already gone, nothing to protect" and deleted.
+R="$WORK/c2e"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/elsewhere run_engine "$R" "$STAGES_DEID" true false
+check unverifiable_kept "$R" deidentified/s1 exist "the uploaded tree does not hold this session"
+
+# 2f - an unset upload source refuses rather than guessing.
+R="$WORK/c2f"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+# An identical copy in the assigned tree, so an engine that fell back to
+# ASSIGNED_DIR would find a match and delete. Without it this case passes on
+# a fallback too, because there is nothing there to compare.
+cp -a "$R/deidentified/s1" "$R/assigned/s1"
+UPLOAD_SOURCE_T="" run_engine "$R" "$STAGES_DEID" true false
+check no_upload_source_kept "$R" deidentified/s1 exist "UPLOAD_SOURCE_DIR unset"
+
+# 2g - A MATCH ON THE UPLOADER'S COPY MUST NOT AUTHORISE REMOVING ANOTHER ONE.
+# A stage whose location is not the uploaded tree, holding a session of the same
+# name with different, never-uploaded bytes. The marker matches the uploader's
+# copy. The engine used to verify that copy and then delete this one.
+R="$WORK/c2g"; build_case "$R"
+mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+mk_session "$R" grouped s1 60
+echo "never uploaded, different bytes" > "$R/grouped/s1/img.dcm"
+touch -d "60 minutes ago" "$R/grouped/s1/img.dcm" "$R/grouped/s1"
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "derived.grouped${TAB}derived${TAB}/data/grouped${TAB}-${TAB}-${TAB}onUploaded${TAB}0${TAB}filesystem" true false
+check other_copy_kept "$R" grouped/s1 exist "the verified copy is the uploader's, not this one"
+
+# 2h - EXTERNAL OWNERSHIP MUST HOLD EVEN WHEN THE CONDITION IS MET. A site moved
+# from upload.mode=s3 to direct keeps its old S3 markers, and they still match.
+# The staged-reclaimer CronJob owns this tree and confirms against XNAT; this
+# engine used to consult ownership only after a FAILED condition, and deleted.
+R="$WORK/c2h"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T=derived.deidentified run_engine "$R" "$STAGES_DEID" true false
+check external_owner_kept "$R" deidentified/s1 exist "a matching marker must not override the CronJob's authority"
+if grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass external_owner_logged "kept line says the deletes are delegated"
+else
+    fail external_owner_logged "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 2i - onAssigned BELONGS TO derived.grouped. It asks whether assign produced
+# its output, and on the assigned stage the first thing it tests is the session
+# itself, so it was always true: every settled session was removed before it
+# was uploaded. The chart now refuses the word there; this is the engine's half.
+R="$WORK/c2i"; build_case "$R"; mk_session "$R" assigned s1 60
+run_engine "$R" "derived.assigned${TAB}derived${TAB}/data/assigned${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem" true false
+check onassigned_on_assigned_kept "$R" assigned/s1 exist "onAssigned proves nothing about the assigned stage"
+if grep -q '"event":"reclaim_unknown_condition"' "$R/out.jsonl" 2>/dev/null; then
+    pass onassigned_on_assigned_logged "the refusal is logged, not silent"
+else
+    fail onassigned_on_assigned_logged "expected reclaim_unknown_condition; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 2j - the same under ingest, on the deidentified stage. A marker exists (any
+# uploaded session has one), which alone used to satisfy onAssigned.
+R="$WORK/c2j"; build_case "$R"; mk_session "$R" deidentified s1 60; mk_uploaded "$R" s1 deidentified
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "derived.deidentified${TAB}derived${TAB}/data/deidentified${TAB}-${TAB}-${TAB}onAssigned${TAB}0${TAB}filesystem" true false
+check onassigned_on_deid_kept "$R" deidentified/s1 exist "ingest: onAssigned proves nothing about the deidentified stage"
+
+# 2k - onAssigned READS ASSIGNED_DIR, NOT THE UPLOAD SOURCE. Under ingest the two
+# differ. assign's output is here and nothing has been de-identified or
+# uploaded yet, so grouped may go; an engine reading UPLOAD_SOURCE_DIR would
+# keep it for ever.
+R="$WORK/c2k"; build_case "$R"; mk_session "$R" grouped s1 60; mk_session "$R" assigned s1 60
+UPLOAD_SOURCE_T=/data/deidentified run_engine "$R" "$STAGES_GROUPED" true false
+check ingest_grouped_after_assign "$R" grouped/s1 gone "ingest layout: assign's output in ASSIGNED_DIR is the proof"
+
+# 2l - A DELEGATED INGEST STAGE IS NOT STUCK. Under ingest the CronJob owns
+# /data/deidentified; a session with no marker, old enough to be stuck, must
+# log the delegated kept line and not stage_stuck, and must survive.
+R="$WORK/c2l"; build_case "$R"; mk_session "$R" deidentified s1 60
+STUCK_AFTER_T=1 STUCK_AFTER_S_T=1 UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T=derived.deidentified \
+    run_engine "$R" "$STAGES_DEID" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    fail ingest_delegated_not_stuck "stage_stuck fired for a stage whose deletes belong to the reclaimer"
+elif grep -q '"delegated":true' "$R/out.jsonl" 2>/dev/null; then
+    pass ingest_delegated_not_stuck "no stage_stuck, and the kept line says the deletes are delegated"
+else
+    fail ingest_delegated_not_stuck "expected a delegated reclaim_kept; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
+check ingest_delegated_kept "$R" deidentified/s1 exist "and this engine deleted nothing from that tree"
+
+# 2m - the control for 2l: the same tree, nothing delegated. stage_stuck MUST
+# fire, or 2l passes because STUCK_AFTER never took effect.
+R="$WORK/c2m"; build_case "$R"; mk_session "$R" deidentified s1 60
+STUCK_AFTER_T=1 STUCK_AFTER_S_T=1 UPLOAD_SOURCE_T=/data/deidentified EXTERNAL_STAGE_T= \
+    run_engine "$R" "$STAGES_DEID" true false
+if grep -q '"event":"stage_stuck"' "$R/out.jsonl" 2>/dev/null; then
+    pass ingest_undelegated_stuck "same tree, nothing delegated: stuck fires"
+else
+    fail ingest_undelegated_stuck "expected stage_stuck; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | tr '\n' ' ')"
+fi
 
 # 3 — never uploaded -> kept regardless of age
 R="$WORK/c3"; build_case "$R"; mk_session "$R" assigned s1 600
@@ -241,6 +367,43 @@ check originals_forever "$R" fb/p1 exist "retain=forever, every switch on"
 R="$WORK/c17"; build_case "$R"; mk_session "$R" fb p1 600
 ALLOW_EXPIRY=true run_engine "$R" "$FB_1H" true true
 check originals_dry_run "$R" fb/p1 exist "allowExpiry=true but dryRun"
+
+# 17b — THE FILE-DROP ROW IS AN ORIGINAL WITH A RECLAIM WORD. Its policy
+#       column is `never` and its age column is minAge, not retain. The engine
+#       read the age alone, so with every switch on a 40-day-old drop was
+#       expired as if `never` were a 30-day retention. The drop is the only
+#       copy of those files.
+FD_NEVER="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}never${TAB}2592000${TAB}filesystem"
+R="$WORK/c17b"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_NEVER" true false
+check filedrop_never_kept "$R" incoming/drop1 exist "reclaim=never, minAge 30d, 40 days old, every switch on"
+check_file filedrop_never_file "$R" incoming/drop1/img.dcm data "and the dropped file is still there, unchanged"
+logged filedrop_never_silent "$R" expiry_removed absent "and no expiry_removed event"
+
+# 17c — onIngested: a defensive test of a word nothing implements. The chart
+#       lets it render only while the policy is off (with the policy on and
+#       the file drop enabled it refuses). If it ever reaches the engine, the
+#       engine must keep, and say which stage and word it kept, rather than
+#       fall back to the age.
+FD_ING="originals.fileDrop${TAB}original${TAB}/data/incoming${TAB}-${TAB}-${TAB}onIngested${TAB}2592000${TAB}filesystem"
+R="$WORK/c17c"; build_case "$R"; mk_session "$R" incoming drop1 57600
+ALLOW_EXPIRY=true run_engine "$R" "$FD_ING" true false
+check filedrop_oningested_kept "$R" incoming/drop1 exist "reclaim=onIngested is not implemented: kept"
+check_file filedrop_oningested_file "$R" incoming/drop1/img.dcm data "and the dropped file is still there, unchanged"
+if grep -E '"event":"expiry_kept".*"stage":"originals.fileDrop".*"policy":"onIngested"' "$R/out.jsonl" >/dev/null 2>&1; then
+    pass filedrop_oningested_said "expiry_kept names the stage and the unimplemented word"
+else
+    fail filedrop_oningested_said "expected expiry_kept with stage=originals.fileDrop and policy=onIngested; got: $(grep -o '"event":"[a-z_]*"' "$R/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+fi
+
+# 17d — THE RAW WORD MAY CARRY SPACES. The chart trims a value before it parses
+#       it, but the stage table renders the raw word, so retain: " 1h " reaches
+#       the engine padded, next to its parsed 3600. A word check that does not
+#       trim keeps the original for ever while the site believes it expires.
+FB_PADDED="originals.facilityBackup${TAB}original${TAB}/data/fb${TAB}-${TAB}-${TAB} 1h ${TAB}3600${TAB}filesystem"
+R="$WORK/c17d"; build_case "$R"; mk_session "$R" fb p1 600
+ALLOW_EXPIRY=true run_engine "$R" "$FB_PADDED" true false
+check originals_padded_duration "$R" fb/p1 gone "retain written as ' 1h ' still expires after 1h"
 
 # ---------------------------------------------------------------------------
 # backends
@@ -339,11 +502,111 @@ logged undelegated_stuck "$R" stage_stuck present "same tree, nothing delegated 
         fail orthanc_authed_ok "expected backend_idle; got: $(grep -o '"event":"[a-z_]*"' "$R3/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
     fi
 
+    # A DRY RUN MUST LOG THE DECISIONS OF AN ARMED RUN. A site runs the policy in
+    # dry run to judge it before it arms it. The dry-run gate was after the age
+    # check, before the instance list, the labels and the snapshot label were
+    # read. So a dry run logged WOULD delete for each processed study past
+    # minAge, and the armed run kept some of them as export_state_unknown.
+    # xnat-ingest before 0.16.3 writes no snapshot label. With it, a dry run said
+    # WOULD delete for each study, and an armed run kept them all.
+    #
+    # These cases fill the store, so they come after authok, which needs it empty.
+    # Three studies, one instance each, all with the processed label:
+    #   SA  a snapshot label with a different digest  kept, export_state_unknown
+    #   SB  no snapshot label (xnat-ingest < 0.16.3)  kept, export_state_unknown
+    #   SC  the snapshot label group-orthanc writes   WOULD delete, then deleted
+    # SC is the control. Without it, SA and SB pass if a dry run logs nothing.
+    OU="http://$OIP:8042"; OA=(-u admin:testpw123)
+    o_study() {  # o_study <PatientID>: a new study with one instance; prints the study id
+        curl -sS --fail "${OA[@]}" -X POST "$OU/tools/create-dicom" \
+             -d "{\"Tags\":{\"PatientID\":\"$1\",\"PatientName\":\"DP^$1\",\"Modality\":\"OT\"}}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["ParentStudy"])' 2>/dev/null
+    }
+    o_label() { curl -sS --fail "${OA[@]}" -X PUT "$OU/studies/$1/labels/$2" -d '' >/dev/null; }
+    o_last() { curl -sS --fail "${OA[@]}" "$OU/studies/$1/metadata/LastUpdate"; }
+    # The snapshot label as group-orthanc writes it (xnat_ingest/model/session.py),
+    # not as the engine reads it, so a drift between the two fails here: the
+    # SHA256 of the sorted instance ids, one per line, cut to 24 hex digits.
+    o_snapshot() {
+        curl -sS --fail "${OA[@]}" "$OU/studies/$1/instances?expand=false" | python3 -c '
+import hashlib, json, sys
+ids = sorted(json.load(sys.stdin))
+print(sys.argv[1] + hashlib.sha256(("\n".join(ids) + "\n").encode()).hexdigest()[:24])' \
+            "xnat-ingest-processed-$(o_last "$1")-"
+    }
+    o_http() { curl -s -o /dev/null -w '%{http_code}' "${OA[@]}" "$OU/studies/$1"; }  # 200 or 404
+    o_said() {  # o_said <root> <study> <pattern>: a line about this study matches
+        o_l=$(grep -F "\"study\":\"$2\"" "$1/out.jsonl" 2>/dev/null)
+        grep -q -- "$3" <<<"$o_l"
+    }
+    o_kept() {  # o_kept <name> <root> <study> <desc>
+        if o_said "$2" "$3" '"message":"WOULD delete'; then
+            fail "$1" "$4: it logged WOULD delete, but an armed run keeps it"
+        elif o_said "$2" "$3" '"event":"reclaim_kept".*"reason":"export_state_unknown"'; then
+            pass "$1" "$4"
+        else
+            fail "$1" "$4: expected reclaim_kept with export_state_unknown; got: $(grep -F "\"study\":\"$3\"" "$2/out.jsonl" 2>/dev/null | grep -o '"event":"[a-z_]*"' | tr '\n' ' ')"
+        fi
+    }
+    # The kept lines of a run, less the two fields that change from run to run.
+    o_keeps() { grep '"event":"reclaim_kept"' "$1/out.jsonl" 2>/dev/null | sed -E 's/"ts":"[^"]*",//; s/,"age_s":[0-9]+//' | sort; }
+    o_ids() { grep -- "$2" "$1/out.jsonl" 2>/dev/null | grep -o '"study":"[^"]*"' | sort | tr '\n' ' '; }
+
+    SA=$(o_study DPA); SB=$(o_study DPB); SC=$(o_study DPC)
+    if [ -n "$SA" ] && [ -n "$SB" ] && [ -n "$SC" ]; then
+        for s in "$SA" "$SB" "$SC"; do o_label "$s" xnat-ingest-processed; done
+        o_label "$SA" "xnat-ingest-processed-$(o_last "$SA")-000000000000000000000000"
+        o_label "$SC" "$(o_snapshot "$SC")"
+
+        # Dry run.
+        RD="$WORK/dryorder"; build_case "$RD"
+        ORTHANC_URL_T="$OU" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+            run_engine "$RD" "$STAGE" true true
+        o_kept orthanc_dry_mismatch_kept "$RD" "$SA" "dry run: a snapshot label with another digest is kept, as armed"
+        o_kept orthanc_dry_nolabel_kept "$RD" "$SB" "dry run: a study with no snapshot label is kept, as armed"
+        if o_said "$RD" "$SC" '"message":"WOULD delete'; then
+            pass orthanc_dry_match_would "dry run: the study with the right snapshot label is WOULD delete"
+        else
+            fail orthanc_dry_match_would "expected WOULD delete for the control study; got: $(grep -o '"event":"[a-z_]*"' "$RD/out.jsonl" 2>/dev/null | sort -u | tr '\n' ' ')"
+        fi
+        [ "$(o_http "$SA") $(o_http "$SB") $(o_http "$SC")" = "200 200 200" ] \
+            && pass orthanc_dry_nodelete "and the dry run deleted no study" \
+            || fail orthanc_dry_nodelete "a study is gone after a dry run"
+
+        # The same store, armed. It must keep with the same lines as the dry run,
+        # and delete only the studies that the dry run said WOULD delete.
+        RA="$WORK/armedorder"; build_case "$RA"
+        ORTHANC_URL_T="$OU" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+            run_engine "$RA" "$STAGE" true false
+        if [ -n "$(o_keeps "$RA")" ] && [ "$(o_keeps "$RD")" = "$(o_keeps "$RA")" ]; then
+            pass orthanc_armed_keeps_same "armed run keeps what the dry run kept, with the same lines"
+        else
+            fail orthanc_armed_keeps_same "kept lines differ; dry run: [$(o_ids "$RD" '"event":"reclaim_kept"')] armed: [$(o_ids "$RA" '"event":"reclaim_kept"')]"
+        fi
+        o_would=$(o_ids "$RD" '"message":"WOULD delete'); o_gone=$(o_ids "$RA" '"event":"reclaim_removed"')
+        [ -n "$o_gone" ] && [ "$o_would" = "$o_gone" ] \
+            && pass orthanc_armed_deletes_same "armed run deletes only what the dry run said WOULD delete" \
+            || fail orthanc_armed_deletes_same "dry run WOULD delete [${o_would}], armed run removed [${o_gone}]"
+        [ "$(o_http "$SA") $(o_http "$SB") $(o_http "$SC")" = "200 200 404" ] \
+            && pass orthanc_armed_state "the kept studies are in Orthanc, the deleted one is gone" \
+            || fail orthanc_armed_state "expected 200 200 404; got $(o_http "$SA") $(o_http "$SB") $(o_http "$SC")"
+    else
+        fail orthanc_dry_run_setup "could not create the test studies in Orthanc"
+    fi
+
     docker kill "$OCID" >/dev/null 2>&1 || true
     rm -rf "$OCFG"
 else
     printf '  SKIP  %-26s %s\n' "orthanc_auth" "$ORTHANC_IMG unavailable"
 fi
+
+# INTERVAL that busybox sleep cannot read: the engine must refuse to start,
+# not sweep back to back. "1e+06" is what toString made of 1000000 before the
+# chart rendered canonical seconds.
+R="$WORK/badinterval"; build_case "$R"; mk_session "$R" assigned s1 60
+INTERVAL_T=1e+06 run_engine "$R" "$STAGES_ASSIGNED" false true
+logged interval_refused "$R" startup_failed present "INTERVAL=1e+06 refused at startup"
+logged interval_no_sweep "$R" stage_report absent "and nothing swept"
 
 printf '\n%sdata-policy: %d passed, %d failed%s\n' "$_B" "$PASS" "$FAIL" "$_O"
 if [ "$FAIL" -gt 0 ]; then printf '  - %s\n' "${FAILED[@]}"; exit 1; fi

@@ -4,6 +4,8 @@ config/edge-nodes.env
 *.key
 *.pem
 *.token
+# k0s join tokens that scripts/05 writes into the repository root.
+join-token-*
 secrets/
 
 # SOPS. sites/*/secrets.enc.yaml IS committed — that is the point, it is
@@ -54,3 +56,7 @@ docs/BEHAVIOUR-CHANGES.md
 # Run artefacts from scripts/adopt-existing.sh: a record of what one specific
 # live cluster adopted, timestamped per run. Output, not source.
 adoption-records/
+
+# Python bytecode, e.g. from the reclaimer tests. Never in a chart.
+__pycache__/
+*.pyc

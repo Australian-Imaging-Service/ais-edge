@@ -198,6 +198,304 @@ PY
 fi
 
 # -----------------------------------------------------------------------------
+# The policy engine reads the trees the uploader and assign actually write
+# -----------------------------------------------------------------------------
+# data-policy decides what to delete from three env values: the tree assign
+# writes (ASSIGNED_DIR), the tree the uploader fingerprinted (UPLOAD_SOURCE_DIR)
+# and where the markers live. Each is set in a different template from a
+# different helper, and a wrong one fails silently in the dangerous direction:
+# the engine compares a marker against the wrong tree. The shell tests cannot
+# see this, because they set the env themselves.
+#
+# STRICT LOAD. PyYAML keeps the LAST of two duplicate keys without a word, and
+# so does the API server. tier-1-solution shipped an env entry with two
+# `value:` keys, and ASSIGNED_DIR reached the pod as "86400". Every edge render
+# is loaded with duplicate keys refused, not only the data-policy object.
+#
+# The staged-reclaimer's pods must carry app=xnat-ingest, component=s3-reclaimer:
+# Vector turns them into the stream labels ReclaimerRunUnavailable and
+# SessionStagedNotConfirmedInXNAT select on. Without them the stream is
+# component="unknown" and both alerts match nothing (seen on tier-1 until
+# 2026-09-29). At least one render must have the reclaimer.
+# That count also pins the NAME: the CronJob is found by its -staged-reclaimer
+# suffix, which ReclaimerNotSucceeding and KubeJobFailed's exclusion select on,
+# so a rename finds none and fails here rather than blinding both.
+#
+# DataPolicyReporterSilent renders exactly when the reporter DaemonSet does:
+# with no reporter it would fire for ever. At least one render must have the
+# Loki rules without a reporter, or that half is checked vacuously.
+#
+# The reporter renders WITHOUT limits.cpu. Its sweep is a sub-second burst of
+# several processes at once: under any CFS quota most of the few periods it
+# runs in are throttled, and upstream CPUThrottlingHigh fires and clears on it
+# all day. No quota, no throttling, and no series for the rule to read.
+#
+# Both layouts must be present, or one engine's wiring is checked vacuously:
+# the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
+# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR),
+# and the package layout (the package stage reads /data/deidentified and writes
+# the tree the uploader drains).
+#
+# EXTERNAL_RECLAIM_STAGE must name a row of stages.tsv, and at least one render
+# must set it. The engine compares it against field 1 of that table, and it is
+# checked before any reclaim condition, so it is what keeps this engine off a
+# tree the staged-reclaimer CronJob owns. fingerprint-contract.sh checks the
+# same thing from a site file of its own; on tier-1-solution that render stopped
+# rendering and the check has been skipping, so this one runs on CI's renders.
+ci_heading "data-policy reads the trees the uploader and assign write"
+
+# 2>&1: SystemExit writes to stderr (see above).
+wire_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, re, sys, yaml
+
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+def no_duplicate_keys(loader, node, deep=False):
+    seen = {}
+    for k, _ in node.value:
+        key = loader.construct_object(k, deep=deep)
+        if key in seen:
+            raise yaml.constructor.ConstructorError(
+                None, None, "duplicate key %r (lines %d and %d)" % (key, seen[key] + 1, k.start_mark.line + 1), k.start_mark)
+        seen[key] = k.start_mark.line
+    return loader.construct_mapping(node, deep=deep)
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, no_duplicate_keys)
+
+def containers(doc):
+    spec = doc.get("spec") or {}
+    tpl = spec.get("template") or {}
+    return (tpl.get("spec") or {}).get("containers") or []
+
+def env(c):
+    return {e["name"]: e.get("value") for e in c.get("env") or [] if "value" in e}
+
+problems, checked, delegated, layouts = [], 0, 0, set()
+reclaimers, windowed = 0, 0
+rules_renders, reporter_off, reclaimers = 0, 0, 0
+interval_case_seen = False
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
+    case = os.path.basename(path)[:-len(".yaml")]
+    try:
+        docs = [d for d in yaml.load_all(open(path), Loader=StrictLoader) if d]
+    except yaml.YAMLError as e:
+        problems.append("%s: %s" % (case, " ".join(str(e).split())))
+        continue
+    dp = up = dp_cpu = pkg = None
+    rows = {}
+    for d in docs:
+        for c in containers(d):
+            if d.get("kind") == "DaemonSet" and c.get("name") == "data-policy":
+                dp = env(c)
+                dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
+            if d.get("kind") == "Deployment" and c.get("name") == "uploader":
+                up = env(c)
+            if d.get("kind") == "Deployment" and c.get("name") == "package":
+                pkg = c.get("args") or []
+        if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+            rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+    for d in docs:
+        if d.get("kind") == "CronJob" and d["metadata"]["name"].endswith("-staged-reclaimer"):
+            reclaimers += 1
+            pod = ((d["spec"].get("jobTemplate") or {}).get("spec") or {}).get("template") or {}
+            lbl = (pod.get("metadata") or {}).get("labels") or {}
+            if lbl.get("component") != "s3-reclaimer" or lbl.get("app") != "xnat-ingest":
+                problems.append("%s: staged-reclaimer pods carry component=%r app=%r; the reclaimer "
+                                "alerts select component=\"s3-reclaimer\" and would match nothing"
+                                % (case, lbl.get("component"), lbl.get("app")))
+        if d.get("kind") == "ConfigMap" and "ais-edge-rules.yaml" in (d.get("data") or {}):
+            rules_renders += 1
+            names = {r.get("alert") for g in yaml.safe_load(d["data"]["ais-edge-rules.yaml"]).get("groups", [])
+                     for r in g.get("rules") or []}
+            if ("DataPolicyReporterSilent" in names) != (dp is not None):
+                problems.append("%s: DataPolicyReporterSilent is %s but the reporter DaemonSet is %s"
+                                % (case, "rendered" if "DataPolicyReporterSilent" in names else "absent",
+                                   "rendered" if dp is not None else "absent"))
+            if dp is None:
+                reporter_off += 1
+    if dp is None:
+        continue
+    checked += 1
+    # INTERVAL feeds busybox sleep, which returns at once on "1e+06" or "5m":
+    # the reporter would then sweep back to back. Plain digits only.
+    if not re.fullmatch(r"[1-9][0-9]*", dp.get("INTERVAL") or ""):
+        problems.append("%s: the reporter's INTERVAL renders %r, not whole seconds; busybox sleep "
+                        "returns at once on that and the reporter sweeps back to back" % (case, dp.get("INTERVAL")))
+    if case == "edge-reporter-interval-3600":
+        silence = [r.get("expr", "") for d in docs if d.get("kind") == "ConfigMap"
+                   for k, v in (d.get("data") or {}).items() if k.endswith("rules.yaml")
+                   for g in (yaml.safe_load(v) or {}).get("groups", []) for r in g.get("rules") or []
+                   if r.get("alert") == "DataPolicyReporterSilent"]
+        if dp.get("INTERVAL") != "3600" or not silence or "[10800s]" not in silence[0]:
+            problems.append("%s: numeric interval 3600 rendered INTERVAL=%r and a silence window %s; expected "
+                            "\"3600\" and [10800s]" % (case, dp.get("INTERVAL"),
+                            re.findall(r"\[\d+s\]", silence[0]) if silence else "(no rule)"))
+        interval_case_seen = True
+    if dp_cpu is not None:
+        problems.append("%s: the data-policy reporter renders limits.cpu=%s. Its sweep is a sub-second, "
+                        "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
+                        "CPUThrottlingHigh flaps on it. Keep only the memory limit" % (case, dp_cpu))
+    src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
+    layouts.add("package" if pkg is not None else "ingest" if src != adir else "orthanc")
+    # The package stage writes the tree the uploader drains, and must retire
+    # its input itself: nothing else can satisfy a reclaim on /data/deidentified.
+    if pkg is not None:
+        if pkg[1:2] != [src]:
+            problems.append("%s: the package stage writes %r but the uploader reads %r" % (case, pkg[1:2], src))
+        if pkg[:1] != ["/data/deidentified"]:
+            problems.append("%s: the package stage reads %r, not the deidentify stage's /data/deidentified" % (case, pkg[:1]))
+        dword = rows.get("derived.deidentified", [""] * 6)[5]
+        if dword == "onPackaged" and "--unlink-source" not in pkg:
+            problems.append("%s: derived.deidentified is onPackaged but the package stage does not unlink its input" % case)
+    if not src.startswith("/"):
+        problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
+    if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
+        problems.append("%s: ASSIGNED_DIR=%r but the assigned stage is at %r" % (case, adir, rows["derived.assigned"][2]))
+    for name, r in rows.items():
+        word = r[5] if len(r) > 5 else ""
+        if word == "onUploaded" and r[2] != src:
+            problems.append("%s: %s is onUploaded at %r but the uploader reads %r" % (case, name, r[2], src))
+        if word == "onAssigned" and name != "derived.grouped":
+            problems.append("%s: %s uses onAssigned, which only derived.grouped may" % (case, name))
+    ext = dp.get("EXTERNAL_RECLAIM_STAGE") or ""
+    if ext:
+        delegated += 1
+        if ext not in rows:
+            problems.append("%s: EXTERNAL_RECLAIM_STAGE=%r is not a row in stages.tsv, so the engine never recognises the CronJob's tree" % (case, ext))
+    if not re.fullmatch(r"[0-9]+", dp.get("STUCK_AFTER_S") or ""):
+        problems.append("%s: STUCK_AFTER_S=%r is not a number of seconds" % (case, dp.get("STUCK_AFTER_S")))
+    # The staged-reclaimer CronJob is the only deleter of the tree data-policy
+    # hands it, so it must read THAT tree, and that tree's minAge.
+    for d in docs:
+        if d.get("kind") != "CronJob" or not d["metadata"]["name"].endswith("-staged-reclaimer"):
+            continue
+        job = ((d.get("spec") or {}).get("jobTemplate") or {}).get("spec") or {}
+        for c in ((job.get("template") or {}).get("spec") or {}).get("containers") or []:
+            cj = env(c)
+            reclaimers += 1
+            if ext not in rows:
+                problems.append("%s: the staged-reclaimer renders but data-policy hands it no tree (EXTERNAL_RECLAIM_STAGE=%r)" % (case, ext))
+                continue
+            if cj.get("STAGED_ROOT") != rows[ext][2]:
+                problems.append("%s: the staged-reclaimer reads %r but %s is at %r" % (case, cj.get("STAGED_ROOT"), ext, rows[ext][2]))
+            if cj.get("TREE_MIN_AGE_KEY") != "dataPolicy.%s.minAge" % ext:
+                problems.append("%s: TREE_MIN_AGE_KEY=%r but data-policy hands over %s" % (case, cj.get("TREE_MIN_AGE_KEY"), ext))
+            m = re.fullmatch(r"([0-9]{1,10})([smhdw]?)", cj.get("TREE_MIN_AGE") or "")
+            got = int(m.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2)] if m else None
+            if got is None or str(got) != rows[ext][6]:
+                problems.append("%s: TREE_MIN_AGE=%r but %s has minAge %ss in stages.tsv" % (case, cj.get("TREE_MIN_AGE"), ext, rows[ext][6]))
+            elif got:
+                windowed += 1
+
+if checked == 0:
+    problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
+for want in ("orthanc", "ingest", "package"):
+    if checked and want not in layouts:
+        problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
+if checked and not interval_case_seen:
+    problems.append("render case edge-reporter-interval-3600 is missing, so a numeric interval's rendering goes unchecked")
+if checked and not reclaimers:
+    problems.append("no render has the staged-reclaimer, so its load-bearing pod labels go unchecked")
+if rules_renders and not reporter_off:
+    problems.append("no render has the Loki rules without a reporter, so the reporter-off gating goes unchecked")
+if checked and not delegated:
+    problems.append("no render sets EXTERNAL_RECLAIM_STAGE, so the delegation wiring goes unchecked")
+if checked and not windowed:
+    problems.append("no staged-reclaimer render carries a non-zero TREE_MIN_AGE, so the tree's minAge wiring goes unchecked")
+if problems:
+    raise SystemExit("; ".join(problems))
+print("%d edge render(s) load without duplicate keys and wire data-policy to the uploader's trees (layouts: %s; %d delegate a stage; %d staged-reclaimer(s) read the delegated tree and its minAge)"
+      % (checked, ", ".join(sorted(layouts)), delegated, reclaimers))
+PY
+)" && ci_pass "$wire_out" || ci_fail "data-policy wiring: $wire_out"
+
+# -----------------------------------------------------------------------------
+# Durations are read in base 10
+# -----------------------------------------------------------------------------
+# edge.durationSeconds used int64, which reads a leading zero as octal.
+# Measured before the fix: "08d" rendered 0, which the engine reads as "expire
+# immediately", and "010d" rendered 691200 (8 days).
+# edge-duration-base10 puts one such value on each stage row; this checks the
+# seconds the engine is handed, in the stages.tsv it actually reads.
+# The 10-digit row pins the ceiling from below; neg-edge-duration-11-digits
+# pins it from above.
+ci_heading "durations render in base 10"
+
+dur_render="$CI_RENDER_DIR/edge-duration-base10.yaml"
+if [ ! -s "$dur_render" ]; then
+  ci_fail "no render at $dur_render: the edge-duration-base10 case is missing from ci_positive_cases"
+else
+  # 2>&1: SystemExit writes to stderr (see above).
+  dur_out="$(python3 - "$dur_render" 2>&1 <<'PY'
+import sys, yaml
+
+# stage, 1-based stages.tsv column, expected seconds, value set in the fixture
+WANT = [
+    ("derived.assigned",         7, "691200",     "08d"),
+    ("derived.orthancStorage",   7, "864000",     "010d"),
+    ("originals.quarantine",     5, "7200",       "07200"),
+    ("originals.facilityBackup", 7, "9999999999", "9999999999s"),
+]
+
+rows = None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+        rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+if rows is None:
+    raise SystemExit("no stages.tsv in the render, so nothing was checked")
+
+bad = []
+for stage, col, want, given in WANT:
+    got = rows[stage][col - 1] if stage in rows and len(rows[stage]) >= col else None
+    if got != want:
+        bad.append("%s=%r rendered %r, expected %s" % (stage, given, got, want))
+if bad:
+    raise SystemExit("; ".join(bad) + ". A leading zero must be decimal: octal turns 08d into 0, 'expire immediately'.")
+print("%d leading-zero and ceiling durations render in base 10 (08d=691200, 010d=864000)" % len(WANT))
+PY
+)" && ci_pass "$dur_out" || ci_fail "durations: $dur_out"
+fi
+
+# -----------------------------------------------------------------------------
+# The parser trims a value before it reads it, so retain: " 1h " renders 3600.
+# The stage table carried the RAW word next to those seconds. The engine's word
+# check (expire_original) then saw " 1h " as a non-duration and kept the
+# original for ever, while the site believed it expired. Helm's trim strips
+# Unicode blanks (U+00A0, U+2003) that a shell loop does not, so the table has
+# to trim with the same `toString | trim` as the parser. This checks the two
+# rows the engine reads against the padded values of the fixture.
+ci_heading "padded durations render trimmed"
+
+pad_render="$CI_RENDER_DIR/edge-duration-padded.yaml"
+if [ ! -s "$pad_render" ]; then
+  ci_fail "no render at $pad_render: the edge-duration-padded case is missing from ci_positive_cases"
+else
+  pad_out="$(python3 - "$pad_render" 2>&1 <<'PY'
+import sys, yaml
+# stage, 1-based word column, 1-based seconds column
+WANT = [("originals.facilityBackup", 6, 7), ("originals.quarantine", 6, 7)]
+rows = None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+        rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+if rows is None:
+    raise SystemExit("no stages.tsv in the render, so nothing was checked")
+bad = []
+for stage, wcol, scol in WANT:
+    row = rows.get(stage) or []
+    word = row[wcol - 1] if len(row) >= wcol else None
+    secs = row[scol - 1] if len(row) >= scol else None
+    if word != "1h" or secs != "3600":
+        bad.append("%s: word %r seconds %r, expected '1h' and '3600'" % (stage, word, secs))
+if bad:
+    raise SystemExit("; ".join(bad) + ". The engine reads the word: an untrimmed word is not a duration to it, and the original is kept for ever.")
+print("%d padded retain values render as the trimmed word next to their seconds" % len(WANT))
+PY
+)" && ci_pass "$pad_out" || ci_fail "padded durations: $pad_out"
+fi
+
+# -----------------------------------------------------------------------------
 # install.sh's generated edge hostnames must match the chart's
 # -----------------------------------------------------------------------------
 # The chart renders the Ingress and the certificate SANs for each hosted control
@@ -280,5 +578,507 @@ if problems:
 print("both join paths deliver the one shared edge-join.sh")
 PY
 )" && ci_pass "$join_out" || ci_fail "join paths: $join_out"
+
+# =============================================================================
+# The uploader refuses a half-written resource by default
+# =============================================================================
+# Without a manifest check, a resource without its manifest is uploaded as it
+# is, and later passes see a partial resource as already uploaded. Measured
+# 2026-10-14 on the CLI: with neither flag, xnat-ingest does not require a
+# manifest (the option default is unset), so the chart must pass
+# --require-manifest explicitly. requireManifest is true by default. This
+# fails when a default render does not pass --require-manifest, or when a site
+# that sets requireManifest false does not get --dont-require-manifest.
+ci_heading "the uploader requires a manifest by default"
+
+while IFS=$'\t' read -r case_name expect; do
+  render="$CI_RENDER_DIR/$case_name.yaml"
+  if [ ! -s "$render" ]; then
+    ci_fail "no render at $render — run scripts/ci/render.sh first"
+    continue
+  fi
+  manifest_out="$(python3 - "$render" "$expect" 2>&1 <<'PY'
+import sys, yaml
+
+path, expect = sys.argv[1:3]
+found = []
+for doc in yaml.safe_load_all(open(path)):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if (c.get("command") or [])[:2] == ["xnat-ingest", "upload"]:
+            args = c.get("args") or []
+            found.append((doc["metadata"]["name"],
+                          [f for f in ("--require-manifest", "--dont-require-manifest") if f in args]))
+if not found:
+    raise SystemExit("no 'xnat-ingest upload' container in the render")
+wrong = [(name, flags) for name, flags in found if flags != [expect]]
+if wrong:
+    raise SystemExit(f"expected exactly {expect}, got {wrong}")
+print(", ".join(name for name, _ in found))
+PY
+  )" && ci_pass "$case_name: $expect ($manifest_out)" \
+     || ci_fail "$case_name: $manifest_out"
+done <<'EOF'
+edge-upload-direct	--require-manifest
+edge-upload-direct-no-manifest	--dont-require-manifest
+EOF
+
+# =============================================================================
+# The stage that writes the upload tree runs under the writer lock
+# =============================================================================
+# A deleter of the upload tree takes /data/.locks/<tree>.lock. So the stage that
+# writes that tree must hold the same lock for each pass (edge.lockedStage), and a
+# shared lock on <tree>.alive for its life. This fails when that stage is not
+# wrapped, when it still passes --loop (two loops), when a stage that does not
+# write the upload tree is wrapped, when the writer is not Recreate (the deleter's
+# .alive check relies on it), or when the staged-reclaimer gets other lock paths.
+ci_heading "the upload-tree writer runs under the writer lock"
+
+while IFS=$'\t' read -r case_name locked plain serialised; do
+  render="$CI_RENDER_DIR/$case_name.yaml"
+  if [ ! -s "$render" ]; then
+    ci_fail "no render at $render — run scripts/ci/render.sh first"
+    continue
+  fi
+  lock_out="$(python3 - "$render" "$locked" "$plain" "${serialised:--}" 2>&1 <<'PY2'
+import re, sys, yaml
+
+path, locked, plain, serialised = sys.argv[1:5]
+tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
+# A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
+# pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
+STOPS = re.compile(r"trap exit TERM INT; .*; sleep [0-9]+ & wait \$!; done")
+stages, strategy, reclaimer = {}, {}, None
+for doc in yaml.safe_load_all(open(path)):
+    if not doc:
+        continue
+    if doc.get("kind") == "CronJob" and doc["metadata"]["name"].endswith("-staged-reclaimer"):
+        c = doc["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
+        reclaimer = {e["name"]: e.get("value") for e in c.get("env", [])}
+    if doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if c["name"] in tree:
+            stages[c["name"]] = (c.get("command") or [], c.get("args") or [])
+            strategy[c["name"]] = (doc["spec"].get("strategy") or {}).get("type")
+
+cmd, args = stages.get(locked, ([], []))
+if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
+    raise SystemExit(f"{locked} is not wrapped: command={cmd}")
+lock, alive = f"/data/.locks/{tree[locked]}.lock", f"/data/.locks/{tree[locked]}.alive"
+if f"flock {lock} " not in cmd[2]:
+    raise SystemExit(f"{locked} does not take {lock}: {cmd[2]}")
+if f"exec 9>>{alive} && flock -s 9 && " not in cmd[2]:
+    raise SystemExit(f"{locked} does not hold {alive} for its life: {cmd[2]}")
+if not STOPS.fullmatch(cmd[2]):
+    raise SystemExit(f"{locked} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {cmd[2]}")
+if strategy.get(locked) != "Recreate":
+    raise SystemExit(f"{locked} is not strategy Recreate: {strategy.get(locked)}")
+if reclaimer is not None and (reclaimer.get("WRITER_LOCK"), reclaimer.get("WRITER_ALIVE")) != (lock, alive):
+    raise SystemExit(f"the staged-reclaimer locks {reclaimer.get('WRITER_LOCK')}, {reclaimer.get('WRITER_ALIVE')}, not {lock}, {alive}")
+if "--loop" in args:
+    raise SystemExit(f"{locked} is wrapped and still passes --loop")
+if plain != "-":
+    cmd, args = stages.get(plain, ([], []))
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", plain] or "--loop" in args:
+        raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
+    if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
+        raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
+if serialised != "-":
+    # The stage that writes the writer's INPUT tree holds its own tree lock for
+    # each pass, and the writer takes that lock before the upload-tree lock for
+    # each of its passes: a pass of one never runs beside a pass of the other,
+    # in steady state and across the upgrade that turns the writer on or off.
+    wcmd, _ = stages.get(locked, ([], []))
+    inner = f"/data/.locks/{tree[serialised]}.lock"
+    if f"flock {inner} flock {lock} " not in wcmd[2]:
+        raise SystemExit(f"{locked} does not take {inner} before {lock} for each pass: {wcmd[2]}")
+    scmd, sargs = stages.get(serialised, ([], []))
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != ["xnat-ingest", serialised]:
+        raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
+    if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
+        raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
+    if not STOPS.fullmatch(scmd[2]):
+        raise SystemExit(f"{serialised} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {scmd[2]}")
+    if "--loop" in sargs:
+        raise SystemExit(f"{serialised} takes turns on the lock and still passes --loop")
+    if strategy.get(serialised) != "Recreate":
+        raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
+print(f"{locked} under {tree[locked]}.lock, stops on TERM and INT" + (", reclaimer on the same locks" if reclaimer else "")
+      + ("" if plain == "-" else f", {plain} holds its producer lock")
+      + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
+PY2
+  )" && ci_pass "$case_name: $lock_out" \
+     || ci_fail "$case_name: $lock_out"
+done <<'EOF'
+edge-defaults	assign	-
+edge-deid-off	assign	-
+edge-upload-direct	assign	-
+edge-upload-alerts	deidentify	assign
+edge-direct-ingest-reclaim	deidentify	assign
+edge-direct-ingest-package	package	-	deidentify
+edge-s3-ingest-package	package	-	deidentify
+EOF
+
+# =============================================================================
+# The stage wrappers stop on SIGTERM
+# =============================================================================
+# The wrapper shell is PID 1 of its container. PID 1 has no default signal
+# action. A wrapper without a trap ignored the SIGTERM from the kubelet: each
+# stop waited 30 s for SIGKILL, and a pass could start after the SIGTERM
+# (measured on the tier-2 test edge, 2026-10-20). This check runs each rendered
+# wrapper with dash, the shell of the stage image, and sends the signals:
+#   - TERM or INT in the sleep: the shell stops at once, status 128 + signal.
+#   - TERM in a pass: the pass ends, then the shell stops with its status.
+#   - A pass that fails stops the shell with its status, as before.
+# No pass starts after a signal. A pass holds its locks while it runs.
+# The stage is a fake, and /data/.locks is a temporary directory.
+# The shell is PID 1 of a new PID namespace when `unshare` can make one, as in
+# the container. Else it is a plain child: a wrapper without the trap then
+# stops at once, before the pass ends, so this check still finds it. In both,
+# dash starts with the default action for TERM and INT, as PID 1 does in the
+# container (a shell cannot trap a signal that was ignored when it started).
+ci_heading "the stage wrappers stop on SIGTERM"
+if ! command -v dash >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1; then
+  ci_skip "stage wrapper signals NOT CHECKED: dash or flock (util-linux) is not on this host"
+else
+  stop_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_STOP'
+import concurrent.futures, glob, os, re, shutil, signal, subprocess, sys, tempfile, time, yaml
+
+wrappers = {}
+LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)   # the C parser is 20x faster
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    text = open(path).read()
+    if "flock /data/.locks/" not in text:
+        continue
+    for doc in yaml.load_all(text, Loader=LOADER):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for c in doc["spec"]["template"]["spec"].get("containers", []):
+            cmd = c.get("command") or []
+            if c["name"] in ("group", "group-fs", "assign"):
+                expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
+                tree = "assigned" if expected == "assign" else "grouped"
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", expected]:
+                    raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
+                if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
+                    raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
+            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
+                wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
+# serialised (one lock), locked (.alive + one lock), locked with the outer lock
+shapes = {("flock -s 9" in s, s.count("flock /data/.locks/")) for s in wrappers}
+if not {(False, 1), (True, 1), (True, 2)} <= shapes:
+    raise SystemExit(f"expected the serialised, locked and nested-lock wrappers, found {sorted(shapes)}")
+
+DASH = shutil.which("dash")
+NS = ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child"]
+try:
+    PID1 = subprocess.run(NS + ["true"], capture_output=True, timeout=10).returncode == 0
+except (OSError, subprocess.TimeoutExpired):
+    PID1 = False
+# A shell cannot trap a signal that was ignored when it started. unshare
+# (util-linux 2.37) starts its child with TERM and INT ignored. So set the
+# default actions, as the container runtime gives PID 1, then start dash.
+DEFAULT_SIGNALS = [sys.executable, "-c", "import os, signal, sys\n"
+                   "for s in (signal.SIGTERM, signal.SIGINT, signal.SIGPIPE, signal.SIGXFSZ):\n"
+                   "    signal.signal(s, signal.SIG_DFL)\n"
+                   "os.execv(sys.argv[1], sys.argv[1:])"]
+FAKE = """#!/bin/sh
+echo "start $(date +%s.%N)" >> "$PROOF_LOG"
+for l in $PROOF_LOCKS; do flock -n "$l" true && echo "free $l" >> "$PROOF_LOG"; done
+sleep "$PASS_SECONDS"
+echo "end $(date +%s.%N)" >> "$PROOF_LOG"
+exit "$PASS_STATUS"
+"""
+# name, pass seconds, pass status, signal, when to send it, expected status
+CASES = [
+    ("TERM in the sleep", 0, 0, signal.SIGTERM, "sleep", 143),
+    ("INT in the sleep", 0, 0, signal.SIGINT, "sleep", 130),
+    ("TERM in a pass", 2, 0, signal.SIGTERM, "pass", 0),
+    ("TERM in a failing pass", 1, 3, signal.SIGTERM, "pass", 3),
+    ("a failing pass", 0, 3, None, None, 3),
+]
+
+
+CHILDREN_FILE = os.path.exists(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+
+
+def children(pid):
+    """(pid, comm) of each child, as this /proc numbers them."""
+    if CHILDREN_FILE:
+        try:
+            kids = open(f"/proc/{pid}/task/{pid}/children").read().split()
+        except OSError:
+            return []
+    else:   # no CONFIG_PROC_CHILDREN: read the parent of each process
+        kids = []
+        for d in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                stat = open(f"/proc/{d}/stat").read()
+            except OSError:
+                continue
+            if stat[stat.rindex(")") + 2:].split()[1] == str(pid):
+                kids.append(d)
+    found = []
+    for k in kids:
+        try:
+            found.append((int(k), open(f"/proc/{k}/comm").read().strip()))
+        except OSError:
+            pass
+    return found
+
+
+def until(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
+def shell_of(p):
+    """The pid of dash (after the exec): the child of unshare, or the process itself."""
+    end = time.time() + 5
+    while time.time() < end:
+        for pid, comm in children(p.pid) if PID1 else [(p.pid, "")]:
+            try:
+                comm = comm if comm == "dash" else open(f"/proc/{pid}/comm").read().strip()
+            except OSError:
+                continue
+            if comm == "dash":
+                return pid
+        time.sleep(0.02)
+    return None
+
+
+def stamps(log, word):
+    try:
+        return [float(l.split()[1]) for l in open(log) if l.startswith(word + " ")]
+    except OSError:
+        return []
+
+
+def run(script, case):
+    name, seconds, status, sig, when, want = case
+    with tempfile.TemporaryDirectory(prefix="stage-stop-") as tmp:
+        body = script.replace("/data/.locks", os.path.join(tmp, "locks"))
+        locks = re.findall(r"\S+\.lock", body)
+        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "xnat-ingest")
+        with open(fake, "w") as f:
+            f.write(FAKE)
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, PROOF_LOG=log, PROOF_LOCKS=" ".join(locks),
+                   PASS_SECONDS=str(seconds), PASS_STATUS=str(status))
+        p = subprocess.Popen((NS if PID1 else []) + DEFAULT_SIGNALS + [DASH, "-c", body, fake, "stage"],
+                             env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            shell = shell_of(p) if sig else None
+            if sig and not shell:
+                return f"{name}: no shell under unshare"
+            if when == "sleep":
+                # Send it in the sleep, not at the end of the pass.
+                if not until(lambda: any(c == "sleep" for _, c in children(shell)), 5):
+                    return f"{name}: the shell does not sleep after a pass"
+                time.sleep(0.3)
+            elif when == "pass":
+                if not until(lambda: stamps(log, "start"), 5):
+                    return f"{name}: no pass started"
+                time.sleep(0.3)
+            sent = time.time()
+            if sig:
+                try:
+                    os.kill(shell, sig)
+                except ProcessLookupError:
+                    return f"{name}: the shell stopped before the signal"
+            if not until(lambda: p.poll() is not None, seconds + 3):
+                return f"{name}: still runs {seconds + 3} s after the signal"
+            gone = time.time()
+            if p.returncode != want:
+                return f"{name}: status {p.returncode}, not {want}"
+            if len(stamps(log, "start")) != 1:
+                return f"{name}: {len(stamps(log, 'start'))} passes started, not 1"
+            if when == "pass":
+                ends = stamps(log, "end")
+                if not ends or gone < ends[0]:
+                    return f"{name}: the shell stopped before the pass ended"
+                if gone - ends[0] > 3:
+                    return f"{name}: the shell stopped {gone - ends[0]:.1f} s after the pass"
+            if any(l.startswith("free ") for l in open(log)):
+                return f"{name}: a pass ran without its lock"
+            for lock in locks:
+                if subprocess.run(["flock", "-n", lock, "true"]).returncode != 0:
+                    return f"{name}: {lock} is held after the shell stopped"
+            return round(gone - sent, 2) if when == "sleep" else None
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+
+
+jobs = [(s, c) for s in wrappers for c in CASES]
+with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    results = list(pool.map(lambda j: run(*j), jobs))
+problems = [f"{wrappers[s]}: {r}" for (s, _), r in zip(jobs, results) if isinstance(r, str)]
+if problems:
+    raise SystemExit("; ".join(problems))
+slowest = max(r for r in results if isinstance(r, float))
+print(f"{len(wrappers)} wrappers x {len(CASES)} cases, "
+      + ("as PID 1 of a new PID namespace" if PID1 else "as a plain child (unshare cannot make a PID namespace here)")
+      + f": TERM and INT in the sleep stop it in {slowest} s or less; TERM in a pass stops it after the pass")
+PY_STOP
+  )" && ci_pass "stage wrapper signals: $stop_out" \
+     || ci_fail "stage wrapper signals: $stop_out"
+fi
+
+# Per-stage resource settings must reach their own application container.
+ci_heading "ingest stage resource settings"
+resource_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_RESOURCES'
+from pathlib import Path
+import sys, yaml
+
+root = Path(sys.argv[1])
+expected = {
+    "group": {"requests": {"cpu": "101m", "memory": "301Mi"},
+              "limits": {"cpu": "901m", "memory": "1301Mi"}},
+    "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"},
+                 "limits": {"cpu": "902m", "memory": "1302Mi"}},
+    "assign": {"requests": {"memory": "444Mi"}},
+    "deidentify": {"limits": {"cpu": "888m"}},
+}
+for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null",
+             "edge-assign-filedrop-only"):
+    found = {}
+    for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for container in doc["spec"]["template"]["spec"].get("containers", []):
+            name = container["name"]
+            if name in expected:
+                if name in found:
+                    raise SystemExit(f"{case}: duplicate stage container {name}")
+                found[name] = container.get("resources")
+                if name == "assign":
+                    initializers = doc["spec"]["template"]["spec"].get("initContainers", [])
+                    assert len(initializers) == 1, (case, "assign initializer missing or duplicated")
+                    init = initializers[0]
+                    assert init["name"] == "init-grouped-dir", case
+                    assert init["image"] == container["image"], case
+                    assert init["imagePullPolicy"] == container["imagePullPolicy"], case
+                    assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
+                    assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                if name == "deidentify":
+                    init = doc["spec"]["template"]["spec"]["initContainers"]
+                    assert len(init) == 1 and init[0]["name"] == "init-assigned-dir", case
+                    assert init[0]["command"] == ["mkdir", "-p", "--", container["args"][0]], case
+                    assert init[0]["image"] == container["image"], case
+                    assert init[0]["imagePullPolicy"] == container["imagePullPolicy"], case
+                    assert init[0]["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+    names = set(expected)
+    if case == "edge-direct-ingest-reclaim":
+        names.remove("group-fs")
+    elif case == "edge-assign-filedrop-only":
+        names.remove("group")
+    if set(found) != names:
+        raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
+    wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
+    if found != wanted:
+        raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
+print("stage resources and assign initialization verified, including file-drop without Orthanc")
+PY_RESOURCES
+)" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
+
+ci_heading "upload input and temporary parent exist before startup"
+upload_startup_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_UPLOAD'
+from pathlib import Path
+import subprocess, sys, tempfile, yaml
+cases = [('edge-upload-direct', '/data/assigned', '/data/tmp'),
+         ('edge-upload-temp-custom', '/data/assigned', '/data/upload scratch/cache;literal'),
+         ('edge-upload-temp-default', '/data/assigned', ''),
+         ('edge-direct-ingest-reclaim', '/data/deidentified', '/data/tmp'),
+         ('edge-upload-ingest-temp-default', '/data/deidentified', '')]
+for name, source, temp in cases:
+    pod = next(d['spec']['template']['spec'] for d in yaml.safe_load_all((Path(sys.argv[1]) / (name + '.yaml')).read_text())
+               if d and d.get('kind') == 'Deployment' and d['metadata']['name'].endswith('-upload'))
+    app = pod['containers'][0]
+    assert app['args'][0] == source
+    assert len(pod['initContainers']) == 1
+    init = pod['initContainers'][0]
+    paths = [source] + ([temp] if temp else [])
+    assert init['name'] == 'init-upload-dirs' and init['command'] == ['mkdir', '-p', '--', *paths]
+    assert init['image'] == app['image'] and init['imagePullPolicy'] == app['imagePullPolicy']
+    assert init['volumeMounts'] == app['volumeMounts'] == [{'name': 'pipeline', 'mountPath': '/data'}]
+    with tempfile.TemporaryDirectory() as tmp:
+        targets = [Path(tmp) / Path(p).relative_to('/data') for p in paths]
+        command = ['mkdir', '-p', '--', *map(str, targets)]
+        subprocess.run(command, check=True)
+        retained = targets[0] / 'existing-data'; retained.write_bytes(b'preserve')
+        targets[0].chmod(0o750)
+        subprocess.run(command, check=True)
+        assert retained.read_bytes() == b'preserve' and targets[0].stat().st_mode & 0o777 == 0o750
+        if temp:
+            with tempfile.TemporaryDirectory(dir=targets[1]): pass
+        else:
+            assert not (Path(tmp) / 'tmp').exists()
+        blocked = Path(tmp) / 'blocked'; blocked.write_text('file')
+        assert subprocess.run(['mkdir','-p','--',str(blocked)],capture_output=True).returncode != 0
+print('assigned/deidentified inputs, custom/default temp and retained data/permissions checked')
+PY_UPLOAD
+)" && ci_pass "upload startup: $upload_startup_out" || ci_fail "upload startup: $upload_startup_out"
+
+ci_heading "group waits for HTTP availability"
+group_startup_out="$(python3 - "$CI_RENDER_DIR/edge-auth-on.yaml" 2>&1 <<'PY_GROUP'
+import subprocess, sys, yaml
+pod = next(d['spec']['template']['spec'] for d in yaml.safe_load_all(open(sys.argv[1]))
+           if d and d.get('kind') == 'Deployment' and d['metadata']['name'].endswith('-group-orthanc'))
+init, app = pod['initContainers'][0], pod['containers'][0]
+assert init['name'] == 'wait-for-orthanc' and init['command'] == ['sh', '-c']
+assert init['image'] == 'curlimages/curl:8.11.1' and init['imagePullPolicy'] == 'IfNotPresent'
+assert init['env'] == [e for e in app['env'] if e['name'] in ('ORTHANC_USER', 'ORTHANC_PASSWORD')]
+assert app['args'][0] + '/system' in init['args'][0]
+assert 'for try in $(seq 1 18); do' in init['args'][0] and '-m 5' in init['args'][0] and 'sleep 5' in init['args'][0]
+subprocess.run(['sh', '-n', '-c', init['args'][0]], check=True)
+print('receiver endpoint, credentials, curl image and shell syntax checked')
+PY_GROUP
+)" && ci_pass "group startup: $group_startup_out" || ci_fail "group startup: $group_startup_out"
+
+ci_heading "Vector discovers short-lived pod logs"
+vector_poll_out="$(python3 - "$CI_RENDER_DIR" edge-observability-on edge-obsstack-on 2>&1 <<'PY_VECTOR_POLL'
+import sys, yaml
+from pathlib import Path
+for case in sys.argv[2:]:
+    sources = []
+    for doc in yaml.safe_load_all((Path(sys.argv[1]) / (case + ".yaml")).read_text()):
+        if not doc or doc.get("kind") != "ConfigMap":
+            continue
+        for name, body in doc.get("data", {}).items():
+            if name != "vector.yaml":
+                continue
+            config = yaml.safe_load(body)
+            sources.extend(s for s in config.get("sources", {}).values() if s.get("type") == "kubernetes_logs")
+    assert sources, f"{case}: no Kubernetes log source found"
+    assert all(s.get("glob_minimum_cooldown_ms") == 1000 for s in sources), case
+print("every rendered Kubernetes log source scans at a one-second interval")
+PY_VECTOR_POLL
+)" && ci_pass "$vector_poll_out" || ci_fail "$vector_poll_out"
+
+ci_heading "facility backup policy follows its mounted volume"
+if out="$(python3 - "$CI_RENDER_DIR" <<'PYBACKUP'
+import sys, pathlib, yaml
+for case, want in (("edge-datapolicy-on", True), ("edge-backup-off", False), ("edge-backup-policy-off", False)):
+    docs = [d for d in yaml.safe_load_all((pathlib.Path(sys.argv[1]) / (case + ".yaml")).read_text()) if d]
+    tables = [d["data"]["stages.tsv"] for d in docs if d.get("kind") == "ConfigMap" and "stages.tsv" in d.get("data", {})]
+    assert len(tables) == 1, (case, "missing policy table")
+    rows = {line.split("\t")[0] for line in tables[0].splitlines() if line.strip()}
+    for name in ("originals.facilityBackup", "originals.quarantine"):
+        assert (name in rows) == want, (case, name, "wrong policy row presence")
+    assert "derived.assigned" in rows, (case, "unrelated stage removed")
+print("backup on, volume off, and policy off rows match")
+PYBACKUP
+)"; then ci_pass "$out"; else ci_fail "$out"; fi
 
 ci_summary "runtime-templates"

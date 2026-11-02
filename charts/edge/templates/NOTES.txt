@@ -25,19 +25,27 @@ DE-IDENTIFICATION
   Any OTHER AE title is rejected for ingest but NOT discarded: the original
   is written to /facility-backup/__unmapped_aet__/<AET>/... and only then
   removed from Orthanc. Add the AET above and re-send to ingest it.
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}
+  Enabled. The xnat-ingest deidentify stage runs between assign and upload,
+  and the uploader reads only its output, {{ include "edge.uploadSourceDir" . }}.
+  {{- if .Values.ingest.deidentify.specs }}
+  {{ len .Values.ingest.deidentify.specs }} recipe(s):
+    {{- range $path, $_ := .Values.ingest.deidentify.specs }}
+    {{ $path }}
+    {{- end }}
+  {{- else }}
+  Recipes from ConfigMap {{ .Values.ingest.deidentify.specConfigMap }}:
+    {{- range $_, $path := .Values.ingest.deidentify.specFiles }}
+    {{ $path }}
+    {{- end }}
+  {{- end }}
 {{- else }}
   *** DISABLED. Studies reach XNAT with PHI intact. ***
 {{- end }}
 
 UPLOAD
-{{- if eq .Values.upload.mode "s3" }}
-  Mode s3 — sessions are staged to s3://{{ .Values.upload.s3.bucket }}/{{ .Values.upload.s3.prefix }}/
-  at {{ .Values.upload.s3.endpoint }}, and the management cluster pushes them
-  into XNAT. This edge never talks to XNAT directly.
-{{- else }}
   Mode direct — sessions are uploaded straight to XNAT. No management cluster
   and no staging bucket are involved.
-{{- end }}
 
 DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun }}DRY RUN{{ else }}ENFORCING{{ end }}{{ else }}NOT ENFORCED{{ end }}
 {{- if not .Values.dataPolicy.enabled }}
@@ -47,6 +55,24 @@ DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun 
 {{- else if .Values.dataPolicy.dryRun }}
   dryRun is true: reclaim decisions are logged but not acted on. Watch a few
   days of logs, confirm they match your expectations, then set dryRun: false.
+{{- end }}
+{{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
+  dataPolicy.enabled and dryRun govern the data policy and the reclaimers
+  only. assign still removes /data/grouped/<session> after it writes the
+  session to /data/assigned, because grouped is onAssigned. That moves data
+  along the pipeline. It does not remove the last copy.
+{{- end }}
+{{- if not .Values.storage.facilityBackup.enabled }}
+
+  ⚠  FACILITY BACKUP IS OFF
+    No original is kept outside the pipeline, so Orthanc and the pipeline
+    folders hold the only copy of each study.
+{{- if eq .Values.dataPolicy.derived.orthancStorage.reclaim "onGrouped" }}
+    derived.orthancStorage.reclaim is onGrouped, so an armed data policy
+    deletes the Orthanc copy of a staged study after its minAge. A session in
+    assigned/__invalid__/ is then the only copy.
+{{- end }}
+    Turn the backup on unless the site keeps its originals somewhere else.
 {{- end }}
   originals   facility backup {{ .Values.dataPolicy.originals.facilityBackup.retain }} | quarantine {{ .Values.dataPolicy.originals.quarantine.retain }} | file drop reclaim {{ .Values.dataPolicy.originals.fileDrop.reclaim }}
   derived     orthanc {{ .Values.dataPolicy.derived.orthancStorage.reclaim }} (min age {{ .Values.dataPolicy.derived.orthancStorage.minAge }}) | grouped {{ .Values.dataPolicy.derived.grouped.reclaim }} | assigned {{ .Values.dataPolicy.derived.assigned.reclaim }}
@@ -69,20 +95,17 @@ SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace 
 {{- if (eq (include "edge.deidEngine" .) "orthanc") }}
   {{ .Values.orthanc.deid.existingSaltSecret }}   key: AIS_DEID_HMAC_SALT
 {{- end }}
-{{- if eq .Values.upload.mode "s3" }}
-  {{ .Values.upload.s3.existingSecret }}   keys: access-key, secret-key
-  {{- if .Values.upload.s3.caBundleSecret }}
-  {{ .Values.upload.s3.caBundleSecret }}   key: {{ .Values.upload.s3.caBundleKey }}
-  {{- end }}
-{{- else }}
   {{ .Values.upload.direct.existingSecret }}   keys: server, username, password
-{{- end }}
 {{- if .Values.samba.enabled }}
   {{ .Values.samba.existingSecret }}   keys: username, password
 {{- end }}
 {{- if .Values.observability.enabled }}
-  {{ .Values.observability.loki.clientCertSecret }}   keys: tls.crt, tls.key
-  {{ .Values.observability.loki.caBundleSecret }}   key: {{ .Values.observability.loki.caBundleKey }}
+{{- with .Values.observability.loki.clientCertSecret }}
+  {{ . }}   keys: tls.crt, tls.key
+{{- end }}
+{{- with .Values.observability.loki.caBundleSecret }}
+  {{ . }}   key: {{ $.Values.observability.loki.caBundleKey }}
+{{- end }}
 {{- end }}
 
 CHECK IT IS WORKING
@@ -103,20 +126,22 @@ CHECK IT IS WORKING
     kubectl -n {{ .Values.namespace }} get pods
   kubectl -n {{ .Values.namespace }} logs -l component=group     -f
   kubectl -n {{ .Values.namespace }} logs -l component=assign    -f
-{{- if eq .Values.upload.mode "s3" }}
-  kubectl -n {{ .Values.namespace }} logs -l component=s3-uploader -f
-{{- else }}
   kubectl -n {{ .Values.namespace }} logs -l component=upload    -f
-{{- end }}
 
   Send a test study:
     dcmsend <node-ip> {{ .Values.orthanc.dicomPort }} -aec {{ .Values.orthanc.aet }} /path/to/study/
 
 NOT REMOVED BY `helm uninstall`
-  The namespace, both PersistentVolumes and both PersistentVolumeClaims carry
+  The namespace, the PersistentVolumes and their claims carry
   helm.sh/resource-policy: keep and Retain. Uninstalling this release leaves
   every received study, and the Secrets above, in place. Removing data is a
   separate deliberate act.
+{{- if .Values.storage.storageClass.create }}
+  The cluster-scoped StorageClass {{ .Values.storage.storageClass.name }} is kept too. A release
+  with another name cannot take it over: set storage.storageClass.create: false,
+  or delete it (kubectl delete storageclass {{ .Values.storage.storageClass.name }})
+  when no PersistentVolume uses it.
+{{- end }}
 
 {{- if and .Values.observability.enabled (not .Values.observability.stack.alerting.emailTo) }}
 

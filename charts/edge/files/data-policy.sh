@@ -48,6 +48,11 @@
 # =============================================================================
 set -u
 
+# PID 1 must catch stop signals. Foreground work finishes before the shell
+# runs this trap. Idle sleeps run in the background so wait is interruptible.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 INTERVAL="${INTERVAL:-300}"
 EDGE_NAME="${EDGE_NAME:?EDGE_NAME required}"
 STAGES_FILE="${STAGES_FILE:-/etc/data-policy/stages.tsv}"
@@ -84,6 +89,12 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
+# The tree the UPLOADER read, so the tree its markers fingerprint. Rendered from
+# edge.uploadSourceDir, the helper that also tells the s3-uploader where to read,
+# so the two cannot disagree. NOT the same as ASSIGNED_DIR under the ingest
+# engine: there the uploader reads /data/deidentified. Empty means unknown, and
+# `onUploaded` then refuses rather than guessing.
+UPLOAD_SOURCE_DIR="${UPLOAD_SOURCE_DIR:-}"
 
 # THE STAGE WHOSE DELETES BELONG TO SOMEONE ELSE. Empty everywhere except
 # upload.mode=direct, where the staged-reclaimer CronJob holds the delete
@@ -138,6 +149,17 @@ jlog() {
     # reporting nothing. Silence here would look exactly like a healthy site.
     exit 1
 }
+
+# INTERVAL must be whole seconds. busybox sleep returns at once on anything it
+# cannot read ("1e+06", "5x", "-1"), so the loop would sweep back to back, with
+# no CPU limit to slow it. The chart renders canonical seconds
+# (edge.reporterIntervalSeconds); this catches a hand-edited env. Exit, as
+# above, so the restart shows.
+case "$INTERVAL" in
+    ''|0*|*[!0-9]*)
+        jlog startup_failed "" "INTERVAL=${INTERVAL} is not whole seconds (dataPolicy.reporter.interval); refusing to sweep back to back"
+        exit 1 ;;
+esac
 
 # Free percent for the filesystem holding a path.
 #
@@ -223,11 +245,12 @@ fingerprint() {
         | sort | md5sum | cut -d' ' -f1 )
 }
 
-condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
+condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <candidate-dir>
     case "$1" in
         onUploaded)
             # THE MARKER'S CONTENT, NOT ITS EXISTENCE. The uploader writes a
-            # fingerprint of exactly the bytes it uploaded; this recomputes it
+            # fingerprint of the tree it uploaded (file names, sizes and mtimes,
+            # not a content checksum); this recomputes it
             # and compares.
             #
             # Existence alone was safe only while the marker was swept in the
@@ -238,13 +261,39 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
             # authorised for removal on the strength of a marker describing an
             # upload of different bytes.
             [ -f "${UPLOAD_STATE_DIR}/$2" ] || return 1
-            [ -d "${ASSIGNED_DIR}/$2" ] || return 0   # already gone; nothing to protect
-            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "${ASSIGNED_DIR}/$2")" ] ;;
+            # COMPARE THE TREE THE UPLOADER READ, not assign's output. Under
+            # deid.engine=ingest they differ: the uploader reads
+            # /data/deidentified, and assign's copy is already unlinked by the
+            # deidentify stage. Checking ASSIGNED_DIR here found it gone, skipped
+            # the comparison, and removed a re-staged deidentified session on a
+            # marker describing different bytes.
+            [ -n "${UPLOAD_SOURCE_DIR}" ] || return 1
+            # ONLY THE COPY THAT WAS VERIFIED MAY BE REMOVED. The marker describes
+            # the uploader's copy. A candidate anywhere else, even a directory
+            # with the same session name, has had nothing checked, so a match on
+            # the uploader's copy must not authorise removing it. -ef compares
+            # device and inode: trailing or doubled slashes and symlinks do not
+            # defeat it, and a missing path is never equal, which also keeps the
+            # rule that nothing to compare is not proof. (This returned 0,
+            # "already gone; nothing to protect", authorising unverified deletes.)
+            [ -n "${4:-}" ] && [ "$4" -ef "${UPLOAD_SOURCE_DIR}/$2" ] || return 1
+            [ "$(cat "${UPLOAD_STATE_DIR}/$2" 2>/dev/null)" = "$(fingerprint "$4")" ] ;;
         onAssigned)
             # Either assign has produced its output, or the session has already
             # travelled further and assign's copy is gone. The second half
             # matters: without it, a session whose assigned copy was already
             # reclaimed would pin its grouped copy forever.
+            #
+            # THE GROUPED STAGE'S WORD, AND ONLY ITS WORD. It asks whether assign
+            # has produced its output, which says nothing about whether the
+            # assigned or deidentified copies are safe to remove. On the assigned
+            # stage its first test is the session itself, so it was always true
+            # and removed every settled session before upload.
+            if [ "$3" != "derived.grouped" ]; then
+                jlog reclaim_unknown_condition "$3" "reclaim word 'onAssigned' belongs to derived.grouped only and proves nothing about this stage, so no session in it is reclaimed" \
+                     ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"onAssigned\""
+                return 1
+            fi
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
         onDeidentified)
             # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
@@ -256,6 +305,12 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
             # present under this word is one the stage has not finished with,
             # and keeping it is the correct answer.
             return 1 ;;
+        onPackaged)
+            # NEVER TRUE HERE, for the same reason as onDeidentified: the
+            # package STAGE unlinks each de-identified session once it has
+            # written the packaged copy, and leaves nothing this engine can
+            # observe. The engine reports /data/deidentified and never acts on it.
+            return 1 ;;
         *)
             # AN UNKNOWN WORD IS NOT AN UNMET CONDITION, and until now both
             # returned 1. A typo -- onDeidentifed, onUpladed -- behaved exactly
@@ -263,7 +318,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name>
             # true: nothing reclaimed, for ever, logged as normal operation. The
             # reclaim words are validated nowhere else; the enum in values.yaml
             # is a comment with no schema behind it.
-            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned or onDeidentified" \
+            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned, onDeidentified or onPackaged" \
                  ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"$(jsan "$1")\""
             return 1 ;;
     esac
@@ -307,7 +362,19 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             continue
         fi
 
-        if ! condition_met "$r_word" "$s" "$r_name"; then
+        # EXTERNAL OWNERSHIP GATES THE DELETE, NOT ONLY THE REPORT. Checked
+        # before the condition, so no marker can carry a session of a tree the
+        # staged-reclaimer CronJob owns to rm. It used to be consulted only when
+        # the condition failed: a site moved from upload.mode=s3 to direct, still
+        # holding matching S3 markers, had this engine delete the terminal tree
+        # itself, without the CronJob's confirmation against XNAT.
+        if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
+            jlog reclaim_kept "$r_name" "the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
+                 ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
+            continue
+        fi
+
+        if ! condition_met "$r_word" "$s" "$r_name" "$d"; then
             # A SESSION WHOSE CONDITION NEVER COMES TRUE IS STUCK, AND UNTIL NOW
             # NOTHING SAID SO. Keeping it is the right call every single time --
             # the copy is not provably reconstructible, so it stays -- but a
@@ -346,11 +413,6 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
             # is also read-only unless retention is armed, so a move would work in
             # one mode and silently not in the other, but the two-operations
             # argument holds whatever the mount says.)
-            if [ -n "$EXTERNAL_RECLAIM_STAGE" ] && [ "$r_name" = "$EXTERNAL_RECLAIM_STAGE" ]; then
-                jlog reclaim_kept "$r_name" "condition ${r_word} is not satisfiable in this upload mode and is not meant to be — the staged-reclaimer CronJob holds the delete authority for this tree and removes each session once XNAT confirms it" \
-                     ",\"session\":\"$(jsan "$s")\",\"reclaim\":\"$(jsan "$r_word")\",\"delegated\":true"
-                continue
-            fi
             if [ "${STUCK_AFTER_S:--}" != "-" ] && [ "${STUCK_AFTER_S:-0}" -gt 0 ]; then
                 s_age=$(newest_age_s "$d") || s_age=-1
                 if [ "$s_age" -ge "$STUCK_AFTER_S" ]; then
@@ -415,6 +477,31 @@ reclaim_stage() {   # reclaim_stage <name> <kind> <location> <min_age_s> <reclai
 # -----------------------------------------------------------------------------
 expire_original() {   # expire_original <name> <location> <retain_seconds> <policy>
     e_name="$1" e_loc="$2" e_age="$3" e_policy="$4"
+
+    # THE WORD BEFORE THE AGE. The file-drop row is an original whose policy
+    # column is a reclaim word (never | onIngested) and whose age column is
+    # its minAge, not a retain duration. Read by age alone, `reclaim: never`
+    # became a 30-day expiry of the only copy once allowExpiry was on.
+    # The table carries the raw values word; the chart trims it before it
+    # parses it (edge.durationSeconds). Trim here too, or " 1h " is kept.
+    e_word=$e_policy
+    while :; do
+        case "$e_word" in
+            ' '*|'	'*) e_word=${e_word#?} ;;
+            *' '|*'	') e_word=${e_word%?} ;;
+            *) break ;;
+        esac
+    done
+    case "$e_word" in never|forever|-|"") return 0 ;; esac
+    # Only a duration (a number, with or without one unit letter) may expire
+    # an original. Any other word is a condition this engine does not
+    # implement for originals, so it keeps and says so.
+    case "${e_word%[smhdwy]}" in
+        ''|*[!0-9]*)
+            jlog expiry_kept "$e_name" "policy '${e_word}' is not a retain duration and this engine implements no reclaim condition for originals, so nothing in this stage is expired" \
+                 ",\"policy\":\"$(jsan "$e_word")\""
+            return 0 ;;
+    esac
 
     # `forever` renders as `-`; anything non-numeric means "no expiry rule", and
     # is treated as forever rather than as 0. A malformed duration must never
@@ -487,6 +574,23 @@ orthanc_curl() {   # orthanc_curl <method> <path> [data]
     fi
 }
 
+# orthanc_flat_list <path> <item-regex>: GET a JSON array of strings and print
+# one item per line. Fails (status 1, nothing printed) unless the ORIGINAL body is
+# exactly such an array, with every item matching the regex and only JSON
+# whitespace between tokens. The body is validated before any whitespace is
+# removed, so a space or a line break inside a quoted item is a malformed body,
+# not an item with its spaces removed. Used for the two flat endpoints the
+# reclaim path reads, so no study document is ever parsed.
+orthanc_flat_list() {   # orthanc_flat_list <path> <item-regex>
+    ofl_raw=$(orthanc_curl GET "$1") || return 1
+    ofl_one=$(printf '%s' "$ofl_raw" | tr '\n\r\t' '   ')
+    ofl_item="\"$2\""
+    printf '%s' "$ofl_one" | grep -qE "^ *\[ *(${ofl_item} *(, *${ofl_item} *)*)?\] *$" || return 1
+    ofl_flat=$(printf '%s' "$ofl_one" | tr -d ' ')
+    [ "$ofl_flat" = '[]' ] && return 0
+    printf '%s' "$ofl_flat" | sed 's/^\[//; s/\]$//' | tr ',' '\n' | tr -d '"'
+}
+
 reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
     o_name="$1" o_policy="$2" o_age="$3"
     case "$o_policy" in never|-|"") return 0 ;; esac
@@ -526,11 +630,13 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         # attached ("20260806T145356,") and every study was then rejected as
         # having an unparseable timestamp — safe, but it would have meant this
         # backend silently never reclaimed anything.
-        last=$(orthanc_curl GET "/studies/${id}" \
-               | sed -n 's/.*"LastUpdate"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
+        # The bare metadata endpoint, with its status checked, instead of a sed
+        # over the study document: a failed or truncated reply reads as unknown.
+        last=$(orthanc_curl GET "/studies/${id}/metadata/LastUpdate") || last=""
         case "${last:-}" in
-            ''|*[!0-9T]*) jlog reclaim_kept "$o_name" "no usable LastUpdate for study ${id} — age UNKNOWN" \
-                               ",\"study\":\"$(jsan "$id")\""; continue ;;
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) jlog reclaim_kept "$o_name" "no usable LastUpdate for study ${id} — age UNKNOWN" \
+                    ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue ;;
         esac
         epoch=$(date -u -D '%Y%m%dT%H%M%S' -d "$last" +%s 2>/dev/null)
         case "${epoch:-}" in ''|*[!0-9]*)
@@ -541,17 +647,76 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         if [ "$age" -lt "$o_age" ]; then
             continue
         fi
+        # DELETE THE INSTANCES THIS PASS SAW, NOT THE STUDY. A series can arrive
+        # after the age check above. A study DELETE would take it with it, before
+        # group-orthanc ever saw it. The late instances are not in this list, so
+        # they stay, the study stays with them, and group-orthanc stages it again.
+        #
+        # EVERY READ USES AN ENDPOINT THAT RETURNS ONE FLAT VALUE, so this shell
+        # never has to parse a study document: /instances?expand=false is a JSON
+        # array of ids, /labels a JSON array of labels, /metadata/LastUpdate the
+        # bare timestamp. Each reply is captured first, its status checked, and
+        # its shape checked strictly. Anything unexpected reads as "unknown" and
+        # keeps the study; it never reads as "nothing there".
+        o_inst=$(orthanc_flat_list "/studies/${id}/instances?expand=false" '[0-9a-f]{8}(-[0-9a-f]{8}){4}') || {
+            jlog reclaim_kept "$o_name" "instance list of study ${id} unavailable or malformed — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        [ -n "$o_inst" ] || {
+            jlog reclaim_kept "$o_name" "study ${id} lists no instances — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        o_labels=$(orthanc_flat_list "/studies/${id}/labels" '[A-Za-z0-9_-]+') || {
+            jlog reclaim_kept "$o_name" "labels of study ${id} unavailable or malformed — kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue; }
+        o_last_again=$(orthanc_curl GET "/studies/${id}/metadata/LastUpdate") || o_last_again=""
+        case "$o_last_again" in
+            [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+            *) jlog reclaim_kept "$o_name" "LastUpdate of study ${id} unreadable after the age check — kept" \
+                    ",\"study\":\"$(jsan "$id")\",\"reason\":\"export_state_unknown\""; continue ;;
+        esac
+        if ! printf '%s\n' $o_labels | grep -qx -- "$ORTHANC_PROCESSED_LABEL"; then
+            jlog reclaim_skipped "$o_name" "study ${id} lost ${ORTHANC_PROCESSED_LABEL} after the age check — left for group-orthanc" \
+                 ",\"study\":\"$(jsan "$id")\""; continue
+        fi
+        if [ "$o_last_again" != "$last" ]; then
+            jlog reclaim_skipped "$o_name" "study ${id} changed after the age check — left for group-orthanc" \
+                 ",\"study\":\"$(jsan "$id")\""; continue
+        fi
+        # EXPORT-BOUND. group-orthanc writes one snapshot label beside the processed
+        # label: <processed>-<LastUpdate>-<digest>, the digest being the first 24 hex
+        # characters (fewer for a long processed label) of the SHA256 of the staged
+        # instance ids, one per line, sorted. The same digest is computed from the
+        # list read above, so only a study whose instances are exactly the staged
+        # ones is deleted. No label, two labels, or another digest: export state
+        # unknown, kept, and said so. An older xnat-ingest writes no label.
+        o_sorted=$(printf '%s\n' $o_inst | LC_ALL=C sort)
+        o_dlen=$(( 64 - ${#ORTHANC_PROCESSED_LABEL} - ${#last} - 2 )); [ "$o_dlen" -gt 24 ] && o_dlen=24
+        o_hash=$(printf '%s\n' $o_sorted | sha256sum | cut -c1-"$o_dlen")
+        o_receipt="${ORTHANC_PROCESSED_LABEL}-${last}-${o_hash}"
+        o_nrec=$(printf '%s\n' $o_labels | grep -c -- "^${ORTHANC_PROCESSED_LABEL}-")
+        if [ "$o_nrec" != 1 ] || ! printf '%s\n' $o_labels | grep -qx -- "$o_receipt"; then
+            jlog reclaim_kept "$o_name" "study ${id} has no single snapshot label ${o_receipt}: its export state is unknown, kept" \
+                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"reason\":\"export_state_unknown\""; continue
+        fi
+        # THE DRY-RUN GATE COMES LAST, and only the delete follows it. A dry run
+        # must log the decisions of an armed run: the same kept and skipped lines,
+        # and WOULD delete only for a study that an armed run deletes. The gate
+        # was after the age check. A dry run then said WOULD delete for a study
+        # that an armed run keeps as export_state_unknown. The steps above only
+        # read from Orthanc.
         if [ "$RECLAIM_ENABLED" != "true" ] || [ "$DRY_RUN" = "true" ]; then
             jlog reclaim_skipped "$o_name" "WOULD delete study ${id} (age ${age}s >= minAge ${o_age}s), enabled=${RECLAIM_ENABLED} dryRun=${DRY_RUN}" \
                  ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"min_age_s\":${o_age}"
             continue
         fi
-        if orthanc_curl DELETE "/studies/${id}" >/dev/null 2>&1; then
+        o_list=""
+        for o_i in $o_sorted; do o_list="${o_list:+$o_list,}\"${o_i}\""; done
+        o_n=$(printf '%s\n' $o_sorted | grep -c .)
+        if orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" >/dev/null 2>&1; then
             o_removed=$((o_removed + 1))
-            jlog reclaim_removed "$o_name" "deleted study ${id} from Orthanc after ${o_age}s" \
-                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age}"
+            jlog reclaim_removed "$o_name" "deleted the ${o_n} instance(s) of study ${id} from Orthanc after ${o_age}s" \
+                 ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"instances\":${o_n}"
         else
-            jlog reclaim_failed "$o_name" "Orthanc refused DELETE for study ${id}" ",\"study\":\"$(jsan "$id")\""
+            jlog reclaim_failed "$o_name" "Orthanc refused the delete of study ${id}" ",\"study\":\"$(jsan "$id")\""
         fi
     done
 }
@@ -630,5 +795,10 @@ while true; do
     done < "$STAGES_FILE"
 
     [ "$ONESHOT" = "true" ] && break
-    sleep "$INTERVAL"
+    # A failed sleep returns at once: exit rather than sweep back to back.
+    sleep "$INTERVAL" &
+    wait $! || {
+        jlog sleep_failed "" "sleep ${INTERVAL} failed; exiting rather than sweeping back to back"
+        exit 1
+    }
 done

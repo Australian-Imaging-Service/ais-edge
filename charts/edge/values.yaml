@@ -1,10 +1,10 @@
 # =============================================================================
 # AIS Edge — edge-site chart
 # =============================================================================
-# One chart, one edge site. It runs in whichever cluster you point it at: a
-# k0smotron-hosted child cluster (tier-2, upload.mode=s3) or a plain
-# single-node k0s box (tier-1, upload.mode=direct). Nothing in here assumes a
-# management plane exists; that lives in charts/mgmt.
+# One chart, one edge site. On this branch (tier-1) it runs on a plain
+# single-node k0s box and uploads straight to XNAT (upload.mode=direct). The
+# tier-2 variant, which stages through S3 to a management cluster, is on the
+# main branch.
 #
 # HOW TO READ THIS FILE
 #   1. dataPolicy    — what is kept and for how long. Read this first.
@@ -134,10 +134,6 @@ hostnames:
   seaweedfs: ""
   grafana: ""
   loki: ""
-seaweedfs:
-  perSiteBuckets: true
-  bucketPrefix: ingest
-
 # Free-text label attached to every log line and metric from this site. It is
 # what Grafana's `cluster` variable filters on, so it must be unique per site.
 clusterLabel: ""
@@ -246,14 +242,21 @@ dataPolicy:
       runAsGroup: 10001
       fsGroup: 10001
     resources:
-      # cpu: 1, not a fraction. The sweep is a single-threaded burst, and
-      # a quota below one core is clipped in nearly EVERY CFS period it
-      # runs in, which both trips CPUThrottlingHigh and stretches the
-      # sweep about 11x. requests stays at 5m, so its scheduler weight is
-      # still tiny and it yields under contention; the limit only bounds
-      # a runaway.
+      # 5m = cgroup cpu.weight 1: yields to Burstable pods, NOT to BestEffort ones.
       requests: {cpu: 5m, memory: 16Mi}
-      limits:   {cpu: 1, memory: 64Mi}
+      # NO CPU LIMIT, on purpose. A sweep is a sub-second burst of pipelines
+      # (find | stat | sort | md5sum) that briefly wants more than one core.
+      # Any CFS quota throttles most of the few periods it runs in (61% at
+      # cpu: 1, 0.0014 cores average, stream-2-ab-dev 2026-09-30), and
+      # CPUThrottlingHigh flapped on it. No quota: no throttling, no series.
+      # CPU is bounded by the script running one pipeline at a time, and by
+      # the interval floor (edge.validate, templates/_helpers.tpl).
+      # CAUTION: re-adding limits.cpu brings the CPUThrottlingHigh mails back,
+      # and scripts/ci/runtime-templates.sh fails on it. A site that must cap
+      # CPU (namespace policy) needs the reporter excluded from that rule
+      # again, as #26 did: make it a decision, not an accident.
+      # CAUTION: parallelism in data-policy.sh (&, xargs -P) is uncapped.
+      limits: {memory: 64Mi}
 
   # ---------------------------------------------------------------------
   # ORIGINALS
@@ -329,8 +332,14 @@ dataPolicy:
     fileDrop:
       # Root of ingest.fileDrop.inputGlob. Only read when that path is enabled.
       location: /data/incoming
+      # never       keep every drop (the default).
+      # onIngested  reserved. Nothing implements it yet: the engine keeps the
+      #             drops and logs expiry_kept. With the policy on, the chart
+      #             refuses any word but never while the file drop is enabled.
       reclaim: never             # never | onIngested
-      minAge: 30d                # additionally required when not 'never'
+      # Reserved with onIngested. Under `never` the engine does not read it: a
+      # drop is never expired by this age alone.
+      minAge: 30d
 
   # ---------------------------------------------------------------------
   # DERIVED
@@ -340,6 +349,10 @@ dataPolicy:
     # De-identified copy held inside Orthanc until group-orthanc has pulled
     # it. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
+    # CAUTION: needs an xnat-ingest that writes the export snapshot label
+    # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
+    # The default image, our fork build 0.16.2.post1, writes it. With an older
+    # image this backend keeps every study and logs export_state_unknown.
     orthancStorage:
       # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
       # goes through the backend below, because Orthanc names files by UUID and
@@ -350,6 +363,14 @@ dataPolicy:
       # deletes them through its API. Replacing the de-identifier means changing
       # this word (or pointing location at the new store), not rewriting the
       # engine.
+      # orthanc-rest deletes a study only when its export is proven: the
+      # processed label is present, LastUpdate is unchanged since the first
+      # read, and the one snapshot label group-orthanc wrote
+      # (<processedLabel>-<LastUpdate>-<digest>) names that LastUpdate and the
+      # digest of the instance list read now. Then exactly that list is
+      # deleted. Anything else is kept and logged as reclaim_kept with reason
+      # export_state_unknown: a series that arrived late, a study staged by an
+      # xnat-ingest that writes no snapshot label, an unreadable reply.
       backend: orthanc-rest      # filesystem | orthanc-rest
       reclaim: onGrouped         # never | onGrouped
       minAge: 7d
@@ -400,6 +421,8 @@ dataPolicy:
       # Ignored under onDeidentified — the stage deletes at handoff, so there is
       # no window to measure. The chart refuses the combination rather than
       # letting a configured window be silently discarded.
+      # CAUTION: under direct upload the stagedReclaimer CronJob below applies
+      # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
 
@@ -415,21 +438,36 @@ dataPolicy:
     # upload.mode=direct, because nothing writes the uploader's state dir, so
     # setting it here would keep this tree forever while looking like a policy.
     stagedReclaimer:
-      # Hourly. The uploader deletes on its own success within seconds; this is
-      # the slower, sure path for whatever that missed.
+      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
+      # terminal tree: xnat-ingest upload never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by
       # the XNAT check regardless, so this is about noise, not safety.
+      # GUIDING: the CronJob waits for the LONGER of this and the minAge of the
+      # tree it reclaims (assigned or deidentified, by deid engine). Set the
+      # recovery window there; it is logged as the deciding key when it wins.
+      # The age counts from when the newest file reached the tree (its ctime),
+      # not from the file's own mtime, which a hard link keeps from Orthanc.
       minAge: 1d
-      # Ask XNAT whether it holds the session, complete, before deleting the
-      # only remaining copy. Off means trusting local state alone.
-      # CAUTION: `false` removes the last independent check before deletion.
+      # Ask XNAT for each local file (a HEAD: present, same size) before deleting
+      # the only remaining copy.
+      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
+      # XNAT proves, file by file.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes
       # this many and stops, leaving the rest to inspect.
       maxRemovals: 50
       # Killed if a run hangs on an unreachable XNAT, before the next is due.
       deadlineSeconds: 3000
+      # ReclaimerNotSucceeding fires after this long with no successful run,
+      # whatever the cause: failed, killed at the deadline, crashed, not started.
+      # Default: one failed run never fires it. Two failed runs, then a third not
+      # succeeding within 15m, do: about 3h15m after the last success.
+      # CAUTION: must exceed 2 x the schedule period + deadlineSeconds, or one bad
+      # run fires it. Raise it when you slow the schedule.
+      # The chart refuses less (reading the period from the usual schedule
+      # forms; others are checked against deadlineSeconds only), and forever/never.
+      alertAfter: 3h
       resources:
         requests: {cpu: 20m, memory: 64Mi}
         limits: {memory: 256Mi}
@@ -439,7 +477,25 @@ dataPolicy:
       # so the stage and the uploader cannot end up pointed at different trees.
       # Restating it here would also declare a path that does not exist in a
       # render with de-identification off.
-      reclaim: auto             # never | onUploaded
+      # never | onUploaded | onPackaged
+      #
+      # auto resolves to onPackaged when ingest.package renders: the package
+      # stage then reads this tree and removes each session itself once it has
+      # written the packaged copy, so the uploader's markers describe
+      # /data/packaged, not this tree. Otherwise onUploaded.
+      reclaim: auto
+      # The recovery window after upload. Under direct upload the stagedReclaimer
+      # CronJob applies it (the longer of this and its own minAge). Not used
+      # when reclaim resolves to onPackaged: the package stage retires the tree.
+      minAge: 0
+    # Where the package stage writes, and what `upload` reads when
+    # ingest.package renders. Rendered as a stage only then.
+    packaged:
+      # No `location` key, for the same reason as `deidentified` above: the
+      # path is derived from edge.uploadSourceDir.
+      reclaim: auto             # never | onUploaded  (auto = onUploaded)
+      # The recovery window after upload, as for `deidentified` above. Under
+      # direct upload the stagedReclaimer CronJob applies it.
       minAge: 0
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
@@ -653,16 +709,46 @@ orthanc:
 # =============================================================================
 ingest:
   image:
-    repository: ghcr.io/australian-imaging-service/xnat-ingest
-    tag: "0.15.6"
+    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
+    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
+    # repository when an upstream release contains them.
+    repository: ghcr.io/akshitbeniwal/xnat-ingest
+    tag: "0.16.2.post1"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
   # fields directly; turning this off breaks monitoring, not just formatting.
   logFormat: json
 
+  # Extra Python packages, as pip requirement specs, for the pods that load
+  # packaged sessions: package, and the direct-mode upload. Use it for
+  # fileformats types the image does not ship, such as package's dicom-sample
+  # output and DicomSeries archive converters, which live in
+  # fileformats-vendor-australianimagingservice (+ -extras). Pin a vendor
+  # revision that provides both DicomSeries converters. Upload needs the type
+  # as well because packaged manifests name it, and loading a session resolves
+  # every manifest's type.
+  #
+  # An init container pip-installs them (--no-deps, so they must need only what
+  # the image already has) into an emptyDir on PYTHONPATH. fileformats is a
+  # namespace package, so they merge with the image's copy.
+  #
+  # CAUTION: the install runs on EVERY pod start, so the edge must reach the
+  # index or git host each time; if it can't, the pod stays in Init. Pin git
+  # refs to a commit, not a branch, or a restart can pick up different code.
+  #
+  #   extraPipPackages:
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+  #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+  extraPipPackages: []
+  # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
+  # these stages without chart-set reservations or limits, as before. Set each
+  # stage for the site's workload; do not infer production limits from a small
+  # test. See docs/components/xnat-ingest.md, Ingest stage CPU and memory.
+
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
+    resources: {}
     enabled: true
     interval: 60
     # Only studies carrying this label are pulled. Applied by the Lua hook
@@ -677,8 +763,10 @@ ingest:
   # OFF by default — see dataPolicy.originals.fileDrop for why this path
   # deserves more care than the Orthanc one.
   fileDrop:
+    resources: {}
     enabled: false
     interval: 300
+    # Files in subfolders are read too: group runs with --recursive.
     inputGlob: "/data/incoming/**/*"
     waitPeriod: 60
     datatypes: "medimage/dicom-series"
@@ -688,8 +776,14 @@ ingest:
   # routing.json's AETMap is the single source of truth for project; there is
   # no hardcoded project ID anywhere.
   assign:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
+    # OPTION: file every session under this one XNAT project, whatever the
+    # project tag says (assign --constant-project-id; the tagMapping project tag
+    # is then ignored). For an edge that only ever feeds one project. Empty:
+    # the project comes from tagMapping.project.
+    constantProjectId: ""
     # THESE FOLLOW deid.engine. Under the default `ingest` the Lua hook does not
     # modify instances, so nothing writes the ClinicalTrial* tags and assign must
     # read tags the modality itself populates. The chart refuses to render if
@@ -727,8 +821,8 @@ ingest:
     #
     # SET IT ONLY IF YOUR MODALITIES CARRY THE IDS SOMEWHERE ELSE, which is a
     # real case under deid.engine=ingest: the radiographer enters these at the
-    # console, so CAI uses ReferringPhysicianName for project and PatientID for
-    # subject, and other sites use StudyComments or StudyDescription. Whatever
+    # console, so cai-lfs3 uses StudyDescription for project and PatientID for
+    # subject, and other sites use StudyComments or ReferringPhysicianName. Whatever
     # is named is checked against the engine at render time, in both directions.
     #
     # WHAT IT COSTS TO KNOW: whatever is named here becomes the XNAT SUBJECT
@@ -784,6 +878,7 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
+    resources: {}
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file, exactly like
@@ -829,7 +924,51 @@ ingest:
     # Fernet.generate_key()). Set, mappings are written encrypted as
     # <session>.json.enc and are unreadable without it. Unset, they are plain
     # JSON on the same volume as the data they de-identify.
+    # Production ingest sites must set this reference. Empty means plaintext
+    # reidentification maps; existing plaintext is not migrated automatically.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
+
+  # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`
+  # between deidentify and upload: reads /data/deidentified, writes
+  # /data/packaged, and the uploader follows it to /data/packaged.
+  #
+  # Each SOURCE resource is replaced by every outputResources entry, and each
+  # conversion receives the original series. The vendor extras convert that
+  # series into a DICOM directory ZIP and a representative image. The defaults
+  # produce the XNAT layout: the whole series as an uncompressed zip under
+  # DICOM-zip, plus one DICOM sample that XNAT can read headers from. `auto`
+  # names the sample's resource from its SOP class (DICOM, secondary, ...).
+  #
+  # ONLY RENDERS UNDER deid.engine=ingest. The input is the deidentify stage's
+  # output, which exists only under that engine. Under any other engine this
+  # block is ignored and the uploader reads /data/assigned as before.
+  #
+  # A session without a sourceDatatype scan resource is skipped at INFO and
+  # stays in /data/deidentified. xnat-ingest PR #217 passes it through.
+  # An empty input directory is normal while waiting for new work.
+  package:
+    enabled: false
+    # Runs on ingest.image.tag like every stage. No released xnat-ingest
+    # runs the default spec yet: 0.16.2 stops at start. See the What it needs
+    # section in docs/package-stage.md for all required features.
+    interval: 60
+    copyMode: hardlink_or_copy
+    sourceDatatype: medimage/dicom-series
+    # label: resource name in XNAT. For the DICOM sample use `auto`: it takes the
+    #        label XNAT expects from the SOP class of the series (DICOM for
+    #        images, secondary for secondary captures, ...). A fixed label is
+    #        refused for a series of another class, and the session fails.
+    # spec:  target datatype, with converter options after ':'.
+    outputResources:
+      - label: DICOM-zip
+        # reproducible=true: fixed entry timestamps and sorted entries, so the
+        # zip of unchanged files has the same bytes every time, and a study
+        # staged again for a late series uploads nothing twice. Needs a
+        # fileformats-extras 0.22.3 or later. An older one stops at start with
+        # ValueError: Invalid option 'reproducible'.
+        spec: "medimage/dicom-series+zip:compression=ZIP_STORED,reproducible=true"
+      - label: auto
+        spec: medimage/vnd.australianimagingservice.dicom-sample
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.
@@ -842,58 +981,13 @@ ingest:
 # =============================================================================
 # 5. upload — how sessions reach XNAT
 # =============================================================================
-# s3     edge -> central S3 (SeaweedFS) -> mgmt uploader -> XNAT.
-#        Central buffering and retry, one XNAT credential for the whole
-#        fleet, and the edge never needs to reach XNAT. Needs charts/mgmt.
-#
-# direct edge -> XNAT. No management plane, no S3, no CA plumbing. This is
-#        the tier-1 / standalone-site path.
-#
-# The two are mutually exclusive: both enabled means every session is
-# uploaded twice. The chart refuses to render if you set both.
+# direct edge -> XNAT. No management plane, no S3, no CA plumbing. On this
+#        branch (tier-1) it is the only mode: the chart refuses any other.
+#        Staging through S3 to a management cluster is the tier-2 chart on the
+#        main branch.
 # -----------------------------------------------------------------------------
 upload:
-  mode: s3
-
-  s3:
-    endpoint: ""                       # https://seaweedfs.<domain>
-    # THIS SITE'S OWN staging bucket. The management chart names them
-    # ingest-<edge name> by default, and scopes this edge's S3 identity to
-    # exactly this bucket — SeaweedFS enforces actions per BUCKET, with no
-    # prefix-level scoping, so a shared bucket means every site can read and
-    # delete every other site's staged imaging. Must match the name the
-    # management chart derived for this site.
-    bucket: ""   # e.g. ingest-edge-dev
-    prefix: staged
-    region: us-east-1                  # SeaweedFS ignores it; the AWS CLI requires one
-
-    # No addressing-style key here on purpose: AWS_ENDPOINT_URL alone makes
-    # botocore resolve with ForcePathStyle=True — measured against SeaweedFS
-    # 3.99, the request URL comes out path-style, which the single-SAN cert
-    # needs. AWS_S3_ADDRESSING_STYLE is a config-file key, not a botocore env
-    # var, so a values entry for it would be silently ignored.
-
-    existingSecret: s3-edge-credentials  # keys: access-key, secret-key
-
-    # PEM holding the CA that signed the SeaweedFS server certificate.
-    # CAUTION: an EMPTY AWS_CA_BUNDLE does not fall back to the system trust
-    # store — it disables certificate verification entirely, silently
-    # (measured: a request to a hostname the cert does not cover succeeded
-    # anyway). The chart refuses to render an https endpoint with no CA
-    # configured; never let this render empty.
-    caBundleSecret: ca-bundle
-    caBundleKey: ca.crt
-    image:
-      repository: amazon/aws-cli
-      tag: "2.31.19"
-      pullPolicy: IfNotPresent
-    interval: 60
-    # Don't touch a session until it has been quiet this long — assign may
-    # still be writing into it.
-    settleMinutes: 5
-    resources:
-      requests: {memory: 128Mi, cpu: 100m}
-      limits:   {memory: 512Mi, cpu: 500m}
+  mode: direct
 
   direct:
     replicas: 1
@@ -914,12 +1008,19 @@ upload:
     # that has quietly stopped watching the delivery path.
     alwaysInclude: "all"
     verifySsl: true
-    requireManifest: false
-    checkChecksums: false
+    # true: upload a resource only when its manifest is present and every file
+    # in it matches. A half-written resource waits for the next pass.
+    # false: upload the files that are there. Use only for sessions staged
+    # without manifests.
+    requireManifest: true
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
-      limits:   {memory: 1Gi,   cpu: "1"}
+      # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
+      # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
+      # session with many large scans. Lower this only after the image
+      # writes archives to disk (xnat-ingest PR #200).
+      limits:   {memory: 4Gi,   cpu: "1"}
 
   # Optional direct uploader for radiology reports stored in S3. This is
   # currently a CIMA-X-only workflow and remains off until its S3 layout can
@@ -990,9 +1091,11 @@ observability:
   # THE STACK IS TUNED IN THE SUBCHART BLOCKS AT THE BOTTOM OF THIS FILE
   # (`loki:` and `kube-prometheus-stack:`), NOT HERE.
   #
-  # There were friendly parent keys here — stack.retentionDays,
-  # stack.grafana.nodePort, stack.lokiStorage.size, stack.alerting.* — and every
-  # one of them was DEAD. Helm cannot template subchart values, so no template in
+  # There were friendly parent keys here (stack.retentionDays,
+  # stack.grafana.nodePort, stack.lokiStorage.size) and every one of them was
+  # DEAD. stack.alerting.* is the exception: emailTo, smtpHost and
+  # existingSecret are live, read by templates/observability.yaml, and emailTo
+  # is required. Helm cannot template subchart values, so no template in
   # this chart can read a parent key and push it down into a subchart; the
   # subchart reads its own block or nothing. Measured before removing them:
   # `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.
@@ -1177,6 +1280,18 @@ loki:
 
 kube-prometheus-stack:
   fullnameOverride: ais-kps
+  # Upstream alert rules: all on, except those this chart replaces.
+  defaultRules:
+    disabled:
+      # CPUThrottlingHigh is not listed: upstream's copy runs unmodified. The
+      # data-policy reporter has no CPU limit, so the rule has nothing to read
+      # for it (see dataPolicy.reporter.resources).
+      # Replaced by ais-edge-jobs in files/prometheus-rules/warning.yaml: the
+      # same rule, minus the staged-reclaimer's own Jobs, whose failures
+      # ReclaimerRunUnavailable and ReclaimerNotSucceeding report.
+      # CAUTION: remove this and upstream's copy alerts on the reclaimer's
+      # failed Jobs again; scripts/ci/promtool.sh fails on two copies.
+      KubeJobFailed: true
   # No ingress on tier-1 — Grafana is reached on a NodePort instead.
   grafana:
     enabled: true

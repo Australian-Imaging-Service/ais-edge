@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract secrets-encrypted values-consumers
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -122,6 +122,11 @@ pvc-retention: $(RENDER_DEP)
 reclaimer:
 	@tests/reclaimer/run-tests.sh
 
+# scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
+# error as "no cleanup Job runs", and never resume without a wrapped writer.
+reclaimer-fence:
+	@tests/reclaimer-fence/run-tests.sh
+
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,
 # so without this the Loki rules have no test at all. Skips loudly without
@@ -141,6 +146,10 @@ duplicate-names: $(RENDER_DEP)
 runtime-templates: $(RENDER_DEP)
 	@scripts/ci/runtime-templates.sh
 
+# NOTES.txt renders only at install, so no other stage reads it.
+notes:
+	@scripts/ci/notes.sh
+
 # The only stage that needs no render.
 shell-syntax:
 	@scripts/ci/shell-syntax.sh
@@ -148,8 +157,6 @@ shell-syntax:
 lua-syntax:
 	@bash scripts/ci/lua-syntax.sh
 
-fingerprint-contract:
-	@bash scripts/ci/fingerprint-contract.sh
 
 # The one check standing between an operator and a committed XNAT password.
 # It existed as scripts/site-secrets.sh check and nothing ever ran it.
@@ -205,3 +212,6 @@ help:
 	@echo '  CI_REQUIRE_DATAPOLICY_TESTS=1  a skipped data-policy stage is a failure'
 	@echo '  CI_REQUIRE_RULE_TESTS=1  a rule file with no promtool test is a failure'
 	@echo '  CI_KIND_KEEP=1           leave the kind cluster up for inspection'
+
+verify-live-checks:
+	@python3 tests/verify-live/test_checks.py

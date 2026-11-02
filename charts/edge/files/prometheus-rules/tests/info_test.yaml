@@ -36,3 +36,4 @@ tests:
                 The number of nodes in this cluster changed in the last 10
                 minutes. On a tier-1 appliance there is exactly one node, so
                 this should never fire.
+

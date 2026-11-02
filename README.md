@@ -373,7 +373,7 @@ k0s-k0smotron-mvp/
 │       ├── orthanc-deployment.yaml        ← Orthanc Deployment + Service
 │       ├── orthanc-config.yaml            ← orthanc.json, routing.json, deid profile
 │       ├── ingest-pipeline.yaml           ← group-orthanc + assign
-│       ├── upload.yaml                    ← direct upload to XNAT (tier-1) / s3 (tier-2)
+│       ├── upload.yaml                    ← direct upload to XNAT (the only mode on tier-1)
 │       ├── storage.yaml                   ← StorageClass + both hostPath PVs/PVCs
 │       ├── data-policy.yaml               ← the dataPolicy DaemonSet
 │       ├── vector.yaml                    ← hand-written Vector DaemonSet
@@ -399,10 +399,10 @@ configuration into manifests, so a value is stated once and read once.
 each of which otherwise fails *silently* at runtime — de-id enabled without
 `policyReviewed`, an empty `aetMap` (every modality quarantined), an empty
 `profile` (studies reach XNAT with PHI intact and nothing looks wrong), deid
-without `storage.facilityBackup.enabled`, and `upload.mode` set to both paths at
-once. `install.sh` adds one more: tier-1 requires `upload.mode: direct`, because
-`s3` would have the uploader retrying an endpoint that never answers while the
-disk quietly filled.
+without `storage.facilityBackup.enabled`, and any `upload.mode` other than
+`direct`. `install.sh` refuses the same: `s3` would have the uploader retrying
+an endpoint that never answers while the disk quietly filled. S3 staging needs
+the tier-2 management plane, which is on the main branch.
 
 ## Installing on an Existing Kubernetes Cluster
 
@@ -467,7 +467,7 @@ then runs with `--dont-verify-ssl`.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | 0.15.0 | `ghcr.io/australian-imaging-service/xnat-ingest:0.15.0` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
+| xnat-ingest | 0.16.2 | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |
@@ -542,13 +542,14 @@ curl -sk <XNAT_URL>                                             # should return 
 | Node reboots | k0s auto-starts; pods resume; assigned files are safe on the local disk | Nothing — the pipeline picks up where it left off |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
 | XNAT is down | Uploads fail; sessions accumulate in `/data/assigned` | XNAT returns; the upload loop clears the backlog |
-| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Manual rename/move; real clinical DICOMs populate this field |
+| DICOM missing AccessionNumber | `assign` logs `Could not resolve project/subject/session IDs` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Rename and move the session, as in "Recovering an invalid session" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Real clinical DICOMs populate this field |
 | `/data` disk fills | Nothing is deleted while `dataPolicy.enabled` is false, so both volumes grow unbounded. The data-policy DaemonSet reports free disk and what it *would* reclaim | Expand the disk, or turn on `dataPolicy` (read a week of `dryRun` decisions first — this node holds the only copy of the facility backup) |
 | `helm upgrade` refuses to render | One of the render-time guards fired (see Repository Structure) | The failure text names the values path and why it matters — fix the site file, do not bypass |
-| DICOM missing `SeriesDescription` | `group-orthanc` raises `ImagingSessionParseError: Did not find 'SeriesDescription'` and exports nothing. assign then receives an empty session and names it `assigned/__invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...` — which points at the de-identification profile rather than the real cause | Read the group stage's log first. Confirm de-identification really did set the tags with `curl localhost:8042/instances/<id>/simplified-tags` on the receiver pod; if it did, the fault is upstream in grouping |
-| One malformed study among many | `group-orthanc` raises on it and **exits**, so the loop restarts and every OTHER waiting study is blocked behind it. Kubernetes reports `CrashLoopBackOff` and `IngestPodCrashLoop` fires — which is the alert working correctly, not a false positive | Find the offending study from the traceback, delete it from Orthanc (`DELETE /studies/<id>`), and the loop recovers on the next cycle. Observed on this deployment: 9 restarts, then clean once the bad study was removed |
+| DICOM missing `SeriesDescription` or `SeriesNumber` | `group-orthanc` stages the series with a fallback name and logs a WARNING with `event: series_metadata_fallback` and the Orthanc series ID. A missing description gives the scan type `Series_<scan-id>`. A missing number gives the `SeriesInstanceUID` with its dots changed to underscores, as XNAT's header importer does | Nothing. Correct the tag at the modality if the scan needs a readable name |
+| One study that cannot be staged | `group-orthanc` logs `Skipping Orthanc study '<id>': <reason>` at ERROR, removes the study's scratch folders and stages the other studies. The study stays in Orthanc without the processed label and is tried again on every pass, so `IngestStageError` keeps firing. Two series with one `SeriesNumber` are refused on purpose, so that no series is merged or dropped. Before the 0.16.2.post1 image, one such study stopped the stage for every study | Read the reason, then follow "A study that group-orthanc refuses" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Do not delete the study from Orthanc |
 | XNAT presents an untrusted certificate | The upload pod `CrashLoopBackOff`s with `SSLCertVerificationError ... self-signed certificate`, and no session is ever delivered | `openssl s_client -connect <xnat>:443` to confirm (`Verify return code: 18`). Set `upload.direct.verifySsl: false` for that site, and revert it when XNAT gets a real certificate |
-| Session already delivered, uploader loops again | `'DICOM' resource ... already exists on XNAT with different checksums` is logged at ERROR and inflates the "Upload errors" panel, although nothing is wrong | Look for a matching `Successfully uploaded all files in` line for the same session. If present, the session is delivered |
+| Existing XNAT resource has different checksums | The ERROR means missing, extra or changed content; the empty-digest false ERROR was fixed in 0.15.3. `XNATResourceIncompleteAndStuck` reports repeated conflicts | Compare staged and remote files. A later upload-success line does not prove that content matches. Preserve the source and resolve the conflict before deleting anything. |
+| `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT has no checksum for one or more files, so those bytes were not compared | Ask the XNAT administrator to configure and compute catalog checksums. A matching filename is not a content proof. The warning can recur on each upload attempt. |
 
 ## Observability
 
@@ -706,12 +707,14 @@ changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
 **4. Verify.**
 
 ```bash
-# from inside the cluster — should now be 401 without credentials
-kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
+# The Orthanc image has no curl, so reach the API through a port-forward.
+# Run it in a second terminal, wait for "Forwarding from 127.0.0.1:8042",
+# and stop it with Ctrl-C afterwards:
+#   kubectl -n xnat-ingest port-forward deploy/<release>-orthanc 8042:8042
+# should now be 401 without credentials
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 # and 200 with them
-kubectl -n xnat-ingest exec deploy/<release>-orthanc -- \
-    curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
 Then confirm the pipeline still moves: `group-orthanc`'s log should keep

@@ -120,9 +120,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- end }}
 
 
-  {{- /* Both upload modes at once = every session uploaded to XNAT twice. */ -}}
-  {{- if not (has .Values.upload.mode (list "s3" "direct")) }}
-    {{- fail (printf "upload.mode must be 's3' or 'direct', got %q" .Values.upload.mode) }}
+  {{- /* Tier-1 uploads straight to XNAT. S3 staging needs the management
+       cluster, which is the tier-2 chart on the main branch. */ -}}
+  {{- if ne .Values.upload.mode "direct" }}
+    {{- fail (printf "upload.mode must be 'direct' on the tier-1 branch, got %q. Staging through S3 needs the management cluster: use the main branch (tier-2)." (toString .Values.upload.mode)) }}
   {{- end }}
 
   {{- if .Values.upload.reports.enabled }}
@@ -137,31 +138,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
     {{- if or (le (int .Values.upload.reports.loop) 0) (lt (int .Values.upload.reports.waitPeriod) 0) }}
       {{- fail "upload.reports.loop must be positive and upload.reports.waitPeriod must be non-negative." }}
-    {{- end }}
-  {{- end }}
-
-  {{- if eq .Values.upload.mode "s3" }}
-    {{- if not (include "edge.s3Endpoint" .) }}
-      {{- fail "upload.mode=s3 needs an S3 endpoint, and none could be derived. Either pass the management site values file too (it carries hostnames.seaweedfs / domain.internal), or set upload.s3.endpoint explicitly." }}
-    {{- end }}
-    {{- /* No default. A shared bucket name is exactly the mistake this is
-           preventing: SeaweedFS scopes identities per BUCKET with no
-           prefix-level control, so two sites in one bucket can read and
-           delete each other's staged imaging. The name has to be stated. */ -}}
-    {{- if not (include "edge.s3Bucket" .) }}
-      {{- fail "no staging bucket could be derived. Set it to THIS site's own staging bucket — the management chart names them ingest-<edge name>. There is deliberately no default: a shared bucket gives every site read and delete access to every other site's staged imaging, because SeaweedFS scopes identities per bucket and has no prefix-level scoping." }}
-    {{- end }}
-
-    {{- /* THE trap measured against SeaweedFS 3.99: AWS_CA_BUNDLE set to an
-           empty string does NOT fall back to the system trust store — it
-           disables certificate verification entirely and only logs
-           "Unverified HTTPS request is being made". A request to a hostname
-           the certificate does not cover then succeeds. So an https endpoint
-           with no CA configured must be a hard render error, never a default. */ -}}
-    {{- if hasPrefix "https://" (include "edge.s3Endpoint" .) }}
-      {{- if not .Values.upload.s3.caBundleSecret }}
-        {{- fail (printf "upload.s3.endpoint is https (%s) but upload.s3.caBundleSecret is empty. Refusing to render: an empty AWS_CA_BUNDLE silently DISABLES TLS verification rather than falling back to the system trust store. Set caBundleSecret, or use an http:// endpoint if this is an in-cluster service." (include "edge.s3Endpoint" .)) }}
-      {{- end }}
     {{- end }}
   {{- end }}
 
@@ -290,8 +266,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against the pinned 0.15.6; the same raise is in
-               0.13.1, so this is a long-standing footgun rather than a version
+               it. RE-VERIFIED against the pinned 0.16.2 (api/group_api.py:268, the file is
+               unchanged since 0.16.1); the
+               same raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
         {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
@@ -446,6 +423,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- end }}
   {{- end }}
 
+  {{- if .Values.dataPolicy.reporter.enabled }}
+    {{- $_ := include "edge.reporterIntervalSeconds" . }}
+  {{- end }}
+
   {{- /* A removed key that is still set must fail, not be ignored — silently
          dropping it is the exact defect this whole block is being cleaned of. */ -}}
   {{- if hasKey .Values.dataPolicy.derived.grouped "minAge" }}
@@ -469,6 +450,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          script were written for upload.mode=direct and landed on the branch
          whose default mode is s3, so THIS branch - the one that only ever runs
          direct - was the one left without them. */ -}}
+  {{- /* THE PACKAGE STAGE MOVES THE TERMINAL TREE to /data/packaged, so the
+         deidentified tree becomes an intermediate one, exactly as assigned
+         did under the ingest engine. Its consumer is the package stage, which
+         retires each session with --unlink-source once the packaged copy is
+         written; onUploaded can never be satisfied for it. */ -}}
+  {{- if eq (include "edge.packageEnabled" .) "true" }}
+    {{- if eq (include "edge.deidentifiedReclaim" .) "onUploaded" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onUploaded with ingest.package enabled. The uploader then reads /data/packaged, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/deidentified: every de-identified session would accumulate on the edge disk. Use onPackaged (or auto), which lets the package stage retire each session as soon as it has written the packaged copy, or never if you intend to keep them." }}
+    {{- end }}
+  {{- end }}
+  {{- if eq (include "edge.deidentifiedReclaim" .) "onPackaged" }}
+    {{- if ne (include "edge.packageEnabled" .) "true" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onPackaged but the package stage does not render (it needs ingest.package.enabled=true and deid.engine=ingest). That condition is satisfied by the package STAGE unlinking its own input, so nothing would ever retire /data/deidentified. Use auto." }}
+    {{- end }}
+    {{- $minAge := include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}
+    {{- if and (ne $minAge "-") (gt (int64 $minAge) 0) }}
+      {{- fail (printf "dataPolicy.derived.deidentified.minAge=%v is set alongside reclaim=onPackaged. The package stage deletes each session the moment it has written the packaged copy, so a recovery window on this tree can never elapse. Set minAge to 0, or set dataPolicy.derived.packaged.minAge for a window after upload." .Values.dataPolicy.derived.deidentified.minAge) }}
+    {{- end }}
+  {{- end }}
+
   {{- if eq .Values.upload.mode "direct" }}
     {{- $terminal := include "edge.uploadSourceDir" . }}
     {{- /* DELIBERATELY NOT `assigned` AS WELL when it is the terminal tree: the
@@ -488,6 +489,27 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          session would accumulate while the policy looked correct. */ -}}
   {{- if and (eq (include "edge.deidEngine" .) "ingest") (eq (include "edge.assignedReclaim" .) "onUploaded") }}
     {{- fail "deid.engine=ingest with dataPolicy.derived.assigned.reclaim=onUploaded. Under this engine the uploader reads /data/deidentified, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/assigned — every session's assigned copy would accumulate on the edge disk while the policy read as if it were being cleaned. Use onDeidentified, which lets the deidentify stage retire each session as soon as it has written a complete copy, or never if you intend to keep them." }}
+  {{- end }}
+
+  {{- /* EACH STAGE HAS ITS OWN RECLAIM WORDS, AND ANOTHER STAGE'S WORD IS NOT
+         HARMLESS. onAssigned asks whether assign produced its output, which is
+         true of every assigned session, so on the assigned stage it removed
+         every settled session before upload. onUploaded is only provable on the
+         tree the uploader reads. The engine now keeps in both cases, which
+         would leave the stage growing while the policy read as if it were
+         being cleaned; refusing here makes the mistake an install error. */ -}}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded" "onPackaged") "packaged" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- range $stage, $allowed := $reclaimWords }}
+    {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
+    {{- if not (has $w $allowed) }}
+      {{- fail (printf "dataPolicy.derived.%s.reclaim=%s is not a word this stage accepts. Allowed: %s. Another stage's word is not harmless here: onAssigned on assigned or deidentified is true of every settled session and would remove it before upload, and onUploaded is only provable on the tree the uploader reads." $stage $w (join ", " $allowed)) }}
+    {{- end }}
+  {{- end }}
+  {{- /* onUploaded REMOVES ONLY THE COPY THE UPLOADER FINGERPRINTED. assign
+         always writes /data/assigned, so moving this stage's location points it
+         at a tree whose sessions can never be verified. */ -}}
+  {{- if and (eq (include "edge.assignedReclaim" .) "onUploaded") (ne (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .)) }}
+    {{- fail (printf "dataPolicy.derived.assigned.reclaim resolves to onUploaded, but the stage is at %s while the uploader reads %s. onUploaded removes only the copy the uploader fingerprinted, so nothing at %s could ever be verified and it would be kept for ever. assign writes /data/assigned: leave dataPolicy.derived.assigned.location at its default." (clean .Values.dataPolicy.derived.assigned.location) (include "edge.uploadSourceDir" .) (clean .Values.dataPolicy.derived.assigned.location)) }}
   {{- end }}
 
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
@@ -613,6 +635,9 @@ affinity:
 {{/* Structured logging. The alert rules and dashboards parse these fields
      directly, so this is a functional setting, not a formatting one. */}}
 {{- define "edge.logEnv" -}}
+# GUIDING: progress bars obscure the stage logs in unattended containers.
+- name: TQDM_DISABLE
+  value: "1"
 - name: AIS_LOG_FORMAT
   value: {{ .Values.ingest.logFormat | quote }}
 {{- end }}
@@ -626,15 +651,8 @@ already states — the domain, the published hostnames, the node IP, the bucket
 prefix. Before these helpers each had to be typed a second time in the edge's
 own values file, and a mismatch was silent in the worst way:
 
-  * a wrong s3 endpoint or bucket  -> the uploader's head-bucket probe fails,
-    it preserves the local copy and retries forever. Disk fills on the edge
-    and the management side, which is watching for arrivals rather than
-    absences, reports nothing wrong.
-  * a hostname missing from hostAliases -> NXDOMAIN inside the pod, same
-    outcome.
-  * a wrong bucket that HAPPENS to exist -> worst case. The edge uploads
-    successfully, the management uploader reads a different bucket, and both
-    halves look healthy while nothing reaches XNAT.
+  * a hostname missing from hostAliases -> NXDOMAIN inside the pod: the
+    edge cannot reach that service, and nothing on this side reports it.
 
 So the edge file now only needs what is genuinely local to the edge — its AET
 map, de-identification profile, storage paths. Pass the management site file
@@ -665,13 +683,6 @@ genuinely differs.
 {{- end }}
 {{- end }}
 
-{{- define "edge.s3Endpoint" -}}
-{{- if .Values.upload.s3.endpoint }}{{ .Values.upload.s3.endpoint }}
-{{- else -}}
-  {{- with (include "edge.seaweedfsHost" .) }}{{ printf "https://%s" . }}{{ end }}
-{{- end }}
-{{- end }}
-
 {{- define "edge.lokiEndpoint" -}}
 {{- if .Values.observability.loki.endpoint }}{{ .Values.observability.loki.endpoint }}
 {{- else if .Values.observability.stack.enabled -}}
@@ -687,21 +698,30 @@ genuinely differs.
 {{- end }}
 
 {{/*
-The staging bucket. With seaweedfs.perSiteBuckets the management chart names
-it <bucketPrefix>-<edge name> (charts/mgmt/templates/_helpers.tpl mgmt.edgeBucket),
-and clusterLabel IS the edge name, so the same rule reproduces it exactly.
-
-There is still deliberately NO default for the shared-bucket layout: a
-defaulted shared bucket is the original isolation bug, since SeaweedFS matches
-actions as "<action>:<bucket>" with no prefix scoping, so every edge sharing
-one bucket can read and delete every other site's staged imaging. If a site
-really is on the old shared layout it must say so explicitly.
+dataPolicy.reporter.interval as canonical decimal seconds, validated.
+BOTH consumers read this, never the raw value: the reporter's INTERVAL env
+(data-policy.yaml) and DataPolicyReporterSilent's window (observability.yaml).
+- Whole seconds, 60 to 86400 (one day).
+- 0, or anything sleep cannot read, returns at once: back-to-back sweeps, and
+  the reporter has no CPU limit to slow them.
+- Numbers are formatted here, not with toString: Helm reads values numbers
+  as float64 and toString writes 1000000 as "1e+06", which busybox sleep
+  rejects instantly.
+- A unit string ("30m") is refused: sleep would read it, but the window
+  calculation would not.
 */}}
-{{- define "edge.s3Bucket" -}}
-{{- if .Values.upload.s3.bucket }}{{ .Values.upload.s3.bucket }}
-{{- else if .Values.seaweedfs.perSiteBuckets -}}
-{{ printf "%s-%s" (.Values.seaweedfs.bucketPrefix | default "ingest") .Values.clusterLabel }}
-{{- end }}
+{{- define "edge.reporterIntervalSeconds" -}}
+{{- $iv := .Values.dataPolicy.reporter.interval -}}
+{{- $s := "" -}}
+{{- if or (kindIs "float64" $iv) (kindIs "int" $iv) (kindIs "int64" $iv) -}}
+  {{- if eq (floor $iv) (float64 $iv) -}}{{- $s = printf "%.0f" (float64 $iv) -}}{{- end -}}
+{{- else -}}
+  {{- $s = toString $iv | trim -}}
+{{- end -}}
+{{- if not (and (regexMatch "^[1-9][0-9]{1,4}$" $s) (ge (atoi $s) 60) (le (atoi $s) 86400)) -}}
+  {{- fail (printf "dataPolicy.reporter.interval must be whole seconds, 60 to 86400, got %v. 0 or a value sleep cannot read makes the reporter sweep back to back (it has no CPU limit to slow it), and a unit such as 30m reads as 0 where DataPolicyReporterSilent sizes its window, so it would report a healthy reporter silent." $iv) -}}
+{{- end -}}
+{{- $s -}}
 {{- end }}
 
 {{/*
@@ -715,6 +735,13 @@ never has to do arithmetic on unit suffixes.
 `forever` is NOT a duration and never becomes one. It renders as `-`, which the
 engine treats as "no rule", so an unparseable or absent value can never be
 mistaken for 0 (which would read as "expire immediately").
+
+BASE 10, ALWAYS. The number goes through atoi, never int or int64.
+int64 reads a leading zero as octal: "010d" was 8 days, "08d" and "09h" were 0.
+atoi is strconv.Atoi, base 10 only, so "08d" is 8 days.
+
+CAUTION: an UNQUOTED 010 in a values file is still 8 seconds.
+YAML reads it as octal before this helper sees it. Quote it, or add a unit.
 */}}
 {{- define "edge.durationSeconds" -}}
 {{- $d := . | toString | trim -}}
@@ -729,13 +756,21 @@ mistaken for 0 (which would read as "expire immediately").
        scripts/ci/values.sh, which is why this validates first and fails loudly
        rather than defaulting. */ -}}
 {{- fail (printf "dataPolicy: %q is not a duration I can parse (expected forever, a plain number of seconds, or a number with s/m/h/d/w/y such as 7d or 24h). An unparseable duration must NOT be treated as 0, which would read as 'expire immediately'." $d) -}}
-{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | int64 }}
-{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | int64) 60 }}
-{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | int64) 3600 }}
-{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | int64) 86400 }}
-{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | int64) 604800 }}
-{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | int64) 31536000 }}
-{{- else -}}{{ $d | int64 }}
+{{- else if regexMatch "^[0-9]{11,}" $d -}}
+{{- /* AT MOST 10 DIGITS, about 317 years of seconds.
+       Overflow raises no error. atoi saturates at MaxInt64,
+       then mul wraps int64: 20 nines + "d" rendered -86400.
+       The engine reads a negative minAge as 0, "expire immediately".
+       Leading zeros count: the cap is on what atoi is handed.
+       10 digits of years still fits int64 after the mul. */ -}}
+{{- fail (printf "dataPolicy: %q has more than 10 digits. The limit is 10 (about 317 years in seconds): a longer number can overflow without an error, saturating or wrapping to a negative number of seconds, and a negative minAge is read as 0, 'expire immediately'. Use a larger unit, or forever where the key accepts it." $d) -}}
+{{- else if hasSuffix "s" $d -}}{{ trimSuffix "s" $d | atoi }}
+{{- else if hasSuffix "m" $d -}}{{ mul (trimSuffix "m" $d | atoi) 60 }}
+{{- else if hasSuffix "h" $d -}}{{ mul (trimSuffix "h" $d | atoi) 3600 }}
+{{- else if hasSuffix "d" $d -}}{{ mul (trimSuffix "d" $d | atoi) 86400 }}
+{{- else if hasSuffix "w" $d -}}{{ mul (trimSuffix "w" $d | atoi) 604800 }}
+{{- else if hasSuffix "y" $d -}}{{ mul (trimSuffix "y" $d | atoi) 31536000 }}
+{{- else -}}{{ $d | atoi }}
 {{- end -}}
 {{- end }}
 
@@ -768,8 +803,16 @@ keep a tree it would otherwise retire.
 {{- define "edge.deidentifiedReclaim" -}}
 {{- $v := .Values.dataPolicy.derived.deidentified.reclaim -}}
 {{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.packageEnabled" .) "true" }}onPackaged
 {{- else if eq (include "edge.deidEngine" .) "ingest" }}onUploaded
 {{- else }}never{{ end }}
+{{- end }}
+
+{{- /* /data/packaged is only ever the terminal tree, so onUploaded is the
+       only word that retires it. */ -}}
+{{- define "edge.packagedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.packaged.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}{{- else }}onUploaded{{ end }}
 {{- end }}
 
 {{/*
@@ -802,9 +845,9 @@ the two cannot drift and the alert can never name a directory nothing writes to.
        because its storage is UUID-named — a directory walk cannot tell which
        files belong to which session — and putting that knowledge inline would
        undo the independence that lets the de-identifier be replaced. */ -}}
-{{- if .Values.dataPolicy.originals.facilityBackup.enabled }}
-originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
-originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
+{{- if and .Values.storage.facilityBackup.enabled .Values.dataPolicy.originals.facilityBackup.enabled }}
+originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain | toString | trim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
+originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain | toString | trim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
 {{- end }}
 {{- if .Values.ingest.fileDrop.enabled }}
 originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}	-	-	{{ .Values.dataPolicy.originals.fileDrop.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.fileDrop.minAge }}	filesystem
@@ -813,7 +856,10 @@ derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.loca
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
 derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+derived.deidentified	derived	/data/deidentified	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+derived.packaged	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.packagedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.packaged.minAge }}	filesystem
 {{- end }}
 {{- end }}
 
@@ -890,8 +936,17 @@ with a message rather than silently selecting neither engine.
 {{- eq (include "edge.deidEngine" .) "ingest" -}}
 {{- end }}
 
+{{- /* The package stage renders only under the ingest engine, because its
+       input is the deidentify stage's output. ingest.package.enabled under any
+       other engine is ignored rather than refused: it defaults to true, and a
+       site on the Orthanc engine has nothing to package. */ -}}
+{{- define "edge.packageEnabled" -}}
+{{- and .Values.ingest.package.enabled (eq (include "edge.deidEngine" .) "ingest") -}}
+{{- end }}
+
 {{- define "edge.uploadSourceDir" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}/data/packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
 {{- end }}
 
 {{- /*
@@ -913,5 +968,163 @@ every site is configured, both branches resolve to the assigned key exactly as
 before.
 */}}
 {{- define "edge.uploadReclaim" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}{{ include "edge.packagedReclaim" . }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- end }}
+
+{{- /*
+SITE-SPECIFIC PYTHON PACKAGES (ingest.extraPipPackages), for every pod that
+loads staged sessions whose manifests can name a type the image does not ship.
+An init container pip-installs them into an emptyDir that the main container
+reads via PYTHONPATH; fileformats is a namespace package, so they merge with the
+image's own copy.
+
+The init container MUST run the same image as the container it serves: pip
+installs for the running Python, so the pod passes its own image in.
+  include "edge.extraPip.initContainers" (dict "root" $ "image" $image)
+*/ -}}
+{{- /* One init container, as a list item: the caller writes `initContainers:`
+     and may put other items beside it (upload.yaml creates its directories first). */ -}}
+{{- define "edge.extraPip.initContainer" -}}
+{{- with .root.Values.ingest.extraPipPackages }}
+- name: pip-install
+  image: {{ $.image }}
+  imagePullPolicy: {{ $.root.Values.ingest.image.pullPolicy }}
+  command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
+  args:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  volumeMounts:
+    - name: site-packages
+      mountPath: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.env" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: PYTHONPATH
+  value: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volumeMount" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  mountPath: /opt/site-packages
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volume" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  emptyDir: {}
+{{- end }}
+{{- end }}
+
+{{- /* The terminal tree as a dataPolicy.derived key: the tree the uploader
+     reads and, under direct upload, the staged-reclaimer CronJob owns.
+     GUIDING: data-policy's hand-off (EXTERNAL_RECLAIM_STAGE) and the age the
+     CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
+     different trees. */}}
+{{- define "edge.uploadTreeKey" -}}
+{{- if eq (include "edge.packageEnabled" .) "true" }}packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- end }}
+
+{{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
+     stage folder, so no deleter lists it.
+     GUIDING: the stage that writes the upload tree holds it for each pass
+     (edge.lockedStage). A deleter of that tree must take the same lock before
+     it deletes. No deleter takes it yet: this is the writer side only.
+     CAUTION: keep the path stable. Two paths are two locks, and two locks
+     exclude nothing. */}}
+{{- define "edge.uploadTreeLock" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.lock
+{{- end }}
+
+{{- /* WRITER ALIVE. The wrapped writer holds a SHARED lock on this file for its
+     whole life. The deleter deletes only while it cannot take it: then a wrapped
+     writer runs now, and Recreate means no older writer without the lock runs.
+     CAUTION: this guards an upgrade, not a rollback to a writer without the lock
+     (see docs/components/xnat-ingest.md). */}}
+{{- define "edge.uploadTreeAlive" -}}
+/data/.locks/{{ include "edge.uploadTreeKey" . }}.alive
+{{- end }}
+
+{{- /* The command of a stage that writes the upload tree.
+     Argument: (list $ "<stage>" <interval seconds>).
+     One pass at a time, each inside the lock, then a sleep. The sleep is the
+     same full interval that --loop sleeps, so the stage args must not have
+     --loop.
+     `flock <file> <cmd>` for each pass, not one fd for the whole loop: the pass
+     and any child it leaves keep the lock until they stop.
+     A pass that fails stops the container, as an exception out of --loop did.
+     fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
+{{- /* A stage that writes an INTERMEDIATE tree the upload-tree writer reads and
+     retires (deidentify when the package stage is on). Same one-pass-per-lock
+     loop as edge.lockedStage, on the same lock, without the .alive handle: its
+     passes never overlap a package pass, so nothing changes under the package
+     stage while it reads and unlinks a session. */}}
+{{- /* The stage takes turns on ITS OWN tree lock (deidentified.lock for
+     deidentify), the same lock it holds as the writer when the package stage is
+     off. The upload-tree writer (edge.lockedStage with a fourth argument) takes
+     that lock too, for each of its passes, before the upload-tree lock. A lock
+     is held for a whole pass and released by the kernel when the pod stops, so
+     a pass of one stage never runs beside a pass of the other: not in steady
+     state, and not during the upgrade that turns the package stage on or off
+     or rolls it back, when an old pod of either stage may still be finishing a
+     pass. No marker file, nothing that can go stale. */}}
+{{- /* STOP SIGNALS, for both wrappers (edge.serialisedStage, edge.lockedStage).
+     The shell is PID 1 of its container, and the kubelet sends SIGTERM to
+     PID 1 only. PID 1 has no default action for a signal. Without a trap, the
+     SIGTERM had no effect: each stop waited for SIGKILL at the end of the
+     grace period (30 s), and a pass could start after the SIGTERM.
+     GUIDING: `trap exit TERM INT` stops the loop at the next command boundary.
+     In the sleep, that is at once: the sleep runs in the background, and
+     `wait` returns when the signal comes. In a pass, that is when the pass
+     ends: the shell runs no trap while a foreground command runs. The pass
+     gets no signal, so it does not stop during a write, and its exit releases
+     its lock as before. No pass starts from the sleep after the signal.
+     GUIDING: `exit` in a trap keeps the status of the command before the
+     trap: 128 + the signal number after the sleep, the pass status after a
+     pass. A pass that fails still stops the container with its status.
+     CAUTION: a pass that is longer than the grace period still gets SIGKILL.
+     A signal that comes while a pass waits for its lock has effect only after
+     that pass.
+     CAUTION: a child that a pass leaves running is stopped when the shell
+     exits after the pass (PID 1 exits, so the kernel stops the namespace).
+     CAUTION: keep `sleep N & wait $!`. A sleep in the foreground holds the
+     trap until the sleep ends.
+     scripts/ci/runtime-templates.sh runs the rendered wrappers with dash and
+     sends these signals. */}}
+{{- define "edge.serialisedStage" -}}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+- /bin/sh
+- -c
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
+- xnat-ingest
+- {{ index . 1 | quote }}
+{{- end }}
+
+{{- /* (list $ "<stage>" <interval> ["<stage whose tree this one reads>"]). With
+     the fourth argument each pass first takes that stage's own tree lock, then
+     the upload-tree lock: the package stage reads /data/deidentified, so it
+     takes deidentified.lock (which deidentify holds for each of its passes in
+     either mode) and then packaged.lock (which the staged reclaimer fences
+     on). deidentify never takes packaged.lock and the reclaimer never takes
+     deidentified.lock, so the nested order cannot deadlock. */}}
+{{- define "edge.lockedStage" -}}
+{{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $outer := "" }}
+{{- if gt (len .) 3 }}
+{{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}
+{{- end }}
+- /bin/sh
+- -c
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
+- xnat-ingest
+- {{ $stage | quote }}
 {{- end }}

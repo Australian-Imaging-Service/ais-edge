@@ -46,10 +46,21 @@ if ! sudo k0s status &>/dev/null; then
     sleep 15
 fi
 
-# Wait for Ready
+# Wait for every returned node to have Ready=True. A substring match on the
+# printed table also accepts NotReady. Keep missing conditions as blank lines:
+# command substitution would strip a trailing blank node and could accept it.
 RETRIES=30
 for i in $(seq 1 $RETRIES); do
-    sudo k0s kubectl get nodes 2>/dev/null | grep -q "Ready" && { echo "Node Ready!"; break; }
+    if sudo k0s kubectl get nodes --request-timeout=10s \
+        -o 'jsonpath={range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+        2>/dev/null | awk '
+            BEGIN { ready = 1 }
+            $0 != "True" { ready = 0 }
+            END { exit !(NR > 0 && ready) }
+        '; then
+        echo "Node Ready!"
+        break
+    fi
     [ $i -eq $RETRIES ] && { echo "ERROR: Node not Ready"; exit 1; }
     echo "  Waiting... ($i/$RETRIES)"
     sleep 10

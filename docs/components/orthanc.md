@@ -60,6 +60,28 @@ Every step aborts and KEEPS the instance rather than losing it: if the facility
 backup write fails, nothing is modified and nothing is deleted; if `/modify` or
 the re-POST fails, the study simply never gets labelled and stalls visibly.
 
+A series that arrives after `group-orthanc` staged its study makes the study
+unstable again. When it is stable, `OnStableStudy` removes the
+`xnat-ingest-processed` label and applies `xnat-ingest-ready`, so the next
+`group-orthanc` pass stages the whole study again. The log event is
+`study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
+study is never re-staged.
+
+The chart default image, xnat-ingest 0.16.2, writes no snapshot label. With it,
+an armed data policy keeps every Orthanc study (`reclaim_kept`, reason
+`export_state_unknown`), and `/data/orthanc-storage` grows. This lasts until the
+image has xnat-ingest PR #211 (open on 2026-10-20). With that PR,
+`group-orthanc` also writes a snapshot label,
+`xnat-ingest-processed-<LastUpdate>-<digest>`, when it labels a study, and
+re-stages any processed study whose `LastUpdate` no longer matches it. The data
+policy (`dataPolicy.derived.orthancStorage`, backend `orthanc-rest`) deletes a
+study only when that snapshot label matches what Orthanc holds now, and then
+deletes exactly the instances the label covers. A study without a matching
+snapshot label is kept and logged (`reclaim_kept`, `export_state_unknown`).
+A dry run makes the same keep checks and logs the same `reclaim_kept` and
+`reclaim_skipped` lines. Where an armed run
+deletes, it logs `WOULD delete` (`reclaim_skipped`).
+
 ## What Orthanc has access to
 
 | Resource | Why |

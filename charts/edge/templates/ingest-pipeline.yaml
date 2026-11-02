@@ -6,6 +6,9 @@ The ingest pipeline: group -> assign.
     group (fs)      optional second source: a watched directory
     assign          derive project/subject/session and collate into
                     /data/assigned, ready for upload
+    deidentify      deid.engine=ingest only: /data/assigned -> /data/deidentified
+    package         deid.engine=ingest only: /data/deidentified ->
+                    /data/packaged (zipped series + DICOM sample per scan)
 
 Every stage mounts the SAME pipeline PVC at /data. That is required, not
 tidiness: the stages hardlink between orthanc-storage/, grouped/ and
@@ -46,11 +49,41 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      initContainers:
+        - name: wait-for-orthanc
+          image: "{{ .Values.dataPolicy.reporter.image.repository }}:{{ .Values.dataPolicy.reporter.image.tag }}"
+          imagePullPolicy: {{ .Values.dataPolicy.reporter.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - |-
+              set --
+              {{- if .Values.orthanc.auth.enabled }}
+              set -- -u "$ORTHANC_USER:$ORTHANC_PASSWORD"
+              {{- end }}
+              for try in $(seq 1 18); do
+                code=$(curl -q -sS --noproxy '*' -m 5 -o /dev/null -w '%{http_code}' "$@" "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}/system" 2>/dev/null) && [ "$code" = 200 ] && exit 0
+                sleep 5
+              done
+              echo 'Orthanc API did not become available after 18 attempts (up to about 180 seconds)' >&2
+              exit 1
+          {{- if .Values.orthanc.auth.enabled }}
+          env:
+            - name: ORTHANC_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.orthanc.auth.existingSecret | quote }}, key: orthanc-user}}
+            - name: ORTHANC_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.orthanc.auth.existingSecret | quote }}, key: orthanc-password}}
+          {{- end }}
       containers:
         - name: group
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "group-orthanc"]
+          {{- with .Values.ingest.orthancGroup.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Serialize producers across overlapping old and replacement pods.
+          command:
+            {{- include "edge.serialisedStage" (list . "group-orthanc" .Values.ingest.orthancGroup.interval) | nindent 12 }}
           args:
             - "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
             - "/data/orthanc-storage"
@@ -77,8 +110,6 @@ spec:
             - {{ .Values.ingest.orthancGroup.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.orthancGroup.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.orthancGroup.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.orthanc.auth.enabled }}
@@ -138,7 +169,12 @@ spec:
         - name: group-fs
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "group"]
+          {{- with .Values.ingest.fileDrop.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            {{- include "edge.serialisedStage" (list . "group" .Values.ingest.fileDrop.interval) | nindent 12 }}
           args:
             - {{ .Values.ingest.fileDrop.inputGlob | quote }}
             - "/data/grouped"
@@ -148,6 +184,12 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            # The glob matches directories too. Without this, group reads a matched
+            # directory as a file and the stage dies with FormatRecognitionError.
+            # With it, group descends into directories and skips the ones it
+            # matched. Checked on 0.16.1 with the default glob; api/group_api.py is
+            # unchanged in 0.16.2.
+            - "--recursive"
             # EXPLICIT, because 0.15.0 changed the default from "avoid" to none at all.
             # In 0.13.1 `group` defaulted to --on-resource-clash=avoid and a repeated
             # resource name was silently suffixed _2/_3. In 0.15.0 the option takes a
@@ -165,8 +207,6 @@ spec:
             - {{ .Values.ingest.fileDrop.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.fileDrop.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.fileDrop.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if ne .Values.dataPolicy.originals.fileDrop.reclaim "never" }}
@@ -211,11 +251,36 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # assign validates its input before entering --loop. The group/Orthanc
+      # pods can start later, so create this input on the same PVC first.
+      # mkdir -p preserves existing data and permissions; a volume error keeps
+      # the init container failing instead of starting assign with no input.
+      initContainers:
+        - name: init-grouped-dir
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "/data/grouped"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: assign
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "assign"]
+          {{- with .Values.ingest.assign.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if eq (include "edge.uploadTreeKey" .) "assigned" }}
+          # This stage writes the upload tree: one pass at a time, inside the
+          # writer lock. See edge.lockedStage.
+          command:
+            {{- include "edge.lockedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
+          {{- else }}
+          # Assign still needs its own producer lock when it does not write
+          # the upload tree. A replacement pod can overlap a busy old pod.
+          command:
+            {{- include "edge.serialisedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
+          {{- end }}
           args:
             - "/data/grouped"
             - "/data/assigned"
@@ -228,6 +293,11 @@ spec:
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
             - "--session"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
+            {{- with .Values.ingest.assign.constantProjectId }}
+            # Overrides --project: every session goes to this XNAT project.
+            - "--constant-project-id"
+            - {{ . | quote }}
+            {{- end }}
             - "--copy-mode"
             - {{ .Values.ingest.assign.copyMode | quote }}
             {{- if eq .Values.dataPolicy.derived.grouped.reclaim "onAssigned" }}
@@ -246,8 +316,6 @@ spec:
             - "--unlink-source"
             - "all"
             {{- end }}
-            - "--loop"
-            - {{ .Values.ingest.assign.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
           volumeMounts:
@@ -308,11 +376,35 @@ spec:
       {{- include "edge.hostAliases" . | nindent 6 }}
       {{- include "edge.schedulingRules" . | nindent 6 }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # Deidentify can start before assign creates its output directory.
+      initContainers:
+        - name: init-assigned-dir
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "--", "/data/assigned"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: deidentify
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "deidentify"]
+          {{- with .Values.ingest.deidentify.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # This stage writes the upload tree: one pass at a time, inside the
+          # writer lock. See edge.lockedStage.
+          {{- if eq (include "edge.uploadTreeKey" .) "deidentified" }}
+          command:
+            {{- include "edge.lockedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
+          {{- else }}
+          # The package stage writes the upload tree and holds the lock per
+          # pass. This stage writes the intermediate tree the package stage
+          # reads and retires: one pass per turn of the SAME lock, so a
+          # deidentify pass never runs while a package pass reads a session.
+          command:
+            {{- include "edge.serialisedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
+          {{- end }}
           args:
             - "/data/assigned"
             - "/data/deidentified"
@@ -351,8 +443,6 @@ spec:
             - "--unlink-source"
             - "all"
             {{- end }}
-            - "--loop"
-            - {{ .Values.ingest.deidentify.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
@@ -388,6 +478,89 @@ spec:
               {{- end }}
             {{- end }}
             {{- end }}
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-package
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: package
+spec:
+  replicas: 1
+  # Two packagers over one tree would race each other's build directories.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: package
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: package
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
+      # The package stage can start before deidentify creates its output
+      # directory, and `xnat-ingest package` refuses an input that is not there.
+      initContainers:
+        - name: init-deidentified-dir
+          image: {{ $pkgImage }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "--", "/data/deidentified"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+        {{- with .Values.ingest.extraPipPackages }}
+        {{- include "edge.extraPip.initContainer" (dict "root" $ "image" $pkgImage) | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: package
+          image: {{ $pkgImage }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          # This stage writes the upload tree: one pass at a time inside the
+          # writer lock, no --loop. See edge.lockedStage.
+          command:
+            {{- include "edge.lockedStage" (list . "package" .Values.ingest.package.interval "deidentify") | nindent 12 }}
+          args:
+            - "/data/deidentified"
+            - {{ include "edge.uploadSourceDir" . | quote }}
+            - {{ .Values.ingest.package.sourceDatatype | quote }}
+            {{- range .Values.ingest.package.outputResources }}
+            - "--output-resource"
+            - {{ .label | quote }}
+            - {{ .spec | quote }}
+            {{- end }}
+            - "--copy-mode"
+            - {{ .Values.ingest.package.copyMode | quote }}
+            {{- if eq (include "edge.deidentifiedReclaim" $) "onPackaged" }}
+            # dataPolicy.derived.deidentified.reclaim = onPackaged.
+            #
+            # Drop each de-identified session once the packaged copy has been
+            # written. Without this nothing empties /data/deidentified: the
+            # uploader reads /data/packaged, so its markers never describe this
+            # tree, and `package --loop` would re-package every session each
+            # pass. A session that fails to package is left in place to retry.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- include "edge.extraPip.env" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.extraPip.volumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.extraPip.volume" . | nindent 8 }}
 {{- end }}
 {{- if .Values.ingest.associate.enabled }}
 ---
