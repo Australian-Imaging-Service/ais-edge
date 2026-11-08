@@ -1,180 +1,212 @@
 # De-identification engines: two architectures
 
-Two engines can de-identify studies. They are built for different pipelines, and
-the difference is where the **routing identifiers** — the XNAT project, subject
-and session a study belongs to — come from.
+Use **`deid.engine: ingest` for every new site**. This is the chart default.
+Orthanc receives DICOM. xnat-ingest groups the instances, assigns the XNAT
+labels, applies the site's recipe, and uploads the result. The two arrival
+patterns below both use this pipeline. They differ in the labels the modality
+provides, not in the engine a site must select.
 
-For configuration of either, see
+`deid.engine: orthanc` is deprecated. Its reference material is in
+[Deprecated Orthanc Lua engine](components/deidentification.md#deprecated-orthanc-lua-engine).
+Use that section to understand an existing installation. Do not use it to
+configure a new site. The current ingest configuration is in
 [components/deidentification.md](components/deidentification.md).
 
 ## What routing identifiers are
 
-`assign` files a study into XNAT using three DICOM tags:
+XNAT placement needs three values: project, subject and session. Under ingest,
+the chart derives the following mapping when `ingest.assign.tagMapping` is empty:
 
 ```
-ClinicalTrialProtocolID    -> project
-ClinicalTrialSubjectID     -> subject
-ClinicalTrialTimePointID   -> session
+StudyID           -> project
+PatientID         -> subject
+AccessionNumber   -> session
 ```
 
-Every pipeline needs those three populated before `assign` runs. Whether they
-arrive in the data or are manufactured on the way in is what separates the two
-architectures below.
+The example site states this same mapping explicitly. These are source tags,
+not replacement values. Inspect what each modality sends before you adopt them.
+A site can select other populated tags. `ingest.assign.constantProjectId` can
+supply one destination project for all sessions when that is the site's policy.
+Create the project in XNAT first and restrict the service account to it.
+
+`assign` reads these values before `deidentify` runs. The recipe can remove or
+replace a DICOM tag, but it cannot change an XNAT label that assignment has
+already copied. With `subject: PatientID`, a hospital MRN in PatientID becomes
+the subject label in clear text. Removing PatientID in the recipe does not fix
+that label. Use identifiers approved for the destination before enabling upload.
+
+The chart rejects tagMapping entries that start with `ClinicalTrial` in ingest
+mode. Those entries are not the current defaults. If a site's research IDs use
+those tags, agree on a supported tag mapping before installation. Do not bypass
+the guard or choose a different engine to avoid reviewing the labels.
 
 ---
 
-## Architecture A — studies arrive unidentified
+## Architecture A: studies arrive unidentified
 
-The scanner sends a study identified only by its **AE title**. The DICOM carries
-a patient name and hospital ID, but nothing that says which XNAT project,
-subject or session it belongs to.
+A scanner may send only clinical patient and order identifiers. Its AE title
+identifies a DICOM endpoint, but is not an XNAT project selector under ingest.
+Orthanc accepts calling AE titles with the shipped configuration. There is no
+AE-title routing or unknown-AET quarantine in this mode. Control which senders
+can reach port 4242 at the network boundary.
 
-Something has to manufacture that. The **Orthanc Lua hook** does, at the moment
-each instance arrives:
+Before receiving production studies, arrange the three placement values:
 
-| step | what happens |
+| Value | Site decision |
 |---|---|
-| project | the calling AE title is looked up in `orthanc.deid.aetMap` |
-| subject / session | the patient identifier is hashed with a per-site secret salt (salted djb2, NOT an HMAC) |
-| routing tags | those values are written into the three `ClinicalTrial*` tags |
-| PHI | stripped per the JSON profile passed to Orthanc `/modify` |
-| label | the study is tagged `xnat-ingest-ready` for `group-orthanc` |
+| project | Populate a tag with an existing XNAT project ID, or set `constantProjectId` for a single-project site. |
+| subject | Use a research identifier approved for XNAT. Do not assume a clinical PatientID is a pseudonym. |
+| session | Use a stable visit or acquisition identifier. Check that different sessions do not resolve to the same value. |
+| recipe | Review `ingest.deidentify.specs` for every source format and project. |
+| original | Keep the facility backup and pre-deidentification directories under local access controls. |
 
-**Requires:** `orthanc.deid.aetMap`, a de-identification `profile`, and
-`existingSaltSecret`.
+**Requires:** a supported tag mapping, populated source values, the site's
+recipe, and an explicit `deid.policyReviewed: true` acknowledgement. The gate
+checks that a person acknowledged the policy. It cannot inspect a scanner's
+future output or determine whether an MRN is acceptable in the destination.
 
 **Properties**
 
-* De-identification happens at the door. Every later stage only ever sees
-  stripped data.
-* Pseudonyms are stable across visits — the same patient always hashes to the
-  same subject, so a follow-up scan joins the existing XNAT subject.
-* One-way. No mapping back to the original identifiers is kept, so a study
-  cannot be re-identified later by any means.
+* The clinical input remains identifiable in Orthanc, grouped and assigned
+  storage until the deidentify stage processes it. These directories need the
+  same access controls as the facility backup.
+* Missing placement values send a session to `assigned/__invalid__`. That
+  directory can contain identifiable data. A successful receive does not mean
+  the session has reached deidentify or XNAT.
+* A constant project supplies only the project. It does not generate subject
+  or session pseudonyms, and it does not make empty subject/session tags valid.
+* The re-identification map is a separate sensitive output. The chart writes
+  it under `/data/reid`; encrypt it and control access as described below.
 
-This is the architecture every site in this repo currently runs.
+Resolve incomplete source metadata with the modality or export owner. Keep the
+original files while doing so. Do not send the same clinical identifier under
+a new label without checking how it relates to existing subjects in XNAT.
 
 ---
 
-## Architecture B — studies arrive already identified
+## Architecture B: studies arrive already identified
 
-The study already carries its `ClinicalTrial*` tags, populated by a modality
-worklist, a scanner protocol, or whatever produced the export. `assign` reads
-them directly, so **no AE-title map is involved and none is needed** — the
-routing question is already answered before the data arrives.
+A research export may already contain approved project, subject and session
+values in tags that the chart supports. Select those tags in
+`ingest.assign.tagMapping`. The data still needs a recipe: research labels do
+not prove that the remaining headers, private fields or pixels are safe.
 
-De-identification is then the only remaining job, and the **xnat-ingest
-`deidentify` stage** does it, running between `assign` and `upload`:
+The same xnat-ingest pipeline applies:
 
-| step | what happens |
+| Step | What happens |
 |---|---|
-| PHI | tags named in a pydicom `deid` recipe are removed, one recipe per project |
-| `PatientID` | replaced with a deterministic SHA-256 pseudonym |
-| `AccessionNumber` | hashed separately, so it cannot be used to re-link |
-| reid mapping | every original value is recorded to `/data/reid`, one file per session, optionally encrypted |
+| group | Collects instances into studies without de-identifying them. |
+| assign | Reads the selected tags and stores the placement values in session metadata. |
+| deidentify | Applies the matching project recipe, or the `__default__` fallback. |
+| reid mapping | Writes per-session JSON under `/data/reid`, encrypted when the configured key Secret is supplied. |
+| upload | Reads `/data/deidentified`, or `/data/packaged` if packaging is enabled, and sends the output to XNAT. |
 
-**Requires:** `ClinicalTrial*` tags present in the incoming data, and
-`ingest.deidentify.specs` recipes.
+**Requires:** valid source labels, recipes in `ingest.deidentify.specs`, and
+review of both the labels and the resulting data. Recipe keys have the form
+`<PROJECT_ID or __default__>/medimage/dicom-series`. The value is a pydicom
+`deid` recipe, not JSON. The chart mounts it at the path xnat-ingest expects.
 
 **Properties**
 
-* Reversible. The reid mapping is a route back to the original identifiers,
-  which is what a clinical follow-up needs to locate a scan. The Lua hook has no
-  equivalent.
-* Pseudonyms are stable across visits, on the same input.
-* De-identification happens later in the pipeline, so identifiable data passes
-  through `group` and `assign` and is present on the pipeline volume until the
-  stage runs.
-* The salt is currently disabled upstream — see the caveat below.
-
-This is the architecture upstream xnat-ingest is written for.
+* The example removes PatientID and AccessionNumber. It does not hash them.
+  Neither stable pseudonyms nor salted hashing are automatic properties of
+  the ingest engine.
+* The recipe changes only the tags it names. The example retains private tags,
+  PatientSex and PatientAge. A site must review these choices against its data.
+* The mapping records original and modified metadata. It does not restore
+  removed pixel content or replace the facility backup as an archive of record.
+* The mapped XNAT labels survive recipe processing unchanged. Inspect them
+  separately from the de-identified DICOM headers.
 
 ---
 
 ## Which applies to a given site
 
-```
-Do the studies arriving carry ClinicalTrialProtocolID,
-ClinicalTrialSubjectID and ClinicalTrialTimePointID?
-
-├─ no  ─→ Architecture A. The Lua hook manufactures them from the AE title.
-│         Without it, assign has nothing to route on and every study is
-│         placed in /data/assigned/__invalid__.
-│
-└─ yes ─→ Either architecture works. A still applies if you want cleaning at
-          the door; B applies if you want the reid mapping. The choice rests
-          on whether re-identification is a requirement at your site.
-```
-
-Checking which case applies, on a study a modality actually sends:
+Both cases use ingest. Check a representative synthetic export before enabling
+production traffic, then validate the mapping on approved site data in a
+controlled environment:
 
 ```bash
-dcmdump file.dcm | grep -E 'ClinicalTrial(ProtocolID|SubjectID|TimePointID)'
+# These are the derived defaults. Inspect your selected tags if they differ.
+dcmdump file.dcm | grep -E '(StudyID|PatientID|AccessionNumber)'
 ```
 
-Measured on a live pipeline with the Lua hook disabled, same run:
+Use this sequence for each modality and project:
 
-```
-study WITH the tags     -> test_project.PRETAG_SUBJ_008.PRETAG_SESS_008
-study WITHOUT the tags  -> __invalid__/INVALID_MISSING_CLINICALTRIALPROTOCOLID_...
-```
+1. Identify the populated tags and the destination project.
+2. Confirm that the subject/session values are approved research labels.
+3. Configure `constantProjectId` only if all input belongs to that project.
+4. Check the recipe's removals, retained fields and de-identification markers.
+5. Confirm that the pipeline produces a deidentified session with the intended
+   XNAT labels. Check the destination headers as well as the labels.
+6. Check `/data/reid` access and encryption before receiving patient data.
 
-`assign` does not distinguish who wrote the tags, only whether they are present.
+A field can be present but empty. Such a field does not provide a usable label.
+If assignment fails, use the guarded recovery procedure in
+[components/xnat-ingest.md](components/xnat-ingest.md#recovering-an-invalid-session).
+Do not flatten directories or move a session into an existing target by hand.
+The invalid input may still be needed to correct the site's source mapping.
 
 ## Side by side
 
-| | A — Orthanc Lua hook | B — xnat-ingest deidentify |
+| Check | Clinical source values | Research source values |
 |---|---|---|
-| values key | `orthanc.deid.enabled` | `ingest.deidentify.enabled` |
-| chart default | on | off |
-| runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
-| source of routing identifiers | derives them from the AE title | expects them in the incoming data |
-| needs an AE-title map | yes | no |
-| strips PHI | yes, JSON profile | yes, pydicom `deid` recipe per project |
-| pseudonymises | yes, before anything downstream sees the data (salted djb2, not an HMAC, see *Pseudonym strength*) | **no, not by default** — see *What the recipe does not do* |
-| re-identification possible | no | yes, via the reid mapping |
-| identifiable data on the pipeline volume | no | yes, until the stage runs |
-| applies the ready label | yes | no — clear `toProcessLabel` when switching |
+| engine for a new site | `ingest` | `ingest` |
+| receiver | Orthanc on DICOM port 4242 | Orthanc on DICOM port 4242 |
+| project selection | Populated tag or `constantProjectId` | Supported tag with the approved project ID |
+| subject/session selection | Arrange approved research labels before upload | Select the tags that carry those labels |
+| AE-title routing | Not used | Not used |
+| recipe | Site-reviewed pydicom `deid` recipe | Site-reviewed pydicom `deid` recipe |
+| automatic pseudonym hashing | None in the shipped recipe | None in the shipped recipe |
+| original data on pipeline volume | Yes, before deidentify | Yes; research labels do not clean the other fields |
+| re-identification map | Written by the chart configuration | Written by the chart configuration |
+| ready-label filter | Cleared by the chart under ingest | Cleared by the chart under ingest |
 
 ## Upstream caveats affecting Architecture B
 
-**`deidentify` output cannot yet be consumed by `upload`.** It is written one
-directory level deeper than `assign` produces, so `upload` reports
-`Found 0 sessions`. Tracked as
-[xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144).
-Until it is fixed, the stage runs and de-identifies correctly but data stops
-there.
+The pinned chart image is
+`ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`. Treat the image reference and
+its installed Python version as separate identifiers. The locally inspected
+image reports `0.16.3.dev49+ais.20261021.r13.g3182cc6` as its package version.
+Record the deployed image digest when comparing behavior across installations.
 
-**The pseudonym salt is disabled.** `ais_deid` implements per-site salted
-hashing; the code is commented out in the shipped package:
+[#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144)
+described an extra output directory in version 0.13.1. It is closed. The pinned
+image builds and publishes one session directory under the output root. That
+layout is consumed by upload. The old claim that ingest cannot reach XNAT does
+not describe this image. A running stage is still not delivery proof: inspect
+its output, upload results and the destination files after each site install.
 
-```python
-#_SALT: str | None = os.environ.get("DEID_SALT")
-# NOTE: Salting is currently disabled. The hash is computed without a salt,
-# meaning the same input always produces the same output regardless of site.
-```
+[#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)
+is still open and describes the older `ais_deid` salting path. Do not infer that
+`AIS_DEID_HMAC_SALT` or `DEID_SALT` enables hashing in the current chart recipe.
+The pinned CLI documents a `<format>.salt` sidecar for hash transforms in a
+`<format>.transforms.yaml` sidecar. The chart does not wire this as a salt
+Secret, and the shipped recipe has no hash transform. A custom integration
+needs its own reviewed secret mount, transforms and reproducibility checks.
 
-Unsalted, a hospital MRN is a small search space, so a pseudonym is recoverable
-by brute force, and two sites produce identical codes for the same patient.
-Setting `DEID_SALT` has no effect today because the reader itself is commented
-out; enabling it requires an upstream change — tracked as
-[xnat-ingest#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143). Architecture A is unaffected — it
-HMACs with a site secret.
+The chart still supplies `AIS_DEID_HMAC_SALT` to Orthanc when the facility backup
+is enabled. The Lua script requires the variable at load time. Its value does
+not affect ingest labels or recipe output. Set the placeholder once as the
+installation instructions require; do not treat that as ingest pseudonymisation.
 
 ## Where the data enters
 
-Orthanc is the only DICOM **network** receiver in this stack. xnat-ingest ships
-no DICOM network stack — `pynetdicom` is not installed and no subcommand listens
-on a port — so a scanner performing a C-STORE association has nothing else to
-talk to.
+Orthanc is the DICOM network receiver in this stack. A modality sends C-STORE
+to the configured called AE title at `<nodeIP>:4242`. xnat-ingest processes
+files and the Orthanc REST API; the chart does not expose a second DICOM receiver.
+Network restrictions must enforce the intended sender boundary because the
+shipped Orthanc configuration accepts any calling AE title.
 
-Orthanc is not the only way in, though. `ingest.fileDrop` runs `xnat-ingest
-group` over a filesystem glob, so data arriving as *files* — a share, a vendor
-export, an rsync — reaches the pipeline without Orthanc's REST pull. Either
-de-identification architecture can sit behind that path.
+`ingest.fileDrop` is the other entry path. It runs `xnat-ingest group` over a
+filesystem glob, for example an approved share or vendor export. It bypasses
+Orthanc and its facility-backup callback. Keep the input files as originals;
+`dataPolicy.originals.fileDrop.reclaim: never` is the default. A file-drop age
+setting alone does not expire them. Both input paths feed assignment and the
+same ingest recipe, so test label resolution for each source format.
 
 ## See also
 
-* [components/deidentification.md](components/deidentification.md) — configuring either engine
-* [components/orthanc.md](components/orthanc.md) — the receiver
-* [components/xnat-ingest.md](components/xnat-ingest.md) — the pipeline stages
+* [components/deidentification.md](components/deidentification.md): recipes, labels, mapping encryption and the single deprecated-engine reference.
+* [components/orthanc.md](components/orthanc.md): receiver configuration and the original-data backup.
+* [components/xnat-ingest.md](components/xnat-ingest.md): stage paths, invalid-session recovery and cleanup controls.

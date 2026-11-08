@@ -8,7 +8,7 @@ One Ubuntu machine runs the whole pipeline on a single-node
 [k0s](https://k0sproject.io/) cluster:
 
 ```
-modality --C-STORE--> Orthanc (deid) --> xnat-ingest group-orthanc --> xnat-ingest assign --> xnat-ingest upload --> XNAT (HTTPS)
+modality --C-STORE--> Orthanc (receive) --> group-orthanc --> assign --> deidentify --> upload --> XNAT (HTTPS)
 ```
 
 There is **no** SeaweedFS, **no** S3 hop, **no** k0smotron / child cluster /
@@ -28,18 +28,27 @@ step with it.
   runs k0s and every pipeline component.
 - **One XNAT instance**: reachable over HTTPS, with a local (non-AAF/OIDC) service
   account and a pre-existing project for the sessions to land in. Scope that
-  account to the projects in this site's AET map and nothing else — tier-1
+  account to the projects selected by the site's tag mapping or project constant. Tier-1
   uploads from the same machine that faces the modalities, so the credential
   lives here.
-- **DICOM source(s)**: one or more modalities on the local LAN that can C-STORE to
-  this node on port **4242** with `AET=AISEDGE`. Each modality's Called-AET must
-  appear in `orthanc.deid.aetMap` in your site file. An AET that is *not* listed
-  is quarantined, not discarded (see below).
-- **`AIS_DEID_HMAC_SALT`**: a per-deployment secret. Generate one with
-  `openssl rand -hex 32` and put it in the `orthanc-deid-salt` Secret in
-  `sites/<site>/secrets.enc.yaml`. Effectively permanent: rotating it
-  re-pseudonymises every patient and silently breaks linkage to everything
-  already in XNAT.
+- **DICOM sources**: modalities that can C-STORE to the node on port **4242**
+  with the configured called AE title (`AISEDGE` by default). The shipped
+  receiver accepts any calling AET. Under ingest, an AET map does not select a
+  project or quarantine an unknown sender. Restrict senders at the network edge.
+- **Approved labels and recipe**: `ingest.assign.tagMapping` selects source
+  tags for XNAT project, subject and session. Its ingest defaults are StudyID,
+  PatientID and AccessionNumber. A raw MRN selected as subject becomes the XNAT
+  label before de-identification. Review those values and the complete recipe
+  in `ingest.deidentify.specs` before receiving patient data.
+- **`AIS_DEID_HMAC_SALT`**: generate a value with `openssl rand -hex 32` and
+  put it in Secret `orthanc-deid-salt`. The backup Lua script requires it at
+  load time, and install/verify checks reject the placeholder. Its value is
+  unused for ingest de-identification. It does not salt XNAT labels.
+- **Re-identification protection**: the chart writes maps under `/data/reid`.
+  Set `ingest.deidentify.reidEncryptKeySecret` for production input. Without it,
+  the maps are plain JSON on the pipeline volume. The Secret must contain
+  `XINGEST_REID_ENCRYPT_KEY`; keep recovery keys separately from the maps.
+
 - **`sops` and `age`** on whichever machine edits the site secrets
   (`scripts/site-secrets.sh` refuses to run without them). `python3` with PyYAML
   is needed by `install.sh`, which reads the site file directly. `kubectl` and
@@ -58,7 +67,7 @@ Nothing else needs editing.
 
 | File | What it holds | Scaffolded from |
 |---|---|---|
-| `sites/<site>/values.yaml` | The entire non-secret configuration: `nodeIP`, `installMode`, storage paths, `orthanc.deid.aetMap`, `orthanc.deid.profile`, loop intervals, `upload.mode: direct`, `dataPolicy`, `observability` | `sites/example-single/values.yaml` |
+| `sites/<site>/values.yaml` | The entire non-secret configuration: `nodeIP`, `installMode`, storage paths, `ingest.assign.tagMapping`, `ingest.deidentify.specs`, loop intervals, `upload.mode: direct`, `dataPolicy`, `observability` | `sites/example-single/values.yaml` |
 | `sites/<site>/secrets.enc.yaml` | Four Secrets, SOPS-encrypted, **all in namespace `xnat-ingest`**: `xnat-credentials` (server/username/password), `orthanc-deid-salt` (`AIS_DEID_HMAC_SALT`), `grafana-admin-credentials`, `alertmanager-smtp` | `sites/example-single/secrets.example.yaml` |
 
 `sites/<site>/values.yaml` is safe to commit — it contains no credentials, only
@@ -86,11 +95,13 @@ git clone --branch tier-1-solution <repo-url> && cd ais-edge
 scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient age1...        # the public key it printed
 
-# 3. Scaffold the site (copies sites/example-single/)
+# 3. Scaffold the site. single selects the only tier-1 template, example-single.
+#    The name becomes the release name. Use lowercase letters, digits and
+#    hyphens, starting with a letter. Do not use an underscore.
 scripts/site-secrets.sh new my-hospital single
 
 # 4. Fill in the two files
-$EDITOR sites/my-hospital/values.yaml                # nodeIP, aetMap, deid profile
+$EDITOR sites/my-hospital/values.yaml                # nodeIP, tagMapping, ingest recipe
 openssl rand -hex 32                                 # -> AIS_DEID_HMAC_SALT
 $EDITOR sites/my-hospital/secrets.enc.yaml           # still PLAINTEXT at this point
 #   fill in every REPLACE_ on an UNCOMMENTED line, and set `server:` to your
@@ -111,7 +122,7 @@ scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 # 5. Confirm the de-id policy, deliberately: set
 #      deid.policyReviewed: true
 #    in sites/my-hospital/values.yaml. The chart REFUSES to render while it is
-#    false and deid is on — nothing downstream re-checks what was removed.
+#    false. Review labels, recipe output and reid-map protection first.
 
 # 6. Install
 chmod +x install.sh scripts/*.sh
@@ -155,12 +166,12 @@ What it covers, and what it deliberately does not:
 | Checked | How |
 |---|---|
 | Secrets exist, and the de-id salt is not still the placeholder | reads them from the cluster |
-| Every PVC is `Bound`, and the facility backup shares the pipeline filesystem | the hardlink requirement in section 2.1 of the TOUR |
+| Every PVC is `Bound`, and configured data directories are present | Pipeline stage directories share a filesystem for hardlinks. The backup is a byte copy and may use a separate disk; that comparison can report `SKIP`. |
 | Each pipeline stage is **Ready**, not merely `Running` | a `Running` pod with a failing probe is not working |
 | XNAT is reachable **and the credentials are accepted** | from *inside* the upload pod, honouring the site's `upload.direct.verifySsl` |
 | Grafana answers on its NodePort | HTTP probe |
 | The alert rules actually loaded | counts the rule groups Prometheus holds |
-| DICOM port 4242 | **NOT checked** — it is a `hostPort`, invisible from inside the cluster. Reported as `SKIP`, never as a pass. Test it with a real C-STORE from a machine that will send studies. |
+| DICOM port 4242 | Uses `ss` to check a local listener. If the port is not visible but the receiver pod is Running, reports `SKIP`; otherwise reports failure. This is not a C-STORE test. Send a synthetic study from the modality network as well. |
 
 Re-run it after any `helm upgrade`, after rotating a Secret, and after a reboot.
 
@@ -171,25 +182,25 @@ all below.
 
 ## Architecture
 
-Everything runs on one node, in one namespace, from one Helm release. Modalities
-C-STORE to Orthanc on the node's own IP (port 4242 on the local LAN). Orthanc
-de-identifies in-process, keeps the deid'd instance, and backs up the original to
-a node-local directory that never leaves the machine.
+Everything runs on one node, in one namespace, from one Helm release.
+Modalities C-STORE to Orthanc on the node's IP at port 4242. Orthanc stores the
+original instances and, when enabled, writes a separate facility-backup copy.
+It does not modify headers or apply AET routing under the default ingest mode.
 
-De-identification by xnat-ingest's own `deidentify` stage is the default.
-Orthanc remains the DICOM receiver either way: modalities C-STORE to it on 4242,
-and its Lua script still writes the facility backup and quarantines unmapped AE
-titles. `deid.engine` chooses only which component strips the headers.
+Use **`deid.engine: ingest` for every new site**. xnat-ingest groups the input,
+assigns the XNAT labels, applies the site's recipe, and uploads the output.
+Assignment precedes de-identification. The label values therefore need review
+independently of the DICOM recipe. A recipe cannot change an already assigned
+project, subject or session label.
 
-The Lua hook is the alternative, selected with `deid.engine: orthanc`. It strips
-at the front door, before `group` or `assign` sees anything,
-which suits a different pipeline — one where studies arrive already carrying
-their project/subject/session identifiers. See
-[docs/choosing-a-deid-engine.md](docs/choosing-a-deid-engine.md) for what each
-requires. `xnat-ingest group-orthanc`,
-`xnat-ingest assign`, and `xnat-ingest upload` move the deid'd data to XNAT over
-HTTPS. The only inbound port is DICOM 4242; the only outbound path is HTTPS to
-XNAT (plus the Grafana NodePort for the local admin).
+`deid.engine: orthanc` is deprecated. Existing-engine details are in
+[Deprecated Orthanc Lua engine](docs/components/deidentification.md#deprecated-orthanc-lua-engine).
+See [the source-label guide](docs/choosing-a-deid-engine.md) for ingest setup.
+
+The DICOM endpoint is inbound from the modality LAN. Upload uses outbound HTTPS
+to XNAT. Optional Grafana access is a separate inbound NodePort, and alert email
+needs outbound access to the configured SMTP relay. Restrict those paths to the
+intended networks; enabling observability does not make them part of DICOM.
 
 ```
 ════════════════════════════════════════════════════════════════════════════════
@@ -197,27 +208,31 @@ XNAT (plus the Grafana NodePort for the local admin).
 ════════════════════════════════════════════════════════════════════════════════
 
   Host directories  (the pipeline stages share ONE filesystem so hardlinks resolve)
-    /data/xnat-ingest/orthanc-storage   deid'd DICOM instances (Orthanc storage)
+    /data/xnat-ingest/orthanc-storage   ORIGINAL DICOM instances (Orthanc storage)
     /data/xnat-ingest/grouped           grouped studies (group-orthanc output)
     /data/xnat-ingest/assigned          PROJECT.SUBJECT.SESSION/ dirs (assign output)
     /data/facility-backup               ORIGINAL DICOMs (real IDs) — never leaves node
-      └─ __unmapped_aet__/<AET>/...     quarantine: AE title not in aetMap
+    /data/xnat-ingest/deidentified     recipe output; upload reads this
+    /data/xnat-ingest/reid             sensitive metadata maps; encrypt with key Secret
+    /data/xnat-ingest/packaged         optional package output; upload follows it
 
   ┌─ namespace: xnat-ingest — one release of charts/edge ─────────────────────┐
   │   <rel>-orthanc      DICOM SCP :4242 (hostPort, AET=AISEDGE)               │
   │     Lua deidentify-and-forward.lua:                                        │
-  │       OnStoredInstance  write ORIGINAL → /facility-backup, then /modify    │
-  │                         per orthanc.deid.profile; keep only the deid'd copy│
-  │       OnStableStudy     label study `xnat-ingest-ready`                    │
+  │       OnStoredInstance  copy ORIGINAL to /facility-backup, then return   │
+  │                         No AET routing or header modification in ingest  │
+  │       Ready-label filter is cleared; group waits for stable input        │
   │     env  AIS_DEID_HMAC_SALT (Secret orthanc-deid-salt)                     │
   │     REST :8042 (ClusterIP) — how group-orthanc pulls                       │
   │        │                                                                   │
-  │        ▼  REST-pull labelled studies                                       │
-  │   <rel>-group-orthanc  loop 60s; hardlinks deid'd DICOMs from              │
+  │        ▼  REST-pull stable studies                                       │
+  │   <rel>-group-orthanc  loop 60s; hardlinks original DICOMs from              │
   │                        /data/orthanc-storage → /data/grouped               │
   │   <rel>-assign         loop 60s; assigns IDs, /data/grouped →              │
   │                        /data/assigned/PROJECT.SUBJECT.SESSION              │
-  │   <rel>-upload         loop; reads LOCAL /data/assigned directly;          │
+  │   <rel>-deidentify     recipe: /data/assigned -> /data/deidentified       │
+  │                        mapping: /data/reid (sensitive; key optional)     │
+  │   <rel>-upload         reads LOCAL /data/deidentified by default;         │
   │                        uploads to XNAT over HTTPS                          │
   │                        Secret xnat-credentials (server, username, password)│
   │   <rel>-data-policy    DaemonSet; walks the declared dataPolicy stages and │
@@ -243,71 +258,77 @@ XNAT (plus the Grafana NodePort for the local admin).
 ## Data Flow
 
 ```
-1. Modality C-STOREs to Orthanc on the node
-   - Orthanc receives on port 4242 with AET=AISEDGE
-   - orthanc.deid.aetMap maps the Called-AET → XNAT project. It is rendered
-     into /etc/ais-edge/routing.json, which the Lua hook reads.
-         │
-         ▼
-2. Orthanc Lua hook (files/deidentify-and-forward.lua)
-   - OnStoredInstance:
-     a. Writes the ORIGINAL to /facility-backup/ (site-controlled retention)
-     b. /modify with orthanc.deid.profile; UIDs are kept so the deid'd
-        instance lands in the same Study
-     c. Deletes the ORIGINAL from Orthanc (keeps the deid'd instance in storage)
-     - An AET missing from the map is REJECTED for ingest but NOT discarded:
-       the original goes to /facility-backup/__unmapped_aet__/<AET>/... and is
-       only then removed from Orthanc. If that write fails, the instance stays.
-   - OnStableStudy (after orthanc.stableAge=30s of silence):
-     d. PUTs label "xnat-ingest-ready" on the study
-         │
-         ▼
-3. xnat-ingest group-orthanc (REST-pull mode)
-   - Polls Orthanc's REST API every ingest.orthancGroup.interval (default 60s)
-   - Filters: has label ingest.orthancGroup.toProcessLabel ("xnat-ingest-ready"),
-     lacks ingest.orthancGroup.processedLabel ("xnat-ingest-processed")
-   - Hardlinks instances from /data/orthanc-storage into grouped studies under
-     /data/grouped  (same filesystem — hardlink, not copy)
-   - PUTs the processed label on the study
-         │
-         ▼
-4. xnat-ingest assign (ID assignment)
-   - Reads /data/grouped every ingest.assign.interval
-   - Derives XNAT project/subject/session IDs from the DICOM clinical-trial tags
-     the Orthanc hook writes (ingest.assign.tagMapping:
-     project=ClinicalTrialProtocolID — sourced from the AET map,
-     subject=ClinicalTrialSubjectID, session=ClinicalTrialTimePointID)
-   - Collates each study into /data/assigned/PROJECT.SUBJECT.SESSION/
-   - With dataPolicy.derived.grouped.reclaim=onAssigned it also passes
-     --unlink-source all, dropping each grouped tree once assigned. Without
-     that, assign rebuilds its work list from a live directory listing every
-     pass and re-assigns the same sessions forever.
-         │
-         ▼
-5. xnat-ingest upload (local source → XNAT)
-   - Reads the LOCAL /data/assigned directory directly (no S3)
-   - Uploads sessions to XNAT via REST over HTTPS (XNAT credentials only here)
-   - Creates project/subject/session/scan hierarchy in XNAT
-   - Skips sessions already in XNAT (idempotent); loops every
-     upload.direct.loop seconds, and leaves a session alone until it has been
-     quiet for upload.direct.waitPeriod
+1. Receive
+   Modality --C-STORE--> Orthanc at <nodeIP>:4242, called AET=AISEDGE.
+   The original stays in Orthanc storage. The enabled backup callback writes
+   a byte copy to /facility-backup and returns before AET routing.
+   No unknown-AET quarantine is created under ingest.
+         |
+         v
+2. Group
+   group-orthanc polls the REST API and waits for stable input.
+   The chart clears --to-process-label under ingest.
+   Instances are hardlinked from /data/orthanc-storage into /data/grouped.
+   Processed labels and export snapshots identify what was staged.
+         |
+         v
+3. Assign
+   /data/grouped -> /data/assigned/PROJECT.SUBJECT.SESSION/
+   Derived mapping: StudyID / PatientID / AccessionNumber.
+   constantProjectId can supply one project for all sessions.
+   These values become XNAT labels before any recipe changes the headers.
+   Missing values are held in assigned/__invalid__, still identifiable.
+         |
+         v
+4. Deidentify
+   /data/assigned -> /data/deidentified
+   Recipe: <project or __default__>/medimage/dicom-series.
+   Only named tags change. The example removes PatientID and AccessionNumber,
+   adds de-identification markers, and retains private tags, sex and age.
+   /data/reid holds sensitive mappings; a key Secret enables encryption.
+         |
+         v
+5. Upload
+   /data/deidentified -> XNAT over HTTPS.
+   Optional package runs first and changes the upload source to /data/packaged.
+   The uploader uses assigned session IDs and resource manifests.
+   Its quiet period reduces overlap; it cannot prove a study is complete.
 ```
 
-The deid happens at step 2 inside Orthanc; everything downstream of
-`OnStoredInstance` works with deid'd identifiers. The original DICOM exists only
-in `/data/facility-backup` (real identifiers, site-retained) and nowhere else —
-it never leaves the node and is never uploaded.
+The recipe runs at step 4. Original data exists in Orthanc, grouped and assigned
+storage before that point. The facility backup is a separate retained copy.
+Reid maps can retain original metadata after processing. Include all these
+locations in the site's access and retention policy. File-drop input feeds the
+group/assign path without passing through the Orthanc backup callback.
 
-Orthanc and all three xnat-ingest stages mount the pipeline volume
-(`storage.pipeline.hostPath`, default `/data/xnat-ingest`) at `/data`. Because
-`orthanc-storage`, `grouped`, `assigned`, and the upload source all live on the
-same filesystem, `group-orthanc` can hardlink (rather than copy) and the upload
-pod reads byte-for-byte the same assigned files. Cross-filesystem hardlinks fail
-with `EXDEV` and `hardlink_or_copy` then silently degrades to a full byte copy of
-every study, so these directories **must** be on one physical mount. The facility
-backup is deliberately a *separate* volume (`storage.facilityBackup.hostPath`,
-mounted at `/facility-backup`): a wedged or full pipeline volume must not be able
-to take the originals with it.
+All pipeline stages mount the same PVC at `/data`, backed by
+`storage.pipeline.hostPath` (default `/data/xnat-ingest`). Keep stage directories
+on one filesystem so hardlinks can be used. A hardlink cannot cross filesystems;
+`hardlink_or_copy` can fall back to a full byte copy, which changes disk and time
+requirements. The facility backup is written as a copy to its own volume and can
+be on another disk. It is not subject to the pipeline hardlink requirement.
+
+Cleanup follows separate handoffs. `grouped.reclaim: onAssigned` can cause
+assignment to unlink its consumed input. Under ingest, assigned reclaim `auto`
+resolves to `onDeidentified`. Deidentified reclaim `auto` resolves to `onUploaded`,
+or `onPackaged` when packaging is enabled. The terminal reclaimer verifies the
+files it removes against XNAT and uses the upload-tree writer lock. A successful
+upload message alone is not permission to erase an original or a conflict.
+
+Validate each boundary with synthetic data before enabling patient traffic:
+
+| Boundary | Evidence to check |
+|---|---|
+| receiver to backup | The configured backup contains the original bytes. A separate backup disk is permitted. |
+| group to assign | The session is complete enough to stage and its source labels are populated. |
+| assign to deidentify | The labels are approved for XNAT; the input still contains identifiers until processed. |
+| deidentify to upload | The expected recipe changed the expected fields, and manifests describe the output files. |
+| upload to XNAT | The destination labels, scan resources and stored data match the intended output. |
+| cleanup | Each selected condition has fresh evidence, and unresolved input or conflicts remain available. |
+
+Keep the site mapping, recipe and image reference together in review. A change
+to any one can change where a session lands or what information it contains.
+An engine default is not a substitute for validating a site's actual input.
 
 ## Security Model
 
@@ -321,23 +342,28 @@ Single node                                    XNAT
 └─ Outbound: HTTPS :443 to XNAT                 │
 ```
 
-- **De-identification happens on-node, before anything is uploaded.** Only deid'd
-  data is assigned and sent to XNAT. `deid.policyReviewed` must be set to
+- **De-identification happens on-node, before anything is uploaded.** Assignment sees original data. Deidentified
+  output is what the default uploader reads. `deid.policyReviewed` must be set to
   true by a human before the chart will render, whichever engine is selected: a
-  wrong-but-present profile looks identical to a right one from the outside.
-- **Original DICOMs stay put.** They live only in `/data/facility-backup` under
-  site-controlled retention and are never transmitted anywhere.
+  present recipe is not proof of a correct policy. Review labels separately.
+- **Original data stays on the node.** It exists in the backup and in pipeline
+  directories before deidentify. The recipe output is sent to XNAT. Protect
+  `/data/reid` as identifying data, and review private fields and pixel content.
+- **No automatic label pseudonymisation.** PatientID or an accession chosen as
+  a label reaches XNAT before the recipe can change it. Use approved values.
 - **Credentials are never in a chart or a values file.** Every one is referenced
   by Secret name; the Secrets themselves live SOPS-encrypted in
   `sites/<site>/secrets.enc.yaml` and are decrypted straight into the cluster.
-  All four are in namespace `xnat-ingest` — a pod cannot read a Secret from
-  another namespace, and that failure shows up only as
-  `CreateContainerConfigError`.
-- **XNAT credentials are local** to this node and used only for the outbound
-  HTTPS upload.
-- **One inbound port.** DICOM 4242 on the local LAN, from modalities. Nothing is
-  exposed to the internet. Outbound is HTTPS to XNAT (and, if observability is
-  enabled, the Grafana NodePort for the local admin on the LAN).
+  The four example Secrets and any optional reid encryption Secret must be in
+  namespace `xnat-ingest`. A Secret volume or environment reference cannot read
+  another namespace. Missing references can prevent the pod from starting.
+- **XNAT credentials are local** to this node. The uploader uses them for
+  delivery. The staged reclaimer also uses them to verify the remote archive
+  before deleting terminal local output.
+- **Restrict inbound access.** DICOM 4242 receives modality traffic on the LAN.
+  A Grafana NodePort, when enabled, is also inbound access for administrators.
+  Restrict both at the network boundary. XNAT transfer is outbound HTTPS. SMTP
+  alert delivery and installation downloads need their configured destinations.
 - **No S3 keys, no CA distribution, no per-site key scoping.** This is a single,
   self-contained appliance — there is no fleet, no shared object store, and no
   transport CA to manage. Vector reaches Loki over plain HTTP because nothing
@@ -345,8 +371,8 @@ Single node                                    XNAT
 
 | If compromised... | Impact |
 |--------------------|--------|
-| The node | This is the whole appliance — harden it accordingly. An attacker gets the local DICOMs (originals in `/data/facility-backup`, deid'd in Orthanc storage), the XNAT credentials, and the deid salt. Restrict LAN access to :4242 and OS-level access to the machine. |
-| The DICOM port (:4242) | Anyone on the LAN who can reach :4242 can push studies. Unlisted AETs cannot reach XNAT — they are quarantined under `/facility-backup/__unmapped_aet__/` — but they still consume disk. Keep it on a trusted modality VLAN. |
+| The node | This is the whole appliance; harden it accordingly. An attacker gets the local DICOMs (originals in the backup, Orthanc and pre-deid pipeline directories, plus sensitive reid maps), the XNAT credentials, and the deid salt. Restrict LAN access to :4242 and OS-level access to the machine. |
+| The DICOM port (:4242) | Anyone on the LAN who can reach :4242 can push studies. Ingest does not use an AET allowlist for project routing or quarantine. Any accepted input with usable labels can enter the pipeline and consume disk. Keep it on a trusted modality VLAN. |
 | The XNAT credentials | Scope the XNAT service account to the target project only (Member/Collaborator), so a leak can't reach unrelated data. |
 | An age private key | Whoever holds it can decrypt every `sites/*/secrets.enc.yaml` it is a recipient of. SOPS has no escrow: losing *every* recipient key for a file means that file is gone. Back the key up, and rotate a file with `sops updatekeys` after adding a recipient. |
 
@@ -363,8 +389,8 @@ k0s-k0smotron-mvp/
 │   ├── charts/                            ← vendored kube-prometheus-stack-87.19.2.tgz,
 │   │                                        loki-7.1.0.tgz (no repo fetch at install)
 │   ├── files/                             ← loaded with .Files.Get, never templated
-│   │   ├── deidentify-and-forward.lua     ← deid + facility-backup + label hook
-│   │   ├── deidentification-profile.example.json  ← start your profile here
+│   │   ├── deidentify-and-forward.lua     ← facility-backup callback under ingest
+│   │   ├── deidentification-profile.example.json  ← deprecated-engine reference profile
 │   │   ├── deid-specs.example/               ← recipes for the xnat-ingest deidentify stage
 │   │   ├── data-policy.sh                 ← the retention/reporting engine
 │   │   ├── vector-local.yaml              ← tier-1 Vector config (in-cluster Loki, no TLS)
@@ -395,14 +421,18 @@ k0s-k0smotron-mvp/
 There is no shell-side template rendering: the chart is the only thing that turns
 configuration into manifests, so a value is stated once and read once.
 
-`charts/edge/templates/_helpers.tpl` refuses to render on several conditions,
-each of which otherwise fails *silently* at runtime — de-id enabled without
-`policyReviewed`, an empty `aetMap` (every modality quarantined), an empty
-`profile` (studies reach XNAT with PHI intact and nothing looks wrong), deid
-without `storage.facilityBackup.enabled`, and any `upload.mode` other than
-`direct`. `install.sh` refuses the same: `s3` would have the uploader retrying
-an endpoint that never answers while the disk quietly filled. S3 staging needs
-the tier-2 management plane, which is on the main branch.
+`charts/edge/templates/_helpers.tpl` refuses configurations that cannot work.
+These include a false policy-review gate, ingest without a recipe source,
+ClinicalTrial-prefixed ingest tag mappings, obsolete stage-enable keys, and
+recipes supplied under an engine that would ignore them. Empty required Secret
+names also fail rendering. The guards do not inspect incoming DICOM values.
+
+Tier-1 accepts only `upload.mode: direct`. The chart and installer both enforce
+this because the S3 route needs the tier-2 management plane on the main branch.
+A new site should retain the example's ingest selector and review the source
+mapping, recipe, reid encryption and data policy as a single configuration.
+Legacy-only profile and AET-map validation is described in the deprecated
+component reference, not as a new-site setup requirement.
 
 ## Installing on an Existing Kubernetes Cluster
 
@@ -445,8 +475,8 @@ the configured paths available.
 Before ingesting data, ensure:
 
 1. **The XNAT project exists** — create it in the XNAT web UI first. Its ID must
-   match the `project` value in `orthanc.deid.aetMap` (the single source of the
-   destination project). The Lua hook does not create the project. Use IDs in
+   match the project selected by `ingest.assign.tagMapping.project` or
+   `ingest.assign.constantProjectId`. Assignment does not create the project. Use IDs in
    `[A-Za-z0-9_]` only — xnat-ingest normalises other characters (e.g. a hyphen)
    to `_`, so `test-project` would become `test_project`.
 2. **The XNAT user is a local account** — not AAF/OIDC. Create via
@@ -467,7 +497,7 @@ then runs with `--dont-verify-ssl`.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | 0.16.2 | `ghcr.io/australian-imaging-service/xnat-ingest:0.16.2` — upstream; JSON logging, `group-orthanc` Orthanc REST-pull, `assign` ID-assignment, local-path upload source, and the optional `deidentify` stage. 0.13.1 is the floor: 0.12.x shipped `dicom_deidentify` as a stub and 0.13.0 could not import |
+| xnat-ingest | image tag `0.16.2.post1` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`, the pinned fork image. Includes the default deidentify stage, local upload and grouping snapshot support. The inspected image reports package version `0.16.3.dev49+ais.20261021.r13.g3182cc6`; record the deployed digest as well. |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |
@@ -481,30 +511,41 @@ must not need a working path to `grafana.github.io` in order to reinstall.
 
 ## Testing
 
-Drop a study by C-STORE. The Called-AET (`-aec`) must be listed in
-`orthanc.deid.aetMap` — that's how the deid hook knows which XNAT project to
-route to. An unlisted AET is quarantined under
-`/facility-backup/__unmapped_aet__/<AET>/`, not ingested and not deleted.
+Send a synthetic study from a machine on the modality network. Set its project,
+subject and session tags to known approved test values, and create the project
+in XNAT first. The called AET is `orthanc.aet` (default `AISEDGE`); it does not
+select the project under ingest.
 
 ```bash
-# C-STORE a study to Orthanc on the node (from a machine with dcmtk):
-storescu -aec <AET-from-aetMap> -aet TEST_MOD <nodeIP> 4242 study/*.dcm
+# Replace AISEDGE if the site changes orthanc.aet.
+storescu -aec AISEDGE -aet TEST_MOD <nodeIP> 4242 study/*.dcm
 
-# Watch the Orthanc deid + label events
-kubectl logs -n xnat-ingest -l component=dicom-receiver -f \
-  | grep -E 'instance_deidentified|study_labeled_ready|REJECT|ABORT|ERROR'
-
-# Watch group-orthanc REST-pull from Orthanc and hardlink into /data/grouped
-kubectl logs -n xnat-ingest -l component=group -f
-# Watch assign collate grouped studies into /data/assigned
-kubectl logs -n xnat-ingest -l component=assign -f
-
-# Watch upload to XNAT
-kubectl logs -n xnat-ingest -l component=upload -f
+# Receiver and backup activity
+kubectl logs -n xnat-ingest -l component=dicom-receiver --tail=100
+# Group input, assignment, recipe processing and upload
+kubectl logs -n xnat-ingest -l component=group --tail=100
+kubectl logs -n xnat-ingest -l component=assign --tail=100
+kubectl logs -n xnat-ingest -l component=deidentify --tail=100
+kubectl logs -n xnat-ingest -l component=upload --tail=100
 ```
 
-Then confirm the session appears in the XNAT project's web UI. The original study
-stays in `/data/facility-backup`; only the de-identified session is uploaded.
+Check more than the presence of an XNAT session. Verify the exact label values,
+resource files and deidentified headers. Confirm that PatientID and the other
+named removals are absent, and that the result markers are present. Review the
+fields the recipe leaves in place, including private tags, PatientSex and
+PatientAge. The markers do not prove that pixels or unknown fields are safe.
+
+Confirm that the backup retains the original and that reid maps have the
+expected encryption. The default map path is `/data/reid`; plaintext maps are
+possible unless the encryption-key Secret reference is set. Do not publish the
+map contents in test reports. Use counts, filenames and synthetic expectations
+where possible.
+
+Then test a synthetic input with an empty required label. Confirm that it is
+held in `assigned/__invalid__`, that the assignment error is visible, and that
+it does not appear as a successfully deidentified session. Keep the recovery
+procedure available to operators. No unknown-AET quarantine is expected in this
+mode, so a quarantine directory is not the place to diagnose missing labels.
 
 ## Health Checks
 
@@ -516,13 +557,14 @@ kubectl get pods -n xnat-ingest
 kubectl get nodes
 
 # The pipeline log tails
-kubectl logs -n xnat-ingest -l component=dicom-receiver --tail=20  # Orthanc + deid
+kubectl logs -n xnat-ingest -l component=dicom-receiver --tail=20  # Orthanc receive + backup
 kubectl logs -n xnat-ingest -l component=group        --tail=20    # group-orthanc → /data/grouped
-kubectl logs -n xnat-ingest -l component=assign       --tail=20    # assign → /data/assigned
+kubectl logs -n xnat-ingest -l component=assign       --tail=20    # assign -> /data/assigned
+kubectl logs -n xnat-ingest -l component=deidentify   --tail=20    # recipe -> /data/deidentified
 kubectl logs -n xnat-ingest -l component=upload       --tail=20    # upload → XNAT
 kubectl logs -n xnat-ingest -l component=data-policy  --tail=20    # disk + reclaim decisions
 
-# What the release thinks it deployed (AET map, upload mode, data policy,
+# What the release thinks it deployed (engine, upload mode, data policy,
 # the Secrets it expects to already exist)
 helm get notes <site> -n xnat-ingest
 
@@ -537,12 +579,13 @@ curl -sk <XNAT_URL>                                             # should return 
 
 | Scenario | What happens | Recovery |
 |----------|-------------|---------|
-| Modality sends an unmapped AET | Orthanc rejects it for ingest and quarantines the ORIGINAL under `/facility-backup/__unmapped_aet__/<AET>/`; `REJECT` logged. If the quarantine write fails, the instance is kept in Orthanc (`ABORT`) rather than lost | Add the AET to `orthanc.deid.aetMap`, re-run `./install.sh <site>`, and re-send the study |
-| Network drops mid-upload | The in-flight session upload fails | The upload loop retries the still-assigned session on the next cycle |
+| Unapproved sender reaches the DICOM port | The shipped receiver accepts calling AETs. Ingest does not consult the legacy AET map or quarantine that sender; usable source labels can take the data into the pipeline | Restrict port 4242 at the network boundary and investigate received input under the site's data-handling procedure |
+
+| Network drops mid-upload | The in-flight session upload fails | The upload loop retries the retained upload-source session on the next cycle |
 | Node reboots | k0s auto-starts; pods resume; assigned files are safe on the local disk | Nothing — the pipeline picks up where it left off |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
-| XNAT is down | Uploads fail; sessions accumulate in `/data/assigned` | XNAT returns; the upload loop clears the backlog |
-| DICOM missing AccessionNumber | `assign` logs `Could not resolve project/subject/session IDs` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Rename and move the session, as in "Recovering an invalid session" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Real clinical DICOMs populate this field |
+| XNAT is down | Uploads fail; sessions accumulate in `/data/deidentified` (or `/data/packaged`) | XNAT returns; the upload loop clears the backlog |
+| DICOM missing AccessionNumber | `assign` logs `Could not resolve project/subject/session IDs` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Rename and move the session, as in "Recovering an invalid session" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Check each modality; a field can be absent or empty |
 | `/data` disk fills | Nothing is deleted while `dataPolicy.enabled` is false, so both volumes grow unbounded. The data-policy DaemonSet reports free disk and what it *would* reclaim | Expand the disk, or turn on `dataPolicy` (read a week of `dryRun` decisions first — this node holds the only copy of the facility backup) |
 | `helm upgrade` refuses to render | One of the render-time guards fired (see Repository Structure) | The failure text names the values path and why it matters — fix the site file, do not bypass |
 | DICOM missing `SeriesDescription` or `SeriesNumber` | `group-orthanc` stages the series with a fallback name and logs a WARNING with `event: series_metadata_fallback` and the Orthanc series ID. A missing description gives the scan type `Series_<scan-id>`. A missing number gives the `SeriesInstanceUID` with its dots changed to underscores, as XNAT's header importer does | Nothing. Correct the tag at the modality if the scan needs a readable name |
@@ -639,13 +682,13 @@ accident of network placement, not a control. Anything running *inside* the
 cluster can call that API, and it can **delete studies**. Turn it on for any
 deployment where that matters.
 
-Three keys, all required, because two different things read this Secret:
+Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
-| `users.json` | Orthanc itself, via `RegisteredUsersFile` | Orthanc fails to start — the file its config points at was never mounted |
-| `orthanc-user` | `group-orthanc`, calling the REST API | Orthanc answers 401 and the pipeline stalls with data sitting in Orthanc |
-| `orthanc-password` | `group-orthanc` | as above |
+| `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
 `users.json`. They are separate keys because Orthanc wants a file and

@@ -1,10 +1,10 @@
 # =============================================================================
-# EXAMPLE TIER-1 SITE — one machine, non-secret configuration
+# EXAMPLE TIER-1 SITE; one machine, non-secret configuration
 # =============================================================================
 # Tier-1 is a single-node appliance. ONE Ubuntu box runs the whole pipeline:
 #
-#   modality --C-STORE--> Orthanc (de-identify) --> group-orthanc --> assign
-#                     --> upload --> XNAT (HTTPS)
+#   modality --C-STORE--> Orthanc (receive) --> group-orthanc --> assign
+#                     --> deidentify --> upload --> XNAT (HTTPS)
 #
 # There is no SeaweedFS, no S3 hop, no k0smotron child cluster, no konnectivity,
 # no second worker to join, no nginx-ingress and no cert-manager. Original
@@ -33,37 +33,20 @@ clusterLabel: tier1-example
 # The de-identification engine. One key; the chart derives the Lua hook,
 # the xnat-ingest stage, the group label and the reclaim condition from it.
 deid:
-  # THE DE-IDENTIFICATION ENGINE. Two exist and exactly one runs.
+  # Use ingest for new sites. Its recipe runs after assign and before upload.
+  # Orthanc remains the receiver. Its enabled Lua backup callback copies the
+  # original, then returns before AET routing or header modification.
+  # Unknown calling AETs are not quarantined by ingest. Restrict senders at
+  # the network boundary and select XNAT labels in ingest.assign below.
   #
-  #   ingest   (this, the default) xnat-ingest's own `deidentify` stage, between
-  #            assign and upload. Recipes are pydicom-deid, written below in
-  #            ingest.deidentify.specs, and they can do things the Orthanc
-  #            profile cannot, JITTER on dates among them.
+  # deid.engine: orthanc is deprecated. Existing-site reference material is in
+  # docs/components/deidentification.md, "Deprecated Orthanc Lua engine".
+  # Keep ingest; there is no engine-switch checklist for a new site.
   #
-  #   orthanc  a Lua hook inside Orthanc, stripping each instance as it arrives,
-  #            driven by orthanc.deid.profile further down.
-  #
-  # ORTHANC IS STILL THE DICOM RECEIVER either way. This key only chooses which
-  # component de-identifies; the modality still C-STOREs to Orthanc on 4242, and
-  # the Lua script still writes the facility backup and quarantines unmapped AE
-  # titles. Under `ingest` the hook simply stops modifying the instance.
-  # SWITCHING TO deid.engine: orthanc IS THREE EDITS, NOT ONE. The chart refuses
-  # each wrong combination rather than installing something that quietly does
-  # nothing, so you will be told, one at a time. Doing them together is quicker:
-  #
-  #   1. deid.engine: orthanc
-  #   2. DELETE the ingest.deidentify.specs block below. Recipes belong to the
-  #      stage that no longer renders; left in place the chart refuses, because
-  #      silently ignoring them is how a reviewed policy stops being applied.
-  #   3. ingest.assign.tagMapping back to the ClinicalTrial* tags: the Lua hook
-  #      writes those from the AET map, and they are the pseudonymised ids.
-  #
-  # The two dataPolicy.derived reclaim words follow automatically: they are set
-  # to `auto` below and the chart resolves them for whichever engine is selected,
-  # so they are not part of this list.
-  #
-  # And orthanc.deid.profile becomes the recipe that matters. It is already
-  # filled in below, so it needs reading, not writing.
+  # Review the source labels as well as the recipe. PatientID can contain an
+  # MRN; if selected as subject it becomes the XNAT label before the recipe runs.
+  # Reclaim settings set to auto follow the current pipeline automatically.
+
   engine: ingest
 
   # THE GATE. The chart refuses to render while this is false. Set it only once
@@ -77,7 +60,7 @@ deid:
 # there is nothing to split.
 namespace: xnat-ingest
 
-# onprem  resolves nothing externally — tier-1 talks only to XNAT, by its real
+# onprem  resolves nothing externally; tier-1 talks only to XNAT, by its real
 #         DNS name, over the node's normal resolver. There are no management
 #         hostnames to pin, so no /etc/hosts entries and no hostAliases.
 topology: onprem
@@ -87,14 +70,14 @@ topology: onprem
 installMode: fresh
 
 # This machine's address. Used for the DICOM endpoint and the Grafana URL the
-# installer prints — NOT for cluster networking, which is all local.
+# installer prints; NOT for cluster networking, which is all local.
 nodeIP: "10.0.0.1"
 
 # -----------------------------------------------------------------------------
-# Storage — where the bytes physically land
+# Storage; where the bytes physically land
 # -----------------------------------------------------------------------------
-# All on ONE filesystem, deliberately: group-orthanc HARDLINKS instances out of
-# Orthanc's storage into grouped/, and a hardlink cannot cross a mount point.
+# Keep all PIPELINE directories on one filesystem so hardlinks work.
+# The facility backup is a byte copy and can be on a separate disk.
 storage:
   storageClass:
     create: true
@@ -110,31 +93,26 @@ storage:
     capacity: 500Gi
 
 # -----------------------------------------------------------------------------
-# Orthanc — the DICOM receiver and the de-identification contract
+# Orthanc; the DICOM receiver and the de-identification contract
 # -----------------------------------------------------------------------------
 orthanc:
   # The AE title modalities C-STORE to, on this node's port 4242.
   aet: AISEDGE
   auth:
     enabled: false
+  # Legacy values below are inactive under ingest. The backup script still
+  # needs existingSaltSecret. Use ingest.deidentify.specs for the active policy.
   deid:
     existingSaltSecret: orthanc-deid-salt
 
-    # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
-    # The most site-specific thing here. An AET that is NOT listed is
-    # quarantined, not dropped, so it can be mapped and re-sent.
     aetMap:
       AISEDGE:
         project: example_project
 
-    # The de-identification profile applied to every incoming study.
-    # Start from charts/edge/files/deidentification-profile.example.json.
     profile:
       DeidMode: modify
       Force: true
       RemovePrivateTags: false
-      # UIDs are RETAINED so a study stays internally consistent across series;
-      # the identity fields are replaced below instead.
       Keep:
         - StudyInstanceUID
         - SeriesInstanceUID
@@ -148,9 +126,6 @@ orthanc:
         PatientBirthDate: ${BirthYearOnly}0101
         AccessionNumber: ${SessionHash}
         StudyID: ${SessionHash}
-        # THE ASSIGN STAGE READS THESE THREE. Removing any one of them stalls
-        # every study at assign with "missing metadata fields", after deid has
-        # already reported success.
         ClinicalTrialProtocolID: ${ProjectCode}
         ClinicalTrialSubjectID: ${SubjectHash}
         ClinicalTrialTimePointID: ${SessionHash}
@@ -201,21 +176,19 @@ ingest:
         # Example de-identification recipe for medimage/dicom-series.
         #
         # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
-        # xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+        # xnat-ingest's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
         # is the category and the FILE is the format: medimage/dicom-series. It skips
         # anything at the top level that is not a directory, so a flat file named
         # `medimage@dicom-series.json` is never read and every session fails with
-        # "No deidentification specs found".
+        # "No deidentification recipe files found".
         #
         # Copy this directory, rename __default__ to your project ID for a
         # project-specific policy, and edit to match your site's approved profile.
         # __default__ is the fallback for any project without its own directory.
         #
         # ONLY THE TAGS NAMED HERE ARE REMOVED. Anything not listed passes through
-        # untouched, so this list IS the policy — review it as such.
+        # untouched, so this list IS the policy; review it as such.
         #
-        # Compare with files/deidentification-profile.example.json, which is the
-        # equivalent for the Orthanc Lua engine and has a different syntax.
 
         FORMAT dicom
 
@@ -322,10 +295,10 @@ ingest:
         #   PatientSex
         #   PatientAge
   assign:
-    # THE LUA HOOK IS OFF under deid.engine: ingest, so nothing writes the
-    # ClinicalTrial* tags the chart would otherwise read. These must be tags your
-    # modalities actually populate, and the chart refuses to render if they are
-    # left pointing at ClinicalTrial*.
+    # Select tags that the source actually populates. These are the derived
+    # ingest defaults, stated explicitly for review. The chart rejects any
+    # ClinicalTrial-prefixed tag under ingest. A missing required value goes
+    # to assigned/__invalid__ before de-identification.
     #
     # CAUTION: whatever you name for `subject` becomes the XNAT subject label.
     # PatientID means the medical record number becomes that label, in the clear,
@@ -338,9 +311,9 @@ ingest:
     interval: 60
 
 # -----------------------------------------------------------------------------
-# Upload — STRAIGHT TO XNAT
+# Upload; STRAIGHT TO XNAT
 # -----------------------------------------------------------------------------
-# direct  reads the assigned sessions off local disk and PUTs them to XNAT.
+# direct  reads deidentified output (or packaged output) and sends it to XNAT.
 #         This is what makes tier-1 a single node: no staging bucket, no
 #         management-side reclaimer, no S3 credential to distribute.
 # s3      tier-2 only. Requires SeaweedFS and a management plane.
@@ -374,16 +347,16 @@ upload:
     verifySsl: true
 
 # -----------------------------------------------------------------------------
-# Observability — OPTIONAL, and entirely local on tier-1
+# Observability; OPTIONAL, and entirely local on tier-1
 # -----------------------------------------------------------------------------
 # Tier-2 ships logs off the edge to a management Loki over mTLS. There is no
 # management plane here, so the whole stack runs on this node:
-#   Loki       filesystem storage on a PVC (NOT S3 — there is no object store)
+#   Loki       filesystem storage on a PVC (NOT S3; there is no object store)
 #   Vector     tails pod logs and pushes to the in-cluster Loki over plain HTTP
 #   Grafana    on a NodePort, since there is no ingress
 #   Prometheus + Alertmanager as usual
 #
-# Turn the whole thing off and the pipeline is unaffected — it is observability,
+# Turn the whole thing off and the pipeline is unaffected; it is observability,
 # not plumbing.
 observability:
   # Run Vector on this node and ship logs to Loki.
@@ -393,7 +366,7 @@ observability:
     # MUST BE EMPTY ON TIER-1. The chart defaults these to the tier-2 names
     # (loki-push-client-tls / ca-bundle), which cert-sync delivers from a
     # management cluster. There is no management cluster here, so nothing ever
-    # creates them — and the chart mounts them non-optionally, so Vector would
+    # creates them; and the chart mounts them non-optionally, so Vector would
     # sit in CreateContainerConfigError for good.
     #
     # Empty also selects files/vector-local.yaml, the config without the sink's
@@ -406,11 +379,11 @@ observability:
     # Where alerts are MAILED. Empty is allowed and is the shipped default: the
     # stack installs, the dashboards work, and nothing is sent. Every alert this
     # chart raises is then visible only in Grafana, which nobody is watching at
-    # 3am — so on a real deployment, fill these in.
+    # 3am; so on a real deployment, fill these in.
     #
     # The credentials live in secrets.enc.yaml as the alertmanager-smtp Secret
     # (username + password). Without the three keys below there is nowhere to
-    # send to, so that Secret sits unused — which is the state a fresh
+    # send to, so that Secret sits unused; which is the state a fresh
     # sites/ scaffold starts in.
     #
     # smtpUsername is here rather than in the Secret because Alertmanager has
@@ -437,8 +410,8 @@ observability:
     # on this same node. Tier-2 ships logs off the box to a management cluster;
     # tier-1 has nowhere to ship them, so it keeps them locally.
     #
-    # THIS IS THE ONLY KEY. Everything about HOW the stack is configured —
-    # retention, the Grafana NodePort, Loki's disk, alert routing — lives in the
+    # THIS IS THE ONLY KEY. Everything about HOW the stack is configured :
+    # retention, the Grafana NodePort, Loki's disk, alert routing; lives in the
     # `loki:` and `kube-prometheus-stack:` blocks in charts/edge/values.yaml.
     # Helm cannot template subchart values, so a friendly key here could not
     # reach them: it would be read, trusted and silently ignored. Override those
@@ -454,7 +427,7 @@ observability:
     enabled: true
 
 # -----------------------------------------------------------------------------
-# Data policy — what is kept, and for how long
+# Data policy; what is kept, and for how long
 # -----------------------------------------------------------------------------
 # Nothing expires on a fresh install. Run with dryRun for a week and read the
 # decisions it logs before enabling it.
@@ -496,21 +469,12 @@ dataPolicy:
     # checksums" each time. That is not hypothetical: it is what this tier did
     # until the terminal-stage reclaimer was ported to this branch.
     #
-    # WHICH tree this is depends on the engine: /data/assigned under
-    # deid.engine=orthanc, /data/deidentified under ingest. The chart derives it.
-    #
-    # THE RIGHT VALUE DEPENDS ON THE ENGINE. `auto` (set here and above) lets
-    # the chart pick it, and an explicit word is still checked: the chart
-    # refuses a wrong one rather than letting it read as a policy that is
-    # quietly never applied.
-    #
-    #   deid.engine: ingest  (the default, and what this file sets)
-    #     the uploader reads /data/deidentified, so auto resolves THIS key to
-    #     onUploaded and `assigned.reclaim` above to onDeidentified.
-    #
-    #   deid.engine: orthanc
-    #     the terminal tree is /data/assigned, so auto resolves THIS key to
-    #     `never` and `assigned.reclaim` above to onUploaded, which does the work.
+    # Under ingest, /data/deidentified is the upload source. With packaging
+    # enabled, /data/packaged is the upload source instead.
+    # auto resolves assigned.reclaim to onDeidentified, and this key to
+    # onUploaded (or onPackaged when packaging is on). Keep the conditions
+    # aligned with each tree's actual consumer. The chart rejects mismatches.
+
     deidentified:
       reclaim: auto
 

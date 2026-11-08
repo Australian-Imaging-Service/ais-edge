@@ -87,18 +87,27 @@ Any collector you swap in should preserve at least `namespace`/`app`/`component`
 
 ### 2b. Per-component emitted schema (as actually emitted today)
 
-**Orthanc de-id hook** (`app=orthanc`, `component=dicom-receiver`) — the **richest structured events**, emitted by the Lua hook via `print(DumpJson(...))`. Best per-session/audit anchor:
+**Orthanc receiver** (`app=orthanc`, `component=dicom-receiver`) emits server
+and Lua callback logs. Under ingest, `OnStoredInstance` returns after the backup
+step, before routing or header modification. It does not emit the legacy
+`instance_deidentified` event. The separate `OnStableStudy` callback has no
+engine guard. When the backup feature loads the script, it can emit
+`study_labeled_ready` and `study_reopened` under ingest too. These label events
+do not prove that the ingest recipe ran. See the
+[label coupling reference](components/deidentification.md#the-label-coupling)
+for the difference between producing a label and filtering on it.
 
-```json
-{"ts":"2026-07-06T05:05:36Z","component":"orthanc-deid","event":"instance_deidentified",
- "mode":"modify","calledAet":"AISEDGE","project":"test-project",
- "session":"test-project.90001C64992C.BB6AAD071A7A",
- "originalId":"76d61ff2-…","newId":"3091d67e-…","backupPath":"/facility-backup/…/….dcm"}
+Use native receive logs to establish that Orthanc accepted input. Check backup
+errors separately, then follow group, assign, deidentify and upload. A receive
+message does not identify the final XNAT labels and does not prove that the
+recipe ran. Ingest success must be observed at the deidentify/output boundary.
 
-{"ts":"…","component":"orthanc-deid","event":"study_labeled_ready","studyId":"08c0…","label":"xnat-ingest-ready"}
-```
-Fields: `ts, component, event, mode, calledAet, project, session, originalId, newId, backupPath` (deid) / `ts, component, event, studyId, label` (ready). `event` and `session` are **real JSON fields** here — use `| json | event="instance_deidentified"`.
-Orthanc also emits its **native (non-JSON) server logs** (`DICOM server listening…`, `new stored instance`, Lua tracebacks) — matched by text, not `| json`.
+Receiver logs can include non-JSON text such as DICOM-listener messages and Lua
+tracebacks. Match those as text, not with `| json` alone. Preserve `app`,
+`component`, namespace and node labels when changing the collector, so an
+operator can distinguish receiver errors from recipe-stage errors. Use
+synthetic fixtures when testing a query; do not copy patient identifiers into
+an alert example or a shared dashboard export.
 
 **xnat-ingest group-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`) — upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (it also emits the `Invalid IDs found` lines):
 ```json
@@ -134,7 +143,7 @@ Fields: `ts, component, edge, event, stage, message` on every line; `stage_repor
 | Invalid DICOM (`__invalid__`) | assign | message `=~ "(?i)invalid\|validation.*fail"` |
 | Orthanc backlog | orthanc | native log `=~ "new stored instance"` |
 | **Disk headroom** (per stage) | data-policy | `\| json \| event="stage_report"` → `free_pct` vs `min_free_pct` |
-| Unmapped-AET data sitting in quarantine | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
+| Retained legacy quarantine data (not created by ingest) | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
 
 > **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages).
 >
@@ -189,7 +198,7 @@ Two engines, one Alertmanager.
 
 Mail routing is stated in `observability.stack.alerting.*`, with the password in the `alertmanager-smtp` Secret.
 
-> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources — **and the rule bodies below, which are shipped, not left to you**. `charts/edge/templates/observability.yaml` reads `files/loki-ruler-rules.yaml` with `.Files.Get` (hard-`fail`ing the render if it is missing or empty) into ConfigMap `<release>-loki-rules` labelled `loki_rule: "true"`, substituting `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` from `dataPolicy.originals`; and it globs `files/prometheus-rules/*.yaml` into the PrometheusRules `ais-edge-critical` / `-warning` / `-info`. Both are gated on `observability.stack.enabled`. Three things follow: (1) the ruler path and the sidecar path already agree — `/rules` and `/rules/fake`, the tenant sub-directory, set together in `charts/edge/values.yaml`; adding a rule means applying an *additional* ConfigMap with the `loki_rule` label, not repointing anything; (2) Alertmanager runs the chart's own config, rendered from `files/alertmanager-config.yaml` into the Secret `alertmanager-aisedge-config` and pinned via `alertmanagerSpec.configSecret`, with a real `email-primary` root receiver — `kube-prometheus-stack.alertmanager.config` is inert once that pin is set; (3) what you must still supply is the **mail destination**: `observability.stack.alerting.*` ships empty, so a fresh site renders a valid config that addresses nowhere. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
+> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources; **and the rule bodies below, which are shipped, not left to you**. `charts/edge/templates/observability.yaml` reads `files/loki-ruler-rules.yaml` with `.Files.Get` (hard-`fail`ing the render if it is missing or empty) into ConfigMap `<release>-loki-rules` labelled `loki_rule: "true"`, substituting `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` from `dataPolicy.originals`; and it globs `files/prometheus-rules/*.yaml` into the PrometheusRules `ais-edge-critical` / `-warning` / `-info` / `-uploader`. Both are gated on `observability.stack.enabled`. Three things follow: (1) the ruler path and the sidecar path already agree; `/rules` and `/rules/fake`, the tenant sub-directory, set together in `charts/edge/values.yaml`; adding a rule means applying an *additional* ConfigMap with the `loki_rule` label, not repointing anything; (2) Alertmanager runs the chart's own config, rendered from `files/alertmanager-config.yaml` into the Secret `alertmanager-aisedge-config` and pinned via `alertmanagerSpec.configSecret`, with a real `email-primary` root receiver; `kube-prometheus-stack.alertmanager.config` is inert once that pin is set; (3) what you must still supply is the **mail destination**: `observability.stack.alerting.*` ships empty, so a fresh site renders a valid config that addresses nowhere. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
 
 The table below is the **inventory** — read it as the set of signals worth alerting on, in whichever engine you use.
 
@@ -204,11 +213,11 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
 | `XNATRepairAttempted` | warning | Loki | xnat-ingest's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
-| `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from orthanc in 10m (deid stalled) |
+| `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from Orthanc in 10m; under ingest inspect backup/startup failures, while recipe errors come from deidentify |
 | `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
 | `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
-| `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (an unmapped AET nobody has mapped) |
+| `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (retained legacy input; ingest does not create unknown-AET quarantine entries) |
 | `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |
 | `KubernetesAPIServerDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
 | `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |

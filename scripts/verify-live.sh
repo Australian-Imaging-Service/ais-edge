@@ -129,15 +129,15 @@ for s in xnat-credentials orthanc-deid-salt; do
     else bad "Secret MISSING: $s" "scripts/site-secrets.sh apply ${SITE}"; fi
 done
 
-# THE SALT IS NOT VALIDATED BY ANYTHING ELSE. The chart checks only that the
-# Secret is NAMED, so a site installed with the shipped placeholder starts
-# cleanly and derives every pseudonym from a string published in this repo.
+# Check the backup script startup prerequisite. install.sh also refuses
+# REPLACE_ placeholders. Under ingest this value does not affect labels or
+# recipes; the script still requires the variable when it loads.
 salt=$($K get secret orthanc-deid-salt -n "$NS" -o jsonpath='{.data.AIS_DEID_HMAC_SALT}' 2>/dev/null | base64 -d 2>/dev/null)
 if [ -z "$salt" ]; then
     skip "de-id salt not readable (Secret missing?)"
 elif [ "$salt" = "REPLACE_64_HEX_CHARS" ]; then
     bad "de-id salt is STILL THE PLACEHOLDER" \
-        "every SubjectHash on this site derives from a public string. openssl rand -hex 32"
+        "set the backup script prerequisite with openssl rand -hex 32; ingest does not use it for hashing"
 elif printf '%s' "$salt" | grep -qE '^[0-9a-fA-F]{64}$'; then
     ok "de-id salt is set (64 hex chars)"
 else
