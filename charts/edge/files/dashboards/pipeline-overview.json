@@ -109,7 +109,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h])) or vector(0)",
+          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Could not resolve the labels of .*\" [1h])) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -156,7 +156,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | message =~ \"(?s)^Staging completed with.*\" [1h])) or vector(0)",
+          "expr": "sum(count_over_time({namespace=\"xnat-ingest\",component=\"assign\"} | json | message =~ \"^Label completed with [0-9]+ errors\" [1h])) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
@@ -244,7 +244,7 @@
       },
       "targets": [
         {
-          "expr": "{namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" | line_format \"{{.cluster}} \u2014 {{.message}}\"",
+          "expr": "{namespace=\"xnat-ingest\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Could not resolve the labels of .*\" | line_format \"{{.cluster}} \u2014 {{.message}}\"",
           "refId": "A"
         }
       ],

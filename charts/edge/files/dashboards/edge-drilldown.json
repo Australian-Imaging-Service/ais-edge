@@ -135,7 +135,7 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Invalid IDs found.*\" [1h])) or vector(0)",
+          "expr": "sum(count_over_time({cluster=\"$cluster\",node=~\"$node\",component=\"assign\"} | json | level=\"ERROR\" | message =~ \"^Could not resolve the labels of .*\" [1h])) or vector(0)",
           "queryType": "instant",
           "refId": "A"
         }
