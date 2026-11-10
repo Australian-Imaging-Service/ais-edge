@@ -776,14 +776,21 @@ ingest:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
   extraPipPackages: []
-  # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
-  # these stages without chart-set reservations or limits, as before. Set each
-  # stage for the site's workload; do not infer production limits from a small
-  # test. See docs/components/accessionflow.md, Ingest stage CPU and memory.
+  # Per-stage Kubernetes CPU/memory requests and limits. MEASURED DEFAULTS
+  # (2026-11-10, accessionflow 0.19.0, 4 vCPU edge, one study of 12,098
+  # instances): docs/components/accessionflow.md, Ingest stage CPU and memory.
+  # A site key replaces only that key (Helm merges maps). null removes one key;
+  # `resources: null` removes them all.
+  # NO CPU LIMIT, on purpose: a CPU limit throttles the stage. The request is
+  # its share of the CPU when the node is busy.
 
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
-    resources: {}
+    # Memory grows with the instances of a study: the files are hard-linked
+    # from Orthanc's storage, not read. Measured: 201 MiB for 12,098.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     enabled: true
     interval: 60
     # Under the default deid.engine=ingest the chart does NOT give this label
@@ -802,7 +809,11 @@ ingest:
   # OFF by default — see dataPolicy.originals.fileDrop for why this path
   # deserves more care than the Orthanc one.
   fileDrop:
-    resources: {}
+    # Memory grows with ALL the files of one pass: it reads every header first.
+    # Measured: 340 MiB for 12,098 files.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     enabled: false
     interval: 300
     # Files in subfolders are read too: group runs with --recursive.
@@ -816,7 +827,11 @@ ingest:
   # there is no AE-title routing. Only the deprecated orthanc engine writes the
   # ClinicalTrial* tags, from routing.json's AETMap.
   assign:
-    resources: {}
+    # Memory grows with the instances of the largest session, not with the
+    # backlog. Measured: 310 MiB for 12,098.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     interval: 60
     copyMode: hardlink_or_copy
     # OPTION: file every session under this one XNAT project, whatever the
@@ -915,7 +930,13 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
-    resources: {}
+    # NO DEFAULT MEMORY LIMIT, on purpose. deid 0.4.13 (in accessionflow 0.19.0)
+    # keeps every file it parses in memory until the pass ends (pydicom/deid#301):
+    # about 200 MiB + the bytes of the sessions in one pass. Measured: 1.6 GiB
+    # for one 0.9 GB study. A fixed limit stops a larger session on every pass.
+    # OPTION: limits: {memory: <size>} if the node runs other work (see the docs).
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Written here, in the site file. The chart builds the
