@@ -417,6 +417,14 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
+            # Keep SOPClassUID in the metadata sidecars of the output.
+            # accessionflow 0.18.0 (#247) keeps only __uid__ by default. The
+            # reclaimer (reclaim-files.py) reads SOPClassUID from the sidecar
+            # to find the XNAT resource label, and it KEEPS every series
+            # without it: no error, the disk fills. SOPClassUID is not PHI.
+            # CI: tests/reclaimer/deid-sidecar.sh.
+            - "--metadata-allowlist"
+            - "__uid__,SOPClassUID"
             {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #

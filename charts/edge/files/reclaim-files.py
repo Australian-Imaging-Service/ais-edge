@@ -16,7 +16,9 @@
 # xnat-ingest, so it is the pinned rule); for a non-DICOM folder, its name. All
 # files must be in one XNAT resource. Not mapped, so kept: a series split by
 # modality (<id>-<modality>), a single DICOM image, and a series whose metadata
-# has no SOPClassUID key (the uploader would read the headers).
+# has no SOPClassUID key (the uploader would read the headers). The deidentify
+# stage keeps that key (--metadata-allowlist in ingest-pipeline.yaml); without it
+# accessionflow 0.18.0 and later write only __uid__ (tests/reclaimer/deid-sidecar.sh).
 # CAUTION: the listing alone is not proof. XNAT keeps a row for a file it lost.
 # CAUTION: this proves presence and size, NOT content.
 #
