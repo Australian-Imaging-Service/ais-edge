@@ -898,6 +898,9 @@ ingest:
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
   # Idle `sleep infinity` when there are none, so off unless needed.
   associate:
+    # NOT SUPPORTED YET: the chart refuses enabled: true. accessionflow attach
+    # needs the raw-file location (GLOB) and a session match (ID_PATTERN) that
+    # this chart does not provide yet.
     enabled: false
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy

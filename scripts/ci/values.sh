@@ -863,6 +863,8 @@ printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-
 # execute exactly once each, in anger. Nothing had ever run them.
 printf 'orthanc:\n  deid:\n    enabled: true\n'      >"$V/neg-edge-deid-legacy-orthanc-key.yaml"
 printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-ingest-key.yaml"
+# The attach stage is refused until it is built properly.
+printf 'ingest:\n  associate:\n    enabled: true\n' >"$V/neg-edge-associate-enabled.yaml"
 
 # onDeidentified is satisfied by the deidentify stage unlinking its own input,
 # so it is meaningless when that stage does not render.
@@ -1416,6 +1418,7 @@ neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profi
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
+neg-edge-associate-enabled	charts/edge	edge-base.yaml neg-edge-associate-enabled.yaml	is not supported yet
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-onassigned-on-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onassigned-on-assigned.yaml	is not a word this stage accepts
 neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-on-grouped.yaml	is not a word this stage accepts
