@@ -3,8 +3,12 @@
 
 Runs INSIDE the edge's label (assign) pod, which mounts the pipeline at /data.
 The chart ships it there: ConfigMap <release>-requeue-tool, mounted read-only at
-/opt/ais-edge. An operator needs only kubectl access to the edge, no copy of the
-repository:
+/opt/ais-edge. No copy of the repository is needed. On the edge node, the edge
+command (scripts/files/ais-requeue, installed in /usr/local/bin) runs it:
+
+    sudo ais-requeue list
+
+With kubectl access to the edge, the same command is:
 
     kubectl -n xnat-ingest exec deploy/<release>-assign -c assign -- \
         python3 /opt/ais-edge/requeue-invalid.py list
@@ -21,11 +25,21 @@ THE SCRIPT NEVER GUESSES A LABEL. The label stage could not resolve a label
 because a DICOM tag was empty. A person finds the correct value in the
 hospital's records (RIS/PACS), then gives it here. The script only makes the
 move safe and repeatable:
-  - only the missing labels can be given, and each must be a legal label;
+  - the folder must be a name as `list` prints it: a plain child of
+    assigned/__invalid__, not a path, '.', '..' or a symbolic link (show checks
+    this too). A sudo rule for the edge command relies on this;
+  - only the missing labels can be given, and each must be a legal label. The
+    parts of the name that it keeps must be legal labels too;
   - it refuses when a session with the new name is already in assigned/ or
     deidentified/ (unless --allow-existing: the same study, by intent);
-  - it refuses when a grouped/ copy of the same study is still there (the
-    label stage would quarantine that copy again);
+  - it does not touch grouped/. A grouped/ copy of the same study is more data
+    for it (a late series; collate orthanc stages the whole study again). The
+    label stage skips that copy while the session is in __invalid__ ("already
+    saved as invalid"), so it never clears by itself, and removing it can lose
+    data. requeue moves the folder, and says that the next label pass puts the
+    copy in __invalid__ again, to requeue with the same values (seen on
+    accessionflow 0.20.0, api/label_api.py: the skip is a `continue`, so the
+    copy is not unlinked);
   - it moves the folder under the label stage's writer lock, checks that the
     folder left __invalid__, and appends an audit line to LOGS/requeue-audit.jsonl.
 
@@ -46,6 +60,7 @@ import sys
 import time
 
 LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")          # what the label stage writes
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")  # <project>.<subject>.<session>
 MISSING_RE = re.compile(r"^INVALID_MISSING_([A-Z0-9_]+?)_[A-Za-z0-9]{8}$")
 LEVELS = ("project", "subject", "session")
 SHOW = ("PatientID", "StudyDate", "StudyTime", "StudyDescription", "Modality",
@@ -59,6 +74,33 @@ def die(code, msg):
 
 def invalid_dir(root):
     return os.path.join(root, "assigned", "__invalid__")
+
+
+def checked_folder(args, require_name=False):
+    """The folder as a path that is a direct child of assigned/__invalid__, or exit.
+
+    CONFINED, for a sudo rule that allows only this command: the folder must be a
+    plain child name, as `list` prints it. An absolute path, a slash, '.' or '..',
+    or a symbolic link is refused, and the real path must stay inside __invalid__.
+    With require_name, all three parts of the name must be legal labels: the parts
+    that requeue keeps go into the new name too.
+    """
+    name = args.folder
+    if (not name or "/" in name or "\x00" in name or name in (".", "..")
+            or os.path.basename(name) != name):
+        die(2, f"{name!r} is not a folder name: give the name only, as `list` prints it")
+    if require_name and not NAME_RE.match(name):
+        die(2, f"{name!r} is not <project>.<subject>.<session> with letters, digits, '_' and '-' only; "
+               "requeue it by hand (see the docs)")
+    base = invalid_dir(args.root)
+    path = os.path.join(base, name)
+    if os.path.islink(path):
+        die(2, f"{name!r} is a symbolic link; it is not requeued (check it by hand)")
+    if not os.path.isdir(path):
+        die(3, f"no folder {name!r} in assigned/__invalid__")
+    if os.path.dirname(os.path.realpath(path)) != os.path.realpath(base):
+        die(2, f"{name!r} resolves outside assigned/__invalid__")
+    return path
 
 
 def folder_parts(name):
@@ -111,9 +153,7 @@ def cmd_list(args):
 
 
 def cmd_show(args):
-    p = os.path.join(invalid_dir(args.root), args.folder)
-    if not os.path.isdir(p):
-        die(3, f"no folder {args.folder!r} in assigned/__invalid__")
+    p = checked_folder(args)
     parts = folder_parts(args.folder) or {}
     meta = sidecar(p)
     print(f"folder:   {args.folder}")
@@ -126,13 +166,8 @@ def cmd_show(args):
 
 
 def cmd_requeue(args):
-    base = invalid_dir(args.root)
-    src = os.path.join(base, args.folder)
-    if not os.path.isdir(src):
-        die(3, f"no folder {args.folder!r} in assigned/__invalid__")
+    src = checked_folder(args, require_name=True)
     parts = folder_parts(args.folder)
-    if parts is None:
-        die(2, f"{args.folder!r} is not <project>.<subject>.<session>; requeue it by hand (see the docs)")
     missing = missing_fields(parts)
     given = {lvl: getattr(args, lvl) for lvl in LEVELS if getattr(args, lvl) is not None}
     if not missing:
@@ -150,15 +185,21 @@ def cmd_requeue(args):
     meta = sidecar(src)
     uid = meta.get("__uid__") or ""
     study = flat(meta.get("StudyInstanceUID"))
-    for tree in ("assigned", "deidentified"):
-        if os.path.exists(os.path.join(args.root, tree, new)) and not args.allow_existing:
-            die(2, f"{tree}/{new} already exists. If it is the same study (more data for it), rerun with "
-                   "--allow-existing; otherwise check the value")
+    # assigned/: a rename cannot merge, so --allow-existing does not help there.
+    if os.path.exists(os.path.join(args.root, "assigned", new)):
+        die(2, f"assigned/{new} already exists. A folder cannot be merged into a session that waits in "
+               "assigned/. If it is the same study (more data for it), wait until that session moves on, then "
+               "requeue again (docs/recovering-invalid-sessions.md: more data for the same study); "
+               "otherwise check the value")
+    if os.path.exists(os.path.join(args.root, "deidentified", new)) and not args.allow_existing:
+        die(2, f"deidentified/{new} already exists. If it is the same study (more data for it), rerun with "
+               "--allow-existing; otherwise check the value")
+    # MORE DATA FOR THE SAME STUDY: a note after the move, not a refusal. See the docstring.
     grouped_name = "_." + (uid if uid else study.replace(".", "_"))
-    if uid or study != "(empty)":
+    waiting = None
+    if (uid or study != "(empty)") and "/" not in grouped_name and "\x00" not in grouped_name:
         if os.path.exists(os.path.join(args.root, "grouped", grouped_name)):
-            die(2, f"grouped/{grouped_name} (the same study) is still there: the label stage would quarantine it "
-                   "again. Wait for it to clear, or remove it first (see the docs)")
+            waiting = f"grouped/{grouped_name}"
     lockdir = os.path.join(args.root, ".locks")
     os.makedirs(lockdir, exist_ok=True)
     fd = os.open(os.path.join(lockdir, "assigned.lock"), os.O_CREAT | os.O_RDWR, 0o644)
@@ -172,12 +213,15 @@ def cmd_requeue(args):
                 die(4, f"assigned.lock is held (a label pass is running) for more than {args.lock_wait}s; try again")
             time.sleep(1)
     try:
+        # AGAIN UNDER THE LOCK: the folder must still be the same plain directory.
+        if os.path.islink(src) or not os.path.isdir(src):
+            die(2, f"assigned/__invalid__/{args.folder} changed while waiting for the lock; nothing moved")
         dst = os.path.join(args.root, "assigned", new)
         if os.path.exists(dst) and not args.allow_existing:
             die(2, f"assigned/{new} appeared while waiting for the lock; nothing moved")
         if os.path.exists(dst):
-            die(2, f"assigned/{new} exists; a folder cannot be merged into it here. Wait until the "
-                   "deidentify stage takes it, then requeue again")
+            die(2, f"assigned/{new} exists; a folder cannot be merged into it here. Wait until that "
+                   "session moves on, then requeue again")
         os.rename(src, dst)
         if os.path.exists(src) or not os.path.isdir(dst):
             die(2, f"move not confirmed: check assigned/__invalid__/{args.folder} and assigned/{new}")
@@ -186,13 +230,18 @@ def cmd_requeue(args):
         os.close(fd)
     audit = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": "invalid_requeued",
              "operator": args.operator, "from": args.folder, "to": new,
-             "set": {lvl: given[lvl] for lvl in given}, "study_uid": study}
+             "set": {lvl: given[lvl] for lvl in given}, "study_uid": study, "grouped_waiting": waiting}
     logs = os.path.join(args.root, "LOGS")
     os.makedirs(logs, exist_ok=True)
     with open(os.path.join(logs, "requeue-audit.jsonl"), "a") as f:
         f.write(json.dumps(audit) + "\n")
     print(json.dumps(audit))
     print(f"requeued: assigned/{new}. Next: watch the uploader log for this session, then check it in XNAT.")
+    if waiting:
+        print(f"NOTE: {waiting} has more data for this study. The label stage did not take it while the "
+              "folder was in __invalid__/. Do not remove it. On its next pass, the label stage puts it in "
+              "__invalid__/ again (InvalidSessionAssigned fires again). Then run `list`, and requeue the new "
+              "folder with the same values (docs/recovering-invalid-sessions.md: more data for the same study).")
     return 0
 
 

@@ -3,7 +3,8 @@
 # charts/edge/files/requeue-invalid.py (the chart ships it into the label pod)
 # against fixture trees, then the pinned image.
 # =============================================================================
-# The folder names have the real shape the 0.19.0 label stage writes
+# The folder names have the real shape the label stage writes (0.19.0, seen live;
+# 0.20.0 has the same code, helpers/arg_types.py:432-444)
 # (<project>.<subject>.INVALID_MISSING_<TAG>_<8 letters or digits>, seen live
 # on 2026-11-10). Each case asserts on the TREE afterwards (what moved, what
 # stayed), not only on the exit code. The last case loads the requeued folder
@@ -17,7 +18,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="$REPO_ROOT/charts/edge/files/requeue-invalid.py"
 ci_heading "requeue-invalid"
 
-W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+W="$(mktemp -d)"
+OUTW="$(mktemp -d /tmp/rqoutXXXXXX)"   # dot-free on purpose: see CONFINED below
+trap 'rm -rf "$W" "$OUTW"' EXIT
 BAD="test_project.MRN1.INVALID_MISSING_ACCESSIONNUMBER_ognMmX8R"
 UID_DIR="1_2_826_0_1_9"
 
@@ -50,17 +53,47 @@ expect "requeue refuses a value with a dot" 2 "$(run requeue "$BAD" --session 'A
 expect "requeue refuses a label that is not missing" 2 "$(run requeue "$BAD" --session ACC1 --subject OTHER)" "is not missing" "assigned/__invalid__/$BAD"
 expect "requeue refuses a folder that does not exist" 3 "$(run requeue test_project.MRN9.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz --session ACC1)" "no folder"
 
-mkdir -p "$R/grouped/_.$UID_DIR"
-expect "requeue refuses while a grouped copy of the study remains" 2 "$(run requeue "$BAD" --session ACC1)" "quarantine it" "assigned/__invalid__/$BAD"
-rmdir "$R/grouped/_.$UID_DIR"
-
 mkdir -p "$R/assigned/test_project.MRN1.ACC1"
 expect "requeue refuses a name already waiting in assigned/" 2 "$(run requeue "$BAD" --session ACC1)" "already exists" "assigned/__invalid__/$BAD"
+if grep -q -- "--allow-existing" "$W/out"; then ci_fail "the assigned/ refusal suggests --allow-existing, which cannot merge there"; else ci_pass "the assigned/ refusal does not suggest --allow-existing"; fi
 expect "--allow-existing still refuses a merge into assigned/" 2 "$(run requeue "$BAD" --session ACC1 --allow-existing)" "cannot be merged" "assigned/__invalid__/$BAD"
 rmdir "$R/assigned/test_project.MRN1.ACC1"
 
 mkdir -p "$R/deidentified/test_project.MRN1.ACC1"
 expect "requeue refuses a name already downstream" 2 "$(run requeue "$BAD" --session ACC1)" "already exists" "assigned/__invalid__/$BAD"
+
+# CONFINED TO assigned/__invalid__ (codex-608): the folder is a plain child name. An absolute
+# path, '..', a symbolic link or an illegal part of the name is refused, and the outside
+# folders stay unread and unmoved. Before the fix, show printed an outside folder's
+# metadata and requeue renamed an outside directory.
+# Each case has its own outside folder: one case that fails cannot hide the next one.
+# CAUTION: the old tool split the WHOLE argument on '.'. A dot in the parent path (mktemp
+# gives /tmp/tmp.XXXX) made it refuse by luck, so $OUTW is dot-free and the absolute case
+# is a real escape on the old tool. The guard below fails if that stops being true.
+outside_folder() { mkdir -p "$1"; echo '{"PatientID": "OUTSIDE-SENTINEL", "__uid__": "9_9"}' > "$1/__METADATA__.json"; }
+OUT="$OUTW/P.S.INVALID_MISSING_ACCESSIONNUMBER_abcdefgh"; outside_folder "$OUT"
+case "$OUT" in *.*.*.*) ci_fail "the outside path has a dot before the folder name: $OUT" ;; esac
+expect "show refuses an absolute path outside the pipeline" 2 "$(run show "$OUT")" "not a folder name"
+if grep -q OUTSIDE-SENTINEL "$W/out"; then ci_fail "show printed the outside sentinel"; else ci_pass "show did not read the outside folder"; fi
+expect "requeue refuses an absolute path outside the pipeline" 2 "$(run requeue "$OUT" --session ACC1)" "not a folder name"
+if [ -d "$OUT" ] && [ ! -e "$OUTW/P.S.ACC1" ]; then ci_pass "the outside folder was not moved"; else ci_fail "the outside folder moved"; fi
+DOTS="../../../outside2/Q.S.INVALID_MISSING_ACCESSIONNUMBER_abcdefgh"   # from $R/assigned/__invalid__ to $W/outside2
+outside_folder "$W/outside2/Q.S.INVALID_MISSING_ACCESSIONNUMBER_abcdefgh"
+expect "show refuses a relative path with .." 2 "$(run show "$DOTS")" "not a folder name"
+if grep -q OUTSIDE-SENTINEL "$W/out"; then ci_fail "show printed the '..' sentinel"; else ci_pass "show did not read the '..' folder"; fi
+expect "requeue refuses a relative path with .." 2 "$(run requeue "$DOTS" --session ACC1)" "not a folder name"
+if [ -d "$W/outside2/Q.S.INVALID_MISSING_ACCESSIONNUMBER_abcdefgh" ] && [ ! -e "$W/outside2/Q.S.ACC1" ]; then ci_pass "the '..' folder was not moved"; else ci_fail "the '..' folder moved"; fi
+LINK="L.S.INVALID_MISSING_ACCESSIONNUMBER_abcdefgh"; outside_folder "$OUTW/linked"
+ln -s "$OUTW/linked" "$R/assigned/__invalid__/$LINK"
+expect "show refuses a symbolic link in __invalid__" 2 "$(run show "$LINK")" "symbolic link"
+if grep -q OUTSIDE-SENTINEL "$W/out"; then ci_fail "show printed the link target's sentinel"; else ci_pass "show did not read the link target"; fi
+expect "requeue refuses a symbolic link in __invalid__" 2 "$(run requeue "$LINK" --session ACC1)" "symbolic link"
+if [ -L "$R/assigned/__invalid__/$LINK" ] && [ ! -e "$R/assigned/L.S.ACC1" ]; then ci_pass "the link stayed in __invalid__"; else ci_fail "the link moved to assigned/"; fi
+rm -f "$R/assigned/__invalid__/$LINK" "$R/assigned/L.S.ACC1"
+mkdir -p "$R/assigned/__invalid__/pro\$j.MRN1.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz"
+expect "show still prints an odd but plain folder name" 0 "$(run show 'pro$j.MRN1.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz')" "missing:"
+expect "requeue refuses an illegal part that it would keep" 2 "$(run requeue 'pro$j.MRN1.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz' --session ACC1)" "letters, digits"
+rmdir "$R/assigned/__invalid__/pro\$j.MRN1.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz"
 
 # The lock: a label pass holds assigned.lock.
 python3 -c 'import fcntl,os,sys,time; fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX); time.sleep(6)' "$R/.locks/assigned.lock" &
@@ -69,12 +102,35 @@ expect "requeue waits for the label pass's lock, then gives up" 4 "$(run requeue
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 
 expect "requeue --allow-existing moves when the same study is downstream" 0 "$(run requeue "$BAD" --session ACC1 --allow-existing)" '"to": "test_project.MRN1.ACC1"' "assigned/test_project.MRN1.ACC1" "assigned/__invalid__/$BAD"
+if grep -q NOTE "$W/out"; then ci_fail "a NOTE with no grouped copy: $(grep NOTE "$W/out" | cut -c1-120)"; else ci_pass "no NOTE when no grouped copy waits"; fi
 if grep -q '"event": "invalid_requeued"' "$R/LOGS/requeue-audit.jsonl" 2>/dev/null && grep -q '"operator": "ci@test"' "$R/LOGS/requeue-audit.jsonl"; then
     ci_pass "the audit line names the operator and the move"
 else
     ci_fail "no audit line in LOGS/requeue-audit.jsonl"
 fi
 expect "the files moved untouched" 0 "$(cmp -s "$R/assigned/test_project.MRN1.ACC1/1.localizer/DICOM/a.dcm" <(echo dicom); echo $?)" ""
+
+# MORE DATA FOR THE SAME STUDY (reproduced on 2026-11-10 with the real 0.20.0 collate folder +
+# label stages): a late series waits in grouped/ as _.<uid>. The label stage skips it while the
+# session is in __invalid__ ("already saved as invalid"), so it never clears, and removing it can
+# lose data. requeue moves the folder, leaves grouped/ alone and says what comes next.
+# Its own fixture tree, so the flow above keeps its folder in __invalid__.
+R="$W/g"; fixture "$R"
+mkdir -p "$R/grouped/_.$UID_DIR/3.t2_late/DICOM"; echo late > "$R/grouped/_.$UID_DIR/3.t2_late/DICOM/b.dcm"
+expect "requeue goes on while more data for the study waits in grouped/" 0 "$(run requeue "$BAD" --session ACC1)" \
+  "NOTE: grouped/_.$UID_DIR has more data for this study" "assigned/test_project.MRN1.ACC1" "assigned/__invalid__/$BAD"
+if grep -q "requeue the new folder with the same values" "$W/out" && grep -q "Do not remove it" "$W/out"; then
+    ci_pass "the note gives the next step and says not to remove the copy"
+else
+    ci_fail "the note lacks the next step: $(grep NOTE "$W/out" | cut -c1-160)"
+fi
+if [ "$(cat "$R/grouped/_.$UID_DIR/3.t2_late/DICOM/b.dcm" 2>/dev/null)" = late ]; then ci_pass "the grouped copy is untouched"; else ci_fail "the grouped copy changed"; fi
+if grep -q "\"grouped_waiting\": \"grouped/_.$UID_DIR\"" "$R/LOGS/requeue-audit.jsonl"; then
+    ci_pass "the audit line names the grouped copy"
+else
+    ci_fail "the audit line lacks grouped_waiting: $(tail -1 "$R/LOGS/requeue-audit.jsonl" | cut -c1-200)"
+fi
+R="$W/t"
 
 # No abbreviated options: "--ro" must not override --root (allow_abbrev=False).
 expect "the tool refuses an abbreviated option (--ro is not --root)" 2 "$(run --ro /nonexistent list)" "usage:"

@@ -19,7 +19,9 @@
 #
 # SAFE UNDER A SUDO RULE FOR THIS COMMAND ONLY: it sets --root and --operator
 # itself, and the first word must be list, show or requeue, so no option can
-# come before the subcommand (the tool also refuses abbreviated options).
+# come before the subcommand (the tool also refuses abbreviated options). The
+# tool takes the folder only as a plain name in assigned/__invalid__: it refuses
+# a path, '..' and a symbolic link.
 # OPTION: --namespace <ns> (or AIS_NAMESPACE) when the release is not in xnat-ingest.
 # Exit codes are the tool's: 0 done, 2 refused or bad use, 3 folder not found,
 # 4 the label stage's lock is busy (try again).
