@@ -92,6 +92,16 @@ A dry run makes the same keep checks and logs the same `reclaim_kept` and
 `reclaim_skipped` lines. Where an armed run
 deletes, it logs `WOULD delete` (`reclaim_skipped`).
 
+The delete is one `POST /tools/bulk-delete` with the instance ids of the study.
+The engine sends that body from a file, so the size of the study does not
+matter. The time limit of the delete is 30 s (the engine's `HTTP_TIMEOUT`) +
+1 s per 100 instances: Orthanc took 34 s for 12,098 instances on the test edge
+(2026-11-10). A delete that Orthanc does not confirm logs `reclaim_failed` with
+`curl_exit`: 22 means that Orthanc answered 400 or more, 28 that it did not
+answer in time. Before 2026-11-10 the body went on curl's command line, which
+holds at most 128 KiB, so a study of more than about 2,780 instances was never
+deleted (logged as `Orthanc refused the delete`).
+
 ## What Orthanc has access to
 
 | Resource | Why |

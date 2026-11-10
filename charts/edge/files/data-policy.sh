@@ -542,7 +542,7 @@ expire_original() {   # expire_original <name> <location> <retain_seconds> <poli
 # timestamp, an empty study list. The bytes also remain in the facility backup,
 # but that is a reason to be careful rather than a licence to guess.
 # -----------------------------------------------------------------------------
-orthanc_curl() {   # orthanc_curl <method> <path> [data]
+orthanc_curl() {   # orthanc_curl <method> <path> [data] [max-time seconds]
     # --fail, AND IT IS LOAD-BEARING TWICE.
     #
     # Without it curl exits 0 on an HTTP error, so the two callers both read a
@@ -559,13 +559,28 @@ orthanc_curl() {   # orthanc_curl <method> <path> [data]
     #
     # With --fail curl exits 22 on >=400, both callers take their error branch,
     # and the engine reports backend_unavailable rather than inventing a result.
+    #
+    # THE BODY GOES THROUGH A FILE, NOT THE COMMAND LINE. One argument holds at
+    # most 128 KiB (Linux MAX_ARG_STRLEN). A bulk-delete body has 47 bytes per
+    # instance, so for a study of more than about 2,780 instances curl did not
+    # start ("Argument list too long", exit 126) and the study stayed in Orthanc
+    # on every pass. MEASURED 2026-11-10 on edge-dev: 12,098 instances, a
+    # 568,621-byte body. printf is a shell builtin, so it has no such limit.
+    oc_body=""; oc_rc=0
+    if [ -n "${3:-}" ]; then
+        oc_body=$(mktemp) || return 1
+        printf '%s' "$3" > "$oc_body" || { rm -f "$oc_body"; return 1; }
+    fi
     if [ -n "$ORTHANC_USER" ]; then
         printf 'user = "%s:%s"\n' "$ORTHANC_USER" "$ORTHANC_PASS" \
-            | curl -sS --fail --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
-                   ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+            | curl -sS --fail --max-time "${4:-$HTTP_TIMEOUT}" -K - -X "$1" \
+                   ${oc_body:+--data-binary "@$oc_body"} "${ORTHANC_URL}$2" 2>/dev/null || oc_rc=$?
     else
-        curl -sS --fail --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+        curl -sS --fail --max-time "${4:-$HTTP_TIMEOUT}" -X "$1" \
+             ${oc_body:+--data-binary "@$oc_body"} "${ORTHANC_URL}$2" 2>/dev/null || oc_rc=$?
     fi
+    [ -n "$oc_body" ] && rm -f "$oc_body"
+    return "$oc_rc"
 }
 
 # orthanc_flat_list <path> <item-regex>: GET a JSON array of strings and print
@@ -705,12 +720,22 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         o_list=""
         for o_i in $o_sorted; do o_list="${o_list:+$o_list,}\"${o_i}\""; done
         o_n=$(printf '%s\n' $o_sorted | grep -c .)
-        if orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" >/dev/null 2>&1; then
+        # THE DELETE TAKES TIME PER INSTANCE: 34 s for 12,098 on edge-dev
+        # (2026-11-10), more than HTTP_TIMEOUT. A timed-out delete is not a
+        # refusal, and Orthanc goes on deleting after curl gives up. So the limit
+        # grows with the study: HTTP_TIMEOUT + 1 s per 100 instances (151 s for
+        # 12,098 at the default 30).
+        o_tmo=$((HTTP_TIMEOUT + o_n / 100)); o_rc=0
+        orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" "$o_tmo" >/dev/null 2>&1 || o_rc=$?
+        if [ "$o_rc" = 0 ]; then
             o_removed=$((o_removed + 1))
             jlog reclaim_removed "$o_name" "deleted the ${o_n} instance(s) of study ${id} from Orthanc after ${o_age}s" \
                  ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"instances\":${o_n}"
         else
-            jlog reclaim_failed "$o_name" "Orthanc refused the delete of study ${id}" ",\"study\":\"$(jsan "$id")\""
+            # curl exit 22 = Orthanc answered >= 400 (a refusal); 28 = no answer
+            # within ${o_tmo}s; others = local or network errors.
+            jlog reclaim_failed "$o_name" "Orthanc did not confirm the delete of study ${id} (curl exit ${o_rc}, ${o_n} instance(s), limit ${o_tmo}s)" \
+                 ",\"study\":\"$(jsan "$id")\",\"instances\":${o_n},\"curl_exit\":${o_rc}"
         fi
     done
 }
