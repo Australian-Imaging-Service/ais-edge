@@ -825,15 +825,25 @@ ANNOTATION_ONLY = {
     "StageBacklogAgeing": "ANNOTATION ONLY. Management renders dataPolicy.stageAgeAlertAfter; tier-1 renders dataPolicy.reporter.stageAgeAlertAfter. Keep expressions, labels and pending periods compared.",
     "XNATUploadRetryStorm": "ANNOTATION ONLY. The remediation text names the single-node direct uploader here and the management uploader on tier-2. Every other field must match modulo namespace.",
 }
+DESCRIPTION_ONLY = {
+    "EdgeDiskLow": "The investigation selects the emitting edge on tier-2 and the local cluster on tier-1.",
+    "InvalidSessionAssigned": "Recovery uses the affected edge kubeconfig on tier-2 and the single-node kubeconfig on tier-1.",
+    "PipelineSessionStuck": "The investigation selects the emitting edge on tier-2 and the local cluster on tier-1.",
+    "QuarantinedDataUnresolved": "Legacy recovery uses both management and edge site files on tier-2 and only the local site file on tier-1.",
+}
 def comparable(name, rule):
     if name in ANNOTATION_ONLY:
         return {key: value for key, value in rule.items() if key != "annotations"}
+    if name in DESCRIPTION_ONLY:
+        result = dict(rule)
+        result["annotations"] = {key: value for key, value in rule.get("annotations", {}).items() if key != "description"}
+        return result
     return rule
 bad = [n for n in sorted(set(t1) & set(t2))
        if n not in FORCED and norm(comparable(n, t1[n])) != norm(comparable(n, t2[n]))]
 # To STDERR: stdout is the verdict this check is parsed from, and a NOTE on it
 # made the caller read "NOTE ..." as the result instead of PASS.
-for n, reason in sorted({**FORCED, **ANNOTATION_ONLY}.items()):
+for n, reason in sorted({**FORCED, **ANNOTATION_ONLY, **DESCRIPTION_ONLY}.items()):
     if n in t1:
         print(f"    note: {n}: {reason}", file=sys.stderr)
 shared = len(set(t1) & set(t2))

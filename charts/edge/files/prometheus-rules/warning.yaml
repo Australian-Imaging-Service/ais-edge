@@ -124,7 +124,7 @@ groups:
              its deadline (DeadlineExceeded in kubectl describe job).
                kubectl -n {{ $labels.namespace }} get jobs,pods -l component=s3-reclaimer
           3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
-               kubectl -n {{ $labels.namespace }} logs -l component=s3-reclaimer --tail=50
+               kubectl -n {{ $labels.namespace }} logs -l component=s3-reclaimer --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s
         If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
         with it: it must stay above two periods plus deadlineSeconds.
         Clears on the next successful run.

@@ -15,7 +15,7 @@ parent key used to exist and was deleted for being dead — Helm cannot template
 subchart's values, so no template in this chart can read a parent key and push it
 down into a subchart; the subchart reads its own block or nothing. It was
 measured before removal: `--set observability.stack.grafana.nodePort=31234` left
-the Service on 30030. `charts/edge/values.yaml` records that removal and
+the Service on 30030. `charts/edge/values.yaml` (`observability.stack`, `SUBCHART VALUES`) records that removal and
 maps every deleted key to the subchart key that replaced it, which is the table
 to consult before inventing a parent key. `charts/edge/templates/_helpers.tpl`
 validates the real key at render time and fails the install if the port falls
