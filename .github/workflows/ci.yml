@@ -186,6 +186,14 @@ jobs:
           CI_REQUIRE_RECLAIMER_IMAGE: "1"
         run: make reclaimer RENDER_DEP=
 
+      # Requeue of an __invalid__ session: refusals, the lock, the audit line,
+      # and the pinned image reading the new labels from the folder name.
+      - name: Requeue helper for __invalid__ sessions
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_REQUEUE_IMAGE: "1"
+        run: make requeue-invalid
+
       - name: Reclaimer fence (drain and resume fail closed)
         if: ${{ !cancelled() }}
         run: make reclaimer-fence
