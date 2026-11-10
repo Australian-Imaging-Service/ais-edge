@@ -563,4 +563,41 @@ else
   ci_fail "$out"
 fi
 
+# -----------------------------------------------------------------------------
+# LOKI ANNOTATIONS AND LABELS ARE GO TEMPLATES, AND ONE BAD TEMPLATE COSTS THE
+# WHOLE FILE. The Loki ruler parses rule files with Prometheus rulefmt, which
+# checks every annotation and label template. One bad template stops the file
+# from loading (a reload keeps the previous rules), so every alert in it stops
+# changing or stops evaluating. The expressions are LogQL, which promtool cannot
+# parse, so each alert goes into a synthetic rule with `expr: vector(1)` and its
+# own labels and annotations. Found in review on 2026-11-10:
+# `grep -F -- "{{{ $labels.session }}}"` (unexpected "{" in command).
+ci_heading "Loki alert annotations and labels are valid templates"
+loki_templates() {   # loki_templates <loki rules file> <synthetic rules file>: prints the alert count
+  python3 - "$1" "$2" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+rules = [{"alert": r["alert"], "expr": "vector(1)", "labels": r.get("labels") or {},
+          "annotations": r.get("annotations") or {}}
+         for g in doc.get("groups", []) for r in g.get("rules", []) if r.get("alert")]
+yaml.safe_dump({"groups": [{"name": "loki-templates", "rules": rules}]}, open(sys.argv[2], "w"), sort_keys=False)
+print(len(rules))
+PY
+}
+tpl="$CI_WORK_DIR/loki-templates.yaml"
+if ! n_tpl="$(loki_templates "$REPO_ROOT/charts/mgmt/files/loki-ruler-rules.yaml" "$tpl" 2>&1)"; then
+  ci_fail "could not read the Loki alerts: $n_tpl"
+elif out="$("$PROMTOOL" check rules "$tpl" 2>&1)"; then
+  ci_pass "every template of the $n_tpl Loki alerts parses"
+else
+  ci_fail "a Loki alert template does not parse: $(printf '%s' "$out" | grep -E 'annotation|label|template' | head -3 | tr '\n' ' ')"
+fi
+# CONTROL: the same path must refuse the template that was found in review.
+printf 'groups:\n- name: c\n  rules:\n  - alert: C\n    expr: vector(1)\n    annotations:\n      description: "{{{ $labels.session }}}"\n' > "$CI_WORK_DIR/loki-templates-control.yaml"
+if "$PROMTOOL" check rules "$CI_WORK_DIR/loki-templates-control.yaml" >/dev/null 2>&1; then
+  ci_fail "control: promtool accepted {{{ \$labels.session }}}, so this check proves nothing"
+else
+  ci_pass "control: promtool refuses {{{ \$labels.session }}}"
+fi
+
 ci_summary "promtool"
