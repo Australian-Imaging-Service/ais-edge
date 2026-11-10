@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes log-phrases
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy s3-uploader-image greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -133,6 +133,12 @@ s3-uploader:
 s3-uploader-image:
 	@tests/s3-uploader/image-tests.sh
 
+# Needs docker: reads the tool's source out of the PINNED image and checks that
+# every literal log phrase in the Loki rules still exists in the code that
+# writes it. Fixture tests cannot see a reworded message; this can.
+log-phrases:
+	@scripts/ci/log-phrases.sh
+
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,
 # so without this the Loki rules have no test at all. Skips loudly without
@@ -218,6 +224,7 @@ help:
 	@echo 'useful env:'
 	@echo '  CI_REQUIRE_GREENFIELD=1  a skipped kind stage is a failure'
 	@echo '  CI_REQUIRE_LOKI_TESTS=1  a skipped Loki-rule stage is a failure'
+	@echo '  CI_REQUIRE_LOG_PHRASES=1  a skipped log-phrase stage is a failure'
 	@echo '  CI_REQUIRE_DATAPOLICY_TESTS=1  a skipped data-policy stage is a failure'
 	@echo '  CI_REQUIRE_RULE_TESTS=1  a rule file with no promtool test is a failure'
 	@echo '  CI_KIND_KEEP=1           leave the kind cluster up for inspection'
