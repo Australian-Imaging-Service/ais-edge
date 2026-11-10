@@ -1,3 +1,6 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # Warning alerts (Prometheus / kube-state-metrics) — notify, don't page.
 #
@@ -33,6 +36,10 @@ groups:
 # Upstream KubeJobFailed, minus this release's staged-reclaimer Jobs, and
 # ReclaimerNotSucceeding, which covers those Jobs instead.
 # The upstream copy is off: kube-prometheus-stack.defaultRules.disabled in values.yaml.
+
+# ANNOTATION ONLY: KubeJobFailed has a local description that asks for
+# investigation and evidence retention. Its expression, duration, labels,
+# summary and runbook link still follow upstream; promtool checks that scope.
 # No interval: evaluated at the Prometheus default, as upstream is.
 # __RELEASE_NAMESPACE__ is substituted by templates/observability.yaml.
 # __RECLAIMER_ALERT_AFTER_S__: dataPolicy.derived.stagedReclaimer.alertAfter, in seconds.
@@ -59,7 +66,11 @@ groups:
     labels:
       severity: warning
     annotations:
-      description: Job {{ $labels.namespace }}/{{ $labels.job_name }} failed to complete. Removing failed job after investigation should clear this alert on cluster {{ $labels.cluster }}.
+      description: |
+        Job {{ $labels.namespace }}/{{ $labels.job_name }} reports a failure.
+        Inspect its events, pod logs and retry status. Retained failed Jobs can keep
+        this alert active after the underlying cause is fixed. Deleting history can
+        clear the signal but does not repair the workload; preserve evidence first.
       runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
       summary: Job failed to complete.
 
@@ -117,3 +128,6 @@ groups:
         If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
         with it: it must stay above two periods plus deadlineSeconds.
         Clears on the next successful run.
+
+        This depends on CronJob metrics reaching Prometheus. If kube-state-metrics
+        or the evaluator is unavailable, the rule cannot establish job health.

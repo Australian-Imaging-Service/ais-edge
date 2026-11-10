@@ -1,10 +1,13 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # Critical alerts (Prometheus / kube-state-metrics) — pages on-call.
 #
 # Pipeline-event critical alerts (XNATUploadFailingForAllSessions, etc.) live
 # in loki-ruler-rules.yaml, evaluated by Loki's ruler over the JSON event
-# stream. The alerts in this file all derive from K8s/cert-manager metrics
-# scraped directly by mgmt Prometheus.
+# stream. These rules use Kubernetes target and node metrics scraped by
+# the local tier-1 Prometheus; there is no management cluster on this branch.
 # =============================================================================
 
 # NOTE: this file is a BARE `groups:` fragment, not a whole
@@ -24,14 +27,21 @@ groups:
       severity: critical
     annotations:
       summary: Kubernetes API server unreachable on the tier-1 host
-      description: kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane
-        is down or partitioned.
+      description: |
+        The discovered kube-apiserver scrape target has reported up=0 for at least
+        five minutes. Check target errors, network access, TLS and authentication,
+        as well as API-server health. This signal does not prove the entire control
+        plane is down. A vanished target or unavailable Prometheus cannot produce
+        the same up=0 signal; inspect discovery and evaluator health separately.
   - alert: NodeNotReady
     expr: kube_node_status_condition{condition="Ready",status="true"} == 0
     for: 5m
     labels:
       severity: critical
     annotations:
-      summary: Node {{ $labels.node }} NotReady for 5+ minutes
-      description: kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged
-        sessions cannot upload.
+      summary: "Observed node {{ $labels.node }} NotReady for 5+ minutes"
+      description: |
+        The local kube-state-metrics reports the node Ready condition as false.
+        Inspect node conditions, kubelet, disk pressure and network status. A missing
+        node series can remain silent here. Pipeline stages may be disrupted, but
+        this alert does not establish which files were received or uploaded.

@@ -4,6 +4,13 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 
 ## Overview
 
+**Verified scope (2026-11-10):** descriptions below follow this branch
+and accessionflow 0.19.0. Orthanc is the receiver; the default `ingest` engine
+de-identifies downstream. The Orthanc/Lua de-identification engine was
+deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
+Recipe output and source retention must be checked separately: a stage name,
+processed label, or successful upload is not proof of a complete privacy policy.
+
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
 is the AIS-maintained Python tool that:
 1. **Groups** DICOM instances into studies by REST-pulling them from Orthanc
@@ -17,7 +24,9 @@ is the AIS-maintained Python tool that:
 The default `deid.engine: ingest` renders the deidentify stage. Use it for new
 sites. Review the selected source labels before the recipe runs.
 
-Upstream ≥ 0.12 split the old single `sort` command into these discrete stages.
+Historical releases split the old `sort` command into stages; the exact first
+release for every split is not verified (2026-11-10). The 0.19.0 command names
+and chart wrappers below are the current operational contract.
 We run the default stages as four Deployments on the single node, all rendered by
 `charts/edge`:
 - **`accessionflow collate-orthanc`** (`<release>-group-orthanc`, `component=group`)
@@ -59,9 +68,10 @@ All stages run in one namespace; `namespace:` in `sites/<site>/values.yaml`,
 cluster) because they are different machines; on one node there is nothing to
 split.
 
-Two further stages exist in the chart and are off by default: `group-fs`
-(`ingest.fileDrop.enabled` — a watched directory instead of a modality) and
-`associate` (`ingest.associate.enabled` — Siemens twix/rda/puls side files).
+The optional `group-fs` input (`ingest.fileDrop.enabled`) watches a directory.
+A legacy associate template remains in the chart, but the render guard rejects
+`ingest.associate.enabled`: attach support lacks the required inputs and output
+contract. Do not enable it for Siemens side files on this chart.
 
 There is **no S3 hop**: `upload.mode: direct`, and the chart and `install.sh`
 both refuse anything else, because `s3` needs the tier-2 management plane
@@ -128,7 +138,7 @@ No AET routing or unknown-AET quarantine applies to either ingest input path.
   ingest, `deidentify` writes the upload tree and takes
   `/data/.locks/deidentified.lock` instead. With the package stage on
   (`ingest.package.enabled`), `package` writes the upload tree and takes
-  `/data/.locks/packaged.lock`; `deidentify` then takes turns on that same
+  `/data/.locks/packaged.lock`; `deidentify` takes turns on its own input/output
   lock, one pass per turn and without `--loop`: `deidentify` keeps holding
   `/data/.locks/deidentified.lock` for each pass, and `package` takes that lock
   and then `packaged.lock` for each of its passes, so a pass of one never runs
@@ -142,9 +152,9 @@ No AET routing or unknown-AET quarantine applies to either ingest input path.
   guaranteed rather than a convention; split them and upload sees an empty dir.
 - **Outbound HTTPS** to the configured XNAT server
 - **One Secret** `xnat-credentials` (keys `server`, `username`, `password`) —
-  `upload.direct.existingSecret`. Tier-1 is the tier that holds an XNAT
-  credential at all: a tier-2 edge writes to a bucket-scoped S3 key and never
-  reaches XNAT. Scope this account to the projects selected by the site's tag mapping or project constant and
+  `upload.direct.existingSecret`. Tier-1 keeps XNAT credentials on its node. A tier-2 edge in the normal
+  S3 mode uses a bucket-scoped S3 identity instead; main also supports direct
+  mode, which needs an XNAT credential on that edge. Scope this account to the projects selected by the site's tag mapping or project constant and
   nothing else.
 
 ## Where it runs
@@ -177,7 +187,9 @@ variables. Version 0.19.0 renamed upload to store. The chart keeps
 its stage and Kubernetes names. `group-orthanc` runs `accessionflow
 collate-orthanc`; `group-fs` runs `accessionflow collate`; `assign` runs
 `accessionflow label xnat`; `upload` runs `accessionflow store xnat`. The
-optional `associate` stage maps to `accessionflow attach`. The command change
+legacy associate template would require `accessionflow attach`, but enabling
+`ingest.associate.enabled` is rejected: the chart does not supply the required
+inputs, matching rule, or output contract. The command change
 does not rename any namespace, Orthanc label or storage folder.
 
 Everything non-secret is in **one file**, `sites/<site>/values.yaml` (scaffold it
@@ -194,7 +206,7 @@ with `scripts/site-secrets.sh new <name> single`). You never edit
 | `ingest.assign.constantProjectId` | Optional destination for all sessions at a single-project site; it overrides project-tag resolution only |
 | `ingest.deidentify.{specs,specConfigMap,specFiles,reidEncryptKeySecret}` | Recipe source and reid-map encryption. A missing key reference leaves plaintext maps. |
 | Secret `xnat-credentials` (namespace `xnat-ingest`) | `server`, `username`, `password` — SOPS-encrypted in `sites/<site>/secrets.enc.yaml`, applied by `scripts/site-secrets.sh apply <site>` before the chart |
-| `charts/edge/templates/ingest-pipeline.yaml` | the group, assign and deidentify Deployments, plus optional group-fs, associate and package stages |
+| `charts/edge/templates/ingest-pipeline.yaml` | the group, assign and deidentify Deployments, plus optional group-fs and package stages; associate is render-blocked |
 | `charts/edge/templates/upload.yaml` | the upload Deployment (the `direct` branch) |
 
 ### Ingest stage CPU and memory
@@ -360,7 +372,8 @@ accessionflow collate-orthanc \
   --processed-label    xnat-ingest-processed     # ingest.orthancGroup.processedLabel
   --copy-mode          hardlink_or_copy          # ingest.orthancGroup.copyMode
   --wait-period        60                        # ingest.orthancGroup.waitPeriod
-  --loop               60                        # ingest.orthancGroup.interval
+  # No --loop: the shell wrapper takes grouped.lock for each pass,
+  # then sleeps ingest.orthancGroup.interval (default 60 seconds).
 ```
 
 Under ingest, the chart omits `--to-process-label`. The stored
@@ -403,38 +416,44 @@ accessionflow label xnat \
   --unlink-source  all                   # only when dataPolicy.derived.grouped.reclaim = onAssigned
 ```
 
-With ingest, assign uses its configured `--loop`; deidentify owns the terminal
-writer lock. The following existing-site wrapper applies only when assigned is
-the upload source. It explains the lock protocol used by the reclaimer:
+Assign always runs one pass per shell-wrapper turn; it has **no `--loop`**
+argument. Under ingest it takes `assigned.lock` with `edge.serialisedStage`.
+When assigned is the upload source, `edge.lockedStage` also holds a shared
+`assigned.alive` lock for the wrapper's lifetime so the reclaimer can verify
+that a compatible writer is present. The simplified terminal-writer shape is:
 
 ```
 sh -c 'trap exit TERM INT; mkdir -p /data/.locks && exec 9>>/data/.locks/assigned.alive && flock -s 9 && while :; do flock /data/.locks/assigned.lock "$0" "$@" || exit; sleep 60 & wait $!; done' \
-  accessionflow label xnat <the arguments above>   # sleep: ingest.assign.interval
+  accessionflow label xnat <the arguments above>
 ```
 
-The sleep after each pass is the same full interval that `--loop` sleeps. A
-pass that fails stops the container, as an exception out of `--loop` did.
-fd 9 holds the shared lock on `assigned.alive` for the life of the container.
-The shell is PID 1, and PID 1 has no default action for a signal, so the
-`trap` is necessary. A stop (SIGTERM or SIGINT) ends the loop at once in the
-sleep: the sleep runs in the background, and `wait` returns on the signal. In
-a pass, it ends the loop when the pass ends: the pass is not stopped during a
-write, and no pass starts from the sleep after the signal. A stop that comes
-while the stage waits for its lock runs that one pass first. A pass that is
-longer than the grace period (30 s) still gets SIGKILL. Under
-deid.engine ingest, `assign` does not write the upload tree, so it keeps
-`--loop 60` and `deidentify` runs inside the lock. With the package stage on,
-`package` runs inside `deidentified.lock` and then `packaged.lock` for each
-pass, and `deidentify` keeps its own `deidentified.lock` per pass with the same
-loop, without the `.alive` handle and without `--loop`.
+Each successful pass sleeps the full configured stage interval. This differs
+from 0.19.0 store's internal loop, which subtracts time spent uploading.
+A failed pass exits the wrapper. TERM/INT interrupt idle wait; during a
+foreground pass the shell handles the signal after that pass. A signal during
+lock wait can therefore allow that one pass before exit. Kubernetes can still
+send SIGKILL when the termination grace period expires, so a writer lock does
+not make a partially completed pass transactional.
+
+With packaging enabled, deidentify holds `deidentified.lock`; package takes
+`deidentified.lock` and then `packaged.lock`. Deidentify never takes
+`packaged.lock`. The terminal writer holds the matching `.alive` handle and
+the reclaimer checks that handle before deletion. See `edge.serialisedStage`,
+`edge.lockedStage`, and the signal checks in `scripts/ci/runtime-templates.sh`
+for the complete generated behavior. Do not paste this illustrative wrapper
+over the chart; use the rendered arguments and retain the existing lock order.
+
+
 
 `--unlink-source all` drops each grouped session once it has been assigned, and
 it is not an optimisation. `assign` rebuilds its work list from a live
 listing of `/data/grouped` every pass, so without it the same sessions are
-re-assigned forever: `/data/assigned` is repopulated, the uploader re-stages, and
-the upload-success alert re-fires (that produced two days of duplicate mail). It
-deletes HARDLINKS, not data — the bytes remain in Orthanc storage and in the
-facility backup.
+considered again. Re-created output can cause extra work. Historical duplicate
+mail was recorded under the older emitter (date not verified, reviewed
+2026-11-10); 0.19.0 suppresses unchanged-session success. This option
+unlinks input paths, which can include hardlinks, symlinks, or copied files.
+The last link can be removed; neither an Orthanc copy nor a facility backup
+is proved by this operation. See the 0.19.0 source-retirement warning below.
 
 The derived ingest mapping selects StudyID, PatientID and AccessionNumber.
 An explicit mapping can select other supported tags. The chart rejects tags
@@ -446,7 +465,7 @@ Assignment preserves the selected labels in session metadata. Removing their
 source tags later in the recipe cannot remove the labels from XNAT. In
 particular, PatientID can contain a raw MRN. Check the source values and use
 approved research labels before enabling patient upload. Keep project IDs in
-`[A-Za-z0-9_]` to avoid normalization surprises, and verify the actual result.
+`[A-Za-z0-9_-]` to avoid normalization surprises, and verify the actual result.
 A missing or empty required field goes to the invalid holding directory.
 
 ### upload arguments
@@ -460,7 +479,8 @@ accessionflow store xnat /data/deidentified $(ACFLOW_HOST)   # LOCAL source dir 
                                     #   a half-written resource waits for the next pass
   --dont-require-manifest           # instead, when upload.direct.requireManifest = false
   --dont-verify-ssl                 # rendered when upload.direct.verifySsl = false
-                                    #   (only for an XNAT with a private/self-signed cert)
+                                    #   disables server verification; configure private CA
+                                    #   trust instead for a production XNAT endpoint
 ```
 
 Important env vars:
@@ -647,9 +667,10 @@ first upgrade to this chart the old pod has no lock, but `Recreate` stops it
 first, so the upgrade itself is safe. An old pod that ignores TERM is killed
 after the grace period, possibly during a pass, as before this change.
 
-Each pass starts a new `accessionflow` process. The previous fork took about 1.6 s of
-CPU per pass, the same cost that the deidentify and package stages already
-have. A new process for each pass also returns its memory after the pass.
+Each pass starts a new `accessionflow` process. A historical fork measurement recorded about 1.6 s of
+CPU per pass (measurement date not verified, reviewed 2026-11-10). Startup
+cost for the current 0.19.0 image and each site workload was not benchmarked
+in this review; do not use that old number as a capacity guarantee. A new process for each pass also returns its memory after the pass.
 
 The data-policy loop also stops from idle sleep and after a current foreground
 command. An external child that does not finish within the grace period can
@@ -735,7 +756,9 @@ listing and proof in memory. Startup probes remain separate from that pass.
 It reuses connections, not response data. Each session gets a fresh listing
 when it is examined; the run-start discovery contains names only.
 
-For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+For XNAT proof, the worker uses direct HTTP requests rather than xnatpy
+object caches. It uses HTTP or HTTPS according to the configured server URL,
+and sends `Cache-Control: no-cache`.
 It queries the experiment endpoint before reading its file catalog and keeps
 the per-file HEAD checks. A missing experiment, missing file, failed request,
 invalid response or failed login keeps the affected data. If a login expires,
@@ -754,22 +777,26 @@ deletes. A dry run makes the same checks and removes no data.
 
 - **Battle-tested DICOM parsing** — handles edge cases (missing
   AccessionNumber, multi-frame, multi-series) we don't want to re-implement
-- **Idempotent** — re-running upload skips sessions already in XNAT
+- **Repeat handling:** the 0.19.0 upload verdict can skip a complete session,
+  repair missing files where supported, or refuse a conflict. Matching names
+  without XNAT checksums is weaker than byte equality; inspect the verdict
 - **Loop mode** — every stage runs continuously; new studies are grouped, staged,
   and uploaded as they arrive
-- **Connection-resilience** — transient network errors don't kill the upload loop
+- **Connection resilience:** selected connection failures are retried. Other
+  errors can end a pass or container; inspect the current exception and restart
+  evidence rather than assuming all transient faults stay inside the loop
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Requeue it with `sudo ais-requeue` on the node, as in [Recovering an invalid session](../recovering-invalid-sessions.md). `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
-| Secret missing at install | pod sits in `CreateContainerConfigError` with nothing saying why | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
-| XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
+| Secret missing at install | Pod can remain in `CreateContainerConfigError` or a mount failure; inspect Kubernetes events for the missing Secret or key | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
+| XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; Use credentials accepted by password-based XNAT REST authentication; a browser-only AAF/OIDC identity is not sufficient |
 | XNAT down | Output accumulates in `/data/deidentified`, or `/data/packaged` when packaging is on | Check direct-upload logs, current delivery alerts and free disk. The retained source is retried; a quiet log or a later success line does not prove that a conflicting resource was repaired. |
 | stages given different volumes | a stage reads an empty dir | every stage mounts the ONE `<release>-pipeline` claim at `/data`; that is a chart invariant, not a per-pod setting to keep in step |
 | cross-filesystem hardlink | `group-orthanc` fails with `EXDEV`, or `hardlink_or_copy` silently degrades to a full byte copy of every study | keep `/data/orthanc-storage`, `/data/grouped` and `/data/assigned` on the one volume — which is why they are subdirectories of a single claim |
-| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period` avoids grouping half-written studies |
+| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | The quiet period reduces incomplete input, but late arrivals remain possible. Verify snapshot labels, stage errors, and the next pass rather than treating the wait as a completeness guarantee |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | A custom ready-label filter is added to the running group command | Selection now depends on a configured stable-study label callback, which need not be loaded under ingest | Keep the chart-derived arguments. Ingest clears this filter even though the backup-loaded Lua script can still label stable studies. Inspect the rendered Deployment and callback settings. |
 | Assigned reclaim is set to `onUploaded` under ingest | Assigned is an intermediate tree, not the upload source | Use `auto`, which resolves to `onDeidentified`. The terminal tree is verified by the direct-upload staged reclaimer. Do not disable its writer lock or XNAT checks to clear a backlog. |
@@ -784,10 +811,15 @@ deletes. A dry run makes the same checks and removes no data.
 
 - **Native `prometheus_client` metrics** at `:9090/metrics`: counters like
   `xnat_ingest_files_received_total`, `xnat_ingest_sessions_staged_total`, and
-  upload-duration histograms. Today we derive these from log-line counts via
-  Vector, which is good enough but loses histogram precision.
+  upload-duration histograms. Vector forwards logs to Loki; its removed
+  log-to-metric exporter does not create these counters. LogQL can count
+  observed events and unwrap numeric durations, but those are not native
+  Prometheus histogram buckets or exact counts of delivered sessions.
 - **Custom pipeline-event names** in log lines (an `event` field with values like
-  `session_staged`, `xnat_upload_completed`) so Loki queries are cleaner.
+  `session_staged`, `xnat_upload_completed`) to reduce fragile text matching.
+  Version 0.19.0 already emits selected structured events, including
+  `xnat_identity_adoption` and `xnat_repair_completed`; broader coverage is
+  still a proposal, not an absence of all event names.
 - **Structured DICOM SHA256** in the staging-event log for end-to-end integrity
   verification against XNAT.
 
@@ -798,8 +830,11 @@ session input paths captured before it loaded the session. This includes files
 that the stage did not process. The behavior is present from 0.18.0. Keep
 `/data/grouped` and `/data/assigned` session folders managed by the pipeline;
 do not put files into them by hand. Use the incoming path for supported file
-drops. Originals stay in the facility backup under the site's retention
-policy. The stage does not verify that backup before it unlinks an input.
+drops. A facility-backup copy exists only if the DICOM-protocol callback wrote it
+successfully and the retention policy has kept it. REST uploads and file-drop
+input bypass that backup write. The stage does not verify any backup before
+it unlinks an input. Unlinking can remove the last local path if other copies
+are absent, even when the data-policy deletion switch is off.
 New paths created after the snapshot are left for a later pass. Replacing a
 path that was already in the snapshot is not protected. Other unlink modes
 have different scope; this warning concerns `all`.
@@ -827,7 +862,6 @@ the upload path can adopt it after the subject check and log the WARNING
 does not prove the identity of files already stored there. A mismatched UID
 or subject is refused. Keep this distinction when validating in-flight data.
 
-The 0.19.0 upload loop waits for the remainder of its interval. A verified test
-example was `Upload took 10.8 seconds, waiting another 49.2 seconds before
+The 0.19.0 upload loop waits for the remainder of its interval. A historical tier-2 test on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
 running again (loop every 60 seconds)`. The chart's separate writer shell loops
 still sleep for their configured full interval after a pass.

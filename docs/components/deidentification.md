@@ -8,9 +8,17 @@ checks. This page explains the default pipeline and its configuration.
 
 ## Overview
 
+**Review date: 2026-11-10.** This page describes the pinned accessionflow
+0.19.0 implementation. The facility-backup write in `OnStoredInstance` is
+limited to `RequestOrigin == "DicomProtocol"`. REST uploads and file-drop
+input do not get that backup copy. Verify the retained originals separately
+from recipe output. Orthanc/Lua de-identification was deprecated on 2026-11-02;
+that decision does not deprecate Orthanc as the DICOM receiver.
+
 Orthanc receives network DICOM on port 4242. With the default
 `deid.engine: ingest`, it stores the input unchanged. If the facility backup is
-enabled, its Lua callback also copies each original to that backup. The callback
+enabled, its Lua callback attempts a backup for each DICOM-protocol
+instance. REST input returns before that write. The callback
 then returns before the AET lookup. It neither routes by AE title nor quarantines
 an unknown AET in this mode.
 
@@ -150,7 +158,8 @@ output. Changing it does not re-pseudonymise ingest sessions. Do not use this
 variable as evidence that the ingest recipe performs salted hashing.
 
 The older [issue #143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)
-concerns the `ais_deid` package in the 0.13.1 image and remains open. The current
+concerns the `ais_deid` package in the historical 0.13.1 image and remains
+open as checked on 2026-11-10. The current
 image's recipe/sidecar interface must be assessed separately. Its existence
 does not justify assuming that a current recipe hashes PatientID, or that a
 `DEID_SALT` environment variable is connected to the chart.
@@ -269,8 +278,9 @@ Lua de-identification mode is deprecated.
 
 The Lua engine combines several jobs in one callback. It selects a project,
 constructs subject/session codes, modifies headers, and applies a ready label.
-These jobs are absent from the callback under ingest. The backup copy still
-runs when `storage.facilityBackup.enabled` loads the script.
+Routing and modification are absent under ingest. The separate stable-study
+callback can still label studies. The backup write runs only for
+DICOM-protocol arrivals when the backup feature loads the script.
 
 **Existing configuration.** The old `orthanc.deid.enabled` key is not the
 engine selector. The current selector is the top-level `deid.engine`. For
@@ -293,7 +303,8 @@ profile, AET map, named salt Secret and enabled facility backup for this engine.
 It also requires `deid.policyReviewed: true`. The profile is passed to Orthanc
 `/modify`; its syntax is different from the ingest recipe syntax.
 
-**Routing uses the called AET.** The script looks up
+**Routing uses the called AET for DICOM-protocol arrivals.** REST input
+bypasses this path. The script looks up
 `routing.AETMap[origin.CalledAet]`, the title that the sender addressed. It does
 not look up the scanner's calling title. A missed entry writes the original
 under `/facility-backup/__unmapped_aet__/<AET>/...` before deleting the instance
@@ -386,7 +397,7 @@ identifier becomes a PATH rather than a filename: `medimage/dicom-series` is a
 directory `medimage` holding a file `dicom-series`.
 
 The installed `load_recipe_files` function walks
-`<spec-dir>/<category>/<format>` and skips anything at the top level that is not
+`<project-or-default-recipe-dir>/<category>/<format>` and skips anything at the top level that is not
 a directory, so a flat file named `medimage@dicom-series.json` is never read.
 If no project or fallback recipes are found, the stage raises an error. The
 message starts with "No deidentification recipe files found for".
@@ -577,14 +588,15 @@ On this branch (tier-1) the node uploads straight to XNAT, so `deidentify` sits 
 uploader moves it on to XNAT, so the chain is longer:
 
 ```
-tier-1   orthanc -> group -> assign -> deidentify -> upload ------------> XNAT
-tier-2   orthanc -> group -> assign -> deidentify -> rclone -> S3 -> mgmt xnat-upload -> XNAT
+tier-1   orthanc -> group -> assign -> deidentify -> [package] -> upload ------------> XNAT
+tier-2   orthanc -> group -> assign -> deidentify -> [package] -> rclone -> S3 -> mgmt xnat-upload -> XNAT
 ```
 
 The placement is the same either way — immediately before whatever carries data
 off the node — and the chart handles it with one helper, so no extra
 configuration is needed. `upload` and the rclone S3 uploader both read
-`edge.uploadSourceDir`, which becomes `/data/deidentified` when the stage is on.
+`edge.uploadSourceDir`. It selects `/data/deidentified` for ingest, or
+`/data/packaged` when the optional package stage is enabled.
 
 This ordering matters on tier-2: the default data path runs the recipe before
 S3 upload. The recipe and source labels still determine what leaves the site.
@@ -650,7 +662,8 @@ resource manifests and upload results before changing paths or cleanup rules.
 
 The old output-layout blocker in
 [#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144)
-was reported for 0.13.1 and is closed. The pinned image publishes sessions at
+was reported for 0.13.1 and closed on 2026-08-31; upstream status was
+checked on 2026-11-10. The pinned image publishes sessions at
 `/data/deidentified/<project>.<subject>.<session>/`, with the scan and resource
 directories below that session. Upload reads that root directly. There is no
 need to flatten an extra session directory by hand, and doing so can damage
@@ -674,7 +687,10 @@ The package namespace is `accessionflow`. Current CLI examples use
 and sidecar behavior described in the [component guide](accessionflow.md#source-retirement-and-metadata-in-0190)
 also applies here. Under `--unlink-source all`, unprocessed files in the input
 snapshot can be removed after success; keep session folders pipeline-managed.
-The facility backup remains separate from this cleanup.
+The facility backup remains separate from this cleanup. It is written only
+for DICOM-protocol input when the callback succeeds, and its own retention
+policy may remove copies later. `--unlink-source all` does not prove that
+an original or encrypted mapping remains recoverable.
 
 This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.19.0`.
 The locally inspected image has image ID

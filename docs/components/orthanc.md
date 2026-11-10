@@ -17,6 +17,13 @@ Labels record processing state; they are not a de-identification certificate.
 
 ## Role in this stack
 
+The backup callback immediately returns unless `origin.RequestOrigin` is
+`DicomProtocol`. A REST POST to Orthanc can test storage and downstream stages,
+but it does **not** test facility-backup creation. File drops also bypass that
+callback. Use a synthetic C-STORE send and inspect the archived file when
+validating the backup path. A successful receive does not prove the backup,
+assignment or de-identification succeeded.
+
 Three jobs apply to the default ingest pipeline:
 
 1. **Receive DICOM.** Orthanc runs the DIMSE C-STORE SCP on host port 4242 with
@@ -106,13 +113,13 @@ the script is loaded. Keep ingest for new sites.
 
 | Resource | Why |
 |---|---|
-| Node port 4242 (`hostPort`, from `orthanc.expose.dicom`) | Modality C-STORE inbound from local facility LAN. Binding the real port pins the pod to the node — which is why the Deployment strategy is `Recreate` |
-| PVC `<release>-pipeline` mounted at `/data` | Backed by a hostPath PV at `storage.pipeline.hostPath` (`/data/xnat-ingest`). Holds `orthanc-storage/`, `grouped/`, `assigned/`. **One filesystem for all stages** so hardlinks work (cross-fs hardlink fails with EXDEV) |
-| PVC `<release>-facility-backup` mounted at `/facility-backup` | Backed by hostPath `storage.facilityBackup.hostPath`. Canonical local copy of every received original DICOM, written as `<PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm`. Site-controlled retention. Independent of AIS lifecycle |
+| Node port 4242 (`hostPort`, from `orthanc.expose.dicom`) | Modality C-STORE inbound from local facility LAN. The port can be bound only once per node; scheduling and PV placement choose the node, while Recreate avoids overlapping receiver pods |
+| PVC `<release>-pipeline` mounted at `/data` | Backed by a hostPath PV at `storage.pipeline.hostPath` (`/data/xnat-ingest`). Holds `orthanc-storage/`, `grouped/`, `assigned/`. **One pipeline PVC for all stages** so hardlinks work (cross-fs hardlink fails with EXDEV) |
+| PVC `<release>-facility-backup` mounted at `/facility-backup` | Backed by hostPath `storage.facilityBackup.hostPath`. Byte copy of successfully archived DICOM-protocol input, written as `<PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm`. Site-controlled retention. Kept by default; the original-expiry policy can remove patient directories only when its explicit enable/expiry gates are armed. |
 | Three ConfigMaps at TWO paths | `<release>-orthanc-config` → `/etc/orthanc/orthanc.json`, `<release>-orthanc-scripts` → `/etc/orthanc/scripts/`, `<release>-orthanc-routing` → `/etc/ais-edge/` (routing.json + deidentification-profile.json). See Configuration for why the second path exists |
 | One Secret env var | `AIS_DEID_HMAC_SALT` from `orthanc.deid.existingSaltSecret` (`orthanc-deid-salt`); required when the backup script loads; its value is unused for ingest labels or recipe output |
-| Optionally Secret `orthanc-credentials` | Only when `orthanc.auth.enabled` is true; mounted as `/etc/orthanc/users.json`. The tier-1 example site leaves auth off because the REST API is ClusterIP-only **Enabling it: see the step-by-step in [TOUR.md](../TOUR.md) (section 3) or the README's *Orthanc REST API Authentication* section; the Secret needs THREE keys (`users.json`, `orthanc-user`, `orthanc-password`), and a Secret with only the last two installs cleanly and then stops Orthanc from starting.** |
-| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. Traffic is inbound only: `group-orthanc` REST-pulls over the in-cluster Service, and the data-policy reporter queries it when `dataPolicy.derived.orthancStorage.backend` is `orthanc-rest` |
+| Optionally Secret `orthanc-credentials` | Only when `orthanc.auth.enabled` is true; mounted as `/etc/orthanc/users.json`. The tier-1 example leaves auth off; ClusterIP does not authenticate callers. **Enabling it: see the step-by-step in [TOUR.md](../TOUR.md) (section 3) or the README's *Orthanc REST API Authentication* section; the Secret needs THREE keys (`users.json`, `orthanc-user`, `orthanc-password`), and a Secret with only the last two installs cleanly and then stops Orthanc from starting.** |
+| No application forwarding configured | Orthanc is the receiver; downstream stages call its REST API. The chart does not enforce an egress NetworkPolicy, so this is not a network isolation guarantee. |
 
 ## Where it runs
 
@@ -149,16 +156,17 @@ from the site values. The table separates these responsibilities.
 
 The Lua hook itself,
 [`charts/edge/files/deidentify-and-forward.lua`](../../charts/edge/files/deidentify-and-forward.lua),
-is **identical across all AIS-Edge deployments** — no site-specific bits. It is
+is **shared chart source across sites using this chart revision** ; no site-specific bits. It is
 loaded with `.Files.Get` rather than inlined so it stays lintable and diffable.
 
 **Why routing.json and the profile are NOT under `/etc/orthanc`.** Orthanc is
 started with a directory argument and reads *every* `*.json` in it as server
-configuration — verified on a running edge, it happily read `routing.json` and
-`deidentification-profile.json` as settings. Nothing collides today, but the
+configuration. A historical live observation, date not recorded, showed
+`routing.json` and `deidentification-profile.json` being read as settings. That
+observation was not replayed on 2026-11-10. Even if no key currently collides, the
 scan order is filesystem order, so a future key that does collide would silently
 reconfigure the server. So `/etc/orthanc/` holds only `orthanc.json` and
-`scripts/`, and the hook reads its own inputs from `/etc/ais-edge/` via
+`scripts/`, plus optional `users.json` when authentication is enabled. The hook reads its own inputs from `/etc/ais-edge/` via
 `AIS_ROUTING_FILE`.
 
 **The pod rolls itself when the config changes.** The Deployment carries a
@@ -212,6 +220,17 @@ storescu -aec AISEDGE -aet TEST_MOD <nodeIP> 4242 /path/to/study/*.dcm
 ```
 
 ## Known limitations
+
+- **The Service exposure switches share one Service.** If either DICOM or
+  HTTP selects `nodePort`, the Service type becomes NodePort for both ports.
+  Kubernetes can allocate an HTTP node port even when `.http` is `ClusterIP`,
+  because that value merely omits an explicit nodePort number in this template.
+  Inspect the rendered and live Service and restrict access; do not use the
+  HTTP selector alone as proof that port 8042 is internal.
+- **One receiver Deployment per release.** It has one replica and uses Recreate.
+  A hostPort prevents two pods using the same host port on one node, but does
+  not itself bind the pod to a named node or create one receiver per worker.
+  Review scheduling rules and the node-local PV placement on multi-node edges.
 
 - **Original data remains in Orthanc.** Ingest de-identifies downstream. Treat
   the receiver store, grouped and assigned trees as identifying data. The

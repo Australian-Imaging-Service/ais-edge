@@ -284,9 +284,17 @@ head = flat(f["expr"]).split(" unless on (namespace, job_name) ")[0]
 bad = []
 if bare(head) != bare(u["expr"]):
     bad.append("expr: fork %r vs upstream %r" % (bare(head), bare(u["expr"])))
-for k in ("for", "labels", "annotations"):
+for k in ("for", "labels"):
     if f.get(k) != u.get(k):
         bad.append("%s: fork %r vs upstream %r" % (k, f.get(k), u.get(k)))
+# ANNOTATION ONLY: local recovery text preserves failed-Job evidence instead
+# of recommending deletion to clear an alert. All other upstream fields stay
+# compared. The description is also covered by the existing promtool fixture.
+fa, ua = dict(f.get("annotations", {})), dict(u.get("annotations", {}))
+fa.pop("description", None)
+ua.pop("description", None)
+if fa != ua:
+    bad.append("annotations other than description: fork %r vs upstream %r" % (fa, ua))
 if bad:
     print("FAIL the KubeJobFailed fork has drifted from upstream (%s): %s" % (upstream[0][0], "; ".join(bad)))
 else:
@@ -814,6 +822,7 @@ FORCED = {
     "DICOMRejectedUnmappedAET": "single-namespace collapse plus a different rules file — tier-2 defines this in charts/mgmt/files/loki-ruler-rules.yaml against its own namespace layout; tier-1 has no mgmt chart, so it is defined in charts/edge and selects app=\"orthanc\" in the one namespace. The expression and the regexp are otherwise the tier-2 rule verbatim. It was ABSENT from tier-1 entirely until now, while alertmanager-config.yaml already routed it by name and deidentify-and-forward.lua preserved its log wording for it.",
 }
 ANNOTATION_ONLY = {
+    "StageBacklogAgeing": "ANNOTATION ONLY. Management renders dataPolicy.stageAgeAlertAfter; tier-1 renders dataPolicy.reporter.stageAgeAlertAfter. Keep expressions, labels and pending periods compared.",
     "XNATUploadRetryStorm": "ANNOTATION ONLY. The remediation text names the single-node direct uploader here and the management uploader on tier-2. Every other field must match modulo namespace.",
 }
 def comparable(name, rule):

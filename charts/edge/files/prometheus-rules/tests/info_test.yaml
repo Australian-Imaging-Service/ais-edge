@@ -32,8 +32,4 @@ tests:
               severity: info
             exp_annotations:
               summary: Node inventory changed on the tier-1 host
-              description: >-
-                The number of nodes in this cluster changed in the last 10
-                minutes. On a tier-1 appliance there is exactly one node, so
-                this should never fire.
-
+              description: "The sampled count of kube_node_info series changed within ten minutes.\nTier-1 normally has one node, but a scrape gap, stale-series removal or\ninventory change can affect the count. Check node objects and target health;\nthis is not proof of an unexpected physical node joining the appliance.\n"

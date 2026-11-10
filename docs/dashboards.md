@@ -6,7 +6,7 @@ Grafana exists on tier-1 only when `observability.stack.enabled: true` in
 `sites/<site>/values.yaml`. It comes from the kube-prometheus-stack subchart
 vendored at `charts/edge/charts/kube-prometheus-stack-87.19.2.tgz`, and it is
 reached on a **NodePort** — `http://<nodeIP>:30030`, Service `<release>-grafana`
-— because a single node has no ingress and no cert-manager to put one behind.
+; because this branch does not install an ingress or cert-manager. That is a chart choice, not a general limitation of a single-node cluster; secure external access needs a separately configured endpoint.
 
 The port lives in the subchart's own block:
 `kube-prometheus-stack.grafana.service.nodePort` in `charts/edge/values.yaml`.
@@ -15,7 +15,7 @@ parent key used to exist and was deleted for being dead — Helm cannot template
 subchart's values, so no template in this chart can read a parent key and push it
 down into a subchart; the subchart reads its own block or nothing. It was
 measured before removal: `--set observability.stack.grafana.nodePort=31234` left
-the Service on 30030. `charts/edge/values.yaml:1011-1030` records that removal and
+the Service on 30030. `charts/edge/values.yaml` records that removal and
 maps every deleted key to the subchart key that replaced it, which is the table
 to consult before inventing a parent key. `charts/edge/templates/_helpers.tpl`
 validates the real key at render time and fails the install if the port falls
@@ -34,8 +34,7 @@ empties every panel below:
   only (ConfigMap `ais-kps-grafana-datasource`). Every query in this document is
   LogQL, so add Loki at `http://ais-loki.<namespace>.svc.cluster.local:3100`.
   `ais-loki` is pinned by `loki.fullnameOverride` in `charts/edge/values.yaml`
-  and is the same address Vector pushes to, so a Vector that is shipping proves
-  the URL.
+  and is the same address Vector pushes to, so successful Vector delivery verifies its own path. Grafana connection and query checks are still needed to verify the datasource path and permissions.
 * **Logs, if only half the observability switch is on.**
   `observability.stack.enabled` hosts the store; `observability.enabled` runs
   Vector, and `charts/edge/templates/vector.yaml` renders on that second key
@@ -80,7 +79,7 @@ match.
 
 Tier-1 runs everything in ONE namespace (`namespace:` in the site file,
 `xnat-ingest` by default) on ONE node, so the panels are driven entirely by the
-pod logs Vector tails there: `group-orthanc`, `assign` and the direct XNAT
+pod logs Vector tails there: `collate-orthanc`, `label xnat` and the direct XNAT
 uploader. There is no s3-uploader and no SeaweedFS layer on this tier.
 
 ---
@@ -102,7 +101,7 @@ stages apart, and it is copied straight from the pod label the chart sets.
 | `group` | `accessionflow collate-orthanc` | `ingest.orthancGroup.enabled` |
 | `group-fs` | `accessionflow collate` over the watched directory | `ingest.fileDrop.enabled` (off) |
 | `assign` | `accessionflow label xnat` | either ingest path enabled |
-| `associate` | Siemens side-file attach | `ingest.associate.enabled` (off) |
+| `associate` | Historical Siemens side-file attach | Setting `ingest.associate.enabled: true` currently fails validation; it is unsupported by this pinned CLI |
 | `upload` | `accessionflow store xnat` → XNAT | `upload.mode: direct` |
 | `data-policy` | the retention reporter | `dataPolicy.reporter.enabled` |
 
@@ -134,7 +133,7 @@ exists to prevent.
 One matching terminal line = one completed pass for a session. A later pass
 can count that session again; this is not a distinct-session total. Where a multi-site deployment splits
 `dicoms` vs `files` (the s3-uploader's per-object counters), tier-1 counts
-**sessions**.
+**matching session-completion lines**, with the repeated-attempt limits above.
 
 ---
 
@@ -146,7 +145,7 @@ Single-node view over every pipeline log line pushed to Loki.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Sessions uploaded (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "Successfully uploaded all files in" [1h])) or vector(0)` | One count per session `accessionflow store xnat` confirmed into XNAT in the last hour. Match the string exactly; this panel matches that terminal signal. A repair can also emit it. Other success paths, including session-only resources, have different messages. |
+| **Sessions uploaded (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "Successfully uploaded all files in" [1h])) or vector(0)` | One count per matching terminal line in the last hour, not per distinct or independently confirmed session. Match the string exactly; this panel matches that terminal signal. A repair can also emit it. Other success paths, including session-only resources, have different messages. |
 | **Upload errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "(?i)error\|failed\|exception\|traceback" [1h])) or vector(0)` | A LINE count, not a session count — one Python traceback contributes several. Deliberately over-sensitive: the value matters as 0 vs not-0, not as a magnitude. The `or vector(0)` tail is what stops an idle hour reading "No data" where the operator expects a failure count. |
 
 **Why every stat query ends in `or vector(0)`.** LogQL returns an *empty vector*,
@@ -167,7 +166,7 @@ cannot reach.
 |---|---|---|
 | **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Could not resolve the labels of .*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. The current matcher selects the 0.19.0 assignment-error prefix and excludes the separate cycle summary. Repeated attempts can count the same session again. Read the assign logs and `InvalidSessionAssigned` alert; see the validation note below. |
 | **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "^Label completed with [0-9]+ errors" [1h])) or vector(0)` | The query matches the current `Label completed with N errors` message and a numeric error count. The 0.19.0 summary is one line. Each matching line counts one failed cycle, regardless of how many sessions were rejected within it. It is not a distinct-session count or a sum of the error counts. Inspect the per-session ERROR messages to identify which sessions need review. A quiet cycle or a missing log stream contributes nothing, so confirm collection separately. |
-| **Pipeline liveness** | `(count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > bool 0) or vector(0)` | `1` while the assign loop is logging = the pipeline is alive. `0` means assign has stopped emitting (pod down, crash-looping, or Vector not shipping). |
+| **Pipeline liveness** | `(count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > bool 0) or vector(0)` | `1` means that an assign stream delivered a line in the lookback, which can be an error. It does not prove downstream liveness. The expression is per stream, so several series can coexist. `0` can mean silence, an unmatched selector, or failed collection. |
 
 The `bool` modifier is load-bearing and easy to drop. A bare `> 0` is a *filter*:
 it removes the series when the count is zero, so a dead pipeline produces an
@@ -185,9 +184,9 @@ LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | me
 form is not LogQL and renders literally, which looks like a data problem rather
 than a query one.
 
-The query still uses the older error prefix. The current alert uses
-`Could not resolve the labels of ...`, so a blank panel can
-miss a real assignment failure. Inspect the assign logs and
+The query and current alert both use the 0.19.0 prefix
+`Could not resolve the labels of ...`. A blank panel can still miss
+a real assignment failure if collection, selected labels or the time range is wrong. Inspect the assign logs and
 `InvalidSessionAssigned` alert as well.
 
 Held input is under `<storage.pipeline.hostPath>/assigned/__invalid__/`. It has
@@ -238,7 +237,7 @@ are what a fleet pushing into one Loki needs unchanged.
 
 | Panel | Query (with template vars expanded) | Meaning |
 |---|---|---|
-| **Completed uploads (last 10m)** | `sum(count_over_time({cluster="$cluster",node=~"$node",component="upload"} \|~ "Successfully uploaded all files in" [10m])) or vector(0)` | Last-10-min session count for the selected scope. Threshold red below 1, green above. 0 while scanners are sending means the pipeline is stuck — but 0 overnight is also normal, so read it next to the throughput graph, never alone. |
+| **Completed uploads (last 10m)** | `sum(count_over_time({cluster="$cluster",node=~"$node",component="upload"} \|~ "Successfully uploaded all files in" [10m])) or vector(0)` | Last-10-min session count for the selected scope. Threshold red below 1, green above. 0 during expected traffic merits inspection but does not prove a stall; a session may still be settling or processing. 0 overnight is also normal, so read it next to the throughput graph, never alone. |
 | **Assign errors (last 1h)** | Same shape as "Invalid sessions" above, but selected on `cluster`/`node` **instead of** `namespace` | DICOM metadata validation failures. |
 | **Upload errors (last 1h)** | Same shape as Pipeline Overview's "Upload errors", but selected on `cluster`/`node` **instead of** `namespace` | Error-level noise from the uploader. |
 | **DICOM rejected; unmapped AE title (last 1h)** | `sum(count_over_time({cluster="$cluster",node=~"$node",app="orthanc"} \|~ "REJECT: no project mapped for CalledAET" [1h])) or vector(0)` | Legacy receiver event, absent from the ingest routing path. Under ingest there is no unknown-AET quarantine. A historical non-zero count needs review of the retained input; see the [deprecated-engine reference](components/deidentification.md#deprecated-orthanc-lua-engine). Do not use a zero count to prove sender authorization or successful de-identification. |
@@ -268,8 +267,7 @@ group, assign and upload pods.
 Query: `{namespace="xnat-ingest"} |= "$session" | json | line_format "{{.cluster}} | {{.component}} | {{.event}} | {{.message}}"`.
 
 `|=` is a line match, not a label match, which is why this works even though
-nothing promotes `session` to a stream label: the name appears in the message
-text of every stage that touches it.
+nothing promotes `session` to a stream label: some stage messages include the name. Receiver messages containing only a DICOM UID or records omitting the label will not match; the result is not a complete audit trail.
 
 `{{.event}}` can be empty on a normal store success line. Current 0.19.0
 also emits structured events, such as `deid_failed`, `xnat_repair_completed`
@@ -310,14 +308,16 @@ Used for forensics after a specific session reports a problem.
 
 ## How to validate a panel after changing it
 
+The source currently contains 17 panels across three dashboards (10 overview, 6 drilldown, 1 timeline). Review date: 2026-11-10. Source queries were compared locally; no live query or browser validation was performed. Query variable substitution, datasource configuration, line limits and collection failure must be checked separately. A zero fallback can conceal an unmatched selector. Do not use an upload counter to certify de-identification, completeness of a backup, header reconciliation or downstream XNAT processing.
+
 Enumerate every panel and run its query against Loki. Workflow:
 
 1. Snapshot **before** the change.
-2. Make the change. Send a single test study with a unique subject name:
+2. In an isolated test environment, make the change and send a synthetic study with a unique subject name:
    `dcmsend <nodeIP> 4242 -aec <orthanc.aet> /path/to/study/`.
 3. Predict the delta on every panel.
 4. Snapshot **after**.
-5. For each panel, `delta == prediction` ⇒ panel is correct.
+5. Reconcile the expected events within a fixed window. A matching delta validates that case, not every missing-data, retry, or idle condition.
 
 Any mismatch is a bug — fix the query to match the title (or the title to match
 the query). Never accept "the dashboard looks roughly right": a panel that reads

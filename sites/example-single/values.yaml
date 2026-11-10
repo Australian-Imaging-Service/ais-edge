@@ -1,3 +1,8 @@
+# Reviewed 2026-11-10 against this branch. This file retains its existing
+# site settings; it is not evidence of a current live deployment. Historical
+# measurements without a run date are not verified (2026-11-10).
+# This retained configuration selects the deprecated Lua engine. Do not
+# copy that choice for a new site; start from the current ingest example.
 # The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # EXAMPLE TIER-1 SITE; one machine, non-secret configuration
@@ -8,8 +13,9 @@
 #                     --> deidentify --> upload --> XNAT (HTTPS)
 #
 # There is no SeaweedFS, no S3 hop, no k0smotron child cluster, no konnectivity,
-# no second worker to join, no nginx-ingress and no cert-manager. Original
-# DICOMs never leave the node; only de-identified data goes to XNAT.
+# no second worker to join, no nginx-ingress and no cert-manager. The selected
+# recipe runs before XNAT upload. Retained headers, identifiers in labels,
+# private tags and pixels can still be identifying; verify the output.
 #
 #   scripts/site-secrets.sh new <name> single    # copies this directory
 #   $EDITOR sites/<name>/values.yaml             # <- everything below
@@ -27,12 +33,15 @@
 # reasoning behind them; this file holds the facts that are true of YOUR site.
 # =============================================================================
 
-# Short name for this deployment. Becomes a label on every log line and metric,
-# and appears in alert routing.
+# Deployment label used by selected telemetry and routing templates.
+# It is not automatically attached to every metric. Management Vector uses
+# its configured management label; inspect emitted labels before querying.
 clusterLabel: tier1-example
 
-# The de-identification engine. One key; the chart derives the Lua hook,
-# the accessionflow stage, the group label and the reclaim condition from it.
+# Select the engine for this retained site configuration. The chart derives
+# the stage, labels and reclaim condition from it. New sites use ingest:
+# Orthanc receives DICOM and accessionflow performs de-identification.
+# The orthanc/Lua engine is deprecated and retained only for existing sites.
 deid:
   # Use ingest for new sites. Its recipe runs after assign and before upload.
   # Orthanc remains the receiver. Its enabled Lua backup callback copies the
@@ -50,10 +59,10 @@ deid:
 
   engine: ingest
 
-  # THE GATE. The chart refuses to render while this is false. Set it only once
-  # you have read the recipe the engine above selects and agree it is this
-  # site's policy. Not a formality: nothing downstream re-checks what was
-  # removed.
+  # THE REVIEW GATE. deid.policyReviewed must be true before the chart renders.
+  # Read the selected recipe and source-label mapping first. This flag records
+  # operator review; it does not test de-identification quality or guarantee
+  # that identifiers in headers, pixels, paths and logs have been removed.
   policyReviewed: false
 
 # All pipeline workloads live here. Tier-2 splits ingest (edge cluster) from
@@ -61,9 +70,10 @@ deid:
 # there is nothing to split.
 namespace: xnat-ingest
 
-# onprem  resolves nothing externally; tier-1 talks only to XNAT, by its real
-#         DNS name, over the node's normal resolver. There are no management
-#         hostnames to pin, so no /etc/hosts entries and no hostAliases.
+# onprem does not add tier-2 management host entries on this branch.
+# The node uses normal DNS for XNAT and other configured external services,
+# such as registries, package sources and SMTP. Network access is not
+# limited to XNAT merely because no management plane is present.
 topology: onprem
 
 # fresh     install.sh installs k0s, kubectl, helm and local-path from nothing.
@@ -86,8 +96,10 @@ storage:
   pipeline:
     hostPath: /data/xnat-ingest
     capacity: 500Gi
-  # THE ARCHIVE OF RECORD. Originals with real patient identifiers, written
-  # before de-identification, and the only copy that is never uploaded anywhere.
+  # FACILITY BACKUP. This path holds identifiable original bytes copied by
+  # the DicomProtocol callback. It is not independently uploaded by that
+  # callback. Other arrival paths bypass it, and a write can fail. Verify
+  # backup coverage and independent storage before treating it as an archive.
   facilityBackup:
     enabled: true
     hostPath: /data/facility-backup
@@ -97,7 +109,9 @@ storage:
 # Orthanc; the DICOM receiver and the de-identification contract
 # -----------------------------------------------------------------------------
 orthanc:
-  # The AE title modalities C-STORE to, on this node's port 4242.
+  # The receiver AE title. The container DICOM port defaults to 4242.
+  # Use the actual NodePort or host endpoint selected by the service values
+  # when configuring a modality; it need not be the container port.
   aet: AISEDGE
   auth:
     enabled: false
@@ -167,7 +181,8 @@ ingest:
     #
     # OPTION: dates. This recipe REMOVEs PatientBirthDate outright. If you need
     # age-at-scan preserved, pydicom-deid also supports JITTER, which shifts a
-    # date by a fixed number of days:
+    # date by the supplied number of days. These are illustrative examples, not
+    # a validated project date policy:
     #     JITTER PatientBirthDate 47
     #     JITTER StudyDate 47
     # CAUTION: the offset is the same for every patient, so jitter the study
@@ -213,14 +228,14 @@ ingest:
         # Local accession/order numbers, which are re-identifying within a site.
         REMOVE AccessionNumber
 
-        # MARK THE RESULT AS DE-IDENTIFIED. Without these two tags an instance that has
-        # been through this stage is indistinguishable, by its own metadata, from one
-        # that was never processed, and some downstream tooling keys on them. The
-        # Orthanc engine already sets PatientIdentityRemoved in its profile; this is the
-        # same assertion for this engine, so the two are not asymmetric.
+        # MARK THE RESULT. These metadata flags state that processing was applied;
+        # they are not evidence that all identifiers were removed or that the
+        # instance complies with an approved confidentiality profile. Review the
+        # actual output, including private tags and pixels.
         #
-        # ADD, not REPLACE: the source instance does not carry these, and REPLACE only
-        # rewrites a tag that is already present.
+        # ADD sets the desired field even when it is absent from the input.
+        # Keep this assertion aligned with the complete approved recipe. The
+        # legacy Lua profile uses a different syntax and is not the current policy.
         ADD PatientIdentityRemoved YES
         ADD DeidentificationMethod AIS-Edge xnat-ingest recipe
 
@@ -231,7 +246,7 @@ ingest:
         # assign does no such thing: it READS tag values to resolve the project,
         # subject and session ids and then copies or hardlinks the files unchanged. It
         # never opens a dataset for writing. Verified by grepping the package for any
-        # write to PatientID; there is none.
+        # write by the label stage; it resolves IDs without rewriting DICOMs.
         #
         # It also claimed upload needs the tag to place the session. It does not.
         # Placement is explicit: upload builds the XNAT path from the session object's
@@ -241,11 +256,10 @@ ingest:
         # What DOES happen if it is left: upload finishes by calling
         # /data/experiments/<id>?pullDataFromHeaders=true, which asks XNAT to populate
         # its own metadata FROM THESE HEADERS. So a real medical record number left
-        # here is not merely present in the pixel archive, it is pulled into XNAT's
-        # fields, while PatientName, birth date and institution are all correctly
+        # here is not merely present in the pixel archive, it can be read into XNAT metadata, while PatientName, birth date and institution are all correctly
         # stripped and the result looks de-identified to a spot check.
         #
-        # Measured before this change: an instance de-identified by this recipe and
+        # Historical synthetic measurement, run date not verified (2026-11-10): an instance de-identified by this recipe and
         # uploaded still carried PatientID verbatim, with PatientIdentityRemoved absent.
         REMOVE PatientID
 
@@ -253,7 +267,7 @@ ingest:
         # machine in one room; DeviceSerialNumber is globally unique to a device. With
         # InstitutionName already removed these are what put a study back in a building.
         #
-        # MEASURED, and the reason they are here: a synthetic study carrying
+        # Historical synthetic measurement, run date not verified (2026-11-10): a synthetic study carrying
         # StationName "CT-SCANNER-03" and DeviceSerialNumber "SN-CT-778812" was run
         # through this recipe and reached the de-identified output with BOTH verbatim,
         # because neither this recipe nor the Orthanc profile named them. Both are Basic
@@ -267,7 +281,8 @@ ingest:
         # admitted, so it is clinical information about that patient rather than about
         # the acquisition.
         #
-        # MEASURED on a live tier-1 install with the Orthanc engine: a study whose
+        # Historical test on the now-deprecated Lua engine; run date not verified
+        # (2026-11-10): a study whose
         # RequestingPhysician was "NGUYEN^THI^LAN" and whose
         # AdmittingDiagnosesDescription was "Suspected pulmonary embolism" reached the
         # staged output with both verbatim. OtherPatientIDs ("URN-99887766") survived
@@ -277,15 +292,14 @@ ingest:
         REMOVE RequestingPhysician
         REMOVE AdmittingDiagnosesDescription
 
-        # PRIVATE TAGS PASS THROUGH, and that is a decision, not an oversight. The
-        # Orthanc engine states it explicitly as "RemovePrivateTags": false; this recipe
-        # said nothing, which made the same choice invisible on this side. Vendors put
-        # reconstruction parameters research needs in private blocks, and they also put
-        # scheduling references and operator notes there. MEASURED: a private block
-        # carrying "local-scheduling-ref-8842" survives this recipe intact.
+        # PRIVATE TAGS ARE NOT BLANKET-REMOVED by this example. Vendor private
+        # blocks can carry useful acquisition information and identifying text.
+        # Historical synthetic test: local-scheduling-ref-8842 survived an older
+        # example; its run date is not verified (2026-11-10).
         #
-        # If your site cannot accept that, remove them per-block by tag number; there is
-        # no blanket switch here. Decide, do not inherit this by default.
+        # The current deid library supports recipe REMOVE ALL_PRIVATE. Decide which
+        # private data may remain for the intended use and test the complete recipe.
+        # Do not equate retained private blocks with a guarantee of anonymity.
 
 
 
@@ -302,7 +316,7 @@ ingest:
     # to assigned/__invalid__ before de-identification.
     #
     # CAUTION: whatever you name for `subject` becomes the XNAT subject label.
-    # PatientID means the medical record number becomes that label, in the clear,
+    # If PatientID carries a medical record number, that number becomes the label, in the clear,
     # because assign runs BEFORE deidentify. Point it at a pseudonym tag your
     # modality writes if you have one.
     tagMapping:
@@ -318,33 +332,37 @@ ingest:
 #         This is what makes tier-1 a single node: no staging bucket, no
 #         management-side reclaimer, no S3 credential to distribute.
 # s3      tier-2 only. Requires SeaweedFS and a management plane.
-  # OPTIONAL: the package stage. One zip per DICOM series plus one sample DICOM,
-  # in place of the individual files. Off by default. Turn it on only when the
-  # XNAT project wants zips. See docs/package-stage.md: "What it needs" names
-  # the image and library versions, "Turn it on" the steps.
-  # package:
-  #   enabled: true
-  # The DICOM sample datatype, installed by pip in an init container at every
-  # pod start of the package pod and of the upload pod. The node needs access
-  # to github.com, or to a mirror of the package.
-  # extraPipPackages:
-  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
-  #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
+# OPTIONAL: the package stage. One zip per DICOM series plus one sample DICOM,
+# in place of the individual files. Off by default. Turn it on only when the
+# XNAT project wants zips. See docs/package-stage.md: "What it needs" names
+# the image and library versions, "Turn it on" the steps.
+# package:
+#   enabled: true
+# The DICOM sample datatype, installed by pip in an init container at each new pod initialization of the package pod and of the upload pod. The node needs access
+# to github.com, or to a mirror of the package.
+# extraPipPackages:
+#   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
+#   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
 
 upload:
   mode: direct
   direct:
     existingSecret: xnat-credentials
-    # Poll interval. The chart default is 120; 60 matches every other stage
-    # in the pipeline, so a session is not left waiting on this one.
+    # Upload loop interval; the chart default is 120 seconds. The pinned
+    # 0.19.0 loop waits for the remainder after work, so a long pass can exceed
+    # the interval. A value of 60 does not guarantee a 60-second end-to-end delay.
     loop: 60
-    # Quiet period before a session is considered complete.
+    # Quiet period used for eligibility. It does not prove study completeness
+    # or prevent all late series or concurrent changes. Verify expected inputs.
     waitPeriod: 60
     alwaysInclude: all
-    # true: a half-written resource waits for the next pass instead of being
-    # uploaded in part.
+    # Passes --raise-errors to the uploader. Failures propagate to the wrapper
+    # for later retry; this is not a transactional guarantee that a partially
+    # written resource can never be observed or uploaded.
     requireManifest: true
-    # true unless your XNAT presents a private or self-signed certificate.
+    # Keep TLS verification enabled and install the required trust for a
+    # private CA. Disabling it accepts an unverified server certificate and
+    # should not be the normal response to a private or self-signed endpoint.
     verifySsl: true
 
 # -----------------------------------------------------------------------------
@@ -364,42 +382,39 @@ observability:
   enabled: true
 
   loki:
-    # MUST BE EMPTY ON TIER-1. The chart defaults these to the tier-2 names
-    # (loki-push-client-tls / ca-bundle), which cert-sync delivers from a
-    # management cluster. There is no management cluster here, so nothing ever
-    # creates them; and the chart mounts them non-optionally, so Vector would
-    # sit in CreateContainerConfigError for good.
+    # Keep these tier-2 mTLS Secret names empty for local tier-1 Loki.
+    # There is no management cert-sync service on this branch. If required
+    # Secret mounts are configured but absent, Vector cannot start.
     #
-    # Empty also selects files/vector-local.yaml, the config without the sink's
-    # tls: block, because tier-1's Loki is in this same cluster over plain http.
+    # The local sink uses plain HTTP inside the cluster; it needs no client
+    # certificate. Check the rendered vector-local.yaml and the actual Loki
+    # endpoint instead of copying tier-2 TLS settings.
     clientCertSecret: ""
     caBundleSecret: ""
 
   stack:
     # -------------------------------------------------------------------------
-    # Where alerts are MAILED. Empty is allowed and is the shipped default: the
-    # stack installs, the dashboards work, and nothing is sent. Every alert this
-    # chart raises is then visible only in Grafana, which nobody is watching at
-    # 3am; so on a real deployment, fill these in.
+    # Configure the mail recipient and relay before enabling normal operation.
+    # The chart refuses an empty emailTo when observability.enabled and
+    # observability.stack.enabled are both true. There is no separate bypass
+    # flag. With observability disabled but the stack still on, the presence
+    # guard is bypassed and an empty address routes to null. Check the rendered
+    # receiver and the Alertmanager rule interfaces for the actual state.
     #
-    # The credentials live in secrets.enc.yaml as the alertmanager-smtp Secret
-    # (username + password). Without the three keys below there is nowhere to
-    # send to, so that Secret sits unused; which is the state a fresh
-    # sites/ scaffold starts in.
-    #
-    # smtpUsername is here rather than in the Secret because Alertmanager has
-    # no smtp_auth_username_file; only the PASSWORD is read from a file.
+    # SMTP credentials are provided by the selected Secret and values. In the
+    # shipped config smtpUsername comes from values and the password from a file.
+    # The presence check does not test authentication or delivery. Send a
+    # controlled test and confirm receipt; dashboards alone are not paging.
     alerting:
-      # SET emailTo OR NO ALERT IS EVER DELIVERED, including the ones that tell
-      # you studies have stopped reaching XNAT. Left empty, Alertmanager renders
-      # with receiver "null": every rule still evaluates, every alert still
-      # fires, and all of them go nowhere. Nothing errors and nothing warns.
+      # Set emailTo and relay credentials for mail delivery. With observability
+      # and its local stack enabled, blank emailTo is refused. No separate
+      # opt-out value exists. If Vector/observability is disabled while the
+      # stack remains enabled, that presence guard is bypassed and an empty
+      # address can select the null receiver. Inspect the rendered configuration.
       #
-      # THIS IS EASY TO MISS because the secrets file makes you fill in
-      # REPLACE_SMTP_USERNAME and REPLACE_SMTP_APP_PASSWORD, so it feels as
-      # though email is configured. Those are the credentials for TALKING to the
-      # relay; the four keys here are WHO gets the mail and WHICH relay. Both
-      # halves are required and they live in different files.
+      # The SMTP Secret authenticates to the relay; the recipient, sender and relay
+      # values choose where to send. Both must be correct. A non-empty address
+      # passes only a presence check, so test an actual notification.
       emailTo: ""            # e.g. imaging-ops@example.org
       emailFrom: ""          # defaults to emailTo when left empty
       smtpHost: ""           # e.g. smtp.example.org
@@ -430,11 +445,12 @@ observability:
 # -----------------------------------------------------------------------------
 # Data policy; what is kept, and for how long
 # -----------------------------------------------------------------------------
-# Nothing expires on a fresh install. Run with dryRun for a week and read the
-# decisions it logs before enabling it.
+# Data-policy defaults to disabled/dry-run. Other jobs and CLI unlink flags
+# have their own behavior. Observe representative decisions and verify source
+# and destination evidence before enabling any cleanup path.
 #
-# On tier-1 this matters MORE than on tier-2, not less: this node holds the only
-# copy of the facility backup, and there is no management-side reclaimer to fall
+# On tier-1 this matters MORE than on tier-2, not less: this node can hold the only
+# copy of a facility backup, and there is no management-side reclaimer to fall
 # back on. EdgeDiskLow is the only disk-exhaustion alert in the system.
 dataPolicy:
   enabled: false
@@ -465,10 +481,11 @@ dataPolicy:
     # THE LAST TREE, and the one that used to have no knob here at all.
     # Whatever the uploader reads is what it re-reads every loop. `upload` never
     # deletes what it delivered, deliberately: you do not erase a study because an
-    # HTTP call returned OK. So if nothing retires this tree, the same session is
-    # re-sent every loop for ever and XNAT answers "already exists with different
-    # checksums" each time. That is not hypothetical: it is what this tier did
-    # until the terminal-stage reclaimer was ported to this branch.
+    # HTTP call returned OK. Historical older releases repeatedly misclassified some complete
+    # resources. Current 0.19.0 rechecks file evidence and skips a complete
+    # session without re-sending it or repeating its success line. Retaining
+    # the tree still consumes disk and can cause repeated scans, so the
+    # proof-based staged reclaimer remains necessary for automatic retirement.
     #
     # Under ingest, /data/deidentified is the upload source. With packaging
     # enabled, /data/packaged is the upload source instead.
@@ -479,22 +496,26 @@ dataPolicy:
     deidentified:
       reclaim: auto
 
-    # WHAT SATISFIES onUploaded ON THIS TIER. There is no bucket and no s3-uploader
-    # here, so the marker the data-policy engine looks for is written by nothing
-    # else: this CronJob writes it, after asking XNAT whether the session really
-    # landed. Without it `onUploaded` can never come true and the tree above is
-    # kept whatever you set.
+    # DIRECT-UPLOAD RECLAIM. The staged-reclaimer CronJob implements the
+    # terminal onUploaded path by checking the local files against XNAT and
+    # removing eligible files itself. It does not merely manufacture a marker
+    # for the data-policy reporter. Its enablement, age, limits and proof flags
+    # must align with the terminal tree selected by the chart.
     stagedReclaimer:
-      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
-      # terminal tree: accessionflow store xnat never deletes what it sent.
+      # Hourly by this schedule. The direct staged-reclaimer performs proof-based
+      # terminal cleanup. The shipped store xnat command does not delete its input.
+      # Review CLI unlink settings and other policies before assuming this is
+      # the only possible deletion path for a customized installation.
       schedule: "17 * * * *"
-      # OPTION: raise on a slow link. A session still uploading is protected by the
-      # XNAT check regardless, so this is about noise, not safety.
+      # Raise the minimum age when the workflow needs a longer recovery window.
+      # Destination proof is required, but retention is also a safety and capacity
+      # decision. Concurrent writers and incomplete source knowledge are not
+      # eliminated merely by a successful proof at one instant.
       minAge: 1d
-      # Ask XNAT for each local file (present, same size) before deleting the
-      # only remaining copy.
-      # CAUTION: `false` makes the CronJob remove NOTHING. It deletes only what
-      # XNAT proves, file by file.
+      # Before deletion, require XNAT proof for expected local files using the
+      # current script checks. The staged tree can be the last retained usable
+      # copy, so verify backup coverage too. With verifyAgainstXnat=false the
+      # current job refuses to delete; that flag does not enable an unsafe bypass.
       verifyAgainstXnat: true
       # Ceiling per run. A bug that decides everything is reclaimable removes this
       # many and stops, leaving the rest to inspect.

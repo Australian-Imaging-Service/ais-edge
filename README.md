@@ -15,8 +15,9 @@ modality --C-STORE--> Orthanc (receive) --> group-orthanc --> assign --> deident
 
 There is **no** SeaweedFS, **no** S3 hop, **no** k0smotron / child cluster /
 konnectivity, **no** separate edge worker, **no** nginx-ingress, and **no**
-cert-manager. Original DICOMs never leave the node; only de-identified data is
-uploaded to XNAT. Optional observability (Loki + Prometheus + Grafana +
+cert-manager. The chart uploads the deidentify-stage output, not the facility
+backup. That output can retain fields and labels the recipe does not remove.
+Review those and any separately managed backup exports before patient use. Optional observability (Loki + Prometheus + Grafana +
 Alertmanager + Vector) runs natively on the same node.
 
 Everything above is deployed by **one Helm chart**, `charts/edge`, configured by
@@ -26,8 +27,11 @@ step with it.
 
 ## Prerequisites
 
-- **One Ubuntu node**: Ubuntu 22.04+, 8GB+ RAM, 100GB+ disk. This single machine
-  runs k0s and every pipeline component.
+- **One Ubuntu node**: Ubuntu 22.04 is the recorded test platform. The earlier
+  8GB RAM / 100GB disk sizing suggestion is historical, not a measured
+  0.19.0 minimum (not verified 2026-11-10). Size memory for concurrent stages,
+  archive buffers and optional observability; size disk for retained originals
+  and outages. Validate any newer OS and the actual workload before deployment.
 - **One XNAT instance**: reachable over HTTPS, with a local (non-AAF/OIDC) service
   account and a pre-existing project for the sessions to land in. Scope that
   account to the projects selected by the site's tag mapping or project constant. Tier-1
@@ -117,9 +121,9 @@ scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 #   REPLACE_SMTP_USERNAME and REPLACE_SMTP_APP_PASSWORD, which is only the
 #   credential for talking to the relay. Who receives the mail and which relay
 #   to use are in the VALUES file, under observability.stack.alerting, and they
-#   ship empty. Left that way, Alertmanager renders with receiver "null": every
-#   alert still fires and none is delivered, including the ones that tell you
-#   studies have stopped reaching XNAT. Set emailTo and smtpHost.
+#   ship empty. With Vector and the local stack both enabled, the chart now
+#   refuses empty emailTo or smtpHost. Fill them in, then test a synthetic
+#   notification; a valid rendered route does not prove relay delivery.
 
 # 5. Confirm the de-id policy, deliberately: set
 #      deid.policyReviewed: true
@@ -144,7 +148,8 @@ them:
    to skip it when the cluster already exists.
 2. **site Secrets** — `scripts/site-secrets.sh apply <site>` creates any
    namespace the Secrets name and decrypts straight into the cluster through a
-   pipe. Plaintext never touches disk. Secrets go **before** the workloads: a pod
+   pipe without a plaintext manifest in the checkout. Editor files, swap and
+   Kubernetes storage are outside that guarantee. Secrets go **before** workloads: a pod
    that starts without its Secret sits in `CreateContainerConfigError`.
 3. **the chart** — `helm upgrade --install <site> charts/edge -n xnat-ingest
    --create-namespace -f sites/<site>/values.yaml`.
@@ -152,7 +157,7 @@ them:
 ### Then verify, every time
 
 ```bash
-scripts/verify-live.sh <site>          # exit code = number of failures
+scripts/verify-live.sh <site>          # normal exit = failure count (cap 250); read skips too
 ```
 
 `install.sh` prints this at the end, and it is the difference between "Helm
@@ -184,7 +189,9 @@ all below.
 
 ## Architecture
 
-Everything runs on one node, in one namespace, from one Helm release.
+The application chart runs on one node in its release namespace. Kubernetes
+system components and the local-path provisioner use their own namespaces.
+The one application Helm release contains the pipeline and optional stack.
 Modalities C-STORE to Orthanc on the node's IP at port 4242. Orthanc stores the
 original instances and, when enabled, writes a separate facility-backup copy.
 It does not modify headers or apply AET routing under the default ingest mode.
@@ -213,7 +220,7 @@ intended networks; enabling observability does not make them part of DICOM.
     /data/xnat-ingest/orthanc-storage   ORIGINAL DICOM instances (Orthanc storage)
     /data/xnat-ingest/grouped           grouped studies (group-orthanc output)
     /data/xnat-ingest/assigned          PROJECT.SUBJECT.SESSION/ dirs (assign output)
-    /data/facility-backup               ORIGINAL DICOMs (real IDs) — never leaves node
+    /data/facility-backup               ORIGINAL DICOMs (real IDs); chart does not upload this directory
     /data/xnat-ingest/deidentified     recipe output; upload reads this
     /data/xnat-ingest/reid             sensitive metadata maps; encrypt with key Secret
     /data/xnat-ingest/packaged         optional package output; upload follows it
@@ -250,8 +257,8 @@ intended networks; enabling observability does not make them part of DICOM.
                      │  HTTPS REST (XNAT credentials live only here)
                      ▼
   ┌──────────────────────────┐
-  │  XNAT Server             │   ◄──────── Modalities C-STORE to
-  │ (separate infrastructure)│             AET=AISEDGE on :4242 (LAN)
+  │  XNAT Server             │   Upload destination, not the edge DICOM receiver
+  │ (separate infrastructure)│   Modalities send to Orthanc on the node above
   └──────────────────────────┘
 ```
 
@@ -311,7 +318,9 @@ requirements. The facility backup is written as a copy to its own volume and can
 be on another disk. It is not subject to the pipeline hardlink requirement.
 
 Cleanup follows separate handoffs. `grouped.reclaim: onAssigned` can cause
-assignment to unlink its consumed input. Under ingest, assigned reclaim `auto`
+assignment to retire its successful input snapshot. Under `--unlink-source all`,
+that can include files not represented in the output session. Keep manual
+files outside pipeline inputs; no backup verification precedes that unlink. Under ingest, assigned reclaim `auto`
 resolves to `onDeidentified`. Deidentified reclaim `auto` resolves to `onUploaded`,
 or `onPackaged` when packaging is enabled. The terminal reclaimer verifies the
 files it removes against XNAT and uses the upload-tree writer lock. A successful
@@ -339,7 +348,7 @@ Single node                                    XNAT
 ├─ XNAT credentials (local Secret)             ├─ User data
 ├─ AIS_DEID_HMAC_SALT (local Secret)           │
 ├─ ORIGINAL DICOMs in /data/facility-backup    │
-│  (real identifiers; never leaves the node)   │
+│  (real identifiers; no chart upload path)    │
 ├─ Inbound: DICOM :4242 on the local LAN only  │
 └─ Outbound: HTTPS :443 to XNAT                 │
 ```
@@ -375,7 +384,7 @@ Single node                                    XNAT
 |--------------------|--------|
 | The node | This is the whole appliance; harden it accordingly. An attacker gets the local DICOMs (originals in the backup, Orthanc and pre-deid pipeline directories, plus sensitive reid maps), the XNAT credentials, and the deid salt. Restrict LAN access to :4242 and OS-level access to the machine. |
 | The DICOM port (:4242) | Anyone on the LAN who can reach :4242 can push studies. Ingest does not use an AET allowlist for project routing or quarantine. Any accepted input with usable labels can enter the pipeline and consume disk. Keep it on a trusted modality VLAN. |
-| The XNAT credentials | Scope the XNAT service account to the target project only (Member/Collaborator), so a leak can't reach unrelated data. |
+| The XNAT credentials | Scope the upload account to the intended projects with create/read/update permissions, normally the Member role. Collaborator is read-only. Check effective access, including custom roles and other project grants. See [XNAT roles](https://wiki.xnat.org/documentation/understanding-user-roles-and-permissions). |
 | An age private key | Whoever holds it can decrypt every `sites/*/secrets.enc.yaml` it is a recipient of. SOPS has no escrow: losing *every* recipient key for a file means that file is gone. Back the key up, and rotate a file with `sops updatekeys` after adding a recipient. |
 
 ## Repository Structure
@@ -421,7 +430,9 @@ k0s-k0smotron-mvp/
 ```
 
 There is no shell-side template rendering: the chart is the only thing that turns
-configuration into manifests, so a value is stated once and read once.
+configuration into manifests, so the rendered templates are the workload source. Values can be read by several
+consumers, including installation and verification scripts; verify that a
+custom setting reaches each consumer that needs it.
 
 `charts/edge/templates/_helpers.tpl` refuses configurations that cannot work.
 These include a false policy-review gate, ingest without a recipe source,
@@ -479,19 +490,30 @@ Before ingesting data, ensure:
 1. **The XNAT project exists** — create it in the XNAT web UI first. Its ID must
    match the project selected by `ingest.assign.tagMapping.project` or
    `ingest.assign.constantProjectId`. Assignment does not create the project. Use IDs in
-   `[A-Za-z0-9_-]` only; accessionflow normalises other characters (e.g. a period)
-   to `_`, so `test-project` would become `test_project`.
+   `[A-Za-z0-9_-]` for unchanged labels. accessionflow normalises runs of other
+   characters to `_`: `test.project` becomes `test_project`, while
+   `test-project` keeps its hyphen. This is not a pseudonymisation step.
 2. **The XNAT user is a local account** — not AAF/OIDC. Create via
    Administer → Users.
-3. **The XNAT user has project permissions** — at least Member or Collaborator on
-   the target project.
+3. **The XNAT user has upload permissions.** The standard Member role can
+   create, read and update project data; Collaborator is read-only. Check
+   effective permissions on each intended project and validate a synthetic
+   upload. See [XNAT roles](https://wiki.xnat.org/documentation/understanding-user-roles-and-permissions).
 
 `accessionflow` authenticates via `POST /data/JSESSION` with username/password and
-uses the session token for subsequent REST calls. If your XNAT presents a private
-or self-signed certificate, set `upload.direct.verifySsl: false`; the upload pod
-then runs with `--dont-verify-ssl`.
+uses the session token for subsequent REST calls. Keep
+`upload.direct.verifySsl: true`. For a private CA, provide a trusted certificate
+chain in the uploader environment and verify it there. Setting this value to
+false sends `--dont-verify-ssl` and disables verification; it does not repair
+the trust chain.
 
 ## Tested Versions
+
+Source pins below were reviewed on 2026-11-10. The OS row is a historical
+test environment whose measurement date is not recorded. This table is not a
+new compatibility run or vulnerability audit; current security status is not
+verified (2026-11-10). Record deployed digests and verify a representative
+synthetic workflow after any override.
 
 | Component | Version | Notes |
 |-----------|---------|-------|
@@ -571,7 +593,7 @@ kubectl logs -n xnat-ingest -l component=data-policy  --tail=20    # disk + recl
 helm get notes <site> -n xnat-ingest
 
 # XNAT reachability
-curl -sk <XNAT_URL>                                             # should return HTML
+curl -fsS <XNAT_URL>            # reachability/TLS only; HTML is not upload proof
 
 # Grafana (only if observability.stack.enabled)
 #   http://<nodeIP>:30030
@@ -584,15 +606,15 @@ curl -sk <XNAT_URL>                                             # should return 
 | Unapproved sender reaches the DICOM port | The shipped receiver accepts calling AETs. Ingest does not consult the legacy AET map or quarantine that sender; usable source labels can take the data into the pipeline | Restrict port 4242 at the network boundary and investigate received input under the site's data-handling procedure |
 
 | Network drops mid-upload | The in-flight session upload fails | The upload loop retries the retained upload-source session on the next cycle |
-| Node reboots | k0s auto-starts; pods resume; assigned files are safe on the local disk | Nothing — the pipeline picks up where it left off |
+| Node reboots | Local data normally persists and k0s restarts, but in-flight work can be interrupted | Check disks, pod readiness, retained input, logs and the exact remote inventory. Do not infer completeness from the reboot finishing. |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
 | XNAT is down | Uploads fail; sessions accumulate in `/data/deidentified` (or `/data/packaged`) | XNAT returns; the upload loop clears the backlog |
 | DICOM missing AccessionNumber | `assign` logs `Could not resolve the labels of` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Requeue the session with `sudo ais-requeue` on the node, as in [docs/recovering-invalid-sessions.md](docs/recovering-invalid-sessions.md). Check each modality; a field can be absent or empty |
-| `/data` disk fills | Nothing is deleted while `dataPolicy.enabled` is false, so both volumes grow unbounded. The data-policy DaemonSet reports free disk and what it *would* reclaim | Expand the disk, or turn on `dataPolicy` (read a week of `dryRun` decisions first — this node holds the only copy of the facility backup) |
+| `/data` disk fills | Policy deletion is disabled by default, but successful copy stages can still retire source snapshots. Retained originals and unconfirmed output can fill the filesystem | Restore headroom and inspect every configured filesystem. Review dry-run decisions before arming cleanup; preserve originals and unresolved data. |
 | `helm upgrade` refuses to render | One of the render-time guards fired (see Repository Structure) | The failure text names the values path and why it matters — fix the site file, do not bypass |
 | DICOM missing `SeriesDescription` or `SeriesNumber` | `group-orthanc` stages the series with a fallback name and logs a WARNING with `event: series_metadata_fallback` and the Orthanc series ID. A missing description gives the scan type `Series_<scan-id>`. A missing number gives the `SeriesInstanceUID` with its dots changed to underscores, as XNAT's header importer does | Nothing. Correct the tag at the modality if the scan needs a readable name |
-| One study that cannot be staged | `group-orthanc` logs `Skipping Orthanc study '<id>': <reason>` at ERROR, removes the study's scratch folders and stages the other studies. The study stays in Orthanc without the processed label and is tried again on every pass, so `IngestStageError` keeps firing. Two series with one `SeriesNumber` are refused on purpose, so that no series is merged or dropped. Before the 0.16.2.post1 image, one such study stopped the stage for every study | Read the reason, then follow "A study that group-orthanc refuses" in [docs/components/accessionflow.md](docs/components/accessionflow.md). Do not delete the study from Orthanc |
-| XNAT presents an untrusted certificate | The upload pod `CrashLoopBackOff`s with `SSLCertVerificationError ... self-signed certificate`, and no session is ever delivered | `openssl s_client -connect <xnat>:443` to confirm (`Verify return code: 18`). Set `upload.direct.verifySsl: false` for that site, and revert it when XNAT gets a real certificate |
+| One study that cannot be staged | `group-orthanc` logs the refusal, removes its temporary staging and continues other studies. It retains the source in Orthanc and retries later. Duplicate series-number conflicts are refused so data is not silently merged. Earlier releases could stop the whole pass; that is historical behavior | Read the reason and follow the component guide. Confirm retained input before any recovery; alert timing depends on thresholds and collected logs. |
+| XNAT presents an untrusted certificate | TLS verification can fail before upload | Inspect the presented chain with `openssl s_client -connect <xnat>:443 -servername <xnat>`. Provide a trusted chain in the uploader environment and retain `upload.direct.verifySsl: true`; disabling verification is not a trust repair. |
 | Existing XNAT resource has different checksums | The ERROR means missing, extra or changed content; the empty-digest false ERROR was fixed in 0.15.3. `XNATResourceIncompleteAndStuck` reports repeated conflicts | Compare staged and remote files. A later upload-success line does not prove that content matches. Preserve the source and resolve the conflict before deleting anything. |
 | `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT has no checksum for one or more files, so those bytes were not compared | Ask the XNAT administrator to configure and compute catalog checksums. A matching filename is not a content proof. The warning can recur on each upload attempt. |
 
@@ -651,45 +673,49 @@ Worth knowing before you tune anything, because the two layers look alike:
   retention is `kube-prometheus-stack.prometheus.prometheusSpec.retention` and
   `loki.loki.limits_config.retention_period`; PVC sizes and storage classes are
   likewise under `loki:` / `kube-prometheus-stack:`.
-- **`observability.stack.*` is the intended site-level surface, and today only
-  part of it is wired.** `install.sh` reads `observability.stack.enabled` and
-  `observability.stack.grafana.nodePort` (the latter purely to print the URL at
-  the end); no chart template consumes `retentionDays`, `grafana.*`,
-  `prometheus.*`, `lokiStorage` or `alerting.*` yet. So if you change the
-  NodePort, change it in **both** places or the printed URL and the Service will
-  disagree; and set retention in the subchart blocks, as
-  `charts/edge/values.yaml` (`dataPolicy.telemetry`) instructs.
-- **Alertmanager routing is not generated from `alerting.*` yet.** The
-  `alertmanager-smtp` Secret and the `emailTo` / `smtpHost` / `smtpUsername`
-  values exist and are the right place to record the site's settings, but the
-  Alertmanager runs on the subchart's default configuration until they are
-  wired — do not assume mail is leaving the node without testing it. (Gmail
-  needs an App Password: a 2FA account rejects the account password with
-  `535 BadCredentials`, and the only symptom is alerts that never arrive.)
-- **The Grafana admin login comes from the chart-generated Secret**, not from
-  `grafana-admin-credentials`:
+- **The old parent storage/retention keys are not live subchart settings.**
+  Set NodePort and retention in the blocks above. The current installer still
+  reads `observability.stack.grafana.nodePort` only for its printed URL; that
+  legacy display value does not configure the Service. If you change the real
+  NodePort, read the Service or `helm get notes` for the correct address. This
+  display mismatch remains open in the source reviewed on 2026-11-10.
+- **`observability.stack.alerting.*` is wired.** The parent template loads
+  `files/alertmanager-config.yaml`, substitutes the mail settings and references
+  the mounted SMTP password file. `emailTo` and `smtpHost` cannot be empty when
+  both Vector and the local stack are enabled: the render guard rejects that
+  combination. A stack without Vector does not hit that guard, so still review
+  its receivers. A successful render proves configuration, not mail delivery;
+  test a synthetic alert through the relay and verify receipt and resolution.
+- **Grafana reads `grafana-admin-credentials` by default.** The subchart's
+  `grafana.admin.existingSecret` points to it, using `admin-user` and
+  `admin-password`. It does not mint the operator login from a separate
+  `<release>-grafana` Secret under this configuration. Check existence without
+  printing the password:
 
   ```bash
-  kubectl -n xnat-ingest get secret <release>-grafana \
-    -o jsonpath='{.data.admin-password}' | base64 -d; echo
+  kubectl -n xnat-ingest get secret grafana-admin-credentials
+  helm get notes <site> -n xnat-ingest
   ```
+
+  Use the approved secret-edit process to rotate credentials, and verify the
+  resulting login. Do not paste a decoded password into a shared terminal log.
 
 For component-by-component reference see [`docs/`](docs/README.md).
 
 ## Orthanc REST API Authentication
 
-The shipped site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
-`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
-accident of network placement, not a control. Anything running *inside* the
-cluster can call that API, and it can **delete studies**. Turn it on for any
-deployment where that matters.
+The chart default is `orthanc.auth.enabled: true`; the example site overrides
+it to `false`. Check the merged values. `ClusterIP` limits normal external
+Service exposure but is not an authorization boundary. In-cluster clients and
+users with port-forward access can still reach the API, including its delete
+operations. Enable authentication and supply the matching Secret keys below.
 
 Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
 | `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
-| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401. Grouping cannot export studies and can retry or exit depending on where the error occurs; the policy adapter logs `backend_unavailable` and keeps the store |
 | `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
@@ -744,10 +770,12 @@ scripts/site-secrets.sh apply <site>
 ./install.sh <site>
 kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
 kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+kubectl -n xnat-ingest rollout restart ds/<release>-data-policy
 ```
 
-Both restarts are needed: Kubernetes does not restart a pod when a Secret
-changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+Restart all three consumers when they are enabled. Orthanc loads its users
+configuration at startup; grouping and data-policy read credentials from
+environment variables. A Secret change alone does not replace those processes.
 
 **4. Verify.**
 
@@ -762,9 +790,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
-Then confirm the pipeline still moves: `group-orthanc`'s log should keep
-reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
-`orthanc-password` disagree with `users.json`.
+Then confirm that a synthetic study moves through grouping and assignment.
+A `Found N studies` line alone does not prove an export succeeded. On a 401,
+compare `orthanc-user` and `orthanc-password` with `users.json`, check that
+each consumer was restarted, and inspect the receiver authentication config.
 
 > **Do not expose port 8042 to the host or a NodePort just because auth is now
 > on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
@@ -778,19 +807,29 @@ The release is a Helm release, so removing it is:
 helm uninstall <site> -n xnat-ingest
 ```
 
-What that deliberately does **not** remove: the namespace, both
-PersistentVolumes and both PersistentVolumeClaims (`helm.sh/resource-policy:
-keep` plus `persistentVolumeReclaimPolicy: Retain`), and the Secrets — which the
-chart never created in the first place. Received DICOM cannot be destroyed by an
-uninstall. Removing the data is a separate, deliberate act:
+A plain Helm uninstall is different from the repository reset script. The
+pipeline PVs/PVCs carry retention settings, and operator-managed Secrets and
+the namespace are not chart-created. Inspect the actual retained resources;
+Helm retention is not a backup and does not stop other writers or host deletion.
+Observability storage also needs its own retention review.
+
+The complete site teardown is:
 
 ```bash
-sudo rm -rf /data/xnat-ingest/grouped /data/xnat-ingest/assigned   # derived data
-# /data/facility-backup holds the ORIGINALS. This node is the only copy.
+scripts/uninstall.sh <site>                  # workloads, storage and node reset
+scripts/uninstall.sh --keep-cluster <site>   # retain k0s, still remove site data
 ```
 
-On a `fresh` install the node itself can be reset with `sudo k0s stop && sudo k0s
-reset`, which takes the cluster with it.
+**Both script modes delete configured patient-data directories, including the
+facility backup.** They explicitly remove retained PVs/PVCs and the namespace.
+Copy and verify required originals, reid maps and unresolved input before a
+teardown. The script retains the age key, site configuration and k0s binary.
+A manual `rm -rf` of grouped/assigned is not a general recovery procedure:
+those directories can hold unprocessed or unresolved identifying input.
+
+A standalone `k0s stop` / `k0s reset` removes the node's cluster installation;
+it is not equivalent to a verified application-data cleanup. Check remaining
+mounts, files and network state before reusing the machine.
 
 ## Network Ports
 
@@ -800,8 +839,10 @@ reset`, which takes the cluster with it.
 | Node | XNAT | **443** | XNAT REST API uploads (HTTPS) | TLS |
 | Local admin (LAN) | Node | **30030** | Grafana UI (only if `observability.stack.enabled`) | No (local LAN) |
 
-The only inbound port is DICOM 4242 on the local LAN. The only outbound path is
-HTTPS to XNAT. No inbound ports are exposed to the internet.
+DICOM 4242 is the pipeline input. Grafana adds an administrative NodePort when
+enabled. Installation needs approved download/registry access, SMTP needs its
+configured relay, and DNS/time services need the site's normal paths. The chart
+does not enforce an internet firewall; configure and verify network boundaries.
 
 **Site IT firewall rule:** allow the modalities to reach the node on TCP 4242, and
 allow the node to reach the XNAT server on TCP 443.

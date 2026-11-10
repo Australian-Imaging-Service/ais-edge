@@ -40,7 +40,7 @@ tests:
               job_name: edge-backup-1234
               condition: "true"
             exp_annotations:
-              description: 'Job __RELEASE_NAMESPACE__/edge-backup-1234 failed to complete. Removing failed job after investigation should clear this alert on cluster .'
+              description: "Job __RELEASE_NAMESPACE__/edge-backup-1234 reports a failure.\nInspect its events, pod logs and retry status. Retained failed Jobs can keep\nthis alert active after the underlying cause is fixed. Deleting history can\nclear the signal but does not repair the workload; preserve evidence first.\n"
               runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
               summary: Job failed to complete.
           - exp_labels:
@@ -50,7 +50,7 @@ tests:
               job_name: their-staged-reclaimer-29841317
               condition: "true"
             exp_annotations:
-              description: 'Job other-team/their-staged-reclaimer-29841317 failed to complete. Removing failed job after investigation should clear this alert on cluster .'
+              description: "Job other-team/their-staged-reclaimer-29841317 reports a failure.\nInspect its events, pod logs and retry status. Retained failed Jobs can keep\nthis alert active after the underlying cause is fixed. Deleting history can\nclear the signal but does not repair the workload; preserve evidence first.\n"
               runbook_url: https://runbooks.prometheus-operator.dev/runbooks/kubernetes/kubejobfailed
               summary: Job failed to complete.
 
@@ -91,25 +91,7 @@ tests:
               cronjob: edge-staged-reclaimer
             exp_annotations:
               summary: 'Staged reclaimer edge-staged-reclaimer has not succeeded for 3h 20m 0s'
-              description: |
-                No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
-                for 3h 20m 0s (counted from its creation if none ever has).
-                No run has completed in full, so confirming staged sessions against XNAT and
-                reclaiming them may be falling behind (a run can do part of its work before it
-                fails or reaches its deadline).
-                Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
-                Arriving on its own usually means runs are ending without logging why, but the
-                CronJob may also be suspended or not scheduled, or Loki may be missing the logs:
-                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
-                       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
-                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
-                     its deadline (DeadlineExceeded in kubectl describe job).
-                       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer
-                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
-                       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50
-                If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
-                with it: it must stay above two periods plus deadlineSeconds.
-                Clears on the next successful run.
+              description: "No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully\nfor 3h 20m 0s (counted from its creation if none ever has).\nNo run has completed in full, so confirming staged sessions against XNAT and\nreclaiming them may be falling behind (a run can do part of its work before it\nfails or reaches its deadline).\nHeld back while ReclaimerRunUnavailable fires, which names the failed dependency.\nArriving on its own usually means runs are ending without logging why, but the\nCronJob may also be suspended or not scheduled, or Loki may be missing the logs:\n  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.\n       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer\n  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at\n     its deadline (DeadlineExceeded in kubectl describe job).\n       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer\n  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)\n       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50\nIf the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter\nwith it: it must stay above two periods plus deadlineSeconds.\nClears on the next successful run.\n\nThis depends on CronJob metrics reaching Prometheus. If kube-state-metrics\nor the evaluator is unavailable, the rule cannot establish job health.\n"
       # The kept failed Job fires nothing here: this rule owns it now.
       - eval_time: 200m
         alertname: KubeJobFailed
@@ -150,26 +132,7 @@ tests:
               cronjob: edge-staged-reclaimer
             exp_annotations:
               summary: 'Staged reclaimer edge-staged-reclaimer has not succeeded for 3h 20m 0s'
-              description: |
-                No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully
-                for 3h 20m 0s (counted from its creation if none ever has).
-                No run has completed in full, so confirming staged sessions against XNAT and
-                reclaiming them may be falling behind (a run can do part of its work before it
-                fails or reaches its deadline).
-                Held back while ReclaimerRunUnavailable fires, which names the failed dependency.
-                Arriving on its own usually means runs are ending without logging why, but the
-                CronJob may also be suspended or not scheduled, or Loki may be missing the logs:
-                  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.
-                       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer
-                  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at
-                     its deadline (DeadlineExceeded in kubectl describe job).
-                       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer
-                  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
-                       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50
-                If the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter
-                with it: it must stay above two periods plus deadlineSeconds.
-                Clears on the next successful run.
-
+              description: "No run of __RELEASE_NAMESPACE__/edge-staged-reclaimer has completed successfully\nfor 3h 20m 0s (counted from its creation if none ever has).\nNo run has completed in full, so confirming staged sessions against XNAT and\nreclaiming them may be falling behind (a run can do part of its work before it\nfails or reaches its deadline).\nHeld back while ReclaimerRunUnavailable fires, which names the failed dependency.\nArriving on its own usually means runs are ending without logging why, but the\nCronJob may also be suspended or not scheduled, or Loki may be missing the logs:\n  1. Is it being scheduled? SUSPEND should be False, LAST SCHEDULE within the period.\n       kubectl -n __RELEASE_NAMESPACE__ get cronjob edge-staged-reclaimer\n  2. How did the runs end? OOMKilled, Error, ImagePullBackOff, or a Job killed at\n     its deadline (DeadlineExceeded in kubectl describe job).\n       kubectl -n __RELEASE_NAMESPACE__ get jobs,pods -l component=s3-reclaimer\n  3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)\n       kubectl -n __RELEASE_NAMESPACE__ logs -l component=s3-reclaimer --tail=50\nIf the schedule was slowed, raise dataPolicy.derived.stagedReclaimer.alertAfter\nwith it: it must stay above two periods plus deadlineSeconds.\nClears on the next successful run.\n\nThis depends on CronJob metrics reaching Prometheus. If kube-state-metrics\nor the evaluator is unavailable, the rule cannot establish job health.\n"
   # Hourly successes with ONE run missed (none at 120m). The gap peaks just
   # under 2h at 179m, below alertAfter: a single bad run must not mail.
   - interval: 1m

@@ -4,7 +4,9 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 
 The package stage is optional and off by default. When a site turns it on,
 each DICOM series goes to XNAT as one zip file plus one sample DICOM file,
-instead of one file per image. Nothing else in the pipeline changes.
+instead of one file per image. The upload source changes to `/data/packaged`,
+and cleanup policy follows that tree. The package and upload environments also
+need the optional vendor datatypes described below.
 
 ## What it does
 
@@ -18,7 +20,10 @@ instead of one file per image. Nothing else in the pipeline changes.
 - A scan without a DICOM series passes through unchanged. Session resources
   pass through unchanged.
 - Writes the result to `/data/packaged`. The upload stage reads that tree.
-- Removes the session from `/data/deidentified` once it is packaged.
+- Removes the session from `/data/deidentified` only when the effective
+  reclaim mode is `onPackaged` and the source is unchanged. Unknown or changed
+  input files cause retention and another packaging pass, even after output
+  has been published (`api/package_api.py`, `_input_drift`).
 
 In XNAT a scan then shows two resources, `DICOM-zip` with one file and
 `DICOM` (or `secondary`) with one file, instead of one `DICOM` resource with
@@ -105,7 +110,9 @@ every change. The chart then:
   `dataPolicy.derived.packaged.reclaim: auto` to `onUploaded` (the staged
   reclaimer removes each packaged session after the upload).
 
-Turning the stage on, off, or rolling it back needs no extra steps. The
+The locks coordinate producer passes during an upgrade. They do not migrate
+an existing queue. Before turning the stage off or rolling it back, finish
+and verify the packaged queue as described under "Turn it off" below. The
 deidentify stage holds its own lock, `/data/.locks/deidentified.lock`, for each
 pass in both modes. The package stage takes that same lock, and then the
 upload-tree lock, for each of its passes. A lock is held for the whole pass and
@@ -135,9 +142,10 @@ output resources, and `copyMode: hardlink_or_copy`.
    `pathspec '<tag>' did not match any file(s) known to git` means that the pinned
    tag does not exist. `Could not resolve host` or a timeout means that the node
    cannot reach github.com. While the init container fails, the package
-   container does not start, so `IngestStageError` does not fire. No other
-   alert fires at once. `StageBacklogAgeing` fires only when the oldest
-   session in `/data/deidentified` is older than
+   container does not start, so it cannot emit the package ERROR line that
+   `IngestStageError` needs. Pod or job alerts can still apply, depending on
+   the enabled rules and their wait periods. `StageBacklogAgeing` requires the oldest
+   session in `/data/deidentified` to be older than
    `dataPolicy.reporter.stageAgeAlertAfter` (default 7d). So check the init
    container after each change to the package settings.
 
@@ -147,7 +155,10 @@ output resources, and `copyMode: hardlink_or_copy`.
    kubectl -n xnat-ingest logs deploy/<release>-package -c package
    ```
 
-   Every pass ends with `Packaging completed successfully`. After a study,
+   A pass without recorded errors ends with `Packaging completed successfully`;
+   a failed pass ends with `Packaging completed with <n> errors`. A source-drift
+   warning can retain input even after successful packaging. None of these
+   lines proves XNAT delivery. After a study,
    the log shows one `Converting <scan>/DICOM resource from
    medimage/dicom-series to medimage/dicom-series+zip as 'DICOM-zip'` line
    per series.
@@ -155,13 +166,18 @@ output resources, and `copyMode: hardlink_or_copy`.
 3. In XNAT, open the session. Each scan has a `DICOM-zip` resource with
    `archive.zip` and a `DICOM` (or `secondary`) resource with one file.
 
-4. The trees drain: `/data/deidentified` is empty after each pass and
+4. The trees drain when cleanup is armed and inputs are stable. A successful
+   pass can retain `/data/deidentified` if source files changed, files were
+   not represented, or reclaim is `never`. With `onPackaged`, settled input
+   sessions are retired after packaging, and
    `/data/packaged` keeps each session until the staged-reclaimer proves each file
    in XNAT. With the defaults, that is the first run (hourly, at minute 17) after
    `dataPolicy.derived.stagedReclaimer.minAge` (1d). On a fresh install,
    `dataPolicy.enabled` is false and `dryRun` is true. The reclaimer then only
-   logs, and `/data/packaged` does not drain. The stress test overlay runs the
-   reclaimer every 4 minutes.
+   logs, and `/data/packaged` does not drain through that reclaimer. The older
+   four-minute stress-test schedule is historical (run date not recorded;
+   not verified 2026-11-10). Current checked-in example values use the hourly
+   schedule above. Inspect the deployed values for a site override.
 
 ## Alerts
 
@@ -185,13 +201,17 @@ they cover every other upload.
   A larger zip is retained by the reclaimer's size check, but an equal-size
   content change is not detected without a digest. Preserve the source and
   resolve that conflict before accepting the new images as delivered.
-- Part of a series arriving later (file drop only): when a file drop brings
+- Part of a series arriving later (file drop or an incomplete Orthanc
+  re-stage after retirement): when a new arrival brings
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
   (`IngestStageError` fires) and keeps both the input and the packaged copy.
   This refusal is present in 0.19.0, from xnat-ingest PR #221. In older images
   without it, a smaller replacement zip
-  can lose members of the packaged copy. Drop the whole series again in one go.
+  can lose members of the packaged copy. Preserve the complete original series
+  and both refused copies. Re-stage a verified complete series through the
+  source path only after resolving any existing destination conflict. Do not
+  clear the refused output as a shortcut.
   Orthanc re-stages the whole study only while it still holds the complete
   study. If Orthanc has already retired it, a later arrival can be staged
   alone. A series split across separate arrivals still needs complete-member

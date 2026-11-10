@@ -5,8 +5,7 @@
 [Loki](https://grafana.com/oss/loki/) is a log aggregation system designed
 to be horizontally scalable, cheap to operate, and tightly integrated with
 Grafana. It indexes a small set of labels (not the log content) and stores
-the raw log lines as gzipped chunks — normally in object storage, here on a
-local PVC. Queries use a PromQL-like language called LogQL.
+the raw log lines as compressed chunks, here on a local PVC. The chunk encoding is a Loki setting; Vector's HTTP gzip compression does not establish the stored chunk format. Queries use a PromQL-like language called LogQL.
 
 ## Role in this stack
 
@@ -80,15 +79,14 @@ in that file is the chart default from
 | `loki.loki.rulerConfig` | The ruler — see below |
 | `loki.chunksCache` / `resultsCache` / `lokiCanary` / `gateway` / `test` | All `enabled: false`. One node, one replica: nothing to cache or distribute |
 
-**`observability.stack.retentionDays` and `observability.stack.lokiStorage.*`
-are not what Loki reads.** Helm cannot template a subchart's values from a
-parent key, and `install.sh` deliberately passes no `--set`, so those two keys
-state the *site's intent* for the stack as a whole while the effective values
-are `loki.loki.limits_config.retention_period` and
-`loki.singleBinary.persistence.*`. Nothing in `charts/edge/templates/` reads
-them and `scripts/ci/values-consumers.sh` only audits `dataPolicy.*`, so nothing
-will tell you they have drifted apart. Change retention in both places, or
-change it in the subchart key and treat `retentionDays` as a comment.
+**Historical dead-key audit, date not recorded; current disposition checked
+2026-11-10.** `observability.stack.retentionDays` and
+`observability.stack.lokiStorage.*` were removed from the defaults because no
+consumer used them. Do not restore them or keep a duplicate setting in sync.
+Use `loki.loki.limits_config.retention_period` and
+`loki.singleBinary.persistence.*`. `scripts/ci/values-consumers.sh` still audits
+only `dataPolicy.*`; it does not prove that an arbitrary site override works.
+Inspect the rendered Loki ConfigMap and PVC when changing retention or storage.
 
 ### The ruler
 
@@ -102,13 +100,16 @@ easy to get wrong, both of which fail silently:
   `<release>-kube-prometheus-stack-alertmanager`. This has been wrong once: the
   ruler pushed to a name that does not resolve, and every LogQL alert never
   fired while Loki, the rules and the dashboards all looked healthy.
-- The ruler reads rule files from `/etc/loki/rules`, while the subchart's
-  `loki-sc-rules` sidecar (kiwigrid k8s-sidecar, `METHOD=WATCH`,
-  `LABEL=loki_rule`) writes the ConfigMaps it finds to `/rules`. Point one at
-  the other, or rules load as nothing and nothing says so.
+- The ruler now reads `/rules`; the `loki-sc-rules` sidecar watches
+  ConfigMaps labelled `loki_rule` and writes under `/rules/fake` for the
+  single tenant. Both containers mount the same rules volume. A historical
+  `/etc/loki/rules` mismatch, date not recorded, is fixed in the current values.
+  Check loaded rules after a change; a running pod alone does not prove evaluation.
 
-`charts/edge` ships **no LogQL rule bodies of its own** — supply them as
-ConfigMaps labelled `loki_rule` in the same namespace. See
+`charts/edge` now ships **21 LogQL alert rules** in
+`charts/edge/files/loki-ruler-rules.yaml`, loaded by a labelled ConfigMap from
+`templates/observability.yaml` when the stack is enabled. Additional site rules
+can use the same label and namespace. See
 [`docs/alerting-diy.md`](../alerting-diy.md).
 
 ### Grafana does not get a Loki datasource automatically
@@ -153,21 +154,23 @@ kubectl -n xnat-ingest get ds -l app=vector \
 
 - **Cheap, simple storage** — chunks live on the node's local PVC; no object
   store to run or back up on a single-node appliance
-- **Label-based indexing** — the index is tiny (~1% of log volume),
-  meaning low memory and disk overhead
+- **Label-based indexing**: log content is not indexed as full text. The earlier
+  ~1% size estimate is not verified (2026-11-10). Measure local index, WAL and
+  compactor storage against the actual stream cardinality and retention.
 - **Tight Grafana integration** — same UI as our metrics dashboards;
   operators don't context-switch
 - **Single binary deploys** — one container keeps the operational footprint small
-- **Same vendor as Grafana / Prometheus** — coherent stack with shared semantics
-  (LogQL ↔ PromQL)
+- **Grafana integration**: logs and metrics share a UI. Prometheus is a
+  separate project, and its PromQL rules cannot directly evaluate Loki LogQL.
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Loki PVC disk full | New writes fail; old logs may be unreadable until the compactor frees space | Set `loki.loki.limits_config.retention_period` and size `loki.singleBinary.persistence.size` against the node's disk |
-| Loki pod crash | Logs queued in Vector's buffer are held until Loki recovers | Vector handles backpressure; replay continues automatically |
-| `helm uninstall`, or scaling the StatefulSet to zero | Takes the log store with it. The subchart's StatefulSet renders `persistentVolumeClaimRetentionPolicy: {whenDeleted: Delete, whenScaled: Delete}` and its `volumeClaimTemplate` carries no `helm.sh/resource-policy: keep`. `scripts/ci/pvc-retention.sh` asserts against exactly this, but no CI case renders with `observability.stack.enabled=true`, so it is not covered | Override the policy in the site file, or accept that telemetry is disposable — it holds no patient data. The imaging PVCs are a separate mechanism and *are* covered |
+| Loki pod crash | Vector applies backpressure while its default memory buffer fills; a Vector restart or a long log rotation gap can lose pending data | No persistent sink buffer is configured. Check post-recovery log continuity; checkpoints alone do not preserve queued events. |
+| `helm uninstall`, or scaling the StatefulSet to zero | The rendered Loki StatefulSet uses Delete for both claim-retention actions, and its claim template has no Helm keep annotation | The PVC CI check explicitly exempts these observability object names. This is a current retention choice, not a missing render case. Logs may contain identifiers or sensitive errors and historical events do not regenerate. Back up required logs and choose an explicit retention policy before destructive maintenance. Imaging PVC retention is checked separately. |
+
 | PVC corruption | Loki may need reinitialising; historical logs on the PVC may be lost | Back up the PVC if long-term log retention matters |
 | Label cardinality explosion | Stream count grows unbounded → memory / cost | Vector promotes only `cluster`, `namespace`, `pod`, `container`, `node`, `app`, `component`, `level` to stream labels and sets `remove_label_fields: true`. We explicitly DO NOT label `session`, since each session is unique — it stays a JSON field in the body, reached with `\| json \| session="..."` |
 
@@ -189,5 +192,6 @@ kubectl -n xnat-ingest get ds -l app=vector \
 
 - Recording rules for common LogQL queries (e.g. uploads-per-hour) so Grafana
   panels render faster
-- LogQL → PrometheusRule for additional log-derived alerts (string-pattern
-  alerts)
+- Additional LogQL alerts belong in Loki ruler files. A PrometheusRule
+  evaluates PromQL, so it cannot execute LogQL directly. A future recording-rule
+  path would first export numeric series to a metrics backend.

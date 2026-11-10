@@ -33,7 +33,9 @@ Create the project in XNAT first and restrict the service account to it.
 
 `assign` reads these values before `deidentify` runs. The recipe can remove or
 replace a DICOM tag, but it cannot change an XNAT label that assignment has
-already copied. With `subject: PatientID`, a hospital MRN in PatientID becomes
+already copied. IDSpec preserves letters, digits, underscores and hyphens;
+other character runs become underscores. This normalization does not make a
+clinical identifier private. With `subject: PatientID`, a hospital MRN in PatientID becomes
 the subject label in clear text. Removing PatientID in the recipe does not fix
 that label. Use identifiers approved for the destination before enabling upload.
 
@@ -170,18 +172,21 @@ The pinned chart image is
 `ghcr.io/australian-imaging-service/accessionflow:0.19.0`. Treat the image reference and
 its installed Python version as separate identifiers. The locally inspected
 image reports `0.19.0` as its package version. The previous fork reported
-`0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
+`0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier from
+the 2026-10-21 integration build, retained for comparing old run records.
 Record the deployed image digest when comparing behavior across installations.
 
 [#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144)
-described an extra output directory in version 0.13.1. It is closed. The pinned
+described an extra output directory in version 0.13.1. This historical issue
+closed on 2026-08-31; GitHub state was checked on 2026-11-10. The pinned
 image builds and publishes one session directory under the output root. That
 layout is consumed by upload. The old claim that ingest cannot reach XNAT does
 not describe this image. A running stage is still not delivery proof: inspect
 its output, upload results and the destination files after each site install.
 
 [#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)
-is still open and describes the older `ais_deid` salting path. Do not infer that
+is open as of the 2026-11-10 GitHub check and describes the historical
+0.13.1 `ais_deid` salting path reported on 2026-08-24. Do not infer that
 `AIS_DEID_HMAC_SALT` or `DEID_SALT` enables hashing in the current chart recipe.
 The pinned CLI documents a `<format>.salt` sidecar for hash transforms in a
 `<format>.transforms.yaml` sidecar. The chart does not wire this as a salt

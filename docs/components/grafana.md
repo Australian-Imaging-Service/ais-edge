@@ -41,11 +41,12 @@ The subchart provisions **two** datasources, in ConfigMap
 | `Prometheus` (default, uid `prometheus`) | `http://ais-kps-prometheus.<namespace>:9090/` |
 | `Alertmanager` (uid `alertmanager`) | `http://ais-kps-alertmanager.<namespace>:9093/` |
 
-**Loki is not among them, and the dashboards in
-[`docs/dashboards.md`](../dashboards.md) are not shipped either.** Every query in
-that document is LogQL, so a fresh install renders empty panels until you add
-Loki by hand — in the UI, or as a ConfigMap in the release namespace labelled
-`grafana_datasource: "1"`:
+**Loki is still not provisioned as a datasource by this chart.** However,
+`templates/observability.yaml` now ships three pipeline dashboard ConfigMaps:
+`pipeline-overview`, `session-timeline` and `edge-drilldown`. They reference
+the datasource UID `loki`. Add a Loki datasource with that exact UID, through
+managed provisioning or the UI, at the address below. Merely creating a
+datasource named Loki with another UID does not satisfy those references.
 
 ```
 http://ais-loki.<namespace>.svc.cluster.local:3100
@@ -53,7 +54,9 @@ http://ais-loki.<namespace>.svc.cluster.local:3100
 
 `ais-loki` is pinned by `loki.fullnameOverride` in `charts/edge/values.yaml`,
 and it is the same address Vector pushes to — so a Vector that is shipping logs
-has already proved the URL.
+has proved its own write path. Grafana still needs a configured datasource,
+query access and working resolution from its Pod; Vector success alone does
+not prove that separate read path.
 
 What Grafana *does* arrive with is the kube-prometheus-stack's own Kubernetes
 dashboards (`ais-kps-*` ConfigMaps): cluster/node/pod resources, kubelet,
@@ -69,10 +72,12 @@ useless for "did that session reach XNAT".
   `<release>-grafana-clusterrole`: `get`/`watch`/`list` on **configmaps and
   secrets, in every namespace**. That is the sidecar pattern's cost — the
   dashboard sidecar runs with `NAMESPACE=ALL` and `RESOURCE=both`, so it needs
-  cluster-wide read. It is the broadest grant in this chart; everything else
-  runs with `automountToken: false` and no API access at all.
+  cluster-wide read. It is a broad grant. Other observability components, including KSM and the
+  Prometheus operator, also have API access; the pipeline ServiceAccount
+  token setting does not constrain those subchart accounts.
 - **Persistent volume (5Gi, `local-path`)** for its embedded SQLite database
-  (user prefs, dashboard versions, alert silences), PVC `<release>-grafana`
+  (user preferences and locally saved dashboards), PVC `<release>-grafana`.
+  Alertmanager silences use its separate storage
 - **NO cluster mutation rights** — read verbs only
 
 ## Where it runs
@@ -125,14 +130,16 @@ The sidecar pattern, and its two different scopes:
   is never seen.
 
 Either way the reload is an API call, not a restart: a new ConfigMap appears in
-the UI within ~30s and Grafana does not bounce.
+the UI after its watch/reload completes (latency not verified 2026-11-10) and Grafana does not bounce.
 
 ## Adding a dashboard
 
-The label is the whole mechanism:
+The chart already installs its three pipeline dashboards. The label is also
+the mechanism for an additional site dashboard. Use a distinct ConfigMap name
+so Helm retains ownership of the shipped dashboards:
 
 ```bash
-kubectl -n xnat-ingest create configmap ais-dashboard-pipeline-overview \
+kubectl -n xnat-ingest create configmap site-dashboard-pipeline-copy \
     --from-file=pipeline-overview.json --dry-run=client -o yaml \
   | kubectl label --local -f - grafana_dashboard=1 -o yaml \
   | kubectl apply -f -
@@ -158,17 +165,20 @@ xdg-open http://<nodeIP>:30030
 # Which datasources are actually provisioned
 kubectl -n xnat-ingest get cm ais-kps-grafana-datasource -o yaml
 
-# Restart (the sidecars normally pick up ConfigMap changes within ~30s;
+# Restart (the sidecars normally pick up ConfigMap changes after its watch/reload completes (latency not verified 2026-11-10);
 # restart only to short-circuit that, or after changing the admin Secret)
 kubectl -n xnat-ingest rollout restart deployment/<release>-grafana
 ```
 
 ## Benefits
 
-- **The standard** — every site admin already knows Grafana; no training cost
+- **Familiar interface** for many operators. Site staff still need an
+  introduction to these dashboards, datasource selection and alert routing.
 - **Rich dashboard ecosystem** — community dashboards for Kubernetes already exist
 - **Single UI for logs + metrics** — one place for the whole observability story
-- **Apache 2.0** — no licence concerns
+- **Open-source Grafana uses AGPLv3.** The old Apache 2.0 description is
+  historical (before the 2021 licence change). Review the deployed edition
+  and [upstream licensing](https://grafana.com/licensing/) for its terms.
 
 ## Risks and failure modes
 
@@ -176,12 +186,12 @@ kubectl -n xnat-ingest rollout restart deployment/<release>-grafana
 |---|---|---|
 | NodePort reachable on the LAN over plain HTTP | Anyone on the LAN who can reach the NodePort sees the login page | Keep the node on a trusted admin/LAN segment; set a strong admin password |
 | Placeholder admin password shipped to site | Anyone who reaches Grafana logs in as admin | `admin-password` in `sites/<site>/secrets.enc.yaml` is `REPLACE_GRAFANA_PASSWORD` until you fill it; `install.sh` decrypts it to a pipe and refuses to run while any `REPLACE_` value survives (needs `sops` on PATH) |
-| Admin password changed after first boot | Grafana keeps serving the old one — the Secret seeds the admin user when the SQLite DB is created, not on every start | Reset inside the pod (`grafana cli admin reset-admin-password`), or delete the PVC and let it re-initialise |
+| Admin password changed after first boot | The Secret seeds initial database state; an existing database can retain the old login | Use Grafana's supported admin-password reset workflow and reconcile the Secret used by the reload sidecars. Back up the database. Deleting the PVC discards dashboard and user state and is not routine password rotation |
 | Sidecar reads Secrets cluster-wide | A Grafana compromise reads every Secret on the node, including `xnat-credentials` and `orthanc-deid-salt` | Inherent to `NAMESPACE=ALL`; the same trust boundary as the node itself, which is single-tenant. Treat Grafana access as node access. |
 | Dashboard ConfigMap collision | Any ConfigMap anywhere labelled `grafana_dashboard=1` is loaded | Single-tenant node; nothing else labels ConfigMaps that way |
-| No Loki datasource on a fresh install | Every LogQL panel is empty, and it reads as "no logs" rather than "no datasource" | Add it (above), and confirm against Vector: same URL |
-| Datasource credential leak | Read-only access to Prometheus/Loki/Alertmanager — no privilege escalation from there | Limited blast radius |
-| PV lost | User prefs + alert silences gone, dashboards survive (they reload from ConfigMaps) | Backup PV if customisations matter |
+| No Loki datasource on a fresh install | Shipped LogQL panels cannot query their expected `loki` UID and can show a datasource error or no data | Provision that UID at the Loki URL above. Check a query from Grafana as well as Vector delivery; a missing datasource is not evidence of no logs |
+| Datasource credential leak | Logs, metrics and alert state may be exposed. Alertmanager access can also permit silences, depending on the configured endpoint and permissions | Review actual endpoint permissions and network reachability. Grafana Pod compromise additionally exposes its cluster-wide Secret-read grant |
+| Grafana PV lost | User preferences and locally saved dashboards can be lost. Provisioned dashboards reload from ConfigMaps; Alertmanager silences use its own PV | Back up each application's state separately if those customisations or silences matter |
 
 ## Replacements / future
 
@@ -195,11 +205,13 @@ kubectl -n xnat-ingest rollout restart deployment/<release>-grafana
 
 ## Future enhancements
 
-- Ship the Loki datasource and the pipeline dashboards from `charts/edge` as
-  labelled ConfigMaps, so a site gets them without a manual step
+- Pipeline dashboard provisioning is implemented in `templates/observability.yaml`
+  as of this 2026-11-10 review. A chart-provisioned Loki datasource remains
+  a gap; configure UID `loki` manually until that integration is added.
 - Drive the Service's NodePort from one key instead of two
-- SSO via UQ's identity provider (OAuth/SAML) — Grafana supports both;
-  drop the local admin
+- Site identity-provider integration is a future option. Check the deployed
+  Grafana edition and its supported authentication features before choosing
+  OAuth or SAML. Keep a controlled recovery login during an SSO migration.
 - Per-team folder ACLs once multiple teams use the dashboards
 - Image renderer plugin so alerts include rendered graphs in the email body
 - Link out from PrometheusRule alerts to a deep-linked Grafana panel

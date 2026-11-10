@@ -5,8 +5,9 @@
 [Prometheus](https://prometheus.io/) is the de-facto standard time-series
 database and monitoring toolkit. It pulls metrics from HTTP `/metrics`
 endpoints on a schedule, stores them locally, evaluates alerting and
-recording rules, and exposes a query language (PromQL) used by Grafana
-and Alertmanager.
+recording rules, and exposes PromQL for queries and rule evaluation. Grafana queries it;
+Alertmanager receives evaluated alerts and routes notifications rather than
+executing PromQL itself.
 
 ## Role in this stack
 
@@ -31,11 +32,14 @@ ServiceMonitors kube-prometheus-stack ships:
 What it deliberately does *not* scrape matters as much:
 
 - **`nodeExporter`, `kubeControllerManager`, `kubeScheduler`, `kubeProxy` and
-  `kubeEtcd` are disabled.** Those targets do not exist on a single k0s node, and
-  left on each one contributes a permanently-firing "target down" alert — an
+  `kubeEtcd` are disabled.** The chart does not deploy node-exporter and the other component endpoints are
+  not exposed in the form expected by these defaults; node-exporter is simply
+  disabled here, not impossible to deploy. Enabling an unavailable target can
+  contribute a persistent "target down" alert ; an
   Alertmanager that is always red trains operators to ignore it. The cost is that
-  there is no node-level CPU / memory / **disk** metric at all: the node-exporter
-  mixin rules load but never have series behind them. Disk pressure on the
+  node-exporter host CPU, memory and filesystem series are unavailable;
+  kubelet/cAdvisor still provide some node and container metrics. Do not treat
+  absent node-exporter series as evidence that there are no host-level signals. Disk pressure on the
   pipeline volumes is reported by the data-policy DaemonSet as a JSON log field
   (`stage_report.free_pct`), and `EdgeDiskLow` is therefore a **Loki ruler** alert,
   not a Prometheus one.
@@ -49,7 +53,7 @@ What it deliberately does *not* scrape matters as much:
 It evaluates **two** sets of `PrometheusRule` objects. First, the ones
 **kube-prometheus-stack itself ships** — the `KubeNodeNotReady` /
 `KubePodCrashLooping` / `KubePodNotReady` / `KubePersistentVolumeFillingUp`
-families. Second, three that **`charts/edge` adds itself**, rendered by
+families. Second, four rule objects that **`charts/edge` adds itself**, rendered by
 [`charts/edge/templates/observability.yaml`](../../charts/edge/templates/observability.yaml),
 which emits one `PrometheusRule` per file in `charts/edge/files/prometheus-rules/`
 — one object per severity, matching how the rules are authored, so the object
@@ -58,8 +62,13 @@ names are the same at every site:
 | Object | Source file | Alerts |
 |---|---|---|
 | `ais-edge-critical` | `files/prometheus-rules/critical.yaml` | `KubernetesAPIServerDown`, `NodeNotReady` |
-| `ais-edge-warning` | `files/prometheus-rules/warning.yaml` | `IngestPodCrashLoop` |
+| `ais-edge-warning` | `files/prometheus-rules/warning.yaml` | `IngestPodCrashLoop`, `KubeJobFailed`, `ReclaimerNotSucceeding` |
 | `ais-edge-info` | `files/prometheus-rules/info.yaml` | `NodeCountChanged` |
+
+| `ais-edge-uploader` | `files/prometheus-rules/uploader.yaml` | `XNATUploaderRestarted`, `XNATUploaderMemoryGrowing`, plus six recording rules |
+
+This is eight first-party Prometheus alerts at the reviewed branch head.
+The uploader file renders only when the corresponding uploader is enabled.
 
 Those files are **bare `groups:` fragments**, not whole manifests: the template
 supplies `apiVersion` / `kind` / `metadata` and injects the namespace from
@@ -99,8 +108,8 @@ are evaluated by the Loki ruler instead — see
 
 ## Where it runs
 
-- Cluster: the single node (every pod is scraped directly — no konnectivity
-  boundary)
+- Cluster: the single node (selected monitor targets are scraped directly;
+  there is no konnectivity boundary, and pods without metric endpoints are not scraped)
 - Namespace: **`xnat-ingest`**, the same namespace as the pipeline. There is no
   separate `observability` namespace on tier-1: one node, one release, one
   namespace
@@ -116,8 +125,9 @@ are evaluated by the Loki ruler instead — see
 - Service: `ais-kps-prometheus.xnat-ingest.svc:9090` (ClusterIP)
 - Browser access via the Grafana datasource (provisioned as the default, pointing
   at `http://ais-kps-prometheus.xnat-ingest:9090/`) or `kubectl port-forward`.
-  There is no ingress and no NodePort for Prometheus — Grafana is the only piece
-  of the stack reachable from off the node
+  There is no ingress and no NodePort for Prometheus ; Grafana is the stack component exposed by NodePort by default. ClusterIP
+  alone is not authentication or a firewall; access also depends on cluster
+  routing, API permissions and any site network controls
 
 ## Configuration
 
@@ -127,12 +137,14 @@ are evaluated by the Loki ruler instead — see
 | `sites/<site>/values.yaml`, `observability.stack.enabled` | whether Prometheus exists at all |
 | `sites/<site>/values.yaml`, a `kube-prometheus-stack:` block | per-site overrides of anything above — the site file is merged over the chart defaults like any Helm values file |
 | Per-component `ServiceMonitor` / `PodMonitor` / `PrometheusRule` objects | tell Prometheus what to scrape and what to evaluate |
-| `charts/edge/files/prometheus-rules/{critical,warning,info}.yaml` | this chart's own alert rules, as bare `groups:` fragments. Edit these, not a rendered manifest — `observability.yaml` globs the directory, so a new severity file becomes a new `ais-edge-<name>` object with no template change |
+| `charts/edge/files/prometheus-rules/{critical,warning,info,uploader}.yaml` | this chart's own alert rules, as bare `groups:` fragments. Edit these, not a rendered manifest ; `observability.yaml` globs the directory, so a new severity file becomes a new `ais-edge-<name>` object with no template change |
 
-`observability.stack.retentionDays` and `observability.stack.prometheus.*` are the
-*intended* site-level surface and are **not yet consumed by any template**.
-Changing them alone changes nothing; set retention and PVC size in the
-`kube-prometheus-stack:` block, in the site file if it is site-specific.
+**Historical dead-key surface, date not recorded; removed in the current
+values checked on 2026-11-10.** `observability.stack.retentionDays` and
+`observability.stack.prometheus.*` had no consumers. They are not supported
+configuration knobs. Set retention and storage directly under
+`kube-prometheus-stack.prometheus.prometheusSpec` in the site file, then inspect
+the rendered Prometheus resource to confirm the effective settings.
 
 The subchart's usual label opt-in is switched off:
 
@@ -171,8 +183,8 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 ## Benefits
 
-- **Industry standard** — rich ecosystem, every CNCF project ships with
-  metrics in Prometheus exposition format
+- **Industry standard**: a broad ecosystem exposes Prometheus metrics.
+  Verify each target and its labels; project membership does not guarantee an endpoint.
 - **Pull model** — scrape failures are visible (target listed as down),
   unlike push systems where missing data could mean either "agent died"
   or "nothing happening"
@@ -186,25 +198,27 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| TSDB PVC fills up | Prometheus stops ingesting; alerts stop firing | 30-day retention is the safety valve; grow `prometheusSpec.storageSpec` past 20Gi if needed. `local-path` puts it under `/opt/local-path-provisioner` on the node — a different path from `/data`, but the same physical disk unless `/data` is its own mount |
-| Prometheus pod crashes | Metrics gap; K8s-state alerts cannot fire. Pipeline alerts are unaffected — they run in the Loki ruler | Pod auto-restarts; gap visible in Grafana |
+| TSDB PVC fills up | Prometheus stops ingesting; alerts stop firing | 30-day retention is a time bound, not a disk capacity guarantee. Inspect TSDB growth and the actual StorageClass. Editing storageSpec alone does not guarantee in-place expansion for local-path; plan backup and migration if expansion is unsupported. `local-path` puts it under `/opt/local-path-provisioner` on the node ; a different path from `/data`, but the same physical disk unless `/data` is its own mount |
+| Prometheus pod crashes | Metrics gap; K8s-state alerts cannot fire. Loki evaluates pipeline alerts independently, but a shared node or storage failure can affect both evaluators | Pod auto-restarts; gap visible in Grafana |
 | Scrape target slow / unreachable | That target's metrics go stale | Prometheus marks the target down; the KPS dashboards show it |
 | Cardinality explosion | RAM spike, eventual OOM | We deliberately keep the label set tight; cap a noisy target with `sampleLimit` / `labelLimit` on its ServiceMonitor |
 | A rule is added but never evaluated | Silent — no alert ever fires, and everything looks healthy | `PrometheusRule` and `ServiceMonitor` need no label here, but `PodMonitor`/`Probe`/`ScrapeConfig` do. Check `/rules` and `/targets` after adding either |
-| Operator misconfiguration | Wrong alerts/dashboards / no scrape | Operator logs surface this loudly |
+| Operator misconfiguration | Wrong alerts/dashboards / no scrape | Inspect operator logs, rejected resources, /targets and /rules. A valid selector that matches nothing may leave no obvious error. |
 
 ## Replacements / future
 
-- **VictoriaMetrics** — Prometheus-compatible TSDB with better compression
-  and ingest throughput. Considered but not deployed
+- **VictoriaMetrics**: a possible Prometheus-compatible TSDB replacement,
+  considered but not deployed. Relative compression and throughput are not
+  verified (2026-11-10); benchmark the site workload and required query behavior.
 - **Datadog / New Relic** — managed alternatives with their own agents.
   Drop Prometheus and run Vector or a vendor agent as the scraper
 
 ## Future enhancements
 
-- Wire `observability.stack.retentionDays` and `observability.stack.prometheus.*`
-  through to the subchart so the site file is the single surface, instead of the
-  site file and the `kube-prometheus-stack:` block having to agree
+- Keep one effective configuration surface in the site file under the
+  subchart key. The old proposal to wire duplicate parent retention/storage
+  keys is historical, date not recorded, and superseded by their removal.
+  Extend render checks if new policy overrides are added.
 - A node-level disk/CPU signal that does not require node-exporter's full target
   set, so disk exhaustion is a metric as well as a log line
 - Recording rules to pre-compute the heaviest dashboard queries

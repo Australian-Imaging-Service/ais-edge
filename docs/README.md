@@ -32,7 +32,9 @@ env-var-shaped configuration to keep in step with it.
 - [`orthanc.md`](components/orthanc.md): the DICOM network receiver and original
   backup callback. Under ingest, it does not modify headers or route by AET.
 - [`accessionflow.md`](components/accessionflow.md): group-orthanc, assign, deidentify
-  and direct upload, plus optional file-drop, associate and package stages.
+  and direct upload, plus optional file-drop and package stages.
+  `ingest.associate.enabled: true` is refused because attach support is not
+  implemented in the chart.
 - [`deidentification.md`](components/deidentification.md): the default ingest
   recipe, source-label review and reid-map encryption. It also holds the single
   deprecated Orthanc-engine reference for existing sites. Use ingest for new
@@ -46,8 +48,8 @@ defaults to **false**. Do not confuse it with `observability.enabled`, a separat
 and older switch that only means "run Vector". With the stack on,
 `kube-prometheus-stack` 87.19.2 and `loki` 7.1.0 install as **subcharts of
 `charts/edge`** — pinned and vendored as `charts/edge/charts/*.tgz`, so there is
-no `helm repo add` and no dependency fetch at install time (a hospital appliance
-must not need a working path to the internet to reinstall). Both carry a
+no `helm repo add` and no dependency fetch at install time for the chart archives. Image pulls and binary installation still need
+approved network access or a separately prepared offline cache. Both carry a
 `fullnameOverride`, so the workloads are named `ais-kps-prometheus`,
 `ais-kps-alertmanager` and `ais-loki`, not `<release>-...`.
 
@@ -55,7 +57,9 @@ must not need a working path to the internet to reinstall). Both carry a
   storage on a PVC — there is no object store on a single node)
 - [`prometheus.md`](components/prometheus.md) — metrics store
 - [`grafana.md`](components/grafana.md) — dashboards UI, on a NodePort at
-  `http://<nodeIP>:<observability.stack.grafana.nodePort>` (no ingress on tier-1)
+  `http://<nodeIP>:<kube-prometheus-stack.grafana.service.nodePort>`
+  (default 30030; no ingress on tier-1). Read the Service or Helm notes after
+  changing it; the installer's legacy display setting can differ.
 - [`alertmanager.md`](components/alertmanager.md) — alert routing
 - [`vector.md`](components/vector.md) — log shipper DaemonSet; a hand-written
   `charts/edge/templates/vector.yaml`, not the Vector subchart
@@ -83,7 +87,9 @@ must not need a working path to the internet to reinstall). Both carry a
 - [`observability-integration.md`](observability-integration.md) — for a
   platform team swapping the bundled Loki/Prometheus/Grafana/Vector stack for
   their own tooling: the log-event schema, metric list, alert inventory, and
-  a component swap matrix (verified ground truth, not aspirational).
+  a component swap matrix. Check each claim against the selected revision and
+  the target platform; the documented examples are not proof that a replacement
+  integration has been tested at your site.
 
 ## How to add a new component doc
 
