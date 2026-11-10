@@ -1238,7 +1238,7 @@ namespace: upload-custom
 EOF
 
 # Distinct stage settings catch values wired to the wrong container. Partial
-# requests/limits must also pass through without chart-supplied additions.
+# settings MERGE with the chart defaults: only the keys a site names change.
 cat >"$V/edge-stage-resources.yaml" <<'EOF'
 ingest:
   orthancGroup:
@@ -1257,6 +1257,17 @@ ingest:
     resources:
       limits: {cpu: 888m}
 EOF
+# `null` on one key removes only that default key; the other defaults stay.
+cat >"$V/edge-stage-resources-keynull.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources:
+      limits: {memory: null}
+  assign:
+    resources:
+      requests: null
+EOF
+# `resources: null` removes every default of that stage.
 cat >"$V/edge-stage-resources-null.yaml" <<'EOF'
 ingest:
   orthancGroup:
@@ -1330,6 +1341,7 @@ edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-d
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-stage-resources	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources.yaml
 edge-stage-resources-null	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-null.yaml
+edge-stage-resources-keynull	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-keynull.yaml
 edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-direct-ingest-package	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
 edge-s3-ingest-package	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml

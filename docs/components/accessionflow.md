@@ -199,51 +199,155 @@ with `scripts/site-secrets.sh new <name> single`). You never edit
 
 ### Ingest stage CPU and memory
 
-Set each stage's Kubernetes `resources` in the site's values file. The keys
-are independent, including the two group inputs:
+Each ingest stage has default Kubernetes `resources` in `charts/edge/values.yaml`.
+Change them in the site's values file. The keys are independent, including the
+two group inputs:
 
-| Values key | Container |
-|---|---|
-| `ingest.orthancGroup.resources` | `group` in the group-orthanc Deployment |
-| `ingest.fileDrop.resources` | `group-fs` in the optional file-drop Deployment |
-| `ingest.assign.resources` | `assign` |
-| `ingest.deidentify.resources` | `deidentify`, when `deid.engine=ingest` |
+| Values key | Container | Default requests | Default memory limit |
+|---|---|---|---|
+| `ingest.orthancGroup.resources` | `group` in the group-orthanc Deployment | CPU `100m`, memory `256Mi` | `2Gi` |
+| `ingest.fileDrop.resources` | `group-fs` in the optional file-drop Deployment | CPU `100m`, memory `256Mi` | `2Gi` |
+| `ingest.assign.resources` | `assign` | CPU `100m`, memory `256Mi` | `2Gi` |
+| `ingest.deidentify.resources` | `deidentify`, when `deid.engine=ingest` | CPU `100m`, memory `512Mi` | none, on purpose (see "What the memory use grows with") |
 
-Each key accepts Kubernetes `requests` and `limits` for CPU and memory.
-An omitted key, `{}`, or `null` adds no resources to that container. These
-empty defaults preserve the existing behavior: the chart does not reserve CPU
-or memory for these stages and does not cap their use. A namespace LimitRange
-can still apply defaults. Installing this chart change alone does not establish
-a memory limit or a tested production capacity.
+No default sets a CPU limit. A CPU limit throttles a stage and slows the
+pipeline. The CPU request is the share of the CPU that the stage gets when the
+node is busy. The requests also take the stages out of the `BestEffort` QoS
+class. The kubelet evicts `BestEffort` pods first, and the kernel stops them
+first when the node runs out of memory: their `oom_score_adj` is 1000, and
+Orthanc's is about 936 (measured on the test edge, 2026-11-10).
 
-This example shows the format for one stage. The numbers are illustrative;
-they are not a tested site profile or recommended production limits:
+#### A site setting and the defaults
+
+Helm merges these maps with the defaults. A key that the site sets replaces
+only that key, and the other defaults stay. `null` on a key removes that
+default. `resources: null` removes all the defaults of the stage. A namespace
+LimitRange can still apply its own defaults to a container that has no
+resources.
 
 ```yaml
 ingest:
   assign:
     resources:
-      requests:
-        cpu: 200m
-        memory: 512Mi
       limits:
-        cpu: "1"
-        memory: 2Gi
+        memory: 4Gi        # replaces only the default memory limit
+  deidentify:
+    resources:
+      limits:
+        memory: 6Gi        # adds a limit; size it as in "What the memory use grows with"
+  orthancGroup:
+    resources:
+      limits:
+        memory: null       # removes the default memory limit; the requests stay
 ```
 
 Use the other keys to size the other stages separately. Keep uploader settings
 under `upload.direct.resources` or, on main in S3 mode, `upload.s3.resources`.
-Orthanc remains the DICOM receiver; size the `deidentify` stage for the
-accessionflow recipes used at the site.
+Orthanc remains the DICOM receiver, with its own `orthanc.resources`. Size the
+`deidentify` stage for the accessionflow recipes used at the site.
+
+#### How the defaults were sized
+
+Measured on 2026-11-10 with accessionflow 0.19.0 on the tier-2 test edge (4
+vCPU, 8 GiB), which runs the same stages with the same arguments. One synthetic
+MR study went through the real stages: 12,098 instances, 0.92 GB, in four series
+(10,000 slices of 128 x 128, 2,000 of 256 x 256, 95 of 1280 x 1280, and 3
+localizers). The memory of each container cgroup was read once a second. `anon`
+is the memory that the kernel cannot drop; the working set adds the page cache
+that is in use. The file-drop stage is off on the test edge, so it ran on the
+same files in a container with 4 CPUs.
+
+| Stage | Peak anon | Peak working set | Time for the study | CPU while busy |
+|---|---|---|---|---|
+| group-orthanc | 201 MiB | 454 MiB | 2 min | 0.9 core (peak 2.2) |
+| file-drop group | 340 MiB | 368 MiB | 10 min | 1.0 core |
+| assign | 310 MiB | 344 MiB | 12 min | 0.9 core (peak 2.5) |
+| deidentify | 1,596 MiB | 2,558 MiB | 16 min | 1.0 core (peak 2.6) |
+
+Each pass of a stage starts a new process. A pass with no work uses about
+100 MiB. Orthanc's cgroup memory reached its `2Gi` limit with page cache; its
+working set was 1,315 MiB and its anon memory 528 MiB. The s3-uploader stayed
+under 100 MiB and sent the session (915 MB, 12,111 files) in 126 seconds.
+
+A large study holds a stage for minutes. assign and the file-drop group read
+every header, on one core. Other sessions wait for the end of that pass.
+
+#### What the memory use grows with
+
+- `group-orthanc`: the instances of a study. It hard-links the files from
+  Orthanc's storage and does not read them.
+- File-drop `group`: all the files of one pass. It reads every header before it
+  groups them. One session of 3,000 files: 200 MiB. Four sessions of 3,000 files
+  in one pass: 319 MiB.
+- `assign`: the instances of the largest session. It does not keep the earlier
+  sessions of a pass. One session of 3,000 instances: 192 MiB. Four in one pass:
+  215 MiB.
+- `deidentify`: the bytes of the sessions in one pass. deid 0.4.13, which
+  accessionflow 0.19.0 uses, keeps every file that it parses in memory until the
+  process ends: an unbounded cache in `deid/dicom/fields.py`
+  ([pydicom/deid#301](https://github.com/pydicom/deid/issues/301)). The memory is
+  about 200 MiB + 1.0 to 1.6 times the size of the files; small files cost more
+  per byte. One session of 95 files of 3.1 MB (295 MB): 482 MiB. One of 380 such
+  files (1.25 GB): 1,386 MiB. Four sessions of 95 files in one pass: about
+  1,390 MiB. The number of CPUs changes little: 12 threads instead of 5 added
+  24 MiB. A fix is on deid's main branch
+  ([pydicom/deid#307](https://github.com/pydicom/deid/pull/307)), not in a release
+  (checked 2026-11-10).
+
+So the default memory limits of the group and assign stages are 6 to 10 times
+the measured peaks. deidentify has no default limit: a fixed limit stops every
+session that needs more, on every pass. Without a limit, the kubelet and the
+kernel still stop `deidentify` before Orthanc when the node runs out of memory,
+because it uses the most memory above its request. If the node runs other work
+and you want a limit, set `limits.memory` to at least 200 MiB + 1.6 times the
+size of the largest session that you expect. A pass that runs out of memory
+keeps the sessions that it finished (see the next section), so the limit must
+cover the largest session, not the whole backlog.
+
+#### When a stage reaches its memory limit
+
+The kernel stops the whole container (`OOMKilled`, the container cgroup has
+`memory.oom.group` 1), and Kubernetes starts it again. When the stops repeat,
+the pod goes to `CrashLoopBackOff`. What we saw when we replayed it on
+2026-11-10, with the chart's arguments and limits that were too low on purpose:
+
+- A stage builds each session in `__build__` and moves it out only when it is
+  complete. A stopped pass leaves at most a part in `__build__`, and no
+  half-written session reaches the next stage. The next pass does that session
+  again and leaves no part behind (checked for the file-drop group and for
+  deidentify).
+- The sessions that a pass finished before it stopped stay done. A backlog of
+  three sessions under a deidentify limit that was too low finished in three
+  passes, with every file once.
+- A session that needs more than the limit stops the stage on every pass and
+  stays in its input folder (`assigned/` for deidentify). Nothing moves until the
+  limit is raised. The next pass then finishes it.
+
+How to see it:
+
+```bash
+kubectl -n xnat-ingest get pods                  # RESTARTS goes up on the stage pod
+kubectl -n xnat-ingest describe pod <stage-pod>  # Last State: Terminated, Reason: OOMKilled
+```
+
+With the observability stack on (`observability.stack.enabled`),
+kube-state-metrics sees the restarts. `KubePodCrashLooping` (kube-prometheus-stack
+87.19.2) fires when the container waits in `CrashLoopBackOff` at least once in
+every 5 minutes for 15 minutes. A stage that runs longer than 5 minutes before
+each stop can miss that rule. The session also waits, and `StageBacklogAgeing`
+fires when the oldest entry of the stage is older than
+`dataPolicy.reporter.stageAgeAlertAfter` (`7d` by default). Without the stack,
+nothing alerts. After an unusually large study, check the stage pods.
+
+To recover, raise `limits.memory` for that stage in the site file and upgrade
+the release. The next pass takes the waiting session.
 
 Before setting a production profile, measure CPU and memory with the largest
 supported studies, the site's recipes, and concurrent stages. Allow memory
 headroom above observed peaks and check the total requests against node
 allocatable capacity, including Orthanc and the other services. Short synthetic
-runs and idle snapshots do not establish a safe upper bound. A memory limit
-that is too low can stop a stage with OOMKilled; CPU limits can slow the
-pipeline. Verify throughput, restarts, and recovery on the test deployment
-before applying a site profile.
+runs and idle snapshots do not establish a safe upper bound. Verify throughput,
+restarts, and recovery on the test deployment before applying a site profile.
 
 ### group-orthanc arguments
 

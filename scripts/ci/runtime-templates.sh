@@ -942,29 +942,66 @@ PY_STOP
 fi
 
 # Per-stage resource settings must reach their own application container.
+# The chart ships measured defaults (charts/edge/values.yaml). Helm deep-merges
+# maps, so a site setting changes only the keys it names, `null` on a key removes
+# that key, and `resources: null` removes them all. No default may set a CPU limit;
+# deidentify has no default memory limit (pydicom/deid#301, see the values comment).
 ci_heading "ingest stage resource settings"
-resource_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_RESOURCES'
+resource_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/values.yaml" 2>&1 <<'PY_RESOURCES'
 from pathlib import Path
-import sys, yaml
+import copy, sys, yaml
 
 root = Path(sys.argv[1])
-expected = {
-    "group": {"requests": {"cpu": "101m", "memory": "301Mi"},
-              "limits": {"cpu": "901m", "memory": "1301Mi"}},
-    "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"},
-                 "limits": {"cpu": "902m", "memory": "1302Mi"}},
-    "assign": {"requests": {"memory": "444Mi"}},
-    "deidentify": {"limits": {"cpu": "888m"}},
+ingest = yaml.safe_load(Path(sys.argv[2]).read_text())["ingest"]
+defaults = {"group": ingest["orthancGroup"]["resources"], "group-fs": ingest["fileDrop"]["resources"],
+            "assign": ingest["assign"]["resources"], "deidentify": ingest["deidentify"]["resources"]}
+for name, res in defaults.items():
+    assert isinstance(res, dict) and res, f"{name}: no default resources"
+    assert res.get("requests", {}).get("cpu") and res.get("requests", {}).get("memory"), f"{name}: default needs cpu and memory requests"
+    assert "cpu" not in res.get("limits", {}), f"{name}: default sets a CPU limit (throttles the stage)"
+    if name == "deidentify":
+        # deid 0.4.13 keeps every parsed file until the pass ends (pydicom/deid#301), so a
+        # fixed default would stop any larger session on every pass. Change this with the docs.
+        assert "memory" not in res.get("limits", {}), "deidentify: a default memory limit stops large sessions (deid#301)"
+    else:
+        assert res.get("limits", {}).get("memory"), f"{name}: default needs a memory limit"
+
+
+def merged(base, override):
+    """Helm's coalesce for these maps: the site key wins, null deletes the key."""
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if value is None:
+            out.pop(key, None)
+        elif isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merged(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+# The site settings in scripts/ci/values.sh for each case.
+site = {
+    "edge-stage-resources": {
+        "group": {"requests": {"cpu": "101m", "memory": "301Mi"}, "limits": {"cpu": "901m", "memory": "1301Mi"}},
+        "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"}, "limits": {"cpu": "902m", "memory": "1302Mi"}},
+        "assign": {"requests": {"memory": "444Mi"}},
+        "deidentify": {"limits": {"cpu": "888m"}},
+    },
+    "edge-stage-resources-keynull": {
+        "group": {"limits": {"memory": None}},
+        "assign": {"requests": None},
+    },
 }
 for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null",
-             "edge-assign-filedrop-only"):
+             "edge-stage-resources-keynull", "edge-assign-filedrop-only"):
     found = {}
     for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
         if not doc or doc.get("kind") != "Deployment":
             continue
         for container in doc["spec"]["template"]["spec"].get("containers", []):
             name = container["name"]
-            if name in expected:
+            if name in defaults:
                 if name in found:
                     raise SystemExit(f"{case}: duplicate stage container {name}")
                 found[name] = container.get("resources")
@@ -984,17 +1021,20 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init[0]["image"] == container["image"], case
                     assert init[0]["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init[0]["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
-    names = set(expected)
-    if case == "edge-direct-ingest-reclaim":
+    names = set(defaults)
+    if case in ("edge-direct-ingest-reclaim", "edge-stage-resources-keynull"):
         names.remove("group-fs")
     elif case == "edge-assign-filedrop-only":
         names.remove("group")
     if set(found) != names:
         raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
-    wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
+    if case == "edge-stage-resources-null":
+        wanted = dict.fromkeys(names)
+    else:
+        wanted = {n: merged(defaults[n], site.get(case, {}).get(n, {})) for n in names}
     if found != wanted:
         raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
-print("stage resources and assign initialization verified, including file-drop without Orthanc")
+print("stage defaults, site merge, key and map removal, and assign initialization verified, including file-drop without Orthanc")
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
 
