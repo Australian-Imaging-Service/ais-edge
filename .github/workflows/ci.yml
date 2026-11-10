@@ -150,7 +150,7 @@ jobs:
       # FAST_STAGES but never invoked here, so it had never run on a push.
       - name: Reclaimer tests (the delete path)
         if: ${{ !cancelled() }}
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
 
       # promtool unit-tests the Prometheus rules only. These run the pinned Loki
       # version in docker and evaluate the REAL rule expressions against fixture
@@ -179,7 +179,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           CI_REQUIRE_RECLAIMER_IMAGE: "1"
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
 
       - name: Reclaimer fence (drain and resume fail closed)
         if: ${{ !cancelled() }}

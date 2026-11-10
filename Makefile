@@ -109,7 +109,8 @@ promtool: $(RENDER_DEP)
 pvc-retention: $(RENDER_DEP)
 	@scripts/ci/pvc-retention.sh
 
-reclaimer:
+# deid-sidecar.sh reads the rendered deidentify argv ($(CI_RENDER_DIR)).
+reclaimer: $(RENDER_DEP)
 	@tests/reclaimer/run-tests.sh
 	@tests/reclaimer/deid-sidecar.sh
 
