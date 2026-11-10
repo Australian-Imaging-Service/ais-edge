@@ -149,15 +149,17 @@ dataPolicy:
       # Cap per run. CAUTION: bounds a "delete everything" bug to this many
       # sessions; at hourly this still drains ~1200/day if truly needed.
       maxRemovals: 50
-      # The xnat-ingest image, the same pin as xnatUpload.image: reclaim-files.py
+      # The accessionflow image, the same pin as xnatUpload.image: reclaim-files.py
       # needs its python3 and boto3, and the uploader's own label rule. Pinned:
       # an unpinned tag is worst on the job that deletes data.
       image:
-        # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-        # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-        # repository when an upstream release contains them.
-        repository: ghcr.io/akshitbeniwal/xnat-ingest
-        tag: "0.16.2.post1"
+        # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+        # release has every fix that the fork build 0.16.2.post1 carried.
+        # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
+        # ACFLOW_*). Every pin of the tool in both charts must name the same image
+        # (CI: log-phrases and cli-contract), and the templates follow this version.
+        repository: ghcr.io/australian-imaging-service/accessionflow
+        tag: "0.19.0"
         pullPolicy: IfNotPresent
 
   telemetry:
@@ -413,11 +415,13 @@ xnatUpload:
   enabled: true
   namespace: xnat-upload
   image:
-    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-    # repository when an upstream release contains them.
-    repository: ghcr.io/akshitbeniwal/xnat-ingest
-    tag: "0.16.2.post1"
+    # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+    # release has every fix that the fork build 0.16.2.post1 carried.
+    # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
+    # ACFLOW_*). Every pin of the tool in both charts must name the same image
+    # (CI: log-phrases and cli-contract), and the templates follow this version.
+    repository: ghcr.io/australian-imaging-service/accessionflow
+    tag: "0.19.0"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password

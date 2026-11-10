@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Chart argv vs the binary's actual CLI signature
+# Chart argv and env vs the pinned image's actual CLI
 # =============================================================================
-# The charts invoke xnat-ingest with positional arguments and options. The image
-# is pinned by tag, so upstream can change that signature under us and nothing in
-# this repo would notice: helm still renders, the manifest is still valid, and
-# the failure is a CrashLoopBackOff on a live box.
+# The charts invoke accessionflow (called xnat-ingest before 0.18.0) with
+# positional arguments, options and environment variables. The image is pinned
+# by tag, so upstream can change that contract under us and nothing in this
+# repo would notice: helm still renders, the manifest is still valid, and the
+# failure is a CrashLoopBackOff on a live box, or worse, nothing at all.
 #
 # MEASURED, upgrading 0.13.1 -> 0.15.0, two independent breaks:
 #
@@ -17,90 +18,85 @@
 #                  option at all:
 #                    Error: No such option: --on-resource-clash
 #
-# Neither was catchable before this stage, because the chart's args and the
-# binary's signature were two sources of truth with nothing comparing them.
+# MEASURED, upgrading 0.16.2.post1 -> accessionflow 0.19.0: every command and
+# every XINGEST_* variable was renamed (group-orthanc -> collate-orthanc,
+# assign -> label xnat, upload -> store xnat, XINGEST_* -> ACFLOW_*). A missed
+# env rename is SILENT: an unset ACFLOW_REID_ENCRYPT_KEY writes the
+# re-identification maps in plain text with no error.
 #
-# WHAT IT ASKS ABOUT. Every container in $CI_RENDER_DIR whose command is
-# `xnat-ingest`, across every values combination the render stage covers, taken
-# from the rendered manifest rather than transcribed here. A transcription is a
-# third source of truth that drifts from the chart silently, which defeats the
-# purpose. Env references like $(ORTHANC_USER) are left as they are: they are
-# literal strings to the parser, and substituting them would test something the
-# cluster never runs.
+# WHAT IT ASKS ABOUT. Every container in $CI_RENDER_DIR that runs the tool,
+# directly or under the stage lock wrapper (/bin/sh -c <loop> accessionflow
+# <command...>), across every values combination the render stage covers,
+# taken from the rendered manifest rather than transcribed here.
+#   1. The argv parses: click's make_context() does the full parse and
+#      validation and then STOPS, without running the command (a correct
+#      `--loop 60` would otherwise run for ever and hang CI).
+#   2. No container sets an XINGEST_* variable: the tool never reads them.
+#   3. Every ACFLOW_* variable a container sets is one the image's CLI declares,
+#      so a misspelt name fails here instead of being ignored on a live box.
 #
-# HOW IT ASKS. Through click's make_context(), which does the full parse and
-# validation and then STOPS, without invoking the command body. That distinction
-# is the whole design:
-#
-#   * `xnat-ingest deidentify ... --loop 60` parses fine and then RUNS FOREVER.
-#     An earlier version of this stage did exactly that and hung CI. Worse, it
-#     hung only when the argv was CORRECT, so the stage could only ever report
-#     failure — a check that cannot pass is not a check.
-#   * Nothing here opens a socket, reads a study or writes to a store, so it
-#     needs no fixtures and cannot flake on the network.
+# THE CONTROLS ARE NOT DECORATION. Two argv forms known to be broken must be
+# REJECTED. If they are ever accepted, the probe has stopped discriminating.
 #
 # WHAT IT DOES NOT CATCH. Anything that only shows up once the command body
-# runs. group-orthanc's copy_mode raise is the example: the argv is accepted
-# here and the pod dies later, which is why that one needs a render guard in
-# _helpers.tpl instead. Parse errors here, runtime contracts there.
+# runs, such as group-orthanc's copy_mode raise (a render guard covers that).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ci/lib.sh
 . "$HERE/lib.sh"
 
-ci_heading "chart argv parses against the pinned image"
+ci_heading "chart argv and env parse against the pinned image"
 
-# The INGEST image specifically. An earlier version of this line grepped for the
-# first '  image:' block in values.yaml and picked up samba's, so a check meant
-# to protect the pipeline was testing a file server instead. Parse the YAML and
-# name the key rather than matching on shape.
+# Every pin of the tool in every chart must be one image (see log-phrases.sh).
 IMAGE="$(python3 -c "
-import yaml, sys
-v = yaml.safe_load(open(sys.argv[1]))
-img = v['ingest']['image']
-print('%s:%s' % (img['repository'], img['tag']))
-" "$REPO_ROOT/charts/edge/values.yaml" 2>/dev/null)"
-if [ -z "${IMAGE:-}" ] || [ "${IMAGE#:}" != "$IMAGE" ]; then
-  ci_fail "could not determine ingest.image from charts/edge/values.yaml"
-  ci_summary "cli-contract"; exit 1
-fi
+import glob, sys, yaml
+pins = set()
+def walk(node):
+    if isinstance(node, dict):
+        repo = str(node.get('repository', ''))
+        if 'tag' in node and ('xnat-ingest' in repo or 'accessionflow' in repo):
+            pins.add('%s:%s' % (repo, node['tag']))
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+for path in sorted(glob.glob(sys.argv[1] + '/charts/*/values.yaml')):
+    walk(yaml.safe_load(open(path)))
+print(' '.join(sorted(pins)))
+" "$REPO_ROOT" 2>/dev/null)"
+case "$IMAGE" in
+  "") ci_fail "no xnat-ingest or accessionflow image pin found in charts/*/values.yaml"
+      ci_summary "cli-contract"; exit 1 ;;
+  *" "*) ci_fail "the charts pin different images: $IMAGE"
+      ci_summary "cli-contract"; exit 1 ;;
+esac
 
 if [ ! -d "$CI_RENDER_DIR" ] || [ -z "$(ls -A "$CI_RENDER_DIR" 2>/dev/null)" ]; then
   ci_fail "$CI_RENDER_DIR is empty — run 'make render' first"
   ci_summary "cli-contract"; exit 1
 fi
-if ! command -v docker >/dev/null 2>&1; then
-  ci_skip "docker unavailable — cannot check argv against $IMAGE"
-  ci_summary "cli-contract"; exit 0
-fi
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1 && ! docker pull -q "$IMAGE" >/dev/null 2>&1; then
-  ci_skip "$IMAGE unavailable — cannot check argv"
-  ci_summary "cli-contract"; exit 0
-fi
 
-# Every distinct (subcommand, argv) the charts render, plus two controls.
-#
-# THE CONTROLS ARE NOT DECORATION. They are the exact forms that broke on
-# 0.15.0, and they must be REJECTED. If they ever start being accepted, the
-# probe has stopped discriminating and every pass above them is meaningless —
-# which is the failure mode of a checker that can only ever say yes.
-CASES="$(python3 -c "
+# Every distinct (command path, argv) the charts render, the env names they
+# set, plus the two controls (the exact forms that broke on 0.15.0).
+EXTRACT="$(python3 -c "
 import glob, sys, yaml, collections
 seen = collections.OrderedDict()
+envs = collections.OrderedDict()
 
 def walk(o):
     if isinstance(o, dict):
         for key in ('containers', 'initContainers'):
             for c in (o.get(key) or []):
-                cmd = c.get('command') or []
-                # A stage under the writer lock (edge.lockedStage) runs as
-                # /bin/sh -c <loop> xnat-ingest <stage>. Check its args too.
-                if cmd[:2] == ['/bin/sh', '-c'] and cmd[3:4] == ['xnat-ingest']:
+                cmd = [str(x) for x in (c.get('command') or [])]
+                if cmd[:2] == ['/bin/sh', '-c'] and cmd[3:4] and cmd[3] in ('accessionflow', 'xnat-ingest'):
                     cmd = cmd[3:]
-                if cmd[:1] == ['xnat-ingest']:
-                    sub = cmd[1] if len(cmd) > 1 else ''
+                if cmd[:1] and cmd[0] in ('accessionflow', 'xnat-ingest'):
+                    path = ' '.join(cmd[1:])
                     argv = ' '.join(str(a) for a in (c.get('args') or []))
-                    seen.setdefault((sub, argv), None)
+                    seen.setdefault((path, argv), None)
+                    for e in c.get('env') or []:
+                        envs.setdefault(e['name'], path)
         for v in o.values():
             walk(v)
     elif isinstance(o, list):
@@ -115,43 +111,94 @@ for f in sorted(glob.glob(sys.argv[1] + '/*.yaml')):
     for d in docs:
         walk(d)
 
-for sub, argv in seen:
-    print('accept|%s|%s' % (sub, argv))
-" "$CI_RENDER_DIR")
+for path, argv in seen:
+    print('accept|%s|%s' % (path, argv))
+for name, path in envs.items():
+    if name.startswith(('ACFLOW_', 'XINGEST_')):
+        print('env|%s|%s' % (path, name))
+" "$CI_RENDER_DIR")"
+CASES="$EXTRACT
 reject|deidentify|/w/in /w/out /w/specs /w/reid
-reject|group-orthanc|http://orthanc:8042 /w/store /w/grouped user pass --on-resource-clash avoid all"
+reject|collate-orthanc|http://orthanc:8042 /w/store /w/grouped user pass --on-resource-clash avoid all"
 
 if [ "$(printf '%s\n' "$CASES" | grep -c '^accept|')" -eq 0 ]; then
-  ci_fail "no xnat-ingest container found in $CI_RENDER_DIR — the extraction is looking for the wrong shape"
+  ci_fail "no accessionflow container found in $CI_RENDER_DIR — the extraction is looking for the wrong shape"
   ci_summary "cli-contract"; exit 1
 fi
 
+if ! command -v docker >/dev/null 2>&1; then
+  ci_skip "docker unavailable — cannot check argv against $IMAGE"
+  ci_summary "cli-contract"; exit 0
+fi
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  # Anonymous pull: a stored registry login that the registry refuses would
+  # otherwise fail the pull of a PUBLIC image.
+  anon="$(mktemp -d)"
+  DOCKER_CONFIG="$anon" docker pull -q "$IMAGE" >/dev/null 2>&1
+  rm -rf "$anon"
+  if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    ci_skip "$IMAGE unavailable — cannot check argv"
+    ci_summary "cli-contract"; exit 0
+  fi
+fi
+
 # One container for every case. A hard timeout as a backstop: make_context does
-# not run the command, so this returns in seconds, and if it ever does not the
-# stage must fail loudly rather than hang a CI run.
-OUT="$(printf '%s\n' "$CASES" | timeout 300 docker run --rm -i --entrypoint python3 "$IMAGE" -c '
+# not run the command, so this returns in seconds.
+OUT="$(printf '%s\n' "$CASES" | timeout 300 docker run --rm -i --network none --entrypoint python3 "$IMAGE" -c '
 import os, sys, click
-from xnat_ingest.cli import cli
+try:
+    from accessionflow.cli import cli
+except ImportError:
+    from xnat_ingest.cli import cli
 
 # click validates path arguments, so a missing directory would be reported as an
 # argument error and read as a signature break. Create what the charts name.
 for d in ("/w/in", "/w/out", "/w/specs", "/w/reid", "/w/store", "/w/grouped",
           "/data/incoming", "/data/grouped", "/data/assigned", "/data/deidentified",
-          "/data/reid", "/data/orthanc-storage", "/etc/xnat-ingest/deid-specs"):
+          "/data/packaged", "/data/reid", "/data/orthanc-storage", "/etc/xnat-ingest/deid-specs"):
     os.makedirs(d, exist_ok=True)
 
-root = click.Context(cli)
+def declared(cmd, ctx, out):
+    """Every envvar that the CLI declares, through every group."""
+    for p in getattr(cmd, "params", []):
+        for name in ([p.envvar] if isinstance(p.envvar, str) else (p.envvar or [])):
+            out.add(name)
+    if isinstance(cmd, click.Group):
+        for n in cmd.list_commands(ctx):
+            sub = cmd.get_command(ctx, n)
+            if sub is not None:
+                declared(sub, click.Context(sub, parent=ctx, info_name=n), out)
+    return out
+
+root = click.Context(cli, info_name="accessionflow")
+envvars = declared(cli, root, set())
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
-    want, name, argv = line.split("|", 2)
-    cmd = cli.get_command(root, name)
+    want, path, rest = line.split("|", 2)
+    if want == "env":
+        if rest.startswith("XINGEST_"):
+            print("BAD\t%s\tsets %s, which this image never reads (it reads ACFLOW_*)" % (path, rest))
+        elif rest not in envvars:
+            print("BAD\t%s\tsets %s, which this image does not declare" % (path, rest))
+        else:
+            print("OK\t%s\tsets %s (declared)" % (path, rest))
+        continue
+    names, cmd, ctx = path.split(), cli, root
+    for i, n in enumerate(names):
+        sub = cmd.get_command(ctx, n) if isinstance(cmd, click.Group) else None
+        if sub is None:
+            cmd = None
+            break
+        if i < len(names) - 1:
+            ctx = click.Context(sub, parent=ctx, info_name=n)
+        cmd = sub
     if cmd is None:
-        print("MISSING\t%s\tthe image has no subcommand %r" % (name, name))
+        print("MISSING\t%s\tthe image has no command %r" % (path, path))
         continue
     try:
-        with cmd.make_context(name, argv.split(), parent=root):
+        with cmd.make_context(names[-1], rest.split(), parent=ctx):
             pass
         got, why = "accept", ""
     except click.exceptions.Exit:
@@ -159,11 +206,11 @@ for line in sys.stdin:
     except Exception as e:
         got, why = "reject", str(e).splitlines()[0]
     if got == want:
-        print("OK\t%s\t%s" % (name, "rejected as expected" if want == "reject" else ""))
+        print("OK\t%s\t%s" % (path, "rejected as expected" if want == "reject" else ""))
     elif want == "accept":
-        print("BAD\t%s\t%s" % (name, why))
+        print("BAD\t%s\t%s" % (path, why))
     else:
-        print("BAD\t%s\tACCEPTED an argv known to be broken — this probe is no longer discriminating" % name)
+        print("BAD\t%s\tACCEPTED an argv known to be broken — this probe is no longer discriminating" % path)
 ' 2>&1)"
 
 rc=$?
@@ -176,10 +223,10 @@ while IFS=$'\t' read -r verdict name why; do
   [ -n "${verdict:-}" ] || continue
   case "$verdict" in
     OK)      ci_pass "$name${why:+ $why}" ;;
-    BAD)     ci_fail "$name: $IMAGE disagrees with the argv this chart renders${why:+ — $why}" ;;
+    BAD)     ci_fail "$name: $IMAGE disagrees with what this chart renders${why:+ — $why}" ;;
     MISSING) ci_fail "$why" ;;
     *)       ci_fail "unparseable probe output: $verdict $name $why" ;;
   esac
 done <<<"$OUT"
 
-ci_summary "cli-contract"
+ci_summary "cli-contract ($IMAGE)"

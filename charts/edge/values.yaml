@@ -732,11 +732,15 @@ orthanc:
 # =============================================================================
 ingest:
   image:
-    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-    # repository when an upstream release contains them.
-    repository: ghcr.io/akshitbeniwal/xnat-ingest
-    tag: "0.16.2.post1"
+    # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+    # release has every fix that the fork build 0.16.2.post1 carried.
+    # CAUTION: 0.18.0 renamed the commands (group-orthanc -> collate-orthanc,
+    # group -> collate, assign -> label xnat, upload -> store xnat) and the
+    # XINGEST_* variables (now ACFLOW_*). The templates follow this version:
+    # move the tag only together with them, and with both pins in
+    # charts/mgmt/values.yaml (CI: log-phrases and cli-contract compare them).
+    repository: ghcr.io/australian-imaging-service/accessionflow
+    tag: "0.19.0"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these

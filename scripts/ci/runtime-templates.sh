@@ -614,12 +614,12 @@ for doc in yaml.safe_load_all(open(path)):
     if not doc or doc.get("kind") != "Deployment":
         continue
     for c in doc["spec"]["template"]["spec"].get("containers", []):
-        if (c.get("command") or [])[:2] == ["xnat-ingest", "upload"]:
+        if (c.get("command") or [])[:3] == ["accessionflow", "store", "xnat"]:
             args = c.get("args") or []
             found.append((doc["metadata"]["name"],
                           [f for f in ("--require-manifest", "--dont-require-manifest") if f in args]))
 if not found:
-    raise SystemExit("no 'xnat-ingest upload' container in the render")
+    raise SystemExit("no 'accessionflow store xnat' container in the render")
 wrong = [(name, flags) for name, flags in found if flags != [expect]]
 if wrong:
     raise SystemExit(f"expected exactly {expect}, got {wrong}")
@@ -655,6 +655,10 @@ while IFS=$'\t' read -r case_name locked plain serialised; do
 import re, sys, yaml
 
 path, locked, plain, serialised = sys.argv[1:5]
+# The same map as edge.stageCommand in _helpers.tpl.
+ARGV = {"group": ["collate"], "group-orthanc": ["collate-orthanc"], "assign": ["label", "xnat"],
+        "deidentify": ["deidentify"], "package": ["package"]}
+tool = lambda stage: ["accessionflow"] + ARGV[stage]
 tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
 # A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
 # pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
@@ -674,7 +678,7 @@ for doc in yaml.safe_load_all(open(path)):
             strategy[c["name"]] = (doc["spec"].get("strategy") or {}).get("type")
 
 cmd, args = stages.get(locked, ([], []))
-if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
+if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(locked):
     raise SystemExit(f"{locked} is not wrapped: command={cmd}")
 lock, alive = f"/data/.locks/{tree[locked]}.lock", f"/data/.locks/{tree[locked]}.alive"
 if f"flock {lock} " not in cmd[2]:
@@ -691,7 +695,7 @@ if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
-    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", plain] or "--loop" in args:
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(plain) or "--loop" in args:
         raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
     if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
         raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
@@ -705,7 +709,7 @@ if serialised != "-":
     if f"flock {inner} flock {lock} " not in wcmd[2]:
         raise SystemExit(f"{locked} does not take {inner} before {lock} for each pass: {wcmd[2]}")
     scmd, sargs = stages.get(serialised, ([], []))
-    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != ["xnat-ingest", serialised]:
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != tool(serialised):
         raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
     if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
         raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
@@ -770,11 +774,12 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
             if c["name"] in ("group", "group-fs", "assign"):
                 expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
                 tree = "assigned" if expected == "assign" else "grouped"
-                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", expected]:
+                argv = {"group-orthanc": ["collate-orthanc"], "group": ["collate"], "assign": ["label", "xnat"]}[expected]
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["accessionflow"] + argv:
                     raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
                 if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
                     raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
-            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
+            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["accessionflow"]:
                 wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
 # serialised (one lock), locked (.alive + one lock), locked with the outer lock
 shapes = {("flock -s 9" in s, s.count("flock /data/.locks/")) for s in wrappers}
@@ -875,7 +880,7 @@ def run(script, case):
     with tempfile.TemporaryDirectory(prefix="stage-stop-") as tmp:
         body = script.replace("/data/.locks", os.path.join(tmp, "locks"))
         locks = re.findall(r"\S+\.lock", body)
-        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "xnat-ingest")
+        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "accessionflow")
         with open(fake, "w") as f:
             f.write(FAKE)
         os.chmod(fake, 0o755)
@@ -1153,5 +1158,29 @@ for case, want in (("edge-datapolicy-on", True), ("edge-backup-off", False), ("e
 print("backup on, volume off, and policy off rows match")
 PYBACKUP
 )"; then ci_pass "$out"; else ci_fail "$out"; fi
+
+# THE RE-IDENTIFICATION KEY reaches deidentify under the name the tool reads
+# (ACFLOW_REID_ENCRYPT_KEY), from the Secret key sites already have
+# (XINGEST_REID_ENCRYPT_KEY). A wrong name is silent: plain-text maps.
+if out="$(python3 - "$CI_RENDER_DIR/edge-deid-ingest-reid-key.yaml" 2>&1 <<'PY_REID'
+import sys, yaml
+for doc in yaml.safe_load_all(open(sys.argv[1])):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if c["name"] != "deidentify":
+            continue
+        env = {e["name"]: e for e in c.get("env", [])}
+        e = env.get("ACFLOW_REID_ENCRYPT_KEY")
+        if not e:
+            raise SystemExit(f"deidentify has no ACFLOW_REID_ENCRYPT_KEY: {sorted(env)}")
+        ref = e.get("valueFrom", {}).get("secretKeyRef", {})
+        if (ref.get("name"), ref.get("key")) != ("reid-key", "XINGEST_REID_ENCRYPT_KEY"):
+            raise SystemExit(f"ACFLOW_REID_ENCRYPT_KEY reads {ref}, not reid-key / XINGEST_REID_ENCRYPT_KEY")
+        print("deidentify reads ACFLOW_REID_ENCRYPT_KEY from Secret reid-key, key XINGEST_REID_ENCRYPT_KEY")
+        raise SystemExit(0)
+raise SystemExit("no deidentify container in the render")
+PY_REID
+)"; then ci_pass "$out"; else ci_fail "reid key: $out"; fi
 
 ci_summary "runtime-templates"
