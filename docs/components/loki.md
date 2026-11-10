@@ -5,13 +5,14 @@
 [Loki](https://grafana.com/oss/loki/) is a log aggregation system designed
 to be horizontally scalable, cheap to operate, and tightly integrated with
 Grafana. It indexes a small set of labels (not the log content) and stores
-the raw log lines as gzipped chunks in object storage. Queries use a
+the raw log lines as compressed chunks in object storage. The chunk encoding is a Loki setting; Vector's HTTP gzip compression does not establish the stored chunk format. Queries use a
 PromQL-like language called LogQL.
 
 ## Role in this stack
 
 Loki is the **central log store**. Every Vector pod (mgmt + each edge child
-cluster) pushes its collected log lines to Loki over HTTPS. Operators
+cluster) pushes its collected log lines to Loki. Edges use HTTPS with a client
+certificate; management Vector uses the in-cluster HTTP Service. Operators
 query the data through Grafana's "Explore" view to follow a session's
 journey, debug a failing edge, or audit who uploaded what when.
 
@@ -24,8 +25,9 @@ journey, debug a failing edge, or audit who uploaded what when.
   so with the installer's defaults (`MGMT_RELEASE=mgmt`, `MGMT_NS=ais-mgmt`
   in `install.sh`) it resolves to
   `http://mgmt-seaweedfs.ais-mgmt.svc.cluster.local:8333`. Plain http on
-  purpose: it never leaves the cluster, and it avoids every edge of the
-  custom-CA path. Uses a scoped IAM identity `loki-writer` that can only
+  purpose: it uses the cluster network and avoids the external TLS ingress.
+  Cluster-internal traffic is not automatically encrypted and can cross hosts
+  in a multi-node deployment. Uses a scoped IAM identity `loki-writer` that can only
   read/list/write/tag objects in the `logs-bucket`, and deliberately cannot
   see the ingest buckets — the log store has no business holding a key that
   reads imaging data.
@@ -40,7 +42,7 @@ journey, debug a failing edge, or audit who uploaded what when.
   volume that merely happens to still be *named* `s3-config`. The chart's
   bucket hook Job (`<release>-seaweedfs-buckets`) is create-only and does
   nothing but create buckets — it never writes credentials.
-- **A persistent volume (20Gi default)** for the TSDB index
+- **A persistent volume (20Gi default)** for the WAL, local working state and TSDB index
   (`loki.loki.schemaConfig` pins `store: tsdb`, `schema: v13`,
   `index: {prefix: loki_index_, period: 24h}` — small, just label → chunk-id
   mappings) and for the compactor's local delete-request store. Size is
@@ -83,8 +85,9 @@ journey, debug a failing edge, or audit who uploaded what when.
 
 Key tuning knobs in the values file:
 - `deploymentMode: SingleBinary` — one pod runs all roles. Switch to
-  `Distributed` (separate `read`/`write`/`backend` deployments) when
-  ingest exceeds ~50 GB/day.
+  another supported mode only after a capacity and migration test. The earlier
+  ~50 GB/day trigger is not verified (2026-11-10). `read`/`write`/`backend`
+  describe SimpleScalable roles, not the Distributed microservices layout.
 - `loki.loki.limits_config.retention_period` — a literal in
   `charts/mgmt/values.yaml` (`30d`, marked "THE one place Loki retention is
   set"). The compactor enforces it by deleting old chunks from S3. Override
@@ -95,7 +98,8 @@ Key tuning knobs in the values file:
   subchart's values and a key that is read, trusted and ignored is worse than
   no key at all.
 - `commonConfig.replication_factor: 1` — single-replica is fine for our
-  single mgmt node. Bump to 3 if you go HA.
+  single mgmt node. Raising this number alone does not provide HA: replicas,
+  storage, placement, ring membership and the failure test must agree.
 
 ## Operations
 
@@ -116,6 +120,10 @@ SK=$(kubectl -n ais-mgmt get secret seaweedfs-admin -o jsonpath='{.data.secret-k
 mc alias set seaweed-admin http://localhost:8333 "$AK" "$SK"
 mc ls --recursive seaweed-admin/logs-bucket/ | head
 
+# mc alias set saves credentials in the local mc configuration. Use a protected
+# operator account and remove the temporary alias after inspection. The keys
+# above also pass through process arguments; use the site credential policy.
+
 # Query from the CLI. Prefer the in-cluster Service: the public
 # loki.aisedge.local Ingress demands a CLIENT certificate
 # (auth-tls-verify-client: "on" plus an auth-tls-match-cn pinned to the
@@ -123,7 +131,7 @@ mc ls --recursive seaweed-admin/logs-bucket/ | head
 # directive — so it covers the whole hostname, queries as well as pushes.
 # A CA certificate alone will not get you in.
 kubectl -n ais-mgmt port-forward svc/mgmt-loki 3100:3100 &
-curl -sG http://localhost:3100/loki/api/v1/query \
+curl -sG http://localhost:3100/loki/api/v1/query_range \
   --data-urlencode 'query={cluster="edge-dev"}'
 
 # Through the Ingress instead (logcli — install with `go install ...logcli`):
@@ -140,29 +148,35 @@ logcli --addr=https://loki.aisedge.local --tls-skip-verify=false \
 
 - **Cheap storage** — chunks live in object storage we already operate
   (SeaweedFS), so adding logs doesn't require new infrastructure
-- **Label-based indexing** — the index is tiny (~1% of log volume),
-  meaning low memory and disk overhead at scale
+- **Label-based indexing**: log content is not indexed as full text. The earlier
+  ~1% size estimate is not verified (2026-11-10). Measure local index, WAL and
+  compactor storage against the actual stream cardinality and retention.
 - **Tight Grafana integration** — same UI as our metrics dashboards;
   operators don't context-switch
 - **Single binary deploys** — one container in monolithic mode keeps the
   operational footprint small
-- **Same vendor as Grafana / Prometheus / Mimir / Tempo** — coherent
-  stack with shared semantics (LogQL ↔ PromQL)
+- **Grafana ecosystem integration**: Loki, Grafana, Mimir and Tempo share
+  integrations. Prometheus is a separate open-source project. LogQL resembles
+  PromQL but the query languages and their rule evaluators are not interchangeable.
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| SeaweedFS down | Loki cannot persist new chunks; ingester buffers in memory until OOM | SeaweedFSDown alert; fast restart of SeaweedFS bounces pipelines back |
+| SeaweedFS down | Chunk flushes fail; retry, WAL and memory capacity limit how long ingestion can continue | Investigate SeaweedFSDown and Loki write errors. Recovery time and loss-free outage duration are not verified (2026-11-10); test them with the site workload. |
 | logs-bucket disk full on SeaweedFS | New writes fail; old logs may be unreadable until compactor frees space | Retention is set in days; SeaweedFSDiskFull alert at 80% |
-| Index PV corruption | Loki may need to be reinitialised; chunks themselves remain in S3 | Persistent volume is small (20Gi, TSDB index only); reinitialise + re-run reads from S3. Note the PVC survives `helm uninstall` and StatefulSet deletion (`resource-policy: keep` + `enableStatefulSetAutoDeletePVC: false`), so a deliberate reinitialise means deleting it by hand |
-| Loki pod crash | Logs queued in Vector's disk buffer get held until Loki recovers | Vector handles backpressure; replay continues automatically |
-| Edge client key leak | An attacker could push fake logs (would need network reachability) | The push Ingress requires a client certificate signed by ais-edge-ca whose CN is one of the sites in `edges`. Keys are per-edge and cert-manager replaces them every 90 days with `rotationPolicy: Always`; revoke sooner by deleting the `<edge>-loki-client` Secret (cert-manager reissues) or by removing the site from `edges` and upgrading, which drops it from `auth-tls-match-cn` |
+| Local PV corruption | Index, WAL or compactor state can be lost even when flushed chunks remain in S3 | Preserve the volume and investigate recovery before deleting anything. The 20Gi PVC holds more than the index. It is configured to survive Helm and StatefulSet deletion; S3 chunks alone do not prove that every accepted log can be recovered. |
+| Loki pod crash | The configured Vector sink uses its default memory buffer; pending events can be lost if Vector also restarts | Source checkpoints persist, but they are not an event queue. Long stalls can also outlast kubelet log retention. Verify recent ingestion after recovery; no disk sink buffer is configured. |
+| Edge client key leak | A reachable attacker can submit logs and query the shared tenant with an allowed client certificate | The ingress checks the signed certificate and allowed CN, not the submitted cluster label or query scope. Certificates last 90 days and renew 30 days before expiry. Deleting a Secret or renewing it does not revoke the old keypair; remove the CN from ingress admission when isolating a site, and assess trust-anchor replacement if that is insufficient. |
+
 | Label cardinality explosion | Stream count grows unbounded → memory / cost | Vector strips high-cardinality fields before pushing (we explicitly DO NOT label `session` for example, since each session is unique) |
 
 ### Why `compactor.delete_request_store` is `filesystem`, not `s3`
 
-`s3` builds the delete store from `storage_config.aws` — a different config
+**Historical incident, date not recorded; live reproduction not verified
+(2026-11-10).** The following failure explains the retained filesystem choice.
+The current values select `filesystem` with an explicit root beneath `/var/loki`.
+For the chart configuration investigated at the time, `s3` built the delete store from `storage_config.aws` ; a different config
 path from the `common.storage.s3` block `loki.storage` renders into, which
 the Loki chart never populates. The compactor then resolves an empty bucket
 name and Loki exits 1 at startup:
@@ -180,7 +194,8 @@ Setting `storage_config.aws` directly does not fix it either: the chart
 treats that as taking manual control and blanks
 `common.storage.s3.bucketnames` in response (its `_helpers.tpl` only fills
 the bucket name when `storage_config.aws` is unset), so chunks and the index
-lose their bucket instead. **Verified both ways on a live cluster.**
+lose their bucket instead. **Historically reported as tested both ways on a live cluster; test date and
+current-version replay are not verified (2026-11-10).**
 
 This deployment runs SingleBinary with a persistent PVC at `/var/loki`, so
 the delete-request store has the same durability as the rest of Loki's local
@@ -190,9 +205,10 @@ blocks kept in step by hand.
 
 ## Replacements / future
 
-- **Mimir-style scale-out** — when ingest exceeds ~50 GB/day or queries
-  span multi-cluster, switch the `deploymentMode` to `Distributed` and
-  scale `read`/`write`/`backend` independently
+- **Loki scale-out**: choose a supported object-store deployment mode after
+  measuring ingestion, query load and recovery requirements. The old 50 GB/day
+  trigger is unverified. SimpleScalable uses `read`/`write`/`backend`; Distributed
+  uses individual services. Neither is a one-value migration from this PVC.
 - **Elasticsearch / OpenSearch** — full-text search over log content;
   trades cheap storage for richer query power. Use if compliance requires
   free-text audit on every line. Loki is sufficient for our pipeline-event
@@ -200,16 +216,17 @@ blocks kept in step by hand.
 - **CloudWatch Logs / Datadog / Splunk** — managed alternatives. Drop
   Loki, run a Vector sink for the SaaS API. Useful if the operations
   team already pays for one. We avoid them by default for cost and
-  data-residency reasons (DICOM-related events stay on UQ infra)
+  data-residency reasons (keep DICOM-related events on site-approved infrastructure)
 
 ## Future enhancements
 
 - Recording rules for common LogQL queries (e.g. uploads-per-cluster) so
   Grafana panels render faster
-- LogQL → PrometheusRule for additional log-derived alerts that don't
-  fit Vector's `log_to_metric` (string-pattern alerts)
+- Additional LogQL alerts belong in Loki ruler files. A PrometheusRule
+  evaluates PromQL, so it cannot execute LogQL directly. A future recording-rule
+  path would first export numeric series to a metrics backend.
 - Multi-tenant mode with per-edge tenant IDs (currently we use a single
-  tenant and label-scope by `cluster=`)
+  tenant and filter by `cluster=`; that filter is not an authorization boundary)
 
 ### Delete-request store path
 

@@ -79,18 +79,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-dev
             exp_annotations:
               summary: "cert-sync has not succeeded for mgmt-cert-sync-edge-dev in over 24h"
-              description: |
-                The CronJob observability/mgmt-cert-sync-edge-dev has not
-                recorded a successful run for more than 24 hours, so that edge is
-                holding whatever certificate and credential material it was last
-                given. Nothing breaks until those expire, which is why this is
-                worth acting on now rather than at the expiry date.
-
-                Why it is not syncing:
-                  kubectl -n observability logs job/<latest job of mgmt-cert-sync-edge-dev>
-                or in Loki:
-                  {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
-
+              description: "The CronJob observability/mgmt-cert-sync-edge-dev has no recorded\nsuccess for over 24 hours, and the condition has persisted for 30 minutes.\nAn edge may retain older certificates or credentials. A source rotation,\nrevocation or changed trust requirement can break access before expiry.\nCheck current source/destination versions rather than waiting for expiry.\n\nInspect the latest Job and its pods, then read retained logs if the pod is gone:\n  kubectl -n observability get cronjob mgmt-cert-sync-edge-dev\n  kubectl -n observability get jobs,pods\nLoki: {component=\"cert-sync\"} | json | event=~\"sync_skipped|sync_failed\"\nThe CronJob result does not prove every consuming process has reloaded its\nSecret. Check live mounted certificates and any environment-based clients.\n"
   # ---------------------------------------------------------------------
   - interval: 5m
     name: CertSyncStale does not select other CronJobs in the release
@@ -146,15 +135,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-dev
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-dev"
-              description: |
-                observability/mgmt-cert-sync-edge-dev has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
-
+              description: "observability/mgmt-cert-sync-edge-dev has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"
   # ---------------------------------------------------------------------
   - interval: 5m
     name: CertSyncNeverSucceeded stays quiet once a run has succeeded
@@ -238,15 +219,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-syd
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-syd"
-              description: |
-                ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
-
+              description: "ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"
   # ---------------------------------------------------------------------
   # (3) Never scheduled at all, e.g. the controller missed every slot.
   # The `or` half of the expression is the only thing that sees this.
@@ -274,15 +247,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-syd
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-syd"
-              description: |
-                ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
-
+              description: "ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"
   # ---------------------------------------------------------------------
   # (4) Firing after a failed first run, then the next run succeeds.
   - interval: 1m
@@ -309,14 +274,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-syd
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-syd"
-              description: |
-                ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
+              description: "ais-mgmt/mgmt-cert-sync-edge-syd has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"
       # Cleared at the first evaluation that sees the success.
       - eval_time: 11h24m
         alertname: CertSyncNeverSucceeded
@@ -356,14 +314,7 @@ tests:
               cronjob: mgmt-cert-sync-edge-dev
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-dev"
-              description: |
-                ais-mgmt/mgmt-cert-sync-edge-dev has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
+              description: "ais-mgmt/mgmt-cert-sync-edge-dev has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"
       # Over 24h: the kube_cronjob_created half is live too.
       - eval_time: 30h
         alertname: CertSyncNeverSucceeded
@@ -374,11 +325,4 @@ tests:
               cronjob: mgmt-cert-sync-edge-dev
             exp_annotations:
               summary: "cert-sync has never completed a run for mgmt-cert-sync-edge-dev"
-              description: |
-                ais-mgmt/mgmt-cert-sync-edge-dev has had a scheduled
-                run, or has existed for over 24h without one, and has no
-                successful run on record. That edge has never received a synced
-                copy of the management Secrets, so anything depending on rotation
-                there is running on whatever was pushed at build time by hand.
-                Check RBAC on the edge namespace and whether the child API server
-                is reachable from the management cluster.
+              description: "ais-mgmt/mgmt-cert-sync-edge-dev has had a scheduled run, or\nhas existed over 24 hours without one, and has no recorded successful run.\nThe condition has persisted for 30 minutes. Some individual Secrets may\nhave copied before a failed run; this does not prove no delivery occurred.\nCheck management-to-child API reachability, source Secrets, edge RBAC and\nper-Secret sync events. Compare actual source and destination versions.\nManually created or older Secrets can allow partial operation while this\nalert fires; they do not establish that automatic rotation works.\n"

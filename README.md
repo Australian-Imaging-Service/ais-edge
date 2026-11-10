@@ -39,14 +39,16 @@ the observability stack, the internal certificate authority, and one k0smotron
 *hosted control plane* per edge site.
 
 An **edge** is a single machine inside a hospital network running Orthanc and
-the ingest pipeline. It has no inbound route from the internet. It reaches the
-management node outbound over TLS, and its Kubernetes control plane physically
-runs on the management node — so the hospital operates a Kubernetes node without
-operating a Kubernetes cluster.
+the ingest pipeline. Runtime management traffic uses outbound TLS. The default
+SSH bootstrap and teardown need inbound SSH from management; `join: bundle`
+provides a local bootstrap when that is unavailable. The Kubernetes control
+plane runs on management, while the hospital operates its worker node.
 
-The de-identification happens **on the edge, before anything leaves the site**.
-The original is written to a facility backup that is never automatically
-deleted; everything downstream is derived data.
+The deidentify stage runs **on the edge before image upload**. It removes
+only the fields selected by the recipe; labels and retained headers still need
+review. When enabled, the facility backup stores the input before this stage.
+It defaults to indefinite retention, but explicitly armed originals expiry and
+uninstall can delete it. Derived directories can also contain identifiers.
 
 ---
 
@@ -79,8 +81,10 @@ Many hospitals, one management node, one XNAT credential for the whole fleet.
 ```
 
 Each edge gets its **own S3 bucket, own identity, own uploader, own reclaimer,
-own control plane**. One site's stuck session, expired credential or poison
-study cannot stop delivery for any other site.
+own control plane**. These separate per-site upload loops and storage
+identities. They still share management CPU, memory, disks, network services and
+the configured XNAT credential. Failure or exhaustion of a shared dependency
+can affect more than one site.
 
 ### Tier 1 — single site
 
@@ -96,14 +100,14 @@ chart is not needed.
 |---|---|---|
 | **Orthanc** | edge | DICOM C-STORE receiver on :4242. Runs the Lua hook on every stored instance. Under the default `deid.engine: ingest` the hook only writes the facility backup and labels the study. |
 | **deidentify-and-forward.lua** | edge | Writes the untouched original to the facility backup and labels a stable study. Under `ingest` it does not change the instance. Only the deprecated `deid.engine: orthanc` makes it rewrite identity tags per a profile. |
-| **group-orthanc** | edge | Pulls each study that has been quiet for `waitPeriod` out of Orthanc into `/data/grouped`, then labels it `xnat-ingest-processed` so it is not pulled twice. Under the deprecated `orthanc` engine it pulls only the studies labelled `xnat-ingest-ready`. |
+| **group-orthanc** | edge | Pulls each study that has been quiet for `waitPeriod` out of Orthanc into `/data/grouped`, then records `xnat-ingest-processed` and snapshot state. An unchanged exported study is skipped; changed input is checked again. Under the deprecated `orthanc` engine it pulls only the studies labelled `xnat-ingest-ready`. |
 | **assign** | edge | Groups instances into XNAT sessions under `/data/assigned`, writing `__MANIFEST__.json` (per-resource, with MD5 checksums) and `__METADATA__.json`. |
 | **deidentify** | edge | The default de-identification engine (`deid.engine: ingest`). Applies the site's pydicom `deid` recipe (`ingest.deidentify.specs`) to each session in `/data/assigned`, and writes the result to `/data/deidentified`, with a re-identification map in `/data/reid`. The uploader reads only its output. |
 | **s3-uploader** | edge | `rclone copy` each settled session to `s3://ingest-<edge>/staged/`, inside the upload-tree writer lock. Copies only: it never deletes the local copy, and it copies a session again when the staged-reclaimer leaves a repair request for it. Emits a JSON event schema that the alert rules consume. |
 | **Vector** | edge | Ships pod logs to Loki on the management node over TLS. |
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
 | **mgmt-upload-\<edge\>** | mgmt | `accessionflow store xnat`; pulls staged sessions and writes them into XNAT. |
-| **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**: one object at a time, each delete conditional on the ETag it listed (`If-Match`), never a folder. The only component that deletes patient data. |
+| **mgmt-reclaim-\<edge\>** | mgmt | Removes proven staged resources after XNAT lists each manifest file and HEAD reports the same size. This does not compare file content or prove metadata extraction. Each S3 object delete uses the listed ETag (`If-Match`). Unproven neighboring resources remain. Pipeline retirement and data-policy adapters are separate delete paths. |
 | **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory, in **both upload modes**. Under `upload.mode: s3` it deletes a local file only after the bucket holds it with the same size and an ETag equal to the MD5 of the bytes read from disk now (`PROOF=s3`); a file that fails gets one repair request, which the s3-uploader answers with a new copy. Under `upload.mode: direct` it deletes only what XNAT proves, file by file (`PROOF=xnat`). Without it nothing retires the tree: the uploader never deletes, so `onUploaded` would be unsatisfiable and the tree would grow unbounded. Also deletes patient data, one proved resource at a time, inside the upload-tree writer lock. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
 | **k0smotron** | mgmt | Hosts a k0s control plane per edge. The edge runs only a worker. |
@@ -115,8 +119,9 @@ An edge is a box in a hospital basement that nobody logs into. Running its API
 server on the management node means:
 
 * the hospital does not operate etcd, certificates or control-plane upgrades;
-* the edge needs no inbound firewall rule — the worker dials out through
-  konnectivity;
+* runtime management traffic uses connections opened by the worker, including
+  konnectivity; DICOM and the optional SSH bootstrap still need their own
+  inbound access rules;
 * losing the edge machine loses a worker, not a cluster.
 
 ---
@@ -128,7 +133,7 @@ server on the management node means:
                              │
  2.                          ├──▶ /data/facility-backup/<patient>/<study>/…   ORIGINAL
  3.                          │     written FIRST, before de-identification
-                             │     governed by dataPolicy.originals (forever)
+                             │     governed by dataPolicy.originals (forever by default)
                              ▼
  4.              the instance stays in Orthanc, unchanged
                              │   (deid.engine: ingest strips a copy at step 8)
@@ -140,7 +145,7 @@ server on the management node means:
         ▼
  7.  /data/grouped/<session>/
         │
- 8.  assign, then deidentify   ids from ingest.assign.tagMapping, verbatim;
+ 8.  assign, then deidentify   ids from ingest.assign.tagMapping, normalized;
         │                      the recipe strips the tags it names; UIDs kept;
         │                      re-identification map in /data/reid
         ▼
@@ -167,10 +172,12 @@ server on the management node means:
                           only then deletes, object by object
 ```
 
-**Every hop is idempotent and fails safe.** If the S3 endpoint is unreachable,
-the uploader keeps the local copy and retries. If XNAT is down, staged data
-accumulates rather than being lost. If the reclaimer cannot prove XNAT holds a
-session, it keeps it.
+**Retry and deletion checks differ by stage.** If the S3 endpoint is
+unreachable, its uploader retains the local copy and retries. If XNAT is down,
+staged data accumulates. The reclaimer retains resources it cannot prove.
+Successful copy-stage retirement can remove its complete input snapshot,
+including unrepresented files; it is not a per-file remote proof. Preserve
+original backups and keep manual files outside pipeline inputs.
 
 ---
 
@@ -183,9 +190,10 @@ session, it keeps it.
 
 **One file configures a deployment: `sites/<site>/values.yaml`.** `install.sh`
 reads it *and* passes it to both Helm charts, so every fact is stated once.
-There is no `--set` anywhere in the installer — a flag needed to make an install
-work is a value that belongs in the site file, and an install you cannot
-reproduce from that file alone is not reproducible.
+The management and edge chart releases take their configuration from these
+files. The separate cert-manager prerequisite uses `--set crds.enabled=true`.
+Record site configuration in values and encrypted Secrets so another operator
+can reproduce the intended release; do not rely on undocumented ad hoc flags.
 
 ### First-time setup
 
@@ -227,8 +235,8 @@ scripts/site-secrets.sh add-edge my-site my-edge
 #    hostnames, node IPs, the edges list, the fleet-wide data policy. Each edge
 #    file carries only what is local to that site: its de-identification
 #    recipe, the tags that give the XNAT labels, its disk paths.
-$EDITOR sites/my-site/values.yaml        $EDITOR sites/my-site/secrets.enc.yaml
-$EDITOR sites/my-edge/values.yaml        $EDITOR sites/my-edge/secrets.enc.yaml
+$EDITOR sites/my-site/values.yaml sites/my-site/secrets.enc.yaml
+$EDITOR sites/my-edge/values.yaml sites/my-edge/secrets.enc.yaml
 
 # 6. Encrypt — do this before committing anything
 scripts/site-secrets.sh encrypt my-site
@@ -244,10 +252,11 @@ scripts/site-secrets.sh encrypt my-edge
 make verify-live SITE=my-site
 ```
 
-> **Back up `~/.config/sops/age/keys.txt`.** It is the only key that can decrypt
-> `sites/*/secrets.enc.yaml`, nothing can regenerate it, and losing it makes
-> every encrypted site file permanently unreadable. Put it in the team password
-> manager.
+> **Back up the usable SOPS recipient keys.** Your age key can decrypt files
+> encrypted to its recipient. A file can have several recipients; losing one
+> key does not destroy access while another remains. Losing all usable keys
+> does. Store approved recovery copies separately from the encrypted site files,
+> and verify that a retained key can decrypt the files you must recover.
 
 ### Then verify, every time
 
@@ -264,9 +273,10 @@ in it is hardcoded, and a deployment that keeps its data somewhere other than
 On this tier it walks the whole fleet: the management API server, node
 readiness, pod health per namespace, the `ais-edge-ca` Certificate and every
 Certificate derived from it, the SeaweedFS S3 Service, each edge's hosted
-control plane, and XNAT reachability. Its exit code is 0 when every check
-passed, 1 when a check failed, and 2 when it stops early (a usage error or an
-abort).
+control plane, and XNAT reachability. Its normal exit code is 0 when no check failed, even if some were skipped,
+and 1 when a check failed. Setup/usage errors can exit 2. Read `NOT CHECKED`
+as well as the status code. The probes do not establish complete DICOM
+delivery or content equality; send a synthetic study and inspect its destination.
 
 Run it:
 
@@ -414,8 +424,11 @@ apply.
 > behind holding the ports. Once the new Service has endpoints, delete it:
 > `kubectl -n <edge> delete svc kmc-<edge>-nodeport`.
 
-**Measured cost:** ~231Mi per uploader. On a 16Gi management node that is a
-practical ceiling around **15 sites**.
+**Historical sizing sample (date not recorded; reviewed 2026-11-10):**
+231Mi per uploader and a 15-site estimate on 16Gi came from an older workload.
+They are not a current capacity limit. Budget for configured requests, limits,
+archive buffers, hosted control planes and shared services. Measure concurrent
+large-study loads with the pinned image before adding a site.
 
 ### Edge-local configuration
 
@@ -431,10 +444,11 @@ as well:
 | `observability.loki.endpoint` | `hostnames.loki` or `loki.<domain.internal>` |
 | `hostAliases` | `domain.mgmtNodeIP` + the hostnames edge pods actually dial |
 
-Each of those used to be typed a second time, and **every mismatch in that group
-fails silently** — the uploader retries an endpoint that will never answer,
-correctly preserves its local copy, and the management side, which watches for
-arrivals rather than absences, reports nothing wrong.
+Historically these values were copied into both files and could drift. Wrong
+endpoints can produce DNS, TLS or HTTP failures and retained local copies.
+The uploader emits retry/failure logs; alerts depend on delivery of those logs
+and their thresholds. A quiet dashboard alone does not prove delivery. The
+derived defaults reduce duplication, but explicit overrides still need review.
 
 ### De-identification
 
@@ -466,9 +480,9 @@ ingest:
   project. Start from the complete recipe in `sites/example-edge/values.yaml`.
   It removes 17 tags and adds two de-identification markers. A short fragment
   at the same key replaces all of that, so a fragment is not a full policy.
-* **The XNAT labels are the tag values, verbatim.** `assign` reads them before
-  the recipe runs, so no recipe can change them. `assign` changes only spaces
-  and symbols, each run of them to `_`. PatientID often holds a hospital
+* **XNAT labels come from source tag values with character normalization.** `assign` reads them before
+  the recipe runs, so no recipe can change them. `assign` preserves letters, digits, underscores and hyphens; each run of
+  other characters becomes `_`. This is normalization, not pseudonymisation. PatientID often holds a hospital
   medical record number. If it does, `subject: PatientID` puts that number
   into XNAT in the clear, so choose pseudonymous tags. An approved research
   identifier in PatientID is fine. There is no AE-title routing. A study with
@@ -515,8 +529,9 @@ most heavily annotated in the repo and a YAML round-trip would destroy every
 caution comment in it, so it prints the `edges:` block for you to paste, along
 with the steps it cannot do for you.
 
-`apply` pipes the plaintext directly into `kubectl` — it never touches disk. It
-also creates any namespace its Secrets name, which is what makes
+`apply` pipes plaintext directly into `kubectl` without writing a plaintext
+manifest in the checkout. Editors, swap and the destination cluster are outside
+that narrow guarantee. The command also creates namespaces named by the Secrets, which is what makes
 **secrets-before-workloads** possible on a bare cluster.
 
 Only `data` and `stringData` are encrypted. Names, namespaces and keys stay
@@ -540,7 +555,7 @@ exactly one answer.
 
 ```yaml
 dataPolicy:
-  enabled: false      # nothing expires until you turn this on
+  enabled: false      # disables policy deletes; pipeline source retirement is separate
   dryRun: true        # decisions are logged, never acted on
 
   originals:                                   # the archive of record
@@ -593,9 +608,11 @@ rather than letting the edit look applied.
 
 Three properties worth understanding:
 
-**Every derived rule is `(condition AND minAge)` — both must hold.** A pure age
-rule would expire a session that never reached XNAT because a credential was
-wrong. A pure condition rule frees nothing once the signal breaks.
+**Derived cleanup requires its configured proof and any supported age gate.**
+Grouped retirement is the exception to a universal age rule: assign can unlink
+its successful input snapshot without a grouped `minAge`, and the chart rejects
+that key. Upload reclaimers require their own age and proof checks. An age by
+itself is not evidence that XNAT received data; a failed proof keeps the input.
 
 **`onXnatConfirmed` verifies each file, not existence.** XNAT creates the
 experiment on the first resource POST, so "the experiment exists" is true even
@@ -604,7 +621,9 @@ file names of a resource, finds each name's row in the one XNAT resource the
 uploader maps that folder to (the same scan id, the label accessionflow derives
 from the SOP class), and sends a HEAD for the file: only a 200 with a
 Content-Length equal to the staged size counts. Per-resource totals are not
-trusted; on xnat-test they stayed correct after XNAT had lost the files. Every
+trusted. A historical 2026-08-10 test showed a nonzero total and an empty
+listing. That response discrepancy did not establish whether physical bytes
+were lost; it established that the summary was insufficient cleanup proof. Every
 uncertainty (an unreadable manifest, a 500 from XNAT, an unmapped resource, an
 object that changed after the listing) resolves to **keep** for that resource.
 An upload batch folder, an entry the reclaimer does not recognise, and the
@@ -616,16 +635,20 @@ are proven.
 per run, leaving the rest for somebody to notice. At the hourly schedule this
 still drains ~1200 sessions/day.
 
-**A fresh install expires nothing.** Run with `dryRun` for a week and read the
-decisions it logs before enabling it.
+**Policy expiry is disabled on a fresh install.** Run with `dryRun` and read
+the decisions before arming it. This does not stop pipeline source retirement:
+`--unlink-source all` can remove a successful input snapshot, including files
+not represented in the output. The tool does not first verify a backup copy.
 
 **Originals need a third switch.** `enabled` and `not dryRun` arm the *derived*
 stages only. A duration on `originals.facilityBackup` or `originals.quarantine`
 does nothing until `dataPolicy.originals.allowExpiry` is also true — the
 `edge-data-policy` DaemonSet logs `expiry_skipped` instead, and the chart keeps
 the facility-backup volume mounted read-only, so the kernel refuses the delete
-even if the engine were wrong. Deleting an original destroys the only
-identifiable copy, so it takes its own deliberate act on top of the other two.
+through that mount. It does not protect against a different writer or host
+administrator. Deleting the archive can destroy a retained original; other
+identifiable copies can also exist in Orthanc, grouped, assigned and reid
+storage. Review the retention obligation before arming any originals expiry.
 Full truth table: `docs/TOUR.md` §5c.
 
 ---
@@ -634,24 +657,25 @@ Full truth table: `docs/TOUR.md` §5c.
 
 | Boundary | Mechanism |
 |---|---|
-| Hospital → management | Outbound TLS only. No inbound route to the edge. |
+| Hospital → management | Runtime management traffic uses outbound TLS. The default SSH bootstrap and teardown require inbound SSH; the bundle path performs bootstrap locally. DICOM reception has its own inbound port. |
 | Between edge sites | **One S3 bucket per site.** SeaweedFS matches identity actions as `<action>:<bucket>` with **no prefix scoping**, so a shared bucket would let any edge key read and delete every other site's staged imaging. The bucket is the only boundary there is. |
 | Edge → XNAT | The edge has **no XNAT credential**. Only the management uploader does. This is the main operational advantage of `upload.mode: s3`. |
-| S3 ingestion | Per-edge **SigV4 key pair**, scoped to that site's bucket (the row above). Optionally a second factor: `seaweedfs.ingress.clientCerts` adds a per-edge **client certificate**, verified at the SeaweedFS Ingress with the same `auth-tls-*` annotations the Loki path uses — the key pair is a bearer secret usable from anywhere, the certificate is a private key that never leaves the site and rotates every 90 days. **Ships off**, and turning it on is a four-step rollout (`issue` → confirm `s3-client-tls` landed → edge `requireClientCert` → `require`): flipping verification on before the certificates arrive breaks every upload with an error that names nothing — measured, the handshake succeeds, nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure, so it reads as a dead endpoint. See `docs/components/seaweedfs.md`. |
+| S3 ingestion | Per-edge **SigV4 key pair**, scoped to that site's bucket (the row above). Optionally a second factor: `seaweedfs.ingress.clientCerts` adds a per-edge **client certificate**, verified at the SeaweedFS Ingress with the same `auth-tls-*` annotations the Loki path uses ; the key pair is a bearer secret usable from anywhere, cert-manager creates the certificate and private key on management and cert-sync copies both to the edge. The default certificate lifetime is 90 days, with renewal before expiry; verify issuance and sync rather than assuming a successful rotation. **Ships off**, and turning it on is a four-step rollout (`issue` → confirm `s3-client-tls` landed → edge `requireClientCert` → `require`): flipping verification on before the certificates arrive breaks every upload with an error that names nothing ; measured, the handshake succeeds, nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure, so it reads as a dead endpoint. See `docs/components/seaweedfs.md`. |
 | Loki ingestion | Per-edge **client certificate (mTLS)**, verified at the Ingress (`auth-tls-verify-client: on`, with `auth-tls-match-cn` pinned to the names in `edges`). cert-manager issues one `<edge>-loki-client` certificate per site and cert-sync delivers it as `loki-push-client-tls`. Loki itself runs `auth_enabled: false`, so the Ingress is the only place it is checked. The CN pin admits every site on the one push hostname, so it bounds *which* certificates are accepted, not one edge writing under another's name. |
 | TLS | Internal CA via cert-manager. An https S3 endpoint with no CA bundle is **refused at render time**. The uploader is rclone, and an empty `RCLONE_CA_CERT` falls back to the system store, which does not hold the internal CA, so every transfer would fail the handshake. (The older client, the AWS CLI, was worse: an empty `AWS_CA_BUNDLE` silently disabled verification.) |
-| Credentials at rest | SOPS + age. Never in a values file, never in a ConfigMap, never in git. |
-| CA private key | `tls.key` can never be copied to an edge — cert-sync refuses to render it. |
+| Credentials at rest | Keep plaintext credentials out of values and ConfigMaps. Commit only SOPS-encrypted site secrets. Kubernetes Secrets and their consumers still hold usable credentials; SOPS does not encrypt all runtime copies. |
+| CA private key | cert-sync rejects configured copies of the CA private key to an edge. This is a chart guard, not a restriction on administrators who can read management Secrets. |
 
 `install.sh` also **refuses to install** if `sites/<site>/secrets.enc.yaml` is
 not SOPS-encrypted, or — when `sops` is on `PATH` — if any *value* in it is
-still an unfilled `REPLACE_` placeholder. It decrypts to a pipe, never to disk,
+still an unfilled `REPLACE_` placeholder. This preflight decrypts to a pipe without a plaintext manifest in the checkout,
 and checks the values rather than the file text: the templates' own comments say
 "fill in every REPLACE_", so grepping the whole file refused to install a
-complete, correct site. Note the two limits of that check: `sops` is not in the
-required-tools list, so on a node without it the placeholder check is skipped
-entirely, and **nothing anywhere enforces a minimum length or strength** on a
-credential you did fill in. The check exists because the template once shipped
+complete, correct site. Note the two limits of that check: `sops` is not in the initial
+required-tools list, so on a node without it this preflight is skipped. The
+subsequent secret-apply step still needs decryption. `check-site-secrets.py`
+adds structural checks; this is not a general password-strength policy. Review
+site credential requirements separately. The check exists because the template once shipped
 working defaults annotated "change defaults", and the first deployment ran with
 them unchanged — a comment is advice, and advice does not fail an install.
 
@@ -729,7 +753,8 @@ scripts/
   ci/                          CI stages (render, negative, promtool, …), one
                                script per stage, invoked by the Makefile
 tests/
-  reclaimer/                   45 cases asserting on what was DELETED, both backends
+  reclaimer/                   filesystem/S3 deletion proofs and the pinned-image
+                               deidentify sidecar contract; read current case counts from the run
   loki-rules/                  the real Loki rule expressions, against fixture
                                logs, evaluated by the pinned Loki
   data-policy/                 the real engine under the real image, asserting
@@ -745,7 +770,7 @@ docs/                          component guides, CA ceremony, alerting design
 ## Continuous integration
 
 ```bash
-make ci-fast     # no cluster, no docker
+make ci-fast     # no cluster; selected stages still use Docker
 make ci          # adds the four docker-based stages: loki-rules, data-policy,
                  # s3-uploader-image, greenfield
 
@@ -755,25 +780,34 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 
 | Stage | Proves |
 |---|---|
-| `render` | both charts render across 40 value combinations |
-| `negative` | 114 render-time guards each fire on the condition they claim to detect, plus a census that fails if a guard is added without a case |
-| `promtool` | 47 unit-test groups (85 alert assertions) over the 13 Prometheus alert rules: each rule fires on the condition it describes |
+| `render` | both charts render across the combinations in `scripts/ci/render.sh`, including ingest, packaging and upload modes |
+| `negative` | declared render-time guards reject their invalid configurations, with a census for guards lacking a case |
+| `promtool` | Prometheus expressions are tested with `charts/mgmt/files/prometheus-rules/tests/` fixtures; Loki expressions have a separate harness |
 | `shell-syntax` | every script parses; no `yes \|` pipeline under `pipefail` |
-| `pvc-retention` | nothing holding data can be auto-deleted |
+| `pvc-retention` | data-bearing manifests carry the expected Helm/PVC retention settings; this does not stop runtime reclaimers, uninstall or host deletion |
 | `runtime-templates` | scripts survive Helm rendering |
 | `duplicate-names` | no two objects collide |
-| `reclaimer` | 114 cases, asserting on **what was deleted**, not on log text. 14 drive the edge's `PROOF=s3` proof (the filesystem backend against the fake S3: ETag and size per file, multipart ETag forms, repair requests written once and never in a dry run). 32 drive the S3 backend through the real helper against a fake S3 (`If-Match` honoured, 412 on a stale ETag), a fake XNAT and a fake filer over HTTP, and assert which keys were deleted, that every DELETE carried `If-Match` and that none named a folder; 68 drive the filesystem backend against a real directory tree with real lock files, where the assertion is what is left on disk |
+| `reclaimer` | real filesystem and mocked HTTP/S3 cases assert which data survives and which objects are deleted. They cover file size and ETag proof, multipart ETags, writer locks, repair requests, stale-object 412 responses and conditional DELETE paths. The same target runs the pinned-image deidentify sidecar probe. Case counts come from the exact test revision |
 | `reclaimer-fence` | 27 cases against a stub kubectl: the drain and resume around an upgrade of the edge's staged-reclaimer fail closed, a failed read is never "no Job runs" |
 | `cleaner-activation` | 27 cases against a stub kubectl and a stub curl: the order of the steps that opt a bucket out of the SeaweedFS cleaner, and that a failed query (a pod listing, the multipart check, a scale) is never read as "nothing runs": a failure attests and resumes nothing beyond that point, what it changed stays marked on the object, and a rerun puts it back |
 | `s3-uploader` | 9 cases against a stub rclone: the uploader copies only inside the upload-tree writer lock, skips a session while the lock is held, claims a repair request by rename and answers it with `--ignore-times`, returns it on a failed copy, requeues a claim left by a crash, and has no delete at all |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
-| `values-consumers` | every values key that declares a behaviour has something reading it — Helm never warns about a value nobody consumes |
+| `values-consumers` | audited `dataPolicy` leaves have a reader or a tracked exception. `KNOWN_DEAD` is empty; `originals.fileDrop.minAge` remains declared but not enforced. This is not a census of every values key |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |
-| `data-policy` | the edge retention engine, run under the real busybox image the chart deploys, asserting on **what survived** |
+| `data-policy` | the edge retention engine runs under the chart-pinned curl image, with assertions on surviving files, Orthanc receipt checks and policy refusal cases |
 | `s3-uploader-image` | the uploader loop inside the pinned shell image, with rclone lifted in as the initContainer does it: one real copy |
 | `greenfield` | the charts install onto an empty cluster |
 
-The last four need docker. They **skip loudly** without it, and the skip is
+**Current suite (2026-11-10):** `FAST_STAGES` has 20 stages and
+`ALL_STAGES` adds four. The old table recorded 40 render combinations, 114
+negative checks, 47 Prometheus groups/85 assertions and 114 reclaimer cases.
+Those are historical snapshots, not the current gate totals. Read the summary
+from the exact commit tested. Additional fast stages include `verify-live-checks`,
+`lua-syntax`, `fingerprint-contract`, `shared-files`, `cli-contract`, `notes`
+and `log-phrases`; they check verifier semantics, Lua parsing, shared code,
+rendered arguments, CLI/environment support, operator output and log consumers.
+
+The last four need Docker, and some fast stages do too. They **skip loudly** without it, and the skip is
 reported separately from a pass, so a docker-less run never reads as "the charts
 are installable". `CI_REQUIRE_LOKI_TESTS`, `CI_REQUIRE_DATAPOLICY_TESTS`,
 `CI_REQUIRE_UPLOADER_IMAGE` and `CI_REQUIRE_GREENFIELD` turn each skip into a
@@ -781,8 +815,10 @@ failure, which is what the GitHub workflow sets.
 
 Two of these exist because of specific classes of silent failure:
 
-**The reclaimer is the only component that deletes patient data**, so it is
-tested by asserting on the deletes. A run that logs `reclaim_kept` and issues a
+**Reclaimers delete patient data**, so their tests assert the actual deletes.
+Pipeline source retirement and the data-policy adapters also delete data under
+their own controls and tests. These paths use different proof; no one test
+suite establishes all retention behavior. A run that logs `reclaim_kept` and issues a
 DELETE anyway would pass a log-only test and fail this one. Its `aws` and `curl`
 are stubbed and **fail by default** for anything a case does not configure — a
 stub that invented a plausible success would test the opposite of the property
@@ -820,7 +856,7 @@ kubectl -n cert-manager get certificate
 ### Send a test study
 
 ```bash
-dcmsend <orthanc-pod-ip> 4242 -aec AISEDGE study.dcm
+dcmsend <edge-node-ip> 4242 -aec AISEDGE synthetic-study.dcm
 ```
 
 Then follow it: Orthanc logs (the `instance_archived` event, with its
@@ -828,11 +864,12 @@ Then follow it: Orthanc logs (the `instance_archived` event, with its
 `/data/deidentified` → `upload_completed` in the s3-uploader log →
 `s3://ingest-<edge>/staged/` → the management uploader log.
 
-Note that **re-sending the same file produces no upload notification**. DICOM
-UIDs are deterministic, so Orthanc deduplicates it into a study already labelled
-`xnat-ingest-processed`, and the uploader reports
-`Skipping upload … as all the resources already exist on XNAT`. That is correct
-idempotence, not a failure. Use a different study to test a fresh write.
+Re-sending an unchanged instance with the same DICOM UIDs may produce no new
+upload notification. Orthanc deduplicates stored instances; grouping checks
+its export snapshot, and the uploader skips a session whose remote files are
+complete. The processed label alone is not a permanent skip when new instances
+arrive. Use a new synthetic StudyInstanceUID and known labels to test a fresh
+write, then verify the remote inventory rather than counting notifications.
 
 ### Adding an edge
 
@@ -874,14 +911,17 @@ scripts/site-secrets.sh encrypt <edge>
 make verify-live SITE=<site>
 ```
 
-Existing sites are untouched; the new one gets its own control plane, bucket,
-identity, uploader and reclaimer. Full walkthrough: `docs/TOUR.md` §5b.
+The installer also reconciles existing sites; changed shared values can roll
+their workloads. The new site gets its own control plane, bucket, identity,
+uploader and reclaimer. Review the merged values before applying them. Full walkthrough: `docs/TOUR.md` §5b.
 
 ### Removing an edge
 
-Remove its entry from `edges:`, then `helm upgrade`. Reset the worker with
-`k0s reset` on the edge machine. The staged data and the SeaweedFS identity are
-removed with the entry.
+Plan data retention and credential revocation before decommissioning. Entry
+removal and `helm upgrade` remove rendered consumers, but the create-only bucket
+hook preserves the staging bucket and its data. Retained Secrets, copied keys
+and certificates need explicit handling. A worker reset and host-data removal
+are separate destructive steps; verify retained copies before carrying them out.
 
 ### CA rotation
 
@@ -898,27 +938,28 @@ each site. `CertificateExpiringSoon` fires at 60 days.
 | Edge pods `CreateContainerConfigError` | A Secret is missing. Most often `ca-bundle`, `loki-push-client-tls` or `s3-edge-credentials`, all three delivered by cert-sync — run its job manually: `kubectl -n ais-mgmt create job x --from=cronjob/mgmt-cert-sync-<edge>` |
 | `helm install` fails with `conversion webhook … connection refused` | The k0smotron operator is not ready. It needs cert-manager, which must be installed *before* the chart. |
 | `invalid ownership metadata` on install | An object exists without Helm's ownership labels, usually from a previous non-Helm install. `scripts/uninstall.sh` clears these. |
-| Worker join times out | On a `join: bundle` edge, first check the obvious one: the bundle has not been run on the edge yet — the installer is waiting for the node to appear and 06c says so on timeout. Otherwise the management node cannot resolve its own child-cluster API: check `/etc/hosts` has the `aisedge` entries — a partial teardown that removed the entries but left the marker comment causes the installer to skip re-adding them. |
-| Uploader retries forever, no error on the management side | The edge cannot reach the S3 endpoint. Check `hostAliases` resolve and the CA bundle is present. The edge correctly preserves its local copy, so the only symptom is an absence. |
-| `XNATAuthFailure` while uploads succeed | Was a false positive from `xnat-ingest` progress-bar output matching bare `401`/`403`. Fixed; the rule now requires HTTP context and drops `it/s` lines. |
-| Loki logs `NoSuchBucket` at startup | Non-fatal. The bucket-creation hook is `post-install`, so Loki retries its chunk store until the bucket appears. It converges without restarting. |
+| Worker join times out | For `join: bundle`, verify that the operator ran a fresh bundle. Otherwise inspect DNS or the managed `/etc/hosts` entries, API readiness, outbound reachability and token expiry. The current join scripts reconcile managed host entries; do not assume the old stale-marker defect still applies. |
+| Uploader retries forever, no arrival on management | Inspect the edge uploader logs for DNS, TLS, HTTP and retry errors. Check the resolved endpoint and CA bundle. Local copies remain on failure; log transport and alert thresholds determine whether management receives a warning. |
+| `XNATAuthFailure` while uploads succeed | Historical progress-bar false positives were fixed by requiring HTTP context and excluding `it/s`. A real authentication failure can still occur beside successful uploads. Inspect the matched log, credential validity and reconnect outcome; success does not dismiss the alert. |
+| Loki logs `NoSuchBucket` at startup | The bucket hook runs after install/upgrade. Retry errors may clear when it succeeds. Persistent errors need checks of the hook Job, credentials and SeaweedFS readiness; recovery is not guaranteed by waiting. |
 
 ---
 
 ## Orthanc REST API Authentication
 
-The shipped edge site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
-`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
-accident of network placement, not a control. Anything running *inside* the
-cluster can call that API, and it can **delete studies**. Turn it on for any
-deployment where that matters.
+The chart default sets `orthanc.auth.enabled: true`; the `example-edge`
+site overrides it to `false`. Check the merged site values. The REST Service
+defaults to `ClusterIP`. This limits normal external exposure but is not an
+authorization boundary: reachable clients, including in-cluster workloads or
+users with port-forward access, may call it. The API can delete studies.
+Enable authentication and supply the three matching Secret keys below.
 
 Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
 | `users.json` | Orthanc itself. The chart mounts it at `/etc/orthanc/users.json`, a configuration fragment that Orthanc merges at start. There is no `RegisteredUsersFile` option | Orthanc answers 401 to every request. If the key is missing, the volume does not mount and Orthanc does not start |
-| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401. Grouping cannot export studies and can retry or exit depending on where the error occurs; the policy adapter logs `backend_unavailable` and keeps the store |
 | `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
@@ -995,9 +1036,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
-Then confirm the pipeline still moves: `group-orthanc`'s log should keep
-reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
-`orthanc-password` disagree with `users.json`.
+Then confirm that a synthetic study moves through grouping and assignment.
+A `Found N studies` line alone does not prove an export succeeded. On a 401,
+compare `orthanc-user` and `orthanc-password` with `users.json`, check that
+each consumer was restarted, and inspect the receiver authentication config.
 
 > **Do not expose port 8042 to the host or a NodePort just because auth is now
 > on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
@@ -1010,7 +1052,7 @@ scripts/uninstall.sh <site>                  # full reset, both nodes
 scripts/uninstall.sh --keep-cluster <site>   # workloads only, keep k0s running
 ```
 
-The default is a genuine clean slate: both Helm releases, all namespaces, the
+The default is a genuine clean slate: both Helm releases, the configured component namespaces,
 CRDs and admission webhooks, cluster-scoped RBAC (including the Roles these
 components leave in `kube-system`), every PersistentVolume **and its host
 directory**, `/data` on every node, `/etc/hosts` entries **and their marker
@@ -1053,10 +1095,12 @@ like a bug in the charts.
 | Orthanc | `1.12.11` |
 | accessionflow | `0.19.0`: upstream `ghcr.io/australian-imaging-service/accessionflow`, in both charts. Replaces the former xnat-ingest 0.16.2.post1 fork; deployed object names, paths and Orthanc receipt labels stay the same |
 
-Every one is what is **verified working**, read out of a live deployment rather
-than chosen from a changelog. The previous installer used `/latest/` and
-`/stable/` URLs, so a rebuild months apart got whatever upstream had published
-that morning. Upgrade them deliberately, one at a time.
+These are **source pins reviewed on 2026-11-10**, not a new live compatibility
+or vulnerability certification. Vector has separate versions: management chart
+0.57.0 and edge image 0.49.0. The old live observations are historical; their
+measurement dates were not recorded here. The installer previously used moving
+`/latest/` and `/stable/` URLs. Check the lock files, image tags, release notes
+and validation results before a deliberate upgrade.
 
 ### Requirements
 
@@ -1071,4 +1115,6 @@ that morning. Upgrade them deliberately, one at a time.
   **for `join: ssh` only**. In steady state — and always under `join: bundle` —
   the edge only dials *out*, to the management node on 443, under either
   `exposure` mode.
-* ~16Gi RAM on the management node supports roughly 15 edge sites
+* Size management RAM for measured concurrent load. The historical 16Gi /
+  15-site estimate is not verified for the pinned image (2026-11-10); include
+  per-edge control planes, uploader limits, archive buffers and shared services.

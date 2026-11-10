@@ -1,15 +1,22 @@
+# Reviewed 2026-11-10 against this branch. This file retains its existing
+# site settings; it is not evidence of a current live deployment. Historical
+# measurements without a run date are not verified (2026-11-10).
+# This retained configuration selects the deprecated Lua engine. Do not
+# copy that choice for a new site; start from the current ingest example.
 # The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 clusterLabel: cloud-edge
 
-# The de-identification engine. One key; the chart derives the Lua hook,
-# the accessionflow stage, the group label and the reclaim condition from it.
+# Select the engine for this retained site configuration. The chart derives
+# the stage, labels and reclaim condition from it. New sites use ingest:
+# Orthanc receives DICOM and accessionflow performs de-identification.
+# The orthanc/Lua engine is deprecated and retained only for existing sites.
 deid:
   engine: orthanc
 
-  # THE GATE. The chart refuses to render while this is false. Set it only once
-  # you have read the recipe the engine above selects and agree it is this
-  # site's policy. Not a formality: nothing downstream re-checks what was
-  # removed.
+  # THE REVIEW GATE. deid.policyReviewed must be true before the chart renders.
+  # Read the selected recipe and source-label mapping first. This flag records
+  # operator review; it does not test de-identification quality or guarantee
+  # that identifiers in headers, pixels, paths and logs have been removed.
   policyReviewed: true
 namespace: xnat-ingest
 topology: cloud

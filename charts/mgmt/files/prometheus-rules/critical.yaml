@@ -1,3 +1,6 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # Critical alerts (Prometheus / kube-state-metrics) — pages on-call.
 #
@@ -16,7 +19,12 @@ groups:
         labels: { severity: critical }
         annotations:
           summary: "Management API server unreachable"
-          description: "kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane is down or partitioned."
+          description: |
+            The discovered kube-apiserver scrape target has reported up=0 for at least
+            five minutes. Check target errors, network access, TLS and authentication,
+            as well as API-server health. This signal does not prove the entire control
+            plane is down. A vanished target or unavailable Prometheus cannot produce
+            the same up=0 signal; inspect discovery and evaluator health separately.
 
       - alert: SeaweedFSDown
         # Matched by REGEX, not by an exact name.
@@ -34,13 +42,25 @@ groups:
         for: 2m
         labels: { severity: critical }
         annotations:
-          summary: "SeaweedFS pod has been NotReady for 2+ minutes"
-          description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+          summary: "SeaweedFS deployment has zero ready replicas for 2+ minutes"
+          description: |
+            The matching deployment reports zero ready replicas. It may be unhealthy
+            or deliberately scaled down. Check desired replicas, pod events and logs
+            in {{ $labels.namespace }}. The selector matches deployment names containing
+            seaweedfs; verify the actual workload before assuming a specific failure.
+              kubectl -n {{ $labels.namespace }} get deployments,pods
+              kubectl -n {{ $labels.namespace }} logs -l app=seaweedfs --tail=100
+            Edge transfers may fail or retry while the service is unavailable.
 
       - alert: EdgeWorkerDisconnected
         expr: kube_node_status_condition{condition="Ready",status="true"} == 0
         for: 5m
         labels: { severity: critical }
         annotations:
-          summary: "Edge worker {{ $labels.node }} NotReady for 5+ minutes"
-          description: "kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged sessions cannot upload."
+          summary: "Observed node {{ $labels.node }} NotReady for 5+ minutes"
+          description: |
+            Management kube-state-metrics observes management-cluster nodes, not the
+            remote child workers. This historical alert name does not add edge coverage.
+            Inspect node conditions, kubelet, disk pressure and network status. A missing
+            node series can remain silent here. Pipeline stages may be disrupted, but
+            this alert does not establish which files were received or uploaded.

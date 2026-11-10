@@ -2,6 +2,8 @@
 
 The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 
+Review status (2026-11-10): this is a historical decision record, including rejected proposals and the author’s retrospective. The baseline adoption is dated 2026-08-05; measurements without their own date are **not verified (2026-11-10)** as current deployment facts. Current implementation notes below take precedence over proposal wording. No production state was changed or tested in this documentation review. In the default pipeline Orthanc is the receiver; accessionflow performs de-identification after assignment.
+
 Status: **superseded as a blocker list — most of it has shipped.** When this
 was written the charts rendered and validated but were not safe to install on
 the existing management cluster. They have since been installed on it: the
@@ -47,14 +49,13 @@ aws s3 ls s3://ingest-bucket/   ->  PRE staged/          ALLOWED
 aws s3 ls s3://logs-bucket/     ->  AccessDenied         DENIED
 ```
 
-So the enforcement boundary is the **bucket**, and only the bucket. Because
-every site currently shares `ingest-bucket`, and `Write:ingest-bucket/*`
-covers every key in it, **any edge key can today read, list and delete any
-other site's staged imaging.** Prefix-scoped actions are not a thing here.
+So the enforcement boundary is the **bucket**, and only the bucket. In the pre-migration deployment described here,
+every site shared `ingest-bucket`, and `Write:ingest-bucket/*`
+covers every key in it, **an edge key could read, list and delete another site's staged imaging in that shared bucket.** The current default is one bucket per edge; this historical state is not the current default. Prefix-scoped actions are not a thing here.
 
 ### Recommendation: one bucket per edge site — `ingest-<edge-name>`
 
-This is the only change that makes the isolation claim true.
+Bucket separation supplies the intended per-edge authorization boundary. Its security also depends on the actual policy, credentials, server behavior and administrative access; a chart value alone does not prove live isolation.
 
 **What it changes on the management side.** `accessionflow store xnat` takes one
 `s3://bucket/prefix` argument, so one uploader cannot serve N buckets. The
@@ -64,7 +65,7 @@ and likewise the reclaimer CronJob.
 That reads like a cost, but it is mostly a benefit and I would argue for it
 even without the security case:
 
-* Today one uploader is a **fleet-wide single point of failure**. One site's
+* Historically, one shared uploader was a **fleet-wide delivery failure point**. One site's
   malformed session, one stuck multipart, one bad credential, and every site
   stops being delivered.
 * Per-site uploaders give per-site failure isolation, per-site alerting
@@ -80,10 +81,11 @@ revisiting anyway, so it is not the binding constraint.
 
 **What it still does not buy.** An edge key can delete *its own* staged data,
 because SeaweedFS folds object DELETE into the `Write` action and the edge
-needs `Write` to upload at all. That is acceptable — the edge already holds
-the originals in its facility backup — but it should be stated rather than
-implied away. The mitigation that matters is that the edge uploader never
-issues a delete: it uses a content-fingerprint state file instead.
+needs `Write` to upload at all. That is a residual risk, not made acceptable merely by enabling facility
+backup: REST/file-drop input and failed backup callbacks can lack that copy.
+Verify actual original coverage and retention for the affected data. The mitigation that matters is that the edge uploader does not delete staged session objects during normal copy.
+It does delete its own markers/repair requests and uses a path/size/mtime
+fingerprint, not a content hash, to avoid unchanged passes.
 
 **Migration.** Existing `ingest-bucket` keeps working; add per-site buckets,
 move sites one at a time, retire the shared bucket last. No flag day.
@@ -109,26 +111,26 @@ load balancer is layer 4, so this is unchanged.
 **Two decisions worth recording.**
 
 *A separate anchor from Loki's.* Reusing `mgmt-loki-client-ca` was the obvious
-shortcut. The anchor is the revocation boundary — the only way to stop trusting
-certificates beneath it is to re-issue it, which invalidates all of them — so a
-shared anchor would make "stop this site uploading" and "stop this site
-reporting" the same action, and take a site's telemetry down at the moment it
-is most needed to explain the revocation. Two anchors, one CA.
+shortcut. These are separate endpoint trust-bundle Secrets, but both are populated from
+the same fleet CA. They are not independent certificate authorities. The
+allowed-CN configuration can remove a site without replacing the CA; shared
+CA trust still means a compromised signing key affects both endpoints. To
+claim independent revocation domains, issue from independent authorities and
+verify the resulting trust policies. Separate Secret names alone do not do so.
 
 *Two switches, not one.* `clientCerts.issue` mints and distributes;
 `clientCerts.require` enforces. They are separate because a rejected client
 certificate produces an error that names nothing. Measured against nginx
-`ssl_verify_client on` and rclone 1.75.0: the handshake **succeeds** (TLS 1.3
-sends the client certificate after the server's `Finished`, so nginx refuses
-the first request rather than the connection), nginx answers `400 No required
+`ssl_verify_client on` and rclone 1.75.0: the handshake succeeded in that configuration and rejection occurred at the
+HTTP layer (this is an nginx observation, not a general TLS 1.3 requirement), nginx answers `400 No required
 SSL certificate was sent` with an HTML body, and rclone reports that as
 `error while deserializing xml error response`. Wrong CA is the same 400; a CN
-outside `auth-tls-match-cn` is a 403 with the same noise. Enabling both at once would put
+outside `auth-tls-match-cn` is a 403 with the same noise. Enforcing before running edges receive certificates can put
 cert-sync's six-hour period between "verification is on" and "the certificates
 have arrived", with every upload in the fleet failing for a reason that names
 neither certificates nor auth. With two switches the operator can issue, wait,
 **confirm the Secret exists on each edge**, and only then enforce. Render guards
-hold the pair together in both directions; no template can check the last step,
+hold the pair together in both directions; render validation does not establish that delivery completed,
 so `endpoint_failed`'s message reports the client-certificate state instead.
 
 ---
@@ -164,12 +166,13 @@ so `endpoint_failed`'s message reports the client-certificate state instead.
 > anyway (`auth_enabled: false`, and the `cluster` label comes from the
 > payload) — see the multi-tenancy non-goal at the end of this section.
 >
-> **Still missing: the log-absence alert of §6.** R2 below made it a
-> precondition and it does not exist. It is not a regression — nothing has ever
-> arrived over this path, so there is no working state to lose — but until it
-> lands, "this edge stopped shipping" is still only visible by looking.
+> **Current absence coverage:** `DataPolicyReporterSilent` now checks each
+> configured edge for periodic stage reports, while `CertSyncStale` and
+> `CertSyncNeverSucceeded` cover delivery jobs. This is partial coverage: an
+> active reporter does not prove every component is shipping, and a failed
+> Loki evaluator cannot report its own outage through these LogQL rules.
 
-Today: the token is minted, shipped and sent but **never validated** — the
+Historical pre-mTLS finding: the token was minted, shipped and sent but **never validated** ; the
 push endpoint accepts unauthenticated writes from anything that can route to
 it. The chart's attempted fix renders basic auth against a Secret nothing
 creates, and the edge sends bearer, so a default install is dead instead.
@@ -209,29 +212,32 @@ Design:
 * The Loki Ingress gets `auth-tls-secret` (the CA), `auth-tls-verify-client: on`,
   and `auth-tls-match-cn` built from the `edges` list.
 
-What this buys over a shared token: **no shared secret material anywhere**,
-automatic rotation by cert-manager (a token rotates when someone remembers
-to), an identity that is cryptographically bound to the site rather than a
-string anyone holding it can replay, and revocation by removing the site from
+This replaces one fleet token with per-site private keys and certificates,
+with renewal distributed by cert-sync. Private keys are still secret material
+held on management and the destination edge; possession of a copied key and
+certificate permits impersonation. CN admission also does not bind submitted
+cluster labels to that certificate. The benefit is scoped identities and
+managed renewal, and revocation by removing the site from
 the list and upgrading — the CN no longer matches. It is also the same trust
 root the S3 path already uses, so there is one PKI to reason about instead of
 one PKI plus a bag of tokens.
 
 **Deliberate non-goal: log READ isolation between sites.** Loki multi-tenancy
-(`auth_enabled: true`) would give it, and it is the obvious "do it properly"
+requires tenant authentication and authorization at a trusted gateway;
+`auth_enabled: true` alone only enables tenant identification, and it is the obvious "do it properly"
 reflex — but it is the wrong call here and it is worth writing down why.
 Tenanted rules are evaluated per tenant, so every fleet-wide alert we have
-(`sum by (cluster) (...)` across sites) becomes impossible, and Grafana needs
-per-tenant datasources to see anything. We would trade working cross-site
-alerting for an isolation property nobody needs, since operations are
-fleet-wide by design and Grafana is already admin-authenticated. The push path
+(`sum by (cluster) (...)` across sites) needs a revised query/rule architecture rather than the existing shared-tenant
+queries. Federation and gateway policy require separate design and validation. We would trade working cross-site
+alerting for an isolation property nobody needs, in the original fleet-wide operations design. Sites must still decide whether
+shared log visibility is acceptable; Grafana login alone does not isolate tenants. The push path
 is the boundary that matters, and mTLS is the right control for it.
 
 ---
 
 ## 2. Per-edge hostnames, and no computed ports 🔴
 
-Every edge renders the same `apiHost`/`konnectivityHost`, so two sites produce
+Historical finding, corrected by explicit per-edge exposure values: every edge rendered the same `apiHost`/`konnectivityHost`, so two sites produce
 two Ingresses claiming one hostname. Separately, NodePorts are derived from an
 edge's **position in the list** (`add 30443 $i`), so reordering or deleting an
 entry silently moves a running site's port — while `resource-policy: keep`
@@ -254,14 +260,16 @@ guarantees the old Service still holds it.
 **Production DNS.** nip.io works and is fine for dev, but a production fleet
 should have a real wildcard record (`*.edge.<org-domain>`). nip.io is a
 third-party dependency in the control path of every child cluster's API
-server, and it cannot be used with Let's Encrypt. Treat moving off it as part
+server, and the operator does not control its DNS-01 zone. Do not treat that as a blanket prohibition on public certificate issuance via other validation methods. Treat moving off it as part
 of going to production, not as an optional tidy-up.
 
 ---
 
 ## 3. PKI 🔴
 
-The immediate bug is that `certManager.enabled` ("install the subchart") is
+Current implementation: `certManager.clusterResourceNamespace` is separate from installation. `rotate-ca.sh` remains a legacy-name helper and is not a validated current fleet-rotation runbook; use the ceremony and inspect rendered names. Normal intermediate renewal and compromised-issuer revocation are different operations.
+
+The historical namespace bug was that `certManager.enabled` ("install the subchart") is
 used to decide where cert-manager reads cluster-scoped resources from. On this
 cluster cert-manager was installed with `kubectl apply` and runs
 `--cluster-resource-namespace=cert-manager`, so the CA Certificate lands
@@ -272,7 +280,7 @@ to deal with it.
 
 ### Do it properly: a two-tier CA, with the root key held offline
 
-Today there is **one self-signed root CA whose private key lives in a
+In the default self-signed mode there is **one self-signed root CA whose private key lives in a
 Kubernetes Secret on the management node, and it signs everything**. If that
 node is compromised, or the Secret leaks, the attacker can mint a certificate
 for any hostname in the fleet, and the only remedy is to re-issue and
@@ -287,7 +295,10 @@ The standard answer, and it costs very little here:
 * **Intermediate CA**: lives in the cluster, is what cert-manager's
   `ClusterIssuer` actually uses, and is rotatable on a normal schedule
   *without touching any edge*, because edges trust the root.
-* Edges keep trusting the root, so intermediate rotation is invisible to them.
+* Edges can keep trusting the root across normal intermediate renewal, provided
+  complete chains, verification depth, trust-bundle distribution and leaf renewal
+  are correct. Compromise recovery must also exclude the old intermediate;
+  merely issuing a new one does not revoke a still-trusted stolen issuer.
   This is the whole point: it turns a fleet-wide redistribution event into a
   routine in-cluster operation.
 
@@ -309,6 +320,8 @@ Also settle, rather than defer:
 
 ## 4. Reclaimer completeness 🟠 — restructure it, do not patch it
 
+Historical proposal, revised by R1 and the October section below. Current `reclaim-files.py` verifies mapped resource files and sizes before deletion; it does not delete merely because an experiment exists. Neither a prefix count nor two empty observations is a writer fence.
+
 XNAT creates the experiment on the **first** resource POST, so
 `xnat_has_session` confirms existence, not delivery. An upload that died after
 3 of 400 scans confirms, and the staged copy — including the 397 scans that
@@ -327,7 +340,7 @@ heuristic at all. Move the responsibility:
 
 * **The mgmt uploader deletes its own staged session** immediately after it
   has verified its upload, using knowledge it already holds. `accessionflow`
-  already auto-generates a per-session `MANIFEST.json`, so "did everything
+  writes per-resource `__MANIFEST__.json` files, so "did everything
   arrive" is answerable against a real artifact rather than inferred.
 * **The reclaimer becomes a garbage collector for residue only** — orphaned
   prefixes from a crashed uploader, empty directory entries, sessions whose
@@ -343,8 +356,9 @@ instance of it, and it makes the dangerous component boring.
 delete, but a small single-part PUT can land between the count and the delete.
 The multipart probe does not catch it because a small object is not multipart.
 Fix: **require the prefix to have been empty on two consecutive runs**,
-persisted in a small state object. At an hourly schedule that closes the race
-completely without locking.
+persisted in a small state object. Two observations do not close the race: a PUT can still land after the second
+check. This proposal was insufficient. Current reclaim deletes individually
+proved objects conditionally and deliberately leaves folder entries behind.
 
 ---
 
@@ -377,7 +391,7 @@ read `SeaweedFS_volumeServer_resource` instead (SeaweedFS's own exporter);
 confirmed live with real series and a computable used/all ratio.
 
 Three more Prometheus rules were unable to fire because mgmt Prometheus
-cannot scrape across the one-way konnectivity tunnel: `EdgePodCrashLoop` and
+has no general child-pod scrape path through the API-server Konnectivity tunnel: `EdgePodCrashLoop` and
 `KonnectivityTunnelFlapping` named child-cluster objects that have zero
 series on mgmt and have since been deleted (`docs/TOUR.md` §9);
 `EdgeWorkerDisconnected` is a different case — it fires, just for the
@@ -389,7 +403,7 @@ cannot fire is worse than no alert, because it reads as coverage.**
 * Point the disk alert at SeaweedFS's own `:9324` metrics, which is the
   correct source regardless.
 * Re-express the three edge-cluster rules as Loki absence rules over Vector's
-  own log stream, which does cross the tunnel.
+  own shipped log stream, which uses the external Loki endpoint rather than the Konnectivity tunnel. Log absence still cannot identify every Kubernetes failure.
 * **Build an alert smoke-test harness**: for every rule, inject a synthetic
   log line or metric and assert the rule fires. Run it in CI. This is the only
   thing that stops the class of bug recurring, and it is the difference
@@ -399,7 +413,7 @@ cannot fire is worse than no alert, because it reads as coverage.**
 
 ## 7. Data-retention guarantees 🟠 — audit the whole class
 
-Loki's StatefulSet carries `persistentVolumeClaimRetentionPolicy: Delete`.
+Historical finding: Loki's StatefulSet carried `persistentVolumeClaimRetentionPolicy: Delete`. Main now renders Retain; tier-1 still inherits Delete and is an explicit exception in its retention gate.
 `helm.sh/resource-policy: keep` does **not** protect against it — that
 annotation governs Helm, not the StatefulSet controller. I had assumed the
 annotation was sufficient, and used it as the retention story throughout.
@@ -464,11 +478,12 @@ do now and expensive to retrofit once sites are live.
 
 **The edge S3 identity needs `Write`, which includes DELETE.** SeaweedFS folds
 object deletion into the `Write` action, so an edge can delete its own staged
-data. With bucket-per-site the blast radius is one site, and the edge holds
-the originals in its facility backup, so this is acceptable — but it should be
-recorded as a known property, not discovered later. The mitigation that
-matters is behavioural: the edge uploader never issues a delete, using a
-content-fingerprint state file instead.
+data. With bucket-per-site the blast radius is one site, and the edge may retain originals depending on ingress origin, backup success
+and retention. That is a residual risk to assess, not a guaranteed independent
+copy that makes deletion harmless. The mitigation that
+matters is behavioural: the edge uploader copies session content without deleting those objects in
+its normal loop. Its local metadata fingerprint is not a content-integrity
+proof, and marker/repair-request housekeeping still includes deletion.
 
 ---
 
@@ -499,8 +514,9 @@ the empty-prefix branch (count=0 → a small single-part PUT lands → delete) a
 said I would come back to it after the verify results. I never did. It is
 still unfixed and is not in the findings list above because no agent found it
 either. Adding it now: **the empty-prefix delete should require the prefix to
-have been empty on two consecutive runs**, which closes the race for an hourly
-job without needing locks.
+have been empty on two consecutive runs**, which was later recognized as insufficient: a write can race the final
+observation too. Use the current conditional per-object reclaimer, not this
+rejected empty-prefix proposal, as the implementation reference.
 
 **I under-weighted that none of this has ever run.** Everything so far is
 render-time and dry-run verification. That is real, but the volume of output
@@ -572,6 +588,8 @@ trusted with real data.
 
 ## Recommended order of work
 
+Historical proposed order, not a checklist to execute now. The shipped/status table and amended sections identify the resulting implementation. Do not repeat adoption, CA rotation, deletion or topology migration merely because those actions appear below.
+
 Ordered so that nothing is built on something that is about to change shape.
 
 1. **Bucket per site (§0) and per-site XNAT credentials (§10).** Both change
@@ -615,11 +633,13 @@ fragile coupling I rejected for the edge `assign` stage two days ago.
 **Revised §4.** Keep the reclaimer as a separate component, and fix the check
 rather than the architecture:
 
-* Compare **`MANIFEST.json` against XNAT's actual resource inventory** for the
+* Compare each **`__MANIFEST__.json` against XNAT's actual resource inventory** for the
   session. `accessionflow` already writes that manifest, so this is a real
   file-by-file completeness check, not a heuristic — it answers "is everything
   that was staged now in XNAT", which is the question that matters.
-* Keep minAge, and keep the two-consecutive-runs rule for empty prefixes.
+* Keep minAge. The two-consecutive-runs proposal for empty prefixes did not
+  provide a concurrency fence and is superseded by per-object conditional
+  deletes; current reclaim leaves harmless directory entries behind.
 * Separately, **open an upstream issue/PR on accessionflow for S3 retention**.
   The absence of it is the root cause; everything here is a workaround, and it
   should be labelled as one rather than quietly owned forever.
@@ -654,6 +674,8 @@ here unless renewal is handled.
 
 ## R3. Per-site uploaders have a measured ceiling — §0 amended
 
+Historical sizing snapshot, measurement date not verified (2026-11-10). Current management requests are 256Mi/100m with 4Gi/2 CPU limits. The prior 231Mi idle observation and suggested 512Mi limit are not sizing advice for accessionflow 0.19.0.
+
 Measured on the live uploader: **231Mi resident, 4m CPU**, and the Deployment
 has **no resource limits at all** (`resources: {}` — its own latent bug).
 The management node has 16Gi / 8 CPU allocatable.
@@ -665,8 +687,9 @@ Prometheus, Loki, Grafana and SeaweedFS, and not viable at 30.
 
 * Size them from the measurement: 128Mi request / 512Mi limit, and set limits
   everywhere, which the current deployment does not do.
-* **State the ceiling honestly in the docs: roughly 15 sites per management
-  node.** Beyond that the single-management-node design needs revisiting, and
+* **State the ceiling honestly in the docs: capacity requires workload measurements on the target management
+  node.** The historical 15-site estimate is not a validated limit for the
+  pinned 0.19.0 image, its archive buffers, or concurrent large sessions. Beyond that the single-management-node design needs revisiting, and
   pretending otherwise is how a fleet discovers a scaling wall in production.
 * I considered CronJob-per-site instead (cheaper at rest). Rejected: a large
   session benefits from continuous progress, and a cold start plus scheduling
@@ -703,11 +726,14 @@ credentials and every child cluster kubeconfig.** The CA is not the crown
 jewel. What the two-tier split actually buys is *recoverability* — rotating a
 compromised intermediate without touching every edge, versus a fleet-wide
 trust redistribution by hand. That is still worth it, but it is a different
-and smaller claim than "the root is protected".
+and smaller claim than "the root is protected". The offline root avoids storing its key on management,
+but an old compromised intermediate remains dangerous until trust/revocation
+policy excludes it; rotation alone is not sufficient recovery.
 
 **Amended §3:** `certManager.ca.mode: selfSigned | intermediate`. `selfSigned`
-stays the default for dev and tier-1; `intermediate` is required for a
-multi-site production fleet and documented with the ceremony.
+stays the default for dev and tier-1; `intermediate` was the recommended fleet policy in this proposal, not a
+render-enforced requirement. It is optional in the chart and documented with
+the ceremony; this management chart is not installed on tier-1.
 
 ## R6. Alert testing splits into two very different problems — §6 amended
 
@@ -763,7 +789,8 @@ What ships now, in `upload.mode: s3`:
   proofs.
 * **A failed proof leaves a repair request** that the uploader claims by a
   rename and answers with a copy, so a lost or changed object is re-sent
-  without an operator, and a session is never re-sent twice for one run.
+  without an operator, and duplicate requests within a run are constrained by request claiming and
+  locking. A later failed or changed session can legitimately be re-sent.
 * **The parent sidecars are proven and bound too.** The session's and each
   scan's `__METADATA__.json` must be in the bucket like any file, and the
   identities taken at the snapshot are required again inside the lock before

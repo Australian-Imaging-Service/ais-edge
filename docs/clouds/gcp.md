@@ -1,11 +1,19 @@
 # GCP install (GKE)
 
-> Status: **untested, design complete**. Same shape as AWS — GKE bundles
-> its own cloud-controller-manager, so the k0s-install step (1/7) auto-skips
-> on `installMode: existing` and the rest of the install runs unchanged.
-> There is no cloud-provider switch to set: the installer reads
-> `sites/<site>/values.yaml` and the only cloud-specific config is the
-> ingress-nginx Service override in Step 4.
+**Review status, 2026-11-10:** the cloud topology is implemented in the current
+charts and installer. The provider provisioning commands below are retained
+from the earlier design; a complete deployment with these exact commands and
+current provider defaults is **not verified (2026-11-10)**. Do not read a
+historical commissioning result as certification of this recipe. Start from
+`sites/example-cloud/values.yaml`, supply the complete site Secrets and edge
+configuration, and use [cloud-deployment.md](../cloud-deployment.md) for the
+repository's current interface. The short snippets below are overrides, not
+complete installable site files.
+
+> Historical GKE design, date not recorded. The cloud chart path exists;
+> a full GKE run is not verified (2026-11-10). `installMode: existing`
+> verifies a cluster rather than installing k0s, but it does not supply the
+> provider identity, storage, quota or workload compatibility decisions.
 
 ## TL;DR
 
@@ -23,7 +31,9 @@ gcloud compute addresses create ais-edge-lb \
 
 ## Which ingress shape, and what the pre-flight checks
 
-GKE runs a cloud controller, so `type: LoadBalancer` works out of the box and is the right choice here.
+GKE supports LoadBalancer Services. Choose a TCP passthrough service and
+verify its assigned address, target health and access controls. Provider
+support does not validate the complete site or guarantee immediate readiness.
 
 ```yaml
 ingress-nginx:
@@ -36,30 +46,33 @@ ingress-nginx:
 ```
 
 If you would rather front the cluster with a balancer you build and manage
-yourself, `NodePort` is equally supported and is the DEFAULT for self-managed
-clusters, which have no controller to answer a `LoadBalancer` request:
+yourself, `NodePort` is also supported when you manage the balancer. Set it explicitly:
+the chart requires a cloud ingress override, and its inherited on-prem
+ClusterIP/hostNetwork values are not a working NodePort default:
 
 ```yaml
     service:
       type: NodePort
-      nodePorts:            # pin them, or Kubernetes picks fresh ports each
-        http: 30080         # install and silently breaks your target group
+      nodePorts:            # pin ports used by your externally managed pool
+        http: 30080         # a recreated Service can otherwise receive new ports
         https: 30443
 ```
 
-Before doing any work, `install.sh` checks on `topology: cloud`:
+The cloud preflight runs **after prerequisite installation**, before site
+Secrets and the management release. It is not an all-or-nothing dry run:
 
-* **`domain.internal` resolves.** Edges resolve this name to find the
-  management cluster; if there is no record yet there is no point installing.
-* **it does not resolve to a node itself.** That works until the node is
-  replaced, then every edge loses the cluster.
-* **on the `LoadBalancer` path:** that a cloud controller is running and that
-  no node still carries `node.cloudprovider.kubernetes.io/uninitialized`. On
-  GKE this is satisfied out of the box; the check is there for the
-  self-managed case and costs nothing here.
+* On the **NodePort** path it resolves the first address for `domain.internal`
+  and compares it with `domain.mgmtNodeIP`. It does not probe every service
+  hostname, listener, backend or certificate.
+* On the **LoadBalancer** path it counts pod names containing
+  `cloud-controller-manager`, then checks the uninitialized node taint. It
+  does not check those pods' readiness, and it does not run the NodePort DNS
+  checks. Managed control planes or a separately named AWS Load Balancer
+  Controller may work while failing this heuristic.
 
-`SKIP_CLOUD_PREFLIGHT=1` overrides all of them.
-
+`SKIP_CLOUD_PREFLIGHT=1` skips these checks only. Use it only after independently
+verifying DNS, controller behavior, TCP forwarding and node readiness. It does
+not waive chart validation or establish that the provider setup is correct.
 
 ## Prerequisites
 
@@ -86,8 +99,11 @@ gcloud container clusters create ais-edge-mgmt \
   --workload-pool=<your-project>.svc.id.goog   # enables Workload Identity
 ```
 
-Takes ~5-7 min. Workload Identity is GCP's IAM-for-pods (similar to AWS
-IRSA) — useful later if you want pods to call GCP APIs directly.
+Historical duration: ~5-7 minutes; not verified (2026-11-10). Workload
+Identity configures pod access to Google APIs, but its node-pool and
+ServiceAccount requirements still need verification. For a regional cluster,
+check the total node count across zones; `--num-nodes=2` is not a two-node
+capacity or cost guarantee for the whole region.
 
 ```bash
 gcloud container clusters get-credentials ais-edge-mgmt \
@@ -111,7 +127,11 @@ This is the address you pin in Step 4 as
 LoadBalancer attaches it to the auto-provisioned GCP network LB. (Do **not**
 look for a top-level `ingressNginx.loadBalancerIP` key — it used to exist,
 was read by no template, and has been removed rather than wired. The address
-belongs on the subchart, because a parent chart cannot push values into one.)
+belongs under the subchart key; Helm passes those values to the dependency.
+Unrelated parent policy keys are not automatically translated.)
+GKE supports `spec.loadBalancerIP` for IPv4 and also a version-dependent
+resource-name annotation. Verify regional and network-tier constraints in the
+[provider Service parameter reference](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/service-load-balancer-parameters).
 
 ## Step 3 — DNS
 
@@ -122,7 +142,7 @@ domain:
 ```
 Note that nip.io cannot satisfy a DNS-01 challenge, so a nip.io domain means
 staying on the internal `ais-edge-ca` issuer rather than Let's Encrypt
-(`charts/mgmt/values.yaml:531-535`).
+(`charts/mgmt/values.yaml`).
 
 **Prod** (Cloud DNS):
 ```bash
@@ -134,37 +154,45 @@ gcloud dns managed-zones create aisedge \
 
 ## Step 4 — Config
 
+Use the management node address for `domain.mgmtNodeIP`, not the public
+load-balancer address. Public service names belong under `domain.internal`
+and must resolve through the selected LB. Also override the four explicit
+`local-path` observability StorageClass settings for a managed cluster if that
+class does not exist there: Prometheus and Alertmanager `storageSpec`, Grafana
+`persistence.storageClassName`, and Loki `singleBinary.persistence.storageClass`.
+A default cloud StorageClass does not override an explicit `local-path` name.
+
 `sites/<site>/values.yaml` is **YAML**, not a shell env file — `install.sh`
-parses it with `yaml.safe_load` (`install.sh:95-113`) and reads dotted paths
+parses it with `yaml.safe_load` (`install.sh`) and reads dotted paths
 out of it. Shell `export` lines here are not config; they are a parse error.
 The same file is passed to both charts, so what you write below is also what
 `helm` sees.
 
 ```yaml
-topology: cloud            # install.sh:133 — skips the on-prem /etc/hosts writes
-installMode: existing      # install.sh:134 — GKE already runs; do not install k0s
+topology: cloud            # install.sh ; skips the on-prem /etc/hosts writes
+installMode: existing      # install.sh ; GKE already runs; do not install k0s
 
 domain:
   internal: aisedge.example.com     # or dev.<ip-with-dashes>.nip.io for dev
-  mgmtNodeIP: "10.x.y.z"            # required (install.sh:130, no default) —
+  mgmtNodeIP: "10.x.y.z"            # required (install.sh, no default) ;
                                     # a node IP inside the GKE cluster
 
 certManager:
   enabled: false                    # leave false: install.sh step 2/7 installs
                                     # cert-manager itself, before this chart
   issuer: letsencrypt-prod          # anything prefixed letsencrypt- takes the
-                                    # ACME path (charts/mgmt/templates/cert-issuers.yaml:80)
+                                    # ACME path (charts/mgmt/templates/cert-issuers.yaml)
   acme:
-    email: ops@example.com          # omitted from the ClusterIssuer if empty
+    email: ops@example.com          # required by this chart for ACME
     server: https://acme-v02.api.letsencrypt.org/directory
     dns01Solver:                    # passed through VERBATIM into
-      cloudDNS:                     # solvers[0].dns01 (charts/mgmt/templates/cert-issuers.yaml:291),
+      cloudDNS:                     # solvers[0].dns01 (charts/mgmt/templates/cert-issuers.yaml),
         project: <your-project>     # so it must be a shape cert-manager knows.
                                     # No serviceAccountSecretRef: Workload
                                     # Identity supplies the token (see below).
 
 # The chart ships the ON-PREM ingress shape and expects cloud sites to override
-# it here; consult the CAUTION at charts/mgmt/values.yaml:676-687. All three lines
+# it here; consult the CAUTION at charts/mgmt/values.yaml. All three lines
 # matter: the default binds the host's :443 with hostNetwork and a ClusterIP
 # Service, so on GKE no LB is ever provisioned and loadBalancerIP alone is inert.
 ingress-nginx:                      # subchart key — hyphenated, exactly this
@@ -180,7 +208,7 @@ ingress-nginx:                      # subchart key — hyphenated, exactly this
 There is no cloud-provider or credentials key to set. GCP credentials come from
 the ambient ADC / Workload Identity chain, and the DNS provider is expressed
 solely by which key appears inside `dns01Solver`. For a working solver block in
-this repo, see the route53 example at `scripts/ci/values.sh:292-301`; it uses the same
+this repo, see the route53 example at `scripts/ci/values.sh`; it uses the same
 shape, different provider key.
 
 ## Step 5 — Run install.sh
@@ -192,11 +220,11 @@ shape, different provider key.
 `install.sh` is a **seven-step** installer and prints `1/7` … `7/7` as it goes.
 The old per-script numbering (`01b`, `02c`, `02d`, `07c`) is gone: steps 4 and 7
 are Helm installs that replaced what used to be scripts 02b/02c/02d/03/04/07/
-07b/07c (`install.sh:35`).
+07b/07c (`install.sh`).
 
 | Step | What happens on GCP |
 |---|---|
-| 1/7 k0s management cluster | Skipped — `installMode: existing`; `scripts/01-install-k0s.sh:8` just verifies the GKE cluster answers and warns if there is no default StorageClass, then exits 0 |
+| 1/7 k0s management cluster | Skipped ; `installMode: existing`; `scripts/01-install-k0s.sh` just verifies the GKE cluster answers and warns if there is no default StorageClass, then exits 0 |
 | 2/7 prerequisites: cert-manager CRDs + k0smotron operator | Standard. cert-manager is installed here rather than as a subchart, to break the conversion-webhook ordering loop |
 | 3/7 site Secrets (SOPS → cluster) | Standard; skipped if the site has no `secrets.enc.yaml` |
 | 4/7 helm: management chart | Installs the ingress-nginx subchart. With the Step 4 override above, GKE provisions a regional Network LB and attaches your reserved static IP |
@@ -211,13 +239,21 @@ kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
 # release `mgmt` in namespace `ais-mgmt` — there is no ingress-nginx namespace.
 # EXTERNAL-IP should equal your reserved static IP. It stays <none> unless the
 # ingress-nginx override from Step 4 is in the site file: the chart default is
-# service.type ClusterIP (charts/mgmt/values.yaml:701).
+# service.type ClusterIP (charts/mgmt/values.yaml).
 
-curl -v https://loki.aisedge.example.com/ready
-# Expect 200 with a valid Let's Encrypt cert
+curl -v --cert <edge-loki-client.crt> --key <edge-loki-client.key> \
+  https://loki.aisedge.example.com/ready
+# Expect 200 with an admitted client certificate and valid server trust.
+# With the internal issuer, also pass --cacert <ais-edge-ca.crt>.
 ```
 
 ## Cost ballpark (Sydney region, 2026)
+
+**Historical estimates, 2026; calculation date not recorded.** Every amount
+and the total in this table is **not verified (2026-11-10)** and must not be
+used as a current quote. Recalculate the selected cluster mode, region,
+instance count, public addresses, storage, backups and network transfer with
+the provider before provisioning. No prices in the table are deployment gates.
 
 | Item | Approx monthly |
 |---|---|
@@ -228,8 +264,9 @@ curl -v https://loki.aisedge.example.com/ready
 | Static IP (used) | $0 (free when attached) |
 | **Total** | **~$140/mo** |
 
-(Or use GKE Standard mode if you want to pin node specs — slightly more
-expensive but predictable.)
+The creation command above uses GKE Standard, so the table's Autopilot row
+was inconsistent even as an estimate. Cluster fees, node counts and public IP
+charges need recalculation for the chosen mode; relative price is unverified.
 
 ## Workload Identity for cert-manager DNS-01
 
@@ -256,17 +293,21 @@ kubectl annotate serviceaccount -n cert-manager cert-manager \
   iam.gke.io/gcp-service-account=cert-manager-dns01@<your-project>.iam.gserviceaccount.com
 ```
 
-No secret files anywhere — cert-manager pulls a short-lived GCP token from
-the metadata server.
+With Workload Identity configured correctly, cert-manager can obtain a
+short-lived token without a static service-account key file. This is not a
+claim that the entire deployment has no secret files. Verify DNS challenge
+permissions and token acquisition before relying on automatic renewal.
 
 ## Common gotchas
 
-- **GKE Autopilot vs Standard**: Autopilot doesn't let you SSH to nodes or
-  install DaemonSets that need host access. Most of our edge setup runs on
-  the edge k0s clusters (which we control), so Autopilot is fine for the
-  mgmt cluster. Just confirm nginx-ingress + cert-manager are pod-only and
-  don't need hostPath / hostNetwork.
+- **GKE Autopilot vs Standard**: this management chart includes Vector hostPath
+  reads and a writable host checkpoint directory, plus storage defaults that
+  require review. Do not assume Autopilot compatibility because ingress and
+  cert-manager are pod workloads. The example cluster command uses Standard;
+  Autopilot support is not verified (2026-11-10).
+
 - **Regional vs zonal LBs**: GCP regional Network LBs default to TCP/UDP
   pass-through, which is what we want for SNI passthrough at ingress-nginx.
 - **Pricing surprises**: Cloud Storage egress out of GCP to non-GCP XNAT
-  targets is the biggest cost driver, not the cluster itself.
+  targets can be material. Its share of the bill depends on traffic volume,
+region and network path; the largest cost driver is not verified (2026-11-10).

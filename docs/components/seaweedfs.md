@@ -4,6 +4,12 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 
 ## Overview
 
+**Review date: 2026-11-10.** The chart pins SeaweedFS 4.34 and uses one
+all-in-one pod. Historical live measurements below were not repeated during
+this documentation review. Timing, memory, and TLS observations are evidence
+for those runs, not service guarantees for every site. The current chart and
+its proof-before-delete checks remain the operational reference.
+
 [SeaweedFS](https://seaweedfs.com/) is a distributed file/object store with
 an S3-compatible API. We use it as the central staging layer between edge
 sites and XNAT. Apache 2.0 licensed.
@@ -24,7 +30,8 @@ to a separate `logs-bucket`).
 
 **Why a bucket per site.** SeaweedFS matches an identity's actions as
 `<action>:<bucket>`, so `Write:<bucket>/*` is bucket-wide — there is no
-prefix-level scoping. Measured on the live cluster: the `edge-dev` key
+prefix-level scoping in the chart's identity model. Historical isolation
+test (date not verified, reviewed 2026-11-10): the `edge-dev` key
 lists its own bucket fine and gets `AccessDenied` on `logs-bucket`, so
 the bucket is the enforcement boundary, and only the bucket. While every
 site shared one bucket, any edge key could read, list and delete every
@@ -38,7 +45,9 @@ of failure.
 - **hostPath `/data/seaweedfs`** on the management node (Haystack
   volumes + filer leveldb), surfaced as a PV/PVC pair by the chart
 - **In-cluster network** (its own Service)
-- **No outbound network** — fully passive; only accepts requests
+- **Network reachability:** the application serves incoming requests, but the
+  chart does not install an egress-deny NetworkPolicy. Do not interpret the
+  passive staging role as an enforced ban on outbound connections
 - **S3 IAM identities**, four kinds, each scoped to what it actually
   needs:
   - `admin` — `Admin`/`Read`/`Write`/`List`/`Tagging` over the store.
@@ -46,8 +55,9 @@ of failure.
   - `<edge-name>` — one per `edges[]` entry:
     `Read`/`List`/`Write`/`Tagging` on **that site's own bucket** only
   - `upload-<edge-name>` — one per edge, for the S3→XNAT uploader, same
-    scope. `Write` is what lets it remove a staged session once XNAT has
-    confirmed it: SeaweedFS folds object DELETE into that action
+    scope. The separate per-edge reclaimer uses this identity for proved object
+    deletions; the XNAT upload command does not itself reclaim S3 staging.
+    SeaweedFS folds object DELETE into the `Write` action
   - `loki-writer` — `Read`/`List`/`Write`/`Tagging` on `logs-bucket`
     only. Deliberately cannot see any ingest bucket; the log store has
     no business holding a key that reads imaging data
@@ -58,7 +68,8 @@ The SigV4 key pair above is a **bearer** secret — anything holding a copy
 can use it from anywhere the endpoint is reachable. Set
 `seaweedfs.ingress.clientCerts.*` and each edge additionally presents a
 cert-manager client certificate (`CN=<edge name>`, signed by the fleet CA,
-rotated every 90 days by cert-sync) which the Ingress verifies before the
+issued with a 90-day duration by cert-manager and copied by cert-sync;
+renewal normally begins before expiry) which the Ingress verifies before the
 request ever reaches SeaweedFS. The two are independent and neither
 replaces the other: the key pair is still what scopes a site to **its own
 bucket** — the certificate CN pin admits every site on the one upload
@@ -75,9 +86,9 @@ site can touch.
 | 3 | edge | `upload.s3.requireClientCert: true` in each edge site file |
 | 4 | mgmt | `seaweedfs.ingress.clientCerts.require: true` |
 
-Doing step 4 before step 2 has answered breaks every upload with an error
-that names nothing. Measured against nginx `ssl_verify_client on` and rclone
-1.75.0:
+Doing step 4 before delivery rejects clients that have no usable certificate.
+**Historical interoperability test (date not verified, reviewed 2026-11-10):**
+nginx `ssl_verify_client on` and rclone 1.75.0 produced these responses:
 
 | Client presents | nginx answers | What rclone logs |
 |---|---|---|
@@ -86,25 +97,25 @@ that names nothing. Measured against nginx `ssl_verify_client on` and rclone
 | a valid cert, CN outside `auth-tls-match-cn` | `403` (HTML body) | the same XML parse failure |
 | a cert whose **file** is missing | — | `CRITICAL: Failed to load --client-cert/--client-key pair` (the one loud case) |
 
-Note that the handshake **succeeds** in the first three: under TLS 1.3 the
-client certificate is sent after the server's `Finished`, so nginx cannot
-refuse the connection and refuses the first request instead. The check is
-real; the error is an HTTP one, and it mentions neither certificates nor
-authentication. All of it lands on the uploader's pre-flight probe as
-`endpoint_failed`, which reads as a dead endpoint — which is why that event's
-message now names the client-certificate state explicitly, why the ordering is
-enforced by render guards as far as a template can see it, and why
-`scripts/verify-live.sh` checks the one step no template can (that
-`s3-client-tls` actually reached the edge).
+The recorded nginx path returned HTTP errors for the first three cases, not
+only TLS handshake errors. This is implementation behavior, not a TLS 1.3 rule
+that a server cannot reject client authentication. Read both status and body;
+rclone can report an HTML rejection as an S3 XML parse failure. These failures
+reach the startup probe as `endpoint_failed`. Current diagnostic text names
+the configured client-certificate state. Render guards check the configuration
+relationship, while `scripts/verify-live.sh` checks whether the expected Secret
+reached the edge. Neither check proves that every future request will succeed.
 
-**There is no `s3-config` ConfigMap.** A Helm template cannot read a
-Secret's contents, so this chart cannot render `s3.json` at all — which
-is the point. The identity document is assembled **inside the pod** by
+
+
+**There is no `s3-config` ConfigMap.** This chart deliberately does not use Helm
+to read Secret contents or render `s3.json`. Helm has cluster lookup features,
+but this design keeps credentials out of its rendered manifests. The identity document is assembled **inside the pod** by
 the `build-s3-identities` init container, from the per-identity Secrets
 projected in by name, written with `umask 077` to a tmpfs
 `emptyDir{medium: Memory}`. Nothing secret is ever templated and nothing
-secret is written to a second object at rest. The predecessor,
-`scripts/03-deploy-seaweedfs.sh`, did `kubectl create configmap s3-config
+secret is written to a second object at rest. The historical pre-Helm implementation (date not verified, reviewed
+2026-11-10), `scripts/03-deploy-seaweedfs.sh`, did `kubectl create configmap s3-config
 --from-file=s3.json` — every edge's S3 secret key in plaintext, readable
 by anything with configmap-read in the namespace and dumped in full by
 `kubectl get cm -o yaml`. It also mis-parsed `edge-nodes.env` with a
@@ -128,9 +139,12 @@ init-container failure, naming the identity in the log.
 - Image: `chrislusf/seaweedfs:4.34` (was 3.99 — moved off it because 3.99 is
   vulnerable to CVE-2026-54917, CVE-2026-58372 and CVE-2026-55874: three S3
   path traversals that let one site's key read, copy and *delete* across
-  another site's bucket. 4.34 is the lowest version clean of all six published
-  SeaweedFS advisories. Issue #9035, the 4.18/4.19 filer memory regression the
-  old pin avoided, is closed — but see the risk table for #10253, which is not.
+  another site's bucket. The historical 2026-08-06 advisory audit selected 4.34 for the six
+  advisories considered then; that is not a claim of current CVE freedom.
+  [Issue #9035](https://github.com/seaweedfs/seaweedfs/issues/9035) closed on
+  2026-04-12. [Issue #10253](https://github.com/seaweedfs/seaweedfs/issues/10253)
+  closed on 2026-09-11 (status checked 2026-11-10). Inclusion of its resolution
+  in pinned 4.34 is not verified; retain memory monitoring and limits.
   The Iceberg REST Catalog 4.x turns on by default is disabled explicitly with
   `-s3.port.iceberg=0`.)
 - Service: `mgmt-seaweedfs.ais-mgmt.svc.cluster.local` (ClusterIP only).
@@ -146,8 +160,9 @@ init-container failure, naming the identity in the log.
   `ingressNginx.sslPassthrough=true` (which k0smotron needs) because the
   controller SNI-routes non-passthrough hosts to its own HTTPS listener,
   where the `auth-tls-*` annotations still apply. On cloud the load
-  balancer in front is layer 4 and does not terminate TLS either, so this
-  behaves identically there
+  design requires a layer-4 load balancer so client TLS reaches nginx.
+  A provider configuration that terminates TLS earlier is a different trust
+  path and must be validated; topology=cloud alone does not enforce it
 - Metrics Service: `mgmt-seaweedfs-metrics.ais-mgmt.svc:9324` — a
   separate metrics-only Service so the ServiceMonitor can select it
   without also matching the S3 Service above
@@ -167,7 +182,8 @@ init-container failure, naming the identity in the log.
 # Pod state
 kubectl get pods -n ais-mgmt -l app=seaweedfs
 
-# In-cluster S3 (admin). The client is the AWS CLI now, not mc.
+# Local diagnostic client: AWS CLI, installed separately with approved credentials.
+# The deployed edge copy loop uses rclone. A port-forward does not supply keys.
 kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 8333:8333 &
 export AWS_ENDPOINT_URL=http://localhost:8333 AWS_DEFAULT_REGION=us-east-1
 aws s3 ls s3://ingest-edge-dev/staged/   # one bucket per site
@@ -177,9 +193,9 @@ kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 9333:9333 &  # master
 kubectl port-forward -n ais-mgmt svc/mgmt-seaweedfs 8888:8888 &  # filer
 
 # NOT the metrics port: `weed server -metricsPort=9324` binds the pod IP,
-# not 127.0.0.1, so port-forward to :9324 fails BY DESIGN while Prometheus
-# (which dials the Service IP) scrapes it fine. A failed port-forward here
-# is not evidence of broken metrics.
+# not 127.0.0.1 in the recorded test. Port-forward behavior depends on the
+# runtime's network path. Check Prometheus target health and the pod/service
+# endpoint before treating a port-forward failure as broken metrics.
 
 # Adding or removing an entry in `edges` changes the projected volume and
 # the init script, so Helm rolls the pod by itself:
@@ -201,13 +217,16 @@ this is gone, along with the installer.
 
 ### Deleting staged objects
 
-Measured on SeaweedFS 3.99: `aws s3 rm --recursive` (and `mc rm` before it)
+**Historical measurement on SeaweedFS 3.99 (date not verified, reviewed
+2026-11-10):** `aws s3 rm --recursive` (and `mc rm` before it)
 removes the objects but leaves a 0-byte directory entry, which `aws s3 ls`
 still reports as `PRE <session>/`. That entry made the uploader of the time
 log a bogus success every cycle, so the reclaimer then deleted through the
 filer's HTTP API (`DELETE ...?recursive=true`), which removes the entry.
 
-That is no longer how it works, for two reasons measured on 4.34:
+**Current deletion design, with historical 4.34 tests:** the chart now uses
+per-object conditional deletion. The following timings were recorded during
+those tests (dates not verified, reviewed 2026-11-10):
 
 - A filer folder delete is not atomic. Even without `recursive=true` the
   filer checks the folder, then removes it, and a child written between the
@@ -250,7 +269,9 @@ Deletion of a local upload tree (the edge's staged-reclaimer) is in
 - **All-in-one** — master + volume + filer + S3 in a single pod for
   the MVP. No separate components to operate
 - **Apache 2.0** — clean licensing
-- **S3-compatible** — every S3 client (mc, boto3, AWS SDK) works
+- **S3-compatible API:** supports the operations used by this chart. Validate
+  required behavior with the pinned server and client; compatibility is not
+  a guarantee for every S3 feature or arbitrary SDK version
 - **Cheap on disk** — Haystack format keeps small files efficient
 - **Built-in Prometheus metrics** on `:9324`
 
@@ -258,21 +279,31 @@ Deletion of a local upload tree (the edge's staged-reclaimer) is in
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Pod crash | Edge uploads + Loki writes pause | Pod auto-restarts; fast (~10s) |
-| `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` at 80% of `SeaweedFS_volumeServer_resource`, plus the staged-data reclaimer described below — one CronJob per edge, no longer a TODO |
-| Single replica | Window of unavailability during pod restart | Acceptable for staging (edge + xnat-upload retry naturally) |
+| Pod crash | Edge uploads + Loki writes pause | Kubernetes restarts the pod. The historical ~10s observation is not a recovery-time guarantee; volume checks and replay can take longer |
+| `/data/seaweedfs` disk full | Writes fail | `SeaweedFSDiskFull` at 80% of `SeaweedFS_volumeServer_resource`, plus the staged-data reclaimer described below ; one configured CronJob per edge when reclaim is enabled |
+| Single replica | Window of unavailability during pod restart | Clients retry, but local buffering and source retention must cover the outage. A single node or volume failure can lose staged objects and logs; retry alone is not redundancy |
 | An S3 key is rotated inside its Secret | Nothing rolls; the pod keeps serving the old key until it restarts, and the edge gets 403 on every PUT with nothing wrong on the management side | `kubectl rollout restart deploy/mgmt-seaweedfs -n ais-mgmt` after the rotation. Adding or removing an `edges[]` entry *does* roll the pod by itself — only in-place key edits are invisible to Helm. A missing or empty credential is caught earlier: the init container fails hard, naming the identity |
-| An edge's S3 key pair leaks | The holder can read, write and delete that site's staged imaging from anywhere the endpoint is reachable | The key is per-site and scoped to one bucket, so the blast radius is one site's staging area. `seaweedfs.ingress.clientCerts` closes the "from anywhere" half: with it on, a request also needs a private key that never leaves the site and that cert-manager replaces every 90 days. Off by default — see the four-step rollout above, and note that enabling `require` before the certificates land rejects **every** upload with an error that names neither certificates nor auth |
-| Filer memory growth on 4.x | Pod OOMKilled and restarts | Upstream #10253 is still open (steady growth under concurrent load). Bounded here by `resources.limits.memory: 4Gi` — it costs a restart, not the node — and `SeaweedFSDown` fires. Accepted in exchange for closing the cross-bucket traversals; watch `container_memory_working_set_bytes` for the pod |
-| ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | — | Was only ever measured against 3.99. Re-measured live against 4.34's real S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
+| An edge's S3 key pair leaks | The holder can read, write and delete that site's staged imaging from anywhere the endpoint is reachable | The key is per-site and scoped to one bucket, so the blast radius is one site's staging area. `seaweedfs.ingress.clientCerts` closes the "from anywhere" half: with it required, a request also needs a client key. That key is issued in management and copied to the edge by cert-sync, so it does not originate exclusively on the site. Certificates have a 90-day lifetime and renew earlier. Off by default ; see the four-step rollout above, and note that enabling `require` before the certificates land rejects **every** upload with an error that names neither certificates nor auth |
+| Filer memory growth on 4.x | Pod OOMKilled and restarts | Historical concurrent-load report [#10253](https://github.com/seaweedfs/seaweedfs/issues/10253) closed 2026-09-11; status checked 2026-11-10. Fix inclusion in 4.34 is not verified. The 4Gi limit bounds this container, not all node pressure. OOM can interrupt writes; SeaweedFSDown fires only if its NotReady condition lasts 2m. Watch memory and restart counts |
+| ~~aws-cli checksum headers unverified on 4.34~~ RESOLVED | ; | Historical test (date not verified, reviewed 2026-11-10), originally against 3.99 and then against 4.34's S3 gateway: `s3api put-object --checksum-algorithm SHA256` is accepted, and `s3api head-object --checksum-mode ENABLED` echoes back the identical `ChecksumSHA256` value. Round-tripped correctly. |
 
 ## Staged-data reclaim (shipped, not future work)
 
-`accessionflow store xnat` has **no S3 retention of its own**: it rebuilds its
-work list from a live listing every `--loop` pass, so a delivered session
-stays in the bucket, is listed again, "uploaded" again and re-fires
-`XNATUploadSuccess` forever while staging grows without bound. The
-reclaimer is the only thing that deletes from staging.
+**Operator checks before cleanup:** confirm the correct per-edge bucket,
+`dataPolicy.enabled`, dry-run state, age gate, and recent successful proof logs.
+An `upload_completed` event records a copy result; it does not replace the
+reclaimer's byte-level comparison or authorize deleting the source manually.
+The table below states chart defaults. Site values can change schedules and
+limits, and disabled retention can intentionally leave data indefinitely.
+
+`accessionflow store xnat` has **no S3 retention of its own**. It lists live
+staging each loop, but 0.19.0 suppresses unchanged-session success messages and
+clears cached XNAT state for each pass. The earlier repeated-success behavior
+is historical and was fixed before this review (2026-11-10). Unchanged objects
+still occupy space: the per-edge management reclaimer performs the configured
+proof and conditional deletion. Its absence does not make the uploader delete.
+
+
 
 | Fact | Value |
 |---|---|
@@ -288,15 +319,17 @@ reclaimer is the only thing that deletes from staging.
 Metrics discovery is likewise done: `charts/mgmt/templates/observability.yaml`
 ships a ServiceMonitor for `mgmt-seaweedfs-metrics`, and the
 `SeaweedFS_volumeServer_resource` series it collects are what
-`SeaweedFSDiskFull` reads (measured on the live cluster). The rule
+`SeaweedFSDiskFull` reads (historical measurement, date not verified; reviewed 2026-11-10). The rule
 replaced one built on `kubelet_volume_stats_used_bytes`, which publishes
 nothing for a hostPath volume — `count()` returned no series at all, and
 the alert had been green its entire life for want of an input.
 
 ## Replacements / future
 
-- **MinIO** — was the original choice; archived in Feb 2026 → switched
-  to SeaweedFS
+- **MinIO:** historical original choice, replaced by SeaweedFS. The upstream
+  [repository](https://github.com/minio/minio) is archived as checked on
+  2026-11-10. The earlier February 2026 archival date was not independently
+  verified in this review; it is not needed to operate the current chart
 - **AWS S3** — drop SeaweedFS entirely; point edges + upload pod at
   `s3.<region>.amazonaws.com` with IAM users. Documented in main README.
 - **Garage** — Rust-based S3 implementation; lighter than SeaweedFS but
@@ -307,8 +340,9 @@ the alert had been green its entire life for want of an input.
 
 ## Future enhancements
 
-- S3 lifecycle rules as a *second* line of defence under the reclaimer,
-  for objects it never learns about (an aborted multipart, a session
-  written by something outside the pipeline)
+- A separately reviewed lifecycle policy for abandoned multipart uploads.
+  Do not expire staged session objects on age alone: that would bypass the
+  XNAT proof and the conditional-delete contract. Sessions from other writers
+  need their own retention and ownership rules, not an implicit fallback delete
 - Replication: 3-master HA with Raft, separate volume/filer/s3
   deployments

@@ -12,7 +12,7 @@ count means that the query found no matching events. It does not establish
 that the pipeline or its log delivery is healthy. Check the data source and
 an expected activity signal before treating zero as good news.
 
-Orthanc receives and archives the DICOM instances. In the receiver-only
+Orthanc receives and stores DICOM instances. Its facility-backup callback archives successful DICOM-network arrivals when enabled; REST/file-drop paths do not share that callback guarantee. In the receiver-only
 configuration, de-identification runs in **accessionflow**. The dashboards do
 not require Orthanc de-identification.
 
@@ -53,6 +53,8 @@ while its proxied `/api/v2/status` request succeeds. These four dashboards
 use Loki and Prometheus, not the Alertmanager datasource.
 
 ## The s3-uploader event schema
+
+The example below is a subset of the current event envelope; retry fields such as `attempt`, `max_attempts` and `backoff_s` can also be emitted. These records expose session labels and may contain clinical identifiers. The local upload marker fingerprints relative paths, size and modification time, not file content; an unchanged fingerprint is not an independent integrity proof.
 
 The pipeline headline counters and uploader event charts read structured
 JSON emitted by `charts/edge/files/s3-uploader.sh`. Other panels read assign
@@ -280,7 +282,7 @@ is passed as a regex, as documented by [Grafana's variable reference](https://gr
 | **Volumes (across all buckets)** | `max(SeaweedFS_volumeServer_volumes{type="volume"})` | Maximum reported volume count for the current single-volume-server deployment. |
 | **S3 request rate by HTTP code - $bucket** | `sum by (code) (rate(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}"}[5m]))` | Per-second rate by response code. Inspect 4xx and 5xx responses. |
 | **S3 request rate by operation type - $bucket** | `sum by (type) (rate(SeaweedFS_s3_request_total{bucket=~"${bucket:regex}"}[5m]))` | Per-second operation rate. Multipart requests and retries do not map one-to-one to files. |
-| **SeaweedFS log tail** | `{cluster="mgmt",app="seaweedfs"} | json` with message/original-line formatting. | Service logs selected independently of the Helm release namespace. |
+| **SeaweedFS log tail** | `{cluster="mgmt",app="seaweedfs"} \| json` with message/original-line formatting. | Service logs selected independently of the Helm release namespace. |
 
 The former LIST query fixed `bucket="ingest-bucket"`. That can show zero on
 a healthy per-site deployment because the actual bucket is named

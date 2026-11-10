@@ -1,5 +1,8 @@
+# Reviewed 2026-11-10 against this branch. This file retains its existing
+# site settings; it is not evidence of a current live deployment. Historical
+# measurements without a run date are not verified (2026-11-10).
 # =============================================================================
-# EXAMPLE CLOUD SITE — tier-2 management plane on a cloud provider
+# EXAMPLE CLOUD SITE ; tier-2 management plane on a cloud provider
 # =============================================================================
 # sites/example-mgmt with the cloud differences applied and explained.
 #
@@ -7,20 +10,19 @@
 #   * Names resolve through REAL DNS. The installer stops writing /etc/hosts on
 #     the management node and on every edge, and certificates carry hostnames
 #     only, with no IP SANs.
-#   * The ingress asks the cloud for a LOAD BALANCER instead of binding the
-#     management host's own :443.
+#   * The ingress can request a LoadBalancer, or use NodePort behind an
+#     operator-provisioned Layer-4 balancer. The chart supports both cloud paths.
 #
 # WHAT IT DOES NOT CHANGE
 #   * SNI + ssl-passthrough routing. One address serves every fleet hostname.
-#   * The direction of travel: edges connect OUT, nothing connects in.
+#   * The direction of travel: workers initiate the runtime connections; SSH bootstrap can require inbound access.
 #   * The imaging path: edge -> S3 staging on this cluster -> the management
 #     xnat-upload -> XNAT. The edge never talks to XNAT and holds no XNAT
 #     credential.
 #
 # THE LOAD BALANCER MUST BE LAYER 4.
 # The k0s API and konnectivity are mTLS end to end: the worker proves itself
-# with a client certificate inside the TLS handshake, and nothing survives being
-# decrypted and re-encrypted. An L7 balancer exists in order to read HTTP, which
+# with a client certificate inside the TLS handshake, and terminating that TLS would lose the original client-authentication context. An L7 balancer exists in order to read HTTP, which
 # it cannot do without terminating TLS, so AWS ALB, Azure Application Gateway
 # and GCP HTTPS LB all break the join -- and break it asymmetrically: this side
 # reports healthy and only the edge fails, as an x509 error in a journal on a
@@ -61,8 +63,9 @@
 # edge's own file, which is passed last and therefore wins.
 # =============================================================================
 
-# Short name for this deployment. Becomes a label on every log line and metric,
-# and appears in alert routing.
+# Deployment label used by selected telemetry and routing templates.
+# It is not automatically attached to every metric. Management Vector uses
+# its configured management label; inspect emitted labels before querying.
 clusterLabel: cloud-test
 
 # fresh     install.sh installs k0s, kubectl, helm and local-path here from
@@ -77,15 +80,17 @@ topology: cloud
 installMode: fresh
 
 storage:
-  # Where k0s state and every PVC live on this node. Read by install.sh only.
+  # Base for k0s state and local-path PVCs, read by install.sh. Explicit
+  # hostPath volumes, including SeaweedFS, keep their separately configured paths.
   #
   # ""       everything on the root filesystem (k0s default /var/lib/k0s,
   #          PVCs in /opt/local-path-provisioner). Right for a single-disk host.
-  # /data    a mounted data volume. Use this whenever the root disk is small —
-  #          the container image store alone does not fit in a 30G root.
+  # /data    a mounted data volume. Use this whenever the root disk is small ;
+  #          historical image-store growth exhausted a 30G root. Current capacity
+  #          depends on images, workloads and retention; size it from measurements.
   #
   # Applied as native settings: `k0s install --data-dir` and the
-  # local-path-provisioner nodePathMap. NOT bind mounts — an earlier deployment
+  # local-path-provisioner nodePathMap. NOT bind mounts ; an earlier deployment
   # used fstab binds, and deleting /data left them dangling so the node failed
   # its next boot into an emergency shell. See docs/storage.md.
   #
@@ -95,9 +100,10 @@ storage:
   dataRoot: ""
 
 domain:
-  # Internal DNS suffix. The edges resolve the hostnames below through
-  # /etc/hosts entries that install.sh writes, not through real DNS, so this
-  # name does NOT have to be registered anywhere.
+  # DNS suffix for generated service hostnames. With topology=onprem, the
+  # installer supplies management host entries. With topology=cloud, provide
+  # real DNS that resolves from every participating node; no hosts entries
+  # are installed. Custom hostnames override the derived names.
   internal: cloud-test.203-101-xxx-xxx.nip.io
   # The address every edge node reaches this management node on.
   mgmtNodeIP: "203.101.xxx.xxx"
@@ -113,8 +119,10 @@ hostnames:
   # convention -- and leaves these behind. Nothing warns. The edge uploader then
   # dials the stale name for ever:
   #   dial tcp: lookup seaweedfs.aisedge.local: no such host
-  # and retries until it gives up, while the management side simply sees an
-  # absence it is not watching for. Measured on the first cloud install.
+  # and retries. The installer now checks configured cloud DNS, but that does
+  # not prove the name points at the intended endpoint. Historical first-cloud
+  # incident; run date not verified (2026-11-10). Inspect current uploader and
+  # reporter alerts as well as rendered names.
   seaweedfs: ""
   grafana: ""
   loki: ""
@@ -134,15 +142,15 @@ certManager:
   # FALSE, and required to be. The per-edge Cluster objects this chart creates
   # need k0smotron's conversion webhook; the operator serving that webhook needs
   # a cert-manager-issued certificate; so cert-manager cannot come from this
-  # same release. Setting this true fails the install on the first Cluster
-  # object with "connection refused" from the conversion webhook — which reads
+  # same release. Trying to satisfy the prerequisite in this release can fail on the first
+  # Cluster object when the conversion webhook is unavailable ; which reads
   # as a network problem rather than the ordering problem it is.
   enabled: false
-  # The namespace the running cert-manager was started with
-  # (--cluster-resource-namespace). install.sh puts it in its own namespace, and
-  # it runs --cluster-resource-namespace=$(POD_NAMESPACE). The CA Secret is read
-  # from here and nowhere else, so certSync.secrets[].source.namespace below
-  # must match. Both charts refuse to render on a mismatch.
+  # The cert-manager cluster-resource namespace, set by its startup flag.
+  # The installer uses cert-manager. CA-backed ClusterIssuers look for their
+  # Secrets there. Align certSync source.namespace with the actual Secret
+  # location. The chart has checks, but they do not replace validation of an
+  # existing installation, a custom namespace or an intermediate-CA setup.
   clusterResourceNamespace: cert-manager
 
 ingressNginx:
@@ -163,22 +171,22 @@ seaweedfs:
   # other edge's staged patient data.
   perSiteBuckets: true
   ingress:
-    # mTLS ON THE UPLOAD PATH — one client certificate per edge, verified by
+    # mTLS ON THE UPLOAD PATH ; one client certificate per edge, verified by
     # the Ingress. It ADDS to the per-site S3 key pair (which is what scopes a
     # site to its own bucket); it does not replace it.
     #
     # BOTH DEFAULT OFF, AND THEY ARE FLIPPED AT DIFFERENT TIMES:
     #   1. issue: true, and uncomment the "<edge>-s3-client" certSync entry
-    #      below — together, or the render is refused. helm upgrade.
+    #      below ; together, or the render is refused. helm upgrade.
     #   2. kubectl -n xnat-ingest get secret s3-client-tls   on EVERY edge.
     #   3. upload.s3.requireClientCert: true in each EDGE site file.
     #   4. require: true here. helm upgrade.
     #
     # CAUTION: doing 4 before 2 has answered breaks every upload with an error
-    # that names nothing. Measured: the handshake still succeeds, nginx answers
-    # HTTP 400, and rclone reports it as an S3 XML parse failure — so it reads
-    # as a dead endpoint, not an auth problem. `make verify-live` checks step 2
-    # for you, per site.
+    # or TLS rejection. Historical observation, date not verified (2026-11-10): the handshake still succeeds, nginx answers
+    # HTTP 400, and rclone reports it as an S3 XML parse failure ; so it reads
+    # as a dead endpoint, not an auth problem. Use current Secret, certificate and endpoint checks for every site.
+    # verify-live assists but has documented cloud/topology limitations.
     clientCerts:
       issue: true 
       require: true 
@@ -189,9 +197,11 @@ observability:
     emailFrom: "ais-edge@your-org.example"
     smtpHost: "smtp.your-provider.example"
     smtpPort: 587
-    # For Gmail this must be an App Password. A 2FA account rejects the account
-    # password with 535 BadCredentials, and the only symptom is alerts that
-    # never arrive.
+    # Use the SMTP authentication method allowed by your provider and account.
+    # A Gmail App Password may require account-specific enablement; its current
+    # availability is not verified (2026-11-10). Inspect Alertmanager delivery
+    # errors as well as the destination mailbox. A rendered receiver alone
+    # does not prove that authentication or mail delivery works.
     smtpUsername: "ais-edge@your-org.example"
 
 # -----------------------------------------------------------------------------
@@ -201,13 +211,15 @@ observability:
 # identity, uploader and reclaimer on this node.
 #
 # ADDING A SECOND EDGE: add an entry here, create sites/<edge>/ from
-# sites/example-edge/, then re-run install.sh. Nothing else changes — the new
+# sites/example-edge/, then re-run install.sh. Review per-edge Secrets, identities, capacity and routes too ; the new
 # edge can differ from the first in every edge-local respect (AE titles, XNAT
 # project mapping, de-identification profile, disk paths) because those live in
 # its own file.
 #
-# Measured cost: ~231Mi per uploader. On a 16Gi management node that is a
-# practical ceiling around 15 sites.
+# Historical observation: about 231Mi per idle uploader. The run date is not
+# verified (2026-11-10). A former estimate suggested 15 sites on 16Gi; it is
+# not a current capacity limit. Measure active upload/deid peaks and all
+# hosted control planes with the pinned image before sizing the fleet.
 edges:
   - name: cloud-edge
     nodeIP: 203.101.xxx.xxx
@@ -219,11 +231,12 @@ edges:
 certSync:
   secrets:
     - source:
-        # MUST equal certManager.clusterResourceNamespace above. cert-manager
-        # writes the CA Secret into the namespace it runs in; point this one
-        # namespace away and cert-sync logs sync_failed forever while the edge
-        # pods that mount ca-bundle never start. Both charts refuse to render on
-        # a mismatch rather than let that happen.
+        # Use the actual namespace containing the CA bundle Secret. Align it with
+        # certManager.clusterResourceNamespace for a CA-backed ClusterIssuer.
+        # A wrong source prevents that sync and can leave an absent or stale edge
+        # bundle. Existing Secrets can mask the error until renewal. Confirm the
+        # source, destination and cert-sync logs; render checks are not proof of
+        # correct runtime Secret placement in every custom-namespace setup.
         namespace: cert-manager
         name: ais-edge-ca-secret
         keys:
@@ -235,10 +248,11 @@ certSync:
     - source:
         # This edge's Loki push CLIENT CERTIFICATE. cert-manager issues one per
         # entry in `edges` above, from the same CA as the ca-bundle, into this
-        # namespace as `<edge>-loki-client` — the name is fixed by the chart
+        # namespace as `<edge>-loki-client` ; the name is fixed by the chart
         # and the chart refuses to render if this entry does not match it.
         # Adding a site therefore provisions its push identity automatically;
-        # there is nothing to generate, write down or keep in step.
+        # the templates issue the certificate. The cert-sync destination, edge
+        # Secret name and access policy still need to agree.
         namespace: ais-mgmt
         name: "<edge>-loki-client"
         keys:
@@ -246,8 +260,9 @@ certSync:
           tls.key: tls.key
       destination:
         namespace: xnat-ingest
-        # Must equal observability.loki.clientCertSecret in the EDGE site
-        # values. A mismatch leaves Vector in CreateContainerConfigError.
+        # Must equal observability.loki.clientCertSecret in the edge values.
+        # If the named Secret is absent, Vector cannot start with that required
+        # mount. Inspect pod events; the precise waiting reason can vary.
         name: loki-push-client-tls
         type: kubernetes.io/tls
     - source:
@@ -276,13 +291,14 @@ certSync:
     # ---- mTLS on the S3 upload path: UNCOMMENT WITH THE FLAG, NOT BEFORE ----
     # This edge's S3 upload CLIENT CERTIFICATE. A SEPARATE identity from
     # `<edge>-loki-client` above and from the `<edge>-s3` key pair below it:
-    # separate anchors mean withdrawing a site's upload access does not also
-    # stop its log shipping, which is the telemetry that would explain why.
+    # the two endpoints have separate CN allow-lists and trust-Secret names,
+    # but the shipped anchors use the same fleet CA. Removing an upload CN
+    # can preserve log access; replacing a shared CA has a broader effect.
     #
     # It is commented out because the certificate does not exist until
     # seaweedfs.ingress.clientCerts.issue is true. Uncommenting only this half
-    # would make cert-sync log sync_failed for it every six hours — and exit
-    # non-zero, taking CertSyncStale with it — while every other Secret in the
+    # would make cert-sync log sync_failed for it every six hours ; and exit
+    # non-zero, taking CertSyncStale with it ; while every other Secret in the
     # same run syncs fine. The chart refuses to render on either half alone, in
     # both directions, so the two cannot drift apart.
     #
@@ -303,23 +319,28 @@ certSync:
         type: kubernetes.io/tls
 
 # =============================================================================
-# Data policy — WRITTEN ONCE, HERE, FOR THE WHOLE SITE
+# Data policy ; WRITTEN ONCE, HERE, FOR THE WHOLE SITE
 # =============================================================================
 # This block reaches BOTH charts, because Helm passes this file to each of them.
 # That is the point: the management node and every edge then agree on what may
-# be deleted and when, and cannot be half-enabled.
+# be deleted and when, but explicit edge overrides can make the policies differ. Review the
+# rendered management and edge settings together.
 #
 # Do NOT copy this block into an edge's own file. An edge file is passed last
-# and would override it silently for that edge only — the management reclaimer
+# and would override it silently for that edge only ; the management reclaimer
 # would free staged objects while the edge kept everything, or the reverse. If
 # one site genuinely needs a different policy, set it there deliberately and
 # write down why.
 #
-# Nothing expires on a fresh install. Run with dryRun for a week and read the
-# decisions it logs before enabling it.
+# Data-policy starts disabled/dry-run in the chart defaults. Stage CLI unlink
+# options and separate jobs are independent. Observe representative dry-run
+# decisions and verify destination evidence before enabling that engine; a
+# fixed week of observation alone does not establish safety.
 # =============================================================================
 dataPolicy:
-  # MASTER SWITCHES. Both must be flipped before anything is ever deleted.
+  # These switches control the data-policy engine, not every deletion path.
+  # Stage CLI unlink options and separate reclaim CronJobs have their own
+  # conditions. Review all of them before assuming cleanup is disabled.
   enabled: false      # false | true   — false: nothing is ever reclaimed
   dryRun: true        # true | false   — true: decisions are logged, not acted on
 
@@ -327,13 +348,17 @@ dataPolicy:
   # originals — the archive of record. Nothing downstream can recreate these.
   # ---------------------------------------------------------------------------
   originals:
-    # The DICOM exactly as it arrived, written BEFORE de-identification.
+    # Bytes supplied to the Orthanc callback before de-identification for
+    # DicomProtocol arrivals. REST uploads and watched files do not receive
+    # this backup. Check callback errors and actual files; enabling backup
+    # does not guarantee a successful independent copy for every input.
     facilityBackup:
       retain: forever             # forever | 30d | 90d | 1y | 7y  (any duration)
       minFreeDiskPercent: 10      # 0 disables the free-space guard
 
-    # Studies whose calling AE title is not in the aetMap. They are HELD, not
-    # dropped, so an operator can map the AET and re-send them.
+    # Legacy Lua routing can quarantine instances with an unmapped called AE
+    # title. Confirm the copy succeeded before relying on it. Current ingest
+    # routing uses source tags and sends missing IDs to assigned/__invalid__.
     quarantine:
       retain: forever             # forever | <duration>
       alertAfter: 24h             # <duration> — how long before it nags
@@ -342,17 +367,20 @@ dataPolicy:
     fileDrop:
       reclaim: never              # never   — and the chart REFUSES anything else
                                   #           while ingest.fileDrop is on: that
-                                  #           directory is the only copy
+                                  #           directory can contain the only retained copy
       minAge: 30d                 # <duration>
 
   # ---------------------------------------------------------------------------
-  # derived — reproducible from the originals, so these may be reclaimed.
+  # derived: intermediate data may be reconstructible if originals, recipes
+  # and required identifiers remain available. Verify those prerequisites.
   #
-  # EVERY RULE IS (condition AND minAge) — BOTH must hold. A pure age rule would
-  # expire a session that never reached XNAT because a credential was wrong. A
-  # pure condition rule frees nothing the moment the signal breaks.
+  # Each configured reclaim path checks its condition and minimum age. Its
+  # proof is specific to that path; a completed experiment alone is not enough.
+  # Stage CLI unlink settings and other jobs can act independently of these
+  # settings. Keep the current pipeline and reclaim conditions aligned.
   #
-  # Setting any `reclaim: never` is always safe; you just keep more data.
+  # reclaim: never disables that engine action but consumes disk over time.
+  # Monitor capacity; retaining data is not a substitute for backup checks.
   # ---------------------------------------------------------------------------
   derived:
     # Orthanc's own copy, after group-orthanc has pulled the study out.
@@ -366,21 +394,25 @@ dataPolicy:
     grouped:
       reclaim: onAssigned         # never | onAssigned
 
-    # /data/assigned, once the s3-uploader has shipped it.
+    # /data/assigned follows the selected engine and downstream consumer.
+    # Use auto for a new ingest site: onDeidentified. The legacy Lua path
+    # can use onUploaded when assigned is the terminal upload tree.
     assigned:
       reclaim: onUploaded         # never | onUploaded
       minAge: 0                   # <duration>
 
-    # The S3 staging prefix on the management node. This is the ONLY rule that
-    # deletes data the edge no longer holds, so it verifies before acting:
-    # onXnatConfirmed re-queries XNAT and matches every filename AND checksum
-    # against the staged manifest. "The experiment exists" is not enough — XNAT
-    # creates it on the first resource POST, so that is true of a PARTIAL upload.
+    # The management S3 staging prefix may hold files already retired at the edge.
+    # onXnatConfirmed queries XNAT and compares expected files with the staged
+    # manifest; known digests are compared where available. Check the current
+    # proof implementation and logs. This is not the only path that can delete
+    # a final available copy. Retention and source-backup coverage still matter.
+    # An experiment can exist before all resources arrive; existence alone is
+    # not delivery proof, nor does file proof certify metadata extraction.
     s3Staged:
       reclaim: onXnatConfirmed    # never | onXnatConfirmed
       minAge: 1d                  # <duration> — also gates the
-                                  #   SessionStagedNotConfirmedInXNAT alert;
-                                  #   raise that alert's offset if you raise this
+                                  #   the current chart caps this at 36h for the
+                                  #   48h confirmation alert; review both before changing the code
       verifyAgainstXnat: true     # true | false — false removes the only proof
                                   #   of delivery; do not
       schedule: "17 * * * *"      # cron — how often the reclaimer runs
@@ -388,14 +420,16 @@ dataPolicy:
                                   #   "delete everything"
 
   # ---------------------------------------------------------------------------
-  # telemetry — logs and metrics, never patient data.
+  # telemetry: logs and metrics can contain session identifiers and paths.
+  # Restrict access and set retention; do not assume telemetry is PHI-free.
   # ---------------------------------------------------------------------------
   telemetry:
-    # Loki/Prometheus retention is NOT set here — see charts/mgmt/values.yaml.
+    # Loki/Prometheus retention is NOT set here ; see charts/mgmt/values.yaml.
     # Edit kube-prometheus-stack.prometheus.prometheusSpec.retention and
     # loki.loki.limits_config.retention_period instead. Setting them here is
     # rejected at render rather than silently ignored.
-    # kubelet rotates by size x count, not by time. 10Mi x 5 = 50Mi per container.
+    # kubelet rotates by size x count, not by time. 10Mi x 5 is nominal retained capacity per container, not a strict quota;
+    # rotation timing and the active file can exceed that amount.
     podLogFiles: {maxSize: 10Mi, maxFiles: 5}
 
 # =============================================================================
@@ -403,7 +437,8 @@ dataPolicy:
 # =============================================================================
 # This is a SUBCHART's values. Helm cannot template a subchart from the parent,
 # so it cannot be defaulted for you by topology: it has to be written here, and
-# charts/mgmt refuses to render `topology: cloud` without it.
+# charts/mgmt validates the explicit cloud ingress settings. Both a
+# LoadBalancer Service and supported manual NodePort routing are possible.
 #
 # Left at the on-prem defaults the deployment looks entirely healthy and answers
 # nothing -- the controller reports 1/1 Running, no LoadBalancer is requested,
@@ -413,9 +448,10 @@ ingress-nginx:
     # false, not true: on cloud the entry point is the load balancer's address,
     # not this host's :443.
     hostNetwork: false
-    # ClusterFirst, not ClusterFirstWithHostNet. The latter without hostNetwork
-    # hands the pod the HOST's resolv.conf and loses every in-cluster upstream
-    # name, so SeaweedFS and Loki stop resolving from inside the controller.
+    # Use ClusterFirst for the standard cloud controller configuration.
+    # ClusterFirstWithHostNet is intended for host-network pods and also
+    # retains cluster DNS behavior; it does not inherently select host-only
+    # DNS when hostNetwork is false. Verify the rendered pod DNS settings.
     dnsPolicy: ClusterFirst
     service:
       # NodePort, NOT LoadBalancer. No cloud controller runs in this cluster --
@@ -426,11 +462,12 @@ ingress-nginx:
       # The operator's load balancer forwards 443 to this node port, and
       # domain.internal above names the load balancer's address.
       #
-      # Nectar QLD additionally rejects pinning a floating IP: the qld network is
+      # Historical provider observation, not verified (2026-11-10):
+      # Nectar QLD rejected pinning a floating IP in the tested network: the qld network is
       # both the external network AND where the VMs live, so Neutron has no
       # router between it and itself and fails the association with
-      # ExternalGatewayForFloatingIPNotFound. Whatever VIP Octavia assigns is
-      # already publicly routable.
+      # ExternalGatewayForFloatingIPNotFound. The assigned VIP was publicly routable in that test. Check the current
+      # provider network and reachability; this is not a general guarantee.
       type: NodePort
       # PINNED to the ports the operator's load balancer already forwards to.
       # e.g. a balancer whose TCP listeners forward

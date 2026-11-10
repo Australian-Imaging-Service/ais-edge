@@ -1,3 +1,6 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # cert-sync alerts — "this edge has not had its Secrets refreshed recently"
 # =============================================================================
@@ -5,8 +8,9 @@
 # management cluster; the edge holds a copy. The cert-sync CronJob is what
 # re-pushes it. A sync job that silently stops is therefore the same failure
 # as having no sync job: the edge keeps working right up until the certificate
-# it is still holding expires, and then log shipping (and, once §1 lands, the
-# whole mTLS push path) stops on a date nobody has in a calendar.
+# it is still holding expires, and then log shipping or the configured mTLS
+# upload path can fail. Rotation or revocation can also require action before
+# expiry; inspect the source and destination certificate state.
 #
 # WHY kube_cronjob_status_last_successful_time AND NOT THE LOGS.
 # templates/cert-sync.yaml renders ONE CronJob per edge, named
@@ -21,7 +25,11 @@
 # unreachable. If it exited 0 after skipping, last_successful_time would stay
 # fresh and this alert would stay green through an outage of any length.
 #
-# INPUT AVAILABILITY — stated precisely, because the SeaweedFSDiskFull defect
+# HISTORICAL INPUT AVAILABILITY, recorded before chart deployment.
+# Run date for the initial absence observation is not verified (2026-11-10).
+# The dated 2026-09-30 measurement below supersedes that old absence claim.
+# Input availability must still be checked on the current installation.
+# Earlier diagnostic rationale follows because the SeaweedFSDiskFull defect
 # was exactly a rule selecting a series that does not exist:
 #   * kube-state-metrics on the live management cluster is started with
 #     --resources=...,cronjobs,...,jobs,... and its ClusterRole grants
@@ -61,17 +69,18 @@ groups:
         annotations:
           summary: "cert-sync has not succeeded for {{ $labels.cronjob }} in over 24h"
           description: |
-            The CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has not
-            recorded a successful run for more than 24 hours, so that edge is
-            holding whatever certificate and credential material it was last
-            given. Nothing breaks until those expire, which is why this is
-            worth acting on now rather than at the expiry date.
+            The CronJob {{ $labels.namespace }}/{{ $labels.cronjob }} has no recorded
+            success for over 24 hours, and the condition has persisted for 30 minutes.
+            An edge may retain older certificates or credentials. A source rotation,
+            revocation or changed trust requirement can break access before expiry.
+            Check current source/destination versions rather than waiting for expiry.
 
-            Why it is not syncing:
-              kubectl -n {{ $labels.namespace }} logs job/<latest job of {{ $labels.cronjob }}>
-            or in Loki:
-              {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
-
+            Inspect the latest Job and its pods, then read retained logs if the pod is gone:
+              kubectl -n {{ $labels.namespace }} get cronjob {{ $labels.cronjob }}
+              kubectl -n {{ $labels.namespace }} get jobs,pods
+            Loki: {component="cert-sync"} | json | event=~"sync_skipped|sync_failed"
+            The CronJob result does not prove every consuming process has reloaded its
+            Secret. Check live mounted certificates and any environment-based clients.
       # A CronJob that has NEVER succeeded produces no
       # last_successful_time series at all, so the rule above cannot see it.
       # That is the exact shape of "the alert was green from the day it was
@@ -110,10 +119,11 @@ groups:
         annotations:
           summary: "cert-sync has never completed a run for {{ $labels.cronjob }}"
           description: |
-            {{ $labels.namespace }}/{{ $labels.cronjob }} has had a scheduled
-            run, or has existed for over 24h without one, and has no
-            successful run on record. That edge has never received a synced
-            copy of the management Secrets, so anything depending on rotation
-            there is running on whatever was pushed at build time by hand.
-            Check RBAC on the edge namespace and whether the child API server
-            is reachable from the management cluster.
+            {{ $labels.namespace }}/{{ $labels.cronjob }} has had a scheduled run, or
+            has existed over 24 hours without one, and has no recorded successful run.
+            The condition has persisted for 30 minutes. Some individual Secrets may
+            have copied before a failed run; this does not prove no delivery occurred.
+            Check management-to-child API reachability, source Secrets, edge RBAC and
+            per-Secret sync events. Compare actual source and destination versions.
+            Manually created or older Secrets can allow partial operation while this
+            alert fires; they do not establish that automatic rotation works.

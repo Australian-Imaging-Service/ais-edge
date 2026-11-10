@@ -1,3 +1,6 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # Warning alerts (Prometheus / kube-state-metrics) — notify, don't page.
 #
@@ -70,16 +73,16 @@ groups:
         annotations:
           summary: "Certificate {{ $labels.exported_namespace }}/{{ $labels.name }} is overdue for renewal or expires within 14 days"
           description: |
-            Either cert-manager was due to renew this certificate over a day ago and has not, or
-            it expires within 14 days (an expiry safety threshold, which also catches a
-            renewBefore set too short to act on). cert-manager renews at notAfter minus
-            renewBefore, 30 days before expiry for the 90-day certificates here, so those only
-            reach this when renewal has failed. A certificate whose whole lifetime is under 14
-            days would fire it while healthy.
+            The reported renewal time is over one day in the past, or certificate expiry
+            is within fourteen days. Check Certificate status and the configured lifetime
+            and renewBefore; a short-lived healthy certificate can meet the expiry test.
+            The shipped 90-day leaves normally renew thirty days before expiry, but an
+            alert is not proof of a specific renewal failure or of leaf propagation.
               kubectl -n {{ $labels.exported_namespace }} describe certificate {{ $labels.name }}
               kubectl -n {{ $labels.exported_namespace }} get certificaterequests,orders,challenges
-              kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep {{ $labels.name }}
-
+              kubectl -n cert-manager logs deploy/cert-manager --since=24h | grep -F -- "{{ $labels.name }}"
+            Use the actual controller namespace if customized. Verify copied edge leaves
+            as well as the management Certificate before declaring renewal complete.
       # Every CronJob alert here reads kube-state-metrics: CertSyncStale,
       # CertSyncNeverSucceeded and ReclaimerNotSucceeding. With its series
       # gone they have nothing to evaluate and stay quiet, which reads as

@@ -38,23 +38,32 @@ transforms — there is no third stage:
 - `add_cluster_label` — set `.cluster` (`mgmt`, or `${CLUSTER_LABEL}` on an
   edge, which the chart passes as an env var)
 - `parse_json_messages` — if the line is JSON, parse it and merge keys into
-  the event so Loki indexes them as labels (`event`, `session`,
-  `component`, …). This is what lets the Loki ruler write
+  event as JSON fields. Only the eight explicitly configured sink fields become
+  stream labels; `event` and `session` stay in the body. This lets the Loki ruler write
   `| json | event="upload_failed"` instead of regexing raw text
 - Push to Loki — one `loki` sink, and nothing else. No metrics sink: see the
   Overview for why that path was removed rather than merely disabled
 
 ## What Vector has access to
 
+The configured `cluster` value is a routing/query label, not proof of site
+identity. The JSON merge can replace event fields, and Loki does not bind a
+client certificate CN to the submitted stream label. Treat untrusted log text
+and shared-tenant queries accordingly.
+
 ### Mgmt-side
-- **hostPath read-only** mount of `/var/log/pods` and `/var/log/containers`
+- **hostPath read-only** mounts include `/var/log/pods`, `/var/log/containers`,
+  `/var/log/`, `/var/lib/`, and host proc/sys paths in the rendered subchart.
+- **hostPath read-write** `/var/lib/vector` supplies persistent file checkpoints.
+  These checkpoints are source positions, not a durable queue of log events.
 - **Cluster API** via its ServiceAccount (read-only on namespaces, pods,
   nodes — needed by `kubernetes_logs` source for metadata enrichment)
-- **NO hostNetwork**, **NO write access** anywhere on the host
-- **Outbound** only — talks to in-cluster Loki Service
+- **No hostNetwork** in this configuration. The checkpoint host path is writable.
+- **Configured destinations**: the Kubernetes API and in-cluster Loki Service.
+  No chart NetworkPolicy restricts the pod to those destinations.
 
 ### Edge-side
-- Same hostPath read-only mount
+- Read-only host log mounts plus writable `/var/lib/vector` for checkpoints
 - ClusterRole `vector` (get/list/watch on namespaces, pods, nodes)
 - **CA bundle Secret** mounted at `/etc/ssl/ais-edge-ca/ca.crt` to verify
   the Loki server cert (signed by ais-edge-ca)
@@ -84,7 +93,7 @@ literal. With the release names `install.sh` uses (`mgmt` and `edge`):
 
 | Side | Namespace | Workload | Image |
 |---|---|---|---|
-| Mgmt | `ais-mgmt` | DaemonSet `mgmt-vector` (pinned subchart `charts/mgmt/charts/vector-0.57.0.tgz`) | `timberio/vector` |
+| Mgmt | `ais-mgmt` | DaemonSet `mgmt-vector` (pinned subchart `charts/mgmt/charts/vector-0.57.0.tgz`) | `timberio/vector:0.57.0-distroless-libc` |
 | Edge | `xnat-ingest` | DaemonSet `edge-vector`, pod label `app: vector` (hand-rolled in `charts/edge/templates/vector.yaml`) | `timberio/vector:0.49.0-distroless-libc` |
 
 `observability` and `logging` were the **old shell installer's** namespaces and
@@ -130,8 +139,9 @@ KUBECONFIG=kubeconfig-edge-dev kubectl -n xnat-ingest logs -l app=vector -f
 # per-event label templates on the mgmt side, which Helm would resolve away:
 kubectl -n ais-mgmt get cm mgmt-vector -o yaml | grep 'cluster:'
 #   must print the LITERAL `{{ cluster }}`. An empty value means every log
-#   line is arriving at Loki with no stream labels, which breaks every alert
-#   rule and dashboard panel that selects on them — with no error anywhere.
+#   line may lose its expected stream label. A missing VRL field can instead
+#   cause template_failed and a dropped event. Check Vector errors as well as
+#   the rendered literal; escaping mistakes may also fail Helm rendering.
 
 # Force-refresh config. Vector is a PINNED SUBCHART of charts/mgmt, not a
 # separate release from an upstream repo, so it is upgraded with its parent:
@@ -140,9 +150,12 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 
 ## Benefits
 
-- **Single binary** — replaces Promtail + Fluent Bit + Grafana Agent
-- **Native JSON parsing** — no grok/regex configs to maintain
-- **VRL is type-safe** — type errors caught at config load, not runtime
+- **Single binary**: one collector handles this log path. Promtail and
+  Grafana Agent are historical alternatives, not supported current choices.
+- **Native JSON parsing**: structured lines can be queried as fields. Plain
+  accessionflow messages still need the LogQL patterns in the ruler and dashboards.
+- **VRL checks types at configuration load**. Fallible parsing still needs
+  runtime handling; malformed or non-JSON lines follow the configured fallback.
 - **Built-in `log_to_metric`** — Vector *can* derive Prometheus metrics from
   log lines without native instrumentation. We evaluated it and do not use
   it: the Loki ruler counts the same JSON events with `count_over_time`
@@ -150,29 +163,32 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
   already store, reachable only by standing up a scrape path from mgmt into
   each edge that konnectivity does not provide. Kept in this list as a
   capability worth knowing about, not as something running
-- **Backpressure-aware** — disk-backed buffers handle Loki outages
-- **Apache 2.0** — no vendor lock-in
+- **Backpressure-aware**: the sink uses its default memory buffer here.
+  Persistent checkpoints help restart the source; no disk event buffer is enabled.
+- **Mozilla Public License 2.0**: the pinned Vector source uses MPL-2.0.
+  Review that license and image dependencies for the site distribution policy.
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `/var/log/pods` rotated mid-read | Skipped lines | `auto_partial_merge: true` + Vector's checkpointer; in practice negligible at our log volumes |
-| Loki unreachable | Vector buffers in memory then disk; will eventually drop oldest events | Vector exposes a `vector_buffer_byte_size` gauge; Alertmanager fires VectorBufferGrowing if it climbs |
-| Push credential leaked | Attacker could push fake logs as that edge | There is no bearer token and no shared password — the edge sink has **no `auth:` block at all** and authenticates with an mTLS client certificate (`loki-push-client-tls`, `CN=<edge name>`), so a leak is scoped to one site. cert-manager issues it per edge with `rotationPolicy: Always` on a 90-day cert and the cert-sync CronJob delivers it, so rotation is automatic; to force one, delete the Certificate's Secret on mgmt and let cert-sync re-run. (The bearer and Basic paths this replaced never authenticated anything — the ends had drifted to different bytes and every push 401'd, silently, because the alerts that would have reported it are built from these very logs. See `docs/hardening-decisions.md` §1. The `02d`/`07b` scripts that used to do this by hand no longer exist; `install.sh` steps 4 and 7 replaced them.) |
-| hostPath read-only escape | Theoretical; Vector pod runs as non-root in read-only rootfs | We drop ALL capabilities + seccomp RuntimeDefault |
-| Label cardinality explosion | Loki index size + Prometheus series count blow up | Vector explicitly does NOT label `session` (high cardinality); only structured event-type labels |
-| K8s API rate-limited | Pod metadata enrichment slows | `kubernetes_logs` source is well-mannered; default cache size is fine for our scale |
+| `/var/log/pods` rotated mid-read | Skipped lines | `auto_partial_merge: true` + Vector's checkpointer; loss rate not verified (2026-11-10); partial-line merging does not prevent rotation loss |
+| Loki unreachable | The default memory buffer fills and applies backpressure; a long outage can outlast kubelet log retention | No disk sink buffer, internal metrics source or VectorBufferGrowing alert is configured. Inspect Vector errors and Loki ingestion, and test the outage budget with the site log rotation settings. |
+| Push credential leaked | An allowed client certificate permits access to the shared Loki tenant, including forged cluster labels and queries | The sink uses mTLS without a bearer or basic credential. The ingress checks CN admission, not per-edge label authorization. Renewing or deleting a Secret does not revoke the leaked certificate. Isolate its CN and assess the trust chain; normal 90-day certificates renew 30 days before expiry, with cert-sync delivering replacements. The earlier bearer/basic failures are historical, date not recorded, and fixed by the present mTLS wiring. |
+
+| Host filesystem exposure | The pod reads host logs and writes source checkpoints; the chart does not enforce a non-root user or read-only root filesystem | Capabilities are dropped, privilege escalation is disabled and seccomp is RuntimeDefault. Review the actual image user and mounts; these controls do not eliminate hostPath risk. |
+| Label cardinality explosion | Loki stream and index counts grow | Eight stream labels are configured. Session and event remain JSON fields; Vector does not export Prometheus series in this deployment. Bound the values of cluster, pod, app, component and level as well. |
+| K8s API rate-limited | Pod metadata enrichment slows | Inspect source errors and API throttling; capacity at the site workload is not verified (2026-11-10) |
 
 ## Replacements / future
 
-- **Promtail** — Grafana's purpose-built Loki shipper. Functional subset
-  of Vector. We picked Vector for the unified logs+metrics story
-- **Fluent Bit** — older, more popular, but no native log_to_metric and
-  config language is awkward (TOML-like). Vector's VRL is more ergonomic
-- **Grafana Agent** — successor to Promtail with broader scope (logs +
-  metrics + traces). Heavier than Vector, similar feature set. If we
-  later add Tempo for tracing, we'd consider a unified Grafana Agent
+- **Promtail (historical)**: reached end of life on 2026-03-02. Do not start
+  a new deployment with it; see the [official lifecycle notice](https://grafana.com/docs/loki/latest/send-data/promtail/).
+- **Fluent Bit**: a possible collector replacement. Recheck its current plugins,
+  transforms and operational requirements before planning a migration.
+- **Grafana Alloy**: the current Grafana collector to evaluate for a combined
+  logs, metrics and traces path. Grafana Agent reached end of life on 2025-11-01;
+  see the [official Agent notice](https://grafana.com/docs/agent/latest/).
 - **OpenTelemetry Collector** — vendor-neutral standard. Worth migrating
   to if the OTel ecosystem matures faster than Vector's
 
@@ -189,7 +205,8 @@ helm upgrade mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 
 ### Short-lived pods
 
-The Kubernetes log source discovers new log files every second. The pinned
+The Kubernetes log source uses a one-second minimum interval between file
+discovery scans. Scheduling and workload can make scans later. The pinned
 Vector 0.49 source defaults to 60 seconds, which can miss a pod whose log file
 is created and removed between scans. The shorter interval gives a pod that
 runs for 5-10 seconds several discovery opportunities. This is best-effort

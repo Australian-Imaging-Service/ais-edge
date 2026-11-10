@@ -22,7 +22,9 @@ Operations → Risks → Replacements / Future).
   data
 - [`seaweedfs.md`](components/seaweedfs.md) — S3-compatible storage for
   staged DICOM files
-- [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
+- [`mc.md`](components/mc.md): the S3 uploader guide retains the historical
+  MinIO filename. The current edge uploader uses rclone, with copy-only
+  transfer and a separate guarded reclaimer.
 - [`accessionflow.md`](components/accessionflow.md): group-orthanc, assign, deidentify and upload pods
 - [`deidentification.md`](components/deidentification.md): how to set up the
   default engine, the accessionflow `deidentify` stage (`deid.engine: ingest`),
@@ -80,8 +82,9 @@ which values file you are editing matters.
   recommendation and what it costs, plus the R1-R6 revisions that amended
   earlier calls. Broader than security alone — it also covers reclaimer
   completeness, object counting, alerting correctness, retention, cluster
-  adoption and sizing/immutable fields. Items marked *(measured)* were
-  verified against the live cluster rather than reasoned from documentation.
+  adoption and sizing/immutable fields. Items marked *(measured)* record
+  historical observations. Read each date and current disposition; they are
+  not evidence of present cluster health or a new security audit.
 - [`ca-ceremony.md`](ca-ceremony.md) — the out-of-band offline-root CA
   ceremony, required by `certManager.ca.mode: intermediate` (the chart fails
   the render and points here when that mode is set without a `secretRef`).

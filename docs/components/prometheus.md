@@ -5,8 +5,9 @@
 [Prometheus](https://prometheus.io/) is the de-facto standard time-series
 database and monitoring toolkit. It pulls metrics from HTTP `/metrics`
 endpoints on a schedule, stores them locally, evaluates alerting and
-recording rules, and exposes a query language (PromQL) used by Grafana
-and Alertmanager.
+recording rules, and exposes PromQL for queries and rule evaluation. Grafana queries it;
+Alertmanager receives evaluated alerts and routes notifications rather than
+executing PromQL itself.
 
 ## Role in this stack
 
@@ -18,10 +19,15 @@ The metrics layer of the observability stack. Prometheus scrapes:
   standalone `weed master` / `weed volume` commands, not to the combined
   server we run. Fronted by the `<release>-seaweedfs-metrics` Service and
   scraped every 30s by the ServiceMonitor in `observability.yaml`
-- **nginx-ingress controller** (`:10254/metrics`) — request rates per host
+- **nginx-ingress controller** exposes metrics only if configured in its
+  separate installation. A matching ServiceMonitor is not created by the
+  management chart. Current ingress scrape coverage is not verified (2026-11-10).
 - **cert-manager** (`:9402/metrics`) — certificate expiry, renewal events
 - **kube-state-metrics** — pod restarts, deployment status, PVC capacity
-- **Loki** (`:3100/metrics`) — its own internal health
+- **Loki** (`:3100/metrics`): its self-monitor is enabled in values, but the
+  subchart emits it only when the ServiceMonitor API is available at render
+  time. A plain `helm template` without that capability omits it. The literal
+  monitor label `release: mgmt` must match the Prometheus selector.
 - **NOT Vector.** There is no `:9598` scrape job and no
   `ais_pipeline_events_total` series anywhere in the stack. The Vector
   `log_to_metric` transform, the `prometheus_exporter` sink and the Vector
@@ -47,7 +53,9 @@ firing alerts to Alertmanager.
   resolve Service / Endpoint / Pod targets and discover scrape jobs)
 - **Outbound HTTP scraping** to ClusterIP services and pod IPs
 - **A persistent volume (20Gi default)** for the TSDB
-- Reads `Secret`/`ConfigMap` values referenced by ServiceMonitors
+- The operator reads referenced Secrets/ConfigMaps and prepares mounted
+  configuration. The Prometheus ServiceAccount itself has no Secret or
+  ConfigMap API read permission in the rendered ClusterRole.
 - **NO host filesystem, NO hostNetwork**
 
 ## Where it runs
@@ -56,8 +64,10 @@ firing alerts to Alertmanager.
   konnectivity boundary, and deliberately does not need to — edge signals
   travel as logs (Vector → Loki) and are alerted on there by the Loki ruler,
   rather than being turned back into metrics first. Any rule naming a
-  child-cluster object from mgmt Prometheus matches zero series; two were
-  deleted for exactly that reason
+  child-cluster object from mgmt Prometheus cannot see that object through
+  these local scrapes. Historical unreachable-object rules were removed; the
+  surviving rule named `EdgeWorkerDisconnected` actually selects management
+  cluster node readiness. It is not proof that an edge worker is disconnected
   ([`../alerting-architecture.md`](../alerting-architecture.md))
 - Namespace: `ais-mgmt` — the release namespace, set by `install.sh`
   (`MGMT_NS`). kube-prometheus-stack is a *subchart* of `charts/mgmt` with no
@@ -81,8 +91,10 @@ firing alerts to Alertmanager.
 | `charts/mgmt/files/prometheus-rules/critical.yaml` | critical alerts |
 | `charts/mgmt/files/prometheus-rules/warning.yaml` | warning alerts |
 | `charts/mgmt/files/prometheus-rules/info.yaml` | info alerts |
+
+| `charts/mgmt/files/prometheus-rules/uploader.yaml` | Six recording rules and two uploader restart/memory alerts; scopes are substituted by the template. |
 | `charts/mgmt/files/prometheus-rules/cert-sync.yaml` | per-edge cert-sync staleness (`CertSyncStale`, `CertSyncNeverSucceeded`) |
-| `charts/mgmt/files/prometheus-rules/reclaimer.yaml` | per-edge reclaimer health (`ReclaimerNotSucceeding`). The only rule file with sentinels (namespace, release prefix, threshold), filled by `observability.yaml`; not rendered under `s3Staged.reclaim: never` |
+| `charts/mgmt/files/prometheus-rules/reclaimer.yaml` | per-edge reclaimer health (`ReclaimerNotSucceeding`). Uses namespace, release-prefix and threshold sentinels filled by `observability.yaml`; `uploader.yaml` also uses sentinels; not rendered under `s3Staged.reclaim: never` |
 | Per-component: ServiceMonitor / PodMonitor objects (released alongside Service definitions) | tell Prometheus what to scrape |
 
 The rule files are **not** enumerated in any template. `observability.yaml`
@@ -90,8 +102,9 @@ renders one `PrometheusRule` per file matched by
 `.Files.Glob "files/prometheus-rules/*.yaml"`, so dropping a new file into
 that directory ships it and no list has to be kept in sync. Each file has a
 promtool unit test beside it in `files/prometheus-rules/tests/`, which is
-what stops a rule from selecting a series that does not exist — the failure
-mode a PrometheusRule never reports on its own.
+what checks the synthetic series and timing encoded by the fixtures. Those
+tests do not prove that a live scrape emits every required series. Confirm
+/rules and /targets plus representative queries after deployment.
 
 The selector labels work by **opt-in**: Prometheus only discovers
 ServiceMonitors / PodMonitors / PrometheusRules carrying a `release` label
@@ -136,8 +149,8 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 ## Benefits
 
-- **Widely adopted** — rich ecosystem, every CNCF project ships with
-  metrics in Prometheus exposition format
+- **Widely adopted**: a broad ecosystem exposes Prometheus metrics.
+  Verify each target and its labels; project membership does not guarantee an endpoint.
 - **Pull model** — scrape failures are visible (target listed as down),
   unlike push systems where missing data could mean either "agent died"
   or "nothing happening"
@@ -150,19 +163,21 @@ curl -s 'http://localhost:9090/api/v1/status/tsdb' | jq
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Local PV fills up | Prometheus stops ingesting; alerts stop firing | 15-day retention on a 20Gi PV is the safety valve; resize the PVC if needed. Set retention **only** at `kube-prometheus-stack.prometheus.prometheusSpec.retention` — the chart `fail`s if you try it under `dataPolicy.telemetry`, because Helm cannot template a subchart's values from the parent and the key would change nothing. (Loki's 30d `retention_period` is a separate setting.) |
+| Local PV fills up | Prometheus stops ingesting; alerts stop firing | 15-day retention on a 20Gi PV is a time bound, not a capacity guarantee. Monitor actual TSDB growth; local-path does not by itself provide in-place PVC expansion. Plan storage migration or capacity changes for the deployed provisioner. Set retention **only** at `kube-prometheus-stack.prometheus.prometheusSpec.retention` ; the chart `fail`s if you try it under `dataPolicy.telemetry`, because Helm cannot template a subchart's values from the parent and the key would change nothing. (Loki's 30d `retention_period` is a separate setting.) |
 | Prometheus pod crashes | Metrics gap; alerts cannot fire | Pod auto-restarts; gap visible in Grafana |
 | Scrape target slow / unreachable | That target's metrics go stale | Prometheus marks the target down; KPS dashboard shows it |
-| Cardinality explosion | RAM spike, eventual OOM | We deliberately keep label set tight; quotas via `--enable-feature=cardinality-mitigation` if needed |
-| Operator misconfiguration | Wrong alerts/dashboards / no scrape | Operator logs surface this loudly |
+| Cardinality explosion | RAM spike, eventual OOM | Use supported per-target sampleLimit/labelLimit settings and inspect cardinality. The formerly suggested cardinality-mitigation feature flag is not verified for the pinned image (2026-11-10) and is not an operational instruction. |
+| Operator misconfiguration | Wrong alerts/dashboards / no scrape | Inspect operator logs, rejected resources, /targets and /rules. A valid selector that matches nothing may leave no obvious error. |
 
 ## Replacements / future
 
 - **Mimir** — see [`mimir.md`](mimir.md). Same wire protocol, but
-  horizontally scalable with object-storage backend. Drop-in once we
-  outgrow local PV
-- **VictoriaMetrics** — Prometheus-compatible TSDB with better compression
-  and ingest throughput. Considered but not deployed
+  horizontally scalable with object-storage backend. It is not a drop-in
+  replacement for the scraper and local TSDB; plan remote write, credentials,
+  rules, querying, and any history migration separately
+- **VictoriaMetrics**: a possible Prometheus-compatible TSDB replacement,
+  considered but not deployed. Relative compression and throughput are not
+  verified (2026-11-10); benchmark the site workload and required query behavior.
 - **Datadog / New Relic** — managed alternatives with their own agents.
   Drop Prometheus and run Vector or DataDog-Agent as the scraper
 

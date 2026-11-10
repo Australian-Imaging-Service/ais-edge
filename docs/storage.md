@@ -20,8 +20,10 @@ defaults they write to the **root** disk:
 | `/var/lib/k0s` | containerd image store, etcd/kine, kubelet root-dir | GBs of images |
 | `/opt/local-path-provisioner` | every PVC | Prometheus 20Gi, Loki 10Gi, Grafana 5Gi, Alertmanager 2Gi, each hosted control plane's etcd |
 
-A 30G root does not hold the container images alone. When it fills, the kubelet
-and the API server go down together.
+Whether 30G holds the images depends on image count, retained layers and logs.
+That capacity claim is not verified (2026-11-10). If the root fills, both the
+kubelet and the API server can fail, so measure available space and headroom
+on the target node before installation.
 
 ## The setting
 
@@ -54,7 +56,8 @@ a directory that was never used and leaves the real state behind.
   controller --help` says outright: *"DO NOT CHANGE for an existing setup,
   things will break!"*
 - local-path-provisioner writes the host path into each **PV object**. Changing
-  `nodePathMap` later strands existing volumes at the old path.
+  `nodePathMap` later affects newly provisioned volumes; existing PV objects
+  still refer to their old paths. It does not migrate their data.
 
 So `dataRoot` must be set before the first install. `scripts/01-install-k0s.sh`
 only applies it inside its `k0s status` / `kubectl get sc local-path` guards,
@@ -63,7 +66,10 @@ layout authoritative rather than half-migrating it.
 
 ## Why not bind mounts
 
-Because it was tried, and it cost a node.
+**Historical incident, June to August 2026:** the following record explains
+why this installer uses native paths. Its saved live output was not rechecked
+on 2026-11-10. Current code uses `--data-dir` and the provisioner configuration;
+it does not create these bind mounts.
 
 The June 2026 deployment of `ais-edge-dev` put the data on `vdb` with two fstab
 bind mounts, added by hand four minutes before the install:
@@ -90,15 +96,19 @@ This was caught on `ais-edge-dev` in August 2026 with the reboot already queued.
 The recovery was to recreate the deleted source directories and gate the reboot
 on `findmnt --verify --fstab`.
 
-The native settings above have no fstab entries and no mounts, so the failure
-mode does not exist rather than being defended against. `docs/cai-lfs3-deployment-plan.md`
-§3 called this correctly at the time — *"all supported config, not bind-mount
-hacks"* — and the bind mounts went in anyway.
+The native relocation settings do not create these two fstab bind entries.
+They therefore avoid this particular deleted-bind-source failure. The data
+volume still needs a correct mount and boot configuration. A historical
+internal deployment plan also advised native configuration, but that plan is
+not present in this checkout and its text is not verified (2026-11-10).
 
 ## If you inherit a node that already has the bind mounts
 
-They conflict with `--data-dir`: k0s would write to `/data/k0s` through a bind
-that also presents as `/var/lib/k0s`. Remove them before installing.
+These mounts need an explicit migration plan before a new installation.
+First stop the affected services, preserve the data and record the real PV
+paths. Only on a stopped, backed-up node, remove these exact legacy entries
+if they match the configuration below. Do not unmount an active cluster or
+assume every node uses these source and target paths.
 
 ```bash
 # 1. Release the mounts BEFORE deleting anything under /data.
@@ -108,13 +118,15 @@ sudo umount /var/lib/k0s /opt/local-path-provisioner
 sudo sed -i '\|^/data/k0s |d;\|^/data/local-path |d' /etc/fstab
 
 # 3. Prove the node will still boot. Expect "Success, no errors or warnings"
-#    and no output at all from the second command.
+#    and "no dangling mounts" from the second command.
 sudo findmnt --verify --fstab
 findmnt -o TARGET,SOURCE | grep -- '//deleted' || echo "no dangling mounts"
 ```
 
 Run step 3 before **any** reboot of a node whose fstab you have touched. It is
-the only check that answers "will this machine come back".
+a check of mount-table consistency, not a guarantee that the node will boot.
+Also confirm the data volume is available, the service paths are correct, and
+console recovery is available before restarting the host.
 
 ## Known gap: edge workers
 

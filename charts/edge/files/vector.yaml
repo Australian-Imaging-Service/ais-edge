@@ -1,3 +1,6 @@
+# Review 2026-11-10: event collection and delivery are best effort. The
+# data_dir stores source/checkpoint state; no disk sink buffer is configured.
+# Historical observations below do not assert current live event counts.
 # =============================================================================
 # Vector — edge log shipper configuration
 # =============================================================================
@@ -7,10 +10,10 @@
 #
 #   {{ kubernetes.pod_name }}   Vector event-time templates, evaluated per log
 #                               line. Helm would try to resolve these at chart
-#                               render time and render them EMPTY — producing
-#                               a Loki stream with no pod/component labels and
-#                               silently breaking every alert rule and
-#                               dashboard panel that selects on them.
+#                               render time, which can fail or corrupt the
+#                               intended event-time expression. Preserve the
+#                               literal bytes so Vector can resolve the labels
+#                               from each collected event at runtime.
 #
 #   ${LOKI_ENDPOINT}            Environment interpolation, performed by Vector
 #                               when it loads this file. This is how per-site
@@ -54,15 +57,19 @@ transforms:
       # A Loki label template that references a missing field does not render
       # empty — Vector DROPS the whole event and counts a `template_failed`.
       # `level` below is only present on lines the pods emit as JSON, so every
-      # plain-stdout line (tqdm progress bars, tracebacks, anything a library
-      # prints directly) was being discarded before it reached Loki. Observed
+      # plain-stdout line (historically progress bars, and still tracebacks or
+      # direct library output) was discarded before it reached Loki. Historical
+      # observation; its run date is not verified (2026-11-10). Observed
       # on cai-lfs3: 31 template_failed in a 200-line window, with the internal
       # log itself rate-limited — so the loss was reported only in a warning
       # that was itself being suppressed.
       #
+      # Current stages set TQDM_DISABLE=1 since 2026-10-28. Progress bars are
+      # disabled; this fallback still preserves tracebacks and other plain
+      # output, including bars if that environment setting is later removed.
       # Defaulting the field keeps those lines, labelled honestly as unknown.
-      # Do not drop the label instead: every alert rule and dashboard panel
-      # selects on it.
+      # Keep the label because severity-filtered rules and dashboard panels
+      # depend on it. Other queries use different subsets of these labels.
       if !exists(.level) {
         .level = "unknown"
       }
@@ -115,7 +122,7 @@ sinks:
         - stream
         - tags
     labels:
-      # LOAD-BEARING. Every alert rule and dashboard panel selects on these
+      # Rules and dashboard panels depend on different subsets of these
       # label names. `component` in particular is how the s3-uploader, group,
       # assign and orthanc log streams are told apart.
       cluster: "{{ cluster }}"

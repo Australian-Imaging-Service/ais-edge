@@ -4,8 +4,15 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 
 ## Overview
 
+**Verified scope (2026-11-10):** descriptions below follow this branch
+and accessionflow 0.19.0. Orthanc is the receiver; the default `ingest` engine
+de-identifies downstream. The Orthanc/Lua de-identification engine was
+deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
+Recipe output and source retention must be checked separately: a stage name,
+processed label, or successful upload is not proof of a complete privacy policy.
+
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
-is the AIS-maintained Python tool that turns deid'd DICOMs into
+is the AIS-maintained Python tool that groups, labels, and de-identifies DICOMs into
 XNAT-ready sessions and uploads them. The pinned version is **0.19.0**,
 from the upstream accessionflow image. It replaces the AIS fork build
 0.16.2.post1 (`ingest.image` in `charts/edge/values.yaml`). The old single `sort` command
@@ -41,7 +48,8 @@ node:
 > **De-identification is done in accessionflow by default** (`deid.engine:
 > ingest`). The `deidentify` stage runs between `assign` and the upload. It
 > expects the studies to carry their project/subject/session identifiers in
-> tags, and it writes reversible re-identification metadata. The Orthanc Lua
+> tags, and it writes sensitive re-identification metadata for fields it
+> transforms. Those maps are not a complete original DICOM archive. The Orthanc Lua
 > hook engine (`deid.engine: orthanc`) is deprecated. See
 > [deidentification.md](deidentification.md) and
 > [choosing-a-deid-engine.md](../choosing-a-deid-engine.md).
@@ -52,7 +60,9 @@ This checks HTTP availability, not response JSON; redirects and failed transfers
 ## Role in this stack
 
 The DICOM ingest engine. On each edge worker Orthanc receives studies and
-writes the facility backup (see [orthanc.md](orthanc.md)). Its Lua hook also
+writes a facility backup for DICOM-protocol arrivals when that callback
+succeeds (see [orthanc.md](orthanc.md)). REST arrivals bypass that backup.
+The Lua script also
 labels each stable study `xnat-ingest-ready`, under `ingest` too. That label
 does not show that the study is de-identified. `group-orthanc`
 REST-pulls each study that has been quiet for its wait period (under the
@@ -138,8 +148,9 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   from the release name**, not hardcoded (`mgmt.s3InternalEndpoint` in
   `charts/mgmt/templates/_helpers.tpl`) — the imperative manifest's
   literal `seaweedfs.seaweedfs` broke the moment the release was not
-  named `seaweedfs`. Plain http on purpose: this traffic never leaves
-  the node, so the custom CA never has to reach this pod
+  named `seaweedfs`. Plain http on purpose: the default single-node management topology keeps it local. A future
+  multi-node placement can carry this HTTP traffic across nodes. ClusterIP
+  DNS does not encrypt traffic or enforce a network boundary
 - **Outbound HTTPS** to the configured XNAT server
 - **Two Secrets:**
   - `xnat-credentials` (`xnatUpload.xnatSecretRef`) — server URL,
@@ -149,9 +160,10 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
     admin identity:** the matching `upload-<edge>` S3 identity is scoped
     to `Read`/`List`/`Write`/`Tagging` on that one edge's bucket
     (`charts/mgmt/templates/seaweedfs.yaml`), so a leaked uploader key
-    cannot reach another site's staged imaging. `Write` is what lets it
-    delete a staged session once XNAT has confirmed it — SeaweedFS folds
-    object DELETE into that action
+    cannot reach another site's bucket through that identity. The separate
+    management reclaimer uses the same scoped identity for deletion after
+    XNAT proof; the upload command itself does not delete S3 staging.
+    SeaweedFS includes object DELETE in `Write`
 
 The management chart passes S3 credentials with `ACFLOW_STORE_CREDENTIALS`.
 The CLI also accepts the two values after `--store-credentials`; these are
@@ -186,13 +198,17 @@ credential stops delivery for *every* site, and the failures are
 indistinguishable because they share one log stream. Per-site uploaders
 give per-site isolation, per-site alerting via the `edge` label, and let
 one site be paused without touching the others. Measured cost of a
-single uploader — 231Mi resident, 4m CPU — puts a practical ceiling
-around 15 sites on a 16Gi management node.
+single uploader in a historical run was 231Mi resident and 4m CPU
+(measurement date not verified, reviewed 2026-11-10). The old estimate of
+around 15 sites on a 16Gi node was not a tested ceiling. Measure concurrent
+0.19.0 uploads, temporary storage, Orthanc load, and observability before
+setting a site count or memory limit.
 
 A site can also skip S3 entirely with `upload.mode: direct`, which
 renders `edge-upload` (`accessionflow store xnat` straight from the edge to
 XNAT) instead of `edge-s3-uploader` and needs no management plane, no S3
-and no CA plumbing. The two modes are mutually exclusive and the chart
+and no management-to-edge certificate plumbing. HTTPS to XNAT still needs
+valid server trust; direct mode does not remove TLS verification requirements. The two modes are mutually exclusive and the chart
 refuses to render both — enabling both would push every session into
 XNAT twice.
 
@@ -219,7 +235,9 @@ The chart keeps
 its stage and Kubernetes names. `group-orthanc` runs `accessionflow
 collate-orthanc`; `group-fs` runs `accessionflow collate`; `assign` runs
 `accessionflow label xnat`; `upload` runs `accessionflow store xnat`. The
-optional `associate` stage maps to `accessionflow attach`. The command change
+legacy associate template would require `accessionflow attach`, but enabling
+`ingest.associate.enabled` is rejected: the chart does not supply the required
+inputs, matching rule, or output contract. The command change
 does not rename any namespace, Orthanc label or storage folder.
 
 | File | Purpose |
@@ -398,8 +416,8 @@ shape is fixed and is what every Grafana panel + Loki ruler alert reads:
 {
   "ts":         "2026-05-14T07:16:50+00:00",
   "component":  "s3-uploader",
-  "edge":       "edge-dev",            // CLUSTER_NAME — used as Vector's `cluster` label
-  "event":      "upload_completed",    // one of twelve — full list below
+  "edge":       "edge-dev",            // EDGE_NAME from clusterLabel; Vector sets its own stream cluster label
+  "event":      "upload_completed",    // one of fourteen; full list below
   "session":    "test-project.subject01.visit01",  // PROJECT.SUBJECT.VISIT
   "message":    "",                    // free-form; empty for the routine events
   "bytes":       538740,               // total session size on disk (du -sb)
@@ -415,8 +433,8 @@ The fourteen event names, and what each one means:
 |---|---|
 | `dependency_missing` | before anything else: a tool the loop needs is not in the image, or is a busybox variant without the options the loop uses (`find -xtype`, `stat -c`, `du -sb`, `flock -w -E`; each is checked by use, not by name). Names the tool, carries "refusing to start upload loop", and exits 1 |
 | `startup` | the loop starts; records endpoint, bucket, prefix, part size and client-certificate state, and says that it copies only |
-| `endpoint_ready` | the `head-bucket` probe succeeded |
-| `endpoint_retrying` | probe failed; retrying (12 attempts over 60s) |
+| `endpoint_ready` | `rclone lsd sw:<bucket>` succeeded with this site's credentials |
+| `endpoint_retrying` | probe failed; retrying up to 12 attempts, with 5s sleeps between failures; request duration adds to elapsed time |
 | `endpoint_failed` | probe failed 12 times — refuses to enter the upload loop. Message also reports whether a client certificate is configured and readable: with mTLS on the S3 path this probe is what a bad or missing one breaks first, and (measured) the rejection arrives as an HTTP 400/403 that rclone reports as an S3 XML parse failure |
 | `upload_started` | a settled session, changed since its last copy or named by a repair request, is about to be copied |
 | `upload_completed` | `rclone copy` exited zero; the state file records the fingerprint, and a claimed repair request is removed (`recopy_done` follows) |
@@ -441,22 +459,24 @@ its alert *silently* — no error, just a rule that never fires again.
 The three `endpoint_*` events are operator diagnostics; they were called
 `alias_configured` / `alias_retrying` / `alias_failed` under the old
 `minio/mc` implementation, and were renamed because "alias" is an `mc`
-concept that does not exist now the client is the AWS CLI. Nothing
+concept of that historical client. The replacement was AWS CLI and is now
+rclone (migration history, October 2026). Nothing
 matched the old names, which is what made that rename safe.
 
 An already-uploaded, unchanged session emits **nothing at all**. The
 uploader fingerprints each session directory and compares it against a
-state file under `/data/LOGS/s3-uploader-state/`; a per-cycle "still
-fine" event here is exactly what produced two days of duplicate
-upload-completed alert mail.
+state file under `/data/LOGS/s3-uploader-state/`. This fingerprint hashes
+relative filenames, sizes, and integer mtimes, not content bytes. Historical
+per-cycle events caused duplicate mail (incident date not verified, reviewed
+2026-11-10); unchanged sessions now remain quiet unless recopy is requested.
 
 The `dicoms` vs `files` split exists because accessionflow label xnat
 auto-generates a `__MANIFEST__.json` per RESOURCE (not per session) and the s3-uploader writes
 it to S3 alongside the DICOMs. Dashboards / alerts that want a true
-DICOM count must read `dicoms`; ones that want "S3 PUT count" or
-"objects written" use `files` — which counts DICOMs **plus**
+DICOM count must read `dicoms`; ones that want "local file count considered for upload" use `files` ; which counts DICOMs **plus**
 `__MANIFEST__.json` **plus** `__METADATA__.json`, not just DICOMs and a
-manifest. Both are computed straightforwardly in
+manifest. `files` is not an actual PUT count: rclone can skip unchanged
+objects, and multipart uploads make multiple requests. Both are computed in
 `charts/edge/files/s3-uploader.sh`:
 
 ```bash
@@ -650,8 +670,9 @@ already has, and it ignores a copy with the same SOPInstanceUID.
 ### S3 mode: prove, then delete
 
 Under `upload.mode: s3` the edge keeps its copy of a session until the
-staged-reclaimer has proved the bucket's copy against it. Nothing on the edge
-trusts rclone's exit code: the delete that cleared `/data/assigned` after a
+staged-reclaimer has proved the bucket's copy against it. The staged-reclaimer does not use rclone's exit code as deletion proof.
+The data-policy engine has separate marker-based decisions; do not generalize
+this proof to every retained copy. Historically, the delete that cleared `/data/assigned` after a
 zero exit, which is what the uploader did before, removed the only copy on
 the strength of that code.
 
@@ -747,9 +768,10 @@ first upgrade to this chart the old pod has no lock, but `Recreate` stops it
 first, so the upgrade itself is safe. An old pod that ignores TERM is killed
 after the grace period, possibly during a pass, as before this change.
 
-Each pass starts a new `accessionflow` process. The previous fork took about 1.6 s of
-CPU per pass, the same cost that the deidentify and package stages already
-have. A new process for each pass also returns its memory after the pass.
+Each pass starts a new `accessionflow` process. A historical fork measurement recorded about 1.6 s of
+CPU per pass (measurement date not verified, reviewed 2026-11-10). Startup
+cost for the current 0.19.0 image and each site workload was not benchmarked
+in this review; do not use that old number as a capacity guarantee. A new process for each pass also returns its memory after the pass.
 
 The data-policy loop also stops from idle sleep and after a current foreground
 command. An external child that does not finish within the grace period can
@@ -847,7 +869,9 @@ listing and proof in memory. Startup probes remain separate from that pass.
 It reuses connections, not response data. Each session gets a fresh listing
 when it is examined; the run-start discovery contains names only.
 
-For XNAT proof, the worker uses plain HTTP and sends `Cache-Control: no-cache`.
+For XNAT proof, the worker uses direct HTTP requests rather than xnatpy
+object caches. It uses HTTP or HTTPS according to the configured server URL,
+and sends `Cache-Control: no-cache`.
 It queries the experiment endpoint before reading its file catalog and keeps
 the per-file HEAD checks. A missing experiment, missing file, failed request,
 invalid response or failed login keeps the affected data. If a login expires,
@@ -885,8 +909,9 @@ deletes. A dry run makes the same checks and removes no data.
   historical measurements under "Known upstream defects" before comparing
   old alert behavior with a current deployment.
 - **Loop mode with label tracking** — group-orthanc marks each pulled
-  study `xnat-ingest-processed`, so subsequent loops skip it → no
-  double-ingest
+  study `xnat-ingest-processed` and records a source snapshot. An unchanged
+  study can be skipped; later instances or changed source state can cause
+  regrouping. The label alone is not an exactly-once delivery guarantee
 - **Connection-resilience patch** (merged upstream) — handles
   transient network errors that previously killed the upload loop
 
@@ -894,28 +919,31 @@ deletes. A dry run makes the same checks and removes no data.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | Routes to `__invalid__/` | Requeue it with `sudo ais-requeue` on the edge node, as in [Recovering an invalid session](../recovering-invalid-sessions.md). `InvalidSessionAssigned` fires when assign reports one, and `DICOMValidationFailureSpike` when this happens >10x/h |
-| XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
+| DICOM missing AccessionNumber | Routes to `__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one, and `DICOMValidationFailureSpike` when this happens >10x/h |
+| XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; Use an XNAT credential accepted by the password-based REST client; a browser-only AAF/OIDC login is not sufficient |
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
-| S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
-| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | `--wait-period 60` ensures we don't stage half-written files |
+| S3 endpoint unreachable from upload pod | uploads fail | Check Service endpoints, DNS, network policy, credentials, and SeaweedFS health. An in-cluster URL can fail even while the SeaweedFS pod is running |
+| group/assign pod restarts | in-flight stage interrupted; resumes on next loop | The quiet-period check reduces incomplete input; snapshots detect changed studies. Late series and a process killed mid-pass still need retry and output validation |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
 | Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.19.0` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)
 
-**Historical record:** the measurements in this section describe older
+**Historical record (measurement dates not verified; reviewed 2026-11-10):**
+the measurements in this section describe older
 xnat-ingest releases. The status notes below distinguish them from the
 pinned accessionflow 0.19.0 behavior. Keep the measurements for incident
 comparison; do not apply their old restart or alert advice without the status
 notes.
 
-Both were found by measurement on the dev deployment, both are in the uploader,
-and both are in the same file as the de-identification issue already raised with
-kirsty-UoN. Neither is dangerous — no data is lost or duplicated in XNAT — but
-each makes the uploader's output lie about what it did, and anything monitoring
-that output inherits the lie.
+The following three reports came from older test deployments. They describe
+observed logging and cache behavior, not a guarantee that stale evidence was
+harmless. Current fixes and remaining checksum limitations are stated next to
+each record. Re-run an appropriate synthetic check before using an old
+measurement to interpret a deployed site.
+
+
 
 ### 1. The success line is logged on the SKIP path
 
@@ -952,12 +980,12 @@ three wrong attempts. Our fix was to widen the range past the loop period
 (`charts/mgmt/files/loki-ruler-rules.yaml`), which works but is a workaround for
 a message that should not be there.
 
-**Suggested upstream fix.** Emit a distinct message on the skip path — e.g.
+**Historical proposed fix (implemented by the current pin).** Emit a distinct message on the skip path ; e.g.
 `Session '<session>' already in XNAT, skipping` — or drop the success line to
 debug when nothing was transferred. Either makes the successful-upload line an
 event again, which is what every consumer assumes it is.
 
-**It also blocks a real backlog alert.** `XNATBacklogGrowing` tried to measure
+**Historical backlog-alert consequence; old rule remains removed.** `XNATBacklogGrowing` tried to measure
 "arriving in S3 faster than being pushed to XNAT" by subtracting a count of
 this string from a count of edge `upload_completed` events. Because the
 string is a level, its count grows with however many sessions are sitting in
@@ -983,12 +1011,13 @@ uploader cannot see its own writes.
 It is a **state** bug, not a logic bug: restarting the pod clears it, and with a
 fresh connection the deduplication is correct.
 
-**Operational consequence, worth knowing even if upstream never changes it:** if
-you ever clear XNAT by hand, **restart the uploader**. Otherwise it keeps
-deciding against a snapshot that no longer matches reality — it will skip
-everything staged, and report success while doing it.
+**Historical workaround, superseded in 0.19.0:** the old uploader needed a
+restart after an administrator changed XNAT so it would discard cached state.
+Do not delete XNAT data or restart a current uploader just to follow this old
+workaround. The current path refreshes object evidence; investigate current
+errors and identity conflicts before taking a corrective action.
 
-**Suggested upstream fix.** Refresh the listing once per loop iteration, or
+**Historical proposed fix (implemented by the current pin).** Refresh the listing once per loop iteration, or
 expose the cache TTL as a flag.
 
 ### 3. A benign checksum mismatch logs at ERROR, every loop, until XNAT catches up
@@ -997,7 +1026,7 @@ expose the cache TTL as a flag.
 file by name only when XNAT lists it without a digest. So the ERROR `... already
 exists on XNAT with different checksums` now means a real difference. XNAT holds
 a file that staging does not, or a file with other content.
-`XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2, and in the pinned
+`XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2, and in the
 then-pinned fork build 0.16.2.post1, the upload logged this ERROR and continued.
 In 0.19.0 a failed session verdict suppresses the success line. A success line
 still does not establish byte equality when XNAT supplies no checksums. The record below is the 0.15.0 measurement. Its statement
@@ -1030,7 +1059,8 @@ for hours (`test_project.65DDEFA8D833.8607324A38C9`) shows zero occurrences
 of this line — it stops once XNAT's own checksum catches up — but a
 freshly-arrived session repeats it on every ~60s pass in the meantime.
 
-Not dangerous today: no alert rule matches on log text or level for the
+**Historical monitoring gap, no longer current:** at the time no rule matched
+log text or level for the
 `xnat-upload` namespace (checked — `grep -i "checksum\|already exists"
 charts/mgmt/files/loki-ruler-rules.yaml` returns nothing), so this currently
 produces noise in `kubectl logs` and nothing else. It is the same trap as
@@ -1039,19 +1069,19 @@ nothing is wrong, re-emitted every loop for as long as the session is
 freshly staged. **If anyone ever adds a rule that alerts on `level="ERROR"`
 in this namespace without reading the message first, this line will fire it
 on every normal upload** — the exact failure mode that made
-`OrthancStorageGrowing` and `XNATBacklogGrowing` (deleted this session, see
+`OrthancStorageGrowing` and `XNATBacklogGrowing` (removed during that historical review, see
 `docs/TOUR.md` §9.9) look like coverage while measuring nothing.
 
-**Suggested upstream fix.** Either skip the checksum comparison (and this
+**Historical proposed fix (implemented by the current pin).** Either skip the checksum comparison (and this
 log line) when XNAT's stored checksum is empty/unset — that state means "not
 computed yet", not "computed and different" — or log it at INFO/DEBUG, since
 the pass's own outcome is already success.
 
 ## Replacements / future
 
-- **Orthanc** as a C-STORE listener instead of file-watch (would
-  replace the manual scp/cp into incoming); accessionflow can sit
-  downstream of Orthanc
+- **Orthanc C-STORE reception is already implemented and is the default.**
+  The file-drop source is optional. This former proposal is retained as
+  history; it is not an outstanding replacement task (reviewed 2026-11-10)
 - **DICOMweb (STOW-RS)** receiver — modern alternative to C-STORE;
   HTTPS-native, plays well with our TLS architecture
 - **Custom Python service**; only worth doing if we outgrow accessionflow;
@@ -1071,9 +1101,10 @@ deliberately scoped out of the current change set:
   mgmt one sets `service: {enabled: false}` — so everything below is
   derived from **log lines** instead: Vector ships the JSON events to
   Loki, and Loki's own ruler counts them
-  (`charts/mgmt/files/loki-ruler-rules.yaml`). Counting lines is accurate
-  for rates but has no histogram buckets, so upload-duration percentiles
-  have no source today.
+  (`charts/mgmt/files/loki-ruler-rules.yaml`). Line counts measure observed emissions and can be affected by dropped
+  logs, retries, and grouping. They are not exact session counts. LogQL can
+  unwrap numeric durations for percentiles; native Prometheus histogram
+  buckets are a separate unimplemented interface.
 - **Custom pipeline-event names** in log lines — e.g. an `event` field
   with values `session_staged`, `xnat_upload_completed`, etc.
   The 0.19.0 uploader has structured events for selected paths, including
@@ -1092,8 +1123,11 @@ session input paths captured before it loaded the session. This includes files
 that the stage did not process. The behavior is present from 0.18.0. Keep
 `/data/grouped` and `/data/assigned` session folders managed by the pipeline;
 do not put files into them by hand. Use the incoming path for supported file
-drops. Originals stay in the facility backup under the site's retention
-policy. The stage does not verify that backup before it unlinks an input.
+drops. A facility-backup copy exists only if the DICOM-protocol callback wrote it
+successfully and the retention policy has kept it. REST uploads and file-drop
+input bypass that backup write. The stage does not verify any backup before
+it unlinks an input. Unlinking can remove the last local path if other copies
+are absent, even when the data-policy deletion switch is off.
 New paths created after the snapshot are left for a later pass. Replacing a
 path that was already in the snapshot is not protected. Other unlink modes
 have different scope; this warning concerns `all`.
@@ -1121,7 +1155,6 @@ the upload path can adopt it after the subject check and log the WARNING
 does not prove the identity of files already stored there. A mismatched UID
 or subject is refused. Keep this distinction when validating in-flight data.
 
-The 0.19.0 upload loop waits for the remainder of its interval. A verified test
-example was `Upload took 10.8 seconds, waiting another 49.2 seconds before
+The 0.19.0 upload loop waits for the remainder of its interval. A historical tier-2 test on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
 running again (loop every 60 seconds)`. The chart's separate writer shell loops
 still sleep for their configured full interval after a pass.
