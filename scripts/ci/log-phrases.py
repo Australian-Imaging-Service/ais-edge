@@ -29,8 +29,9 @@ TOOL_COMPONENTS = {
 }
 MIN_LEN = 8  # shorter fragments match too much text to prove anything
 
-FILTER = re.compile(r'(\|=|\|~)\s*("(?:[^"\\]|\\.)*"|`[^`]*`)')
-FIELD = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*(=~|=)\s*("(?:[^"\\]|\\.)*"|`[^`]*`)')
+# Negative filters count too: a stale exclusion lets the wrong lines through.
+FILTER = re.compile(r'(\|=|\|~|!=|!~)\s*("(?:[^"\\]|\\.)*"|`[^`]*`)')
+FIELD = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*("(?:[^"\\]|\\.)*"|`[^`]*`)')
 SELECTOR = re.compile(r'\{[^{}]*\}')
 # Stream labels and parser bookkeeping, not log text.
 NOT_TEXT = {"namespace", "app", "component", "container", "pod", "job", "stream",
@@ -154,14 +155,15 @@ def main():
                 sources, where = [ours], "this repo"
             else:
                 sources, where = [tool, ours], "the image or this repo"
-            checks = [(unquote(t), op == "|~") for op, t in FILTER.findall(expr)]
+            checks = [(unquote(t), op in ("|~", "!~")) for op, t in FILTER.findall(expr)]
             # Drop stream selectors and json extraction parameters
             # (`| json name="path"`): neither is log text.
             body = re.sub(r'\|\s*json\b[^|]*', '| json ', SELECTOR.sub(" ", expr))
-            checks += [(unquote(t), op == "=~") for field, op, t in FIELD.findall(body)
+            checks += [(unquote(t), op in ("=~", "!~")) for field, op, t in FIELD.findall(body)
                        if field not in NOT_TEXT]
             checks += [(unquote(t), True) for t in REGEXP.findall(expr)]
-            for pattern, is_regex in checks:
+            # A field filter can also match the line-filter pattern: check each once.
+            for pattern, is_regex in dict.fromkeys(checks):
                 frags, any_one = fragments(pattern, is_regex)
                 if not frags:
                     continue
@@ -173,7 +175,9 @@ def main():
                             return True
                     return False
                 hits = [f for f in frags if found(f)]
-                ok = bool(hits) if any_one else len(hits) == len(frags)
+                # Each long branch of an alternation names its own message, so
+                # every one must exist; short ones were dropped above.
+                ok = len(hits) == len(frags)
                 missing = [f for f in frags if f not in hits]
                 norm = lambda f: f.lower().strip().rstrip(":")
                 known = [KNOWN[norm(f)] for f in missing if norm(f) in KNOWN]
