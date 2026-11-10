@@ -86,6 +86,16 @@ image, data policy and current source state together before interpreting a
 cleanup log. The filesystem path is useful for capacity reporting, but deleting
 UUID-named files directly would bypass Orthanc's index and the export checks.
 
+The delete is one `POST /tools/bulk-delete` with the instance ids of the study.
+The engine sends that body from a file, so the size of the study does not
+matter. The time limit of the delete is 30 s (the engine's `HTTP_TIMEOUT`) +
+1 s per 100 instances: Orthanc took 34 s for 12,098 instances on the test edge
+(2026-11-10). A delete that Orthanc does not confirm logs `reclaim_failed` with
+`curl_exit`: 22 means that Orthanc answered 400 or more, 28 that it did not
+answer in time. Before 2026-11-10 the body went on curl's command line, which
+holds at most 128 KiB, so a study of more than about 2,780 instances was never
+deleted (logged as `Orthanc refused the delete`).
+
 The deprecated Lua de-identification mode is documented only in
 [Deprecated Orthanc Lua engine](deidentification.md#deprecated-orthanc-lua-engine).
 Its project map, hash and quarantine path do not run in the ingest
