@@ -249,13 +249,13 @@ Orthanc remains the DICOM receiver, with its own `orthanc.resources`. Size the
 #### How the defaults were sized
 
 Measured on 2026-11-10 with accessionflow 0.19.0 on the tier-2 test edge (4
-vCPU, 8 GiB), which runs the same stages with the same arguments. One synthetic
-MR study went through the real stages: 12,098 instances, 0.92 GB, in four series
-(10,000 slices of 128 x 128, 2,000 of 256 x 256, 95 of 1280 x 1280, and 3
-localizers). The memory of each container cgroup was read once a second. `anon`
-is the memory that the kernel cannot drop; the working set adds the page cache
-that is in use. The file-drop stage is off on the test edge, so it ran on the
-same files in a container with 4 CPUs.
+vCPU, 8 GiB), which runs the same stages with the same arguments. Version 0.20.0
+ships the same deid 0.4.13. One synthetic MR study went through the real stages:
+12,098 instances, 0.92 GB, in four series (10,000 slices of 128 x 128, 2,000 of
+256 x 256, 95 of 1280 x 1280, and 3 localizers). The memory of each container
+cgroup was read once a second. `anon` is the memory that the kernel cannot drop;
+the working set adds the page cache that is in use. The file-drop stage is off
+on the test edge, so it ran on the same files in a container with 4 CPUs.
 
 | Stage | Peak anon | Peak working set | Time for the study | CPU while busy |
 |---|---|---|---|---|
@@ -283,7 +283,7 @@ every header, on one core. Other sessions wait for the end of that pass.
   sessions of a pass. One session of 3,000 instances: 192 MiB. Four in one pass:
   215 MiB.
 - `deidentify`: the bytes of the sessions in one pass. deid 0.4.13, which
-  accessionflow 0.19.0 uses, keeps every file that it parses in memory until the
+  accessionflow 0.19.0 and 0.20.0 use, keeps every file that it parses in memory until the
   process ends: an unbounded cache in `deid/dicom/fields.py`
   ([pydicom/deid#301](https://github.com/pydicom/deid/issues/301)). The memory is
   about 200 MiB + 1.0 to 1.6 times the size of the files; small files cost more
@@ -602,10 +602,15 @@ What happens to the copies:
 - The study stays in Orthanc with the processed label. When the data policy is
   armed, it can delete that Orthanc copy after
   `dataPolicy.derived.orthancStorage.minAge`. If the facility backup is on, it
-  also keeps the original. **Keep the facility backup on.** Without it, the
-  folder in `__invalid__/` can be the only copy.
-- If the same study is staged again, `assign` skips it and logs
-  `already saved as invalid` at WARNING, until the folder leaves `__invalid__/`.
+  also keeps the original of each instance that came in by DICOM. It does not
+  keep an instance that came in another way, and a write can fail (the Orthanc
+  log then says `ABORT: facility backup write failed`). **Keep the facility
+  backup on.** Even with it, the folder in `__invalid__/` can be the only copy.
+- If the same study is staged again (for example, a late series), `assign`
+  skips it and logs `already saved as invalid` at WARNING, until the folder
+  leaves `__invalid__/`. The skipped copy stays in `/data/grouped/`: `assign`
+  does not remove it, so it does not clear by itself. Do not remove it. See
+  [More data for the same study](../recovering-invalid-sessions.md#more-data-for-the-same-study).
 
 To recover the session, follow
 [Recovering an invalid session](../recovering-invalid-sessions.md). In short:
