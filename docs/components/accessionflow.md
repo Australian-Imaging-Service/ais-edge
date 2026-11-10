@@ -298,6 +298,12 @@ Each pass of a stage starts a new process. A pass with no work uses about
 working set was 1,315 MiB and its anon memory 528 MiB. The s3-uploader stayed
 under 100 MiB and sent the session (915 MB, 12,111 files) in 126 seconds.
 
+Re-checked on 0.20.0 on the same test edge (2026-11-10). A study of 4,098
+instances (440 MB) went through every stage. deidentify peaked at 781 MiB anon,
+inside the 640 to 900 MiB that "What the memory use grows with" gives for
+440 MB. assign peaked at 210 MiB and group-orthanc at 132 MiB. No stage was
+OOM-killed.
+
 A large study holds a stage for minutes. assign and the file-drop group read
 every header, on one core. Other sessions wait for the end of that pass.
 
