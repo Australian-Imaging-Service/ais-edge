@@ -28,15 +28,21 @@
 # directly or under the stage lock wrapper (/bin/sh -c <loop> accessionflow
 # <command...>), across every values combination the render stage covers,
 # taken from the rendered manifest rather than transcribed here.
-#   1. The argv parses: click's make_context() does the full parse and
+#   1. The executable exists in the image. The old name (xnat-ingest) is
+#      looked for too, so a partial rename fails here.
+#   2. The argv parses: click's make_context() does the full parse and
 #      validation and then STOPS, without running the command (a correct
-#      `--loop 60` would otherwise run for ever and hang CI).
-#   2. No container sets an XINGEST_* variable: the tool never reads them.
-#   3. Every ACFLOW_* variable a container sets is one the image's CLI declares,
-#      so a misspelt name fails here instead of being ignored on a live box.
+#      `--loop 60` would otherwise run for ever and hang CI). The arguments
+#      go to click one by one, as the kubelet passes them.
+#   3. No container sets an XINGEST_* variable: the tool never reads them.
+#   4. Every ACFLOW_* variable a container sets is one that THE COMMAND IT RUNS
+#      declares (its own options and its groups' options), so a misspelt or
+#      misplaced name fails here instead of being ignored on a live box.
 #
-# THE CONTROLS ARE NOT DECORATION. Two argv forms known to be broken must be
-# REJECTED. If they are ever accepted, the probe has stopped discriminating.
+# THE CONTROLS ARE NOT DECORATION. Each form below is known to be wrong and
+# must be REJECTED. If one is ever accepted, the probe has stopped
+# discriminating: two argv forms that broke on 0.15.0, a valid argv under the
+# old executable name, and a deidentify variable set on the uploader.
 #
 # WHAT IT DOES NOT CATCH. Anything that only shows up once the command body
 # runs, such as group-orthanc's copy_mode raise (a render guard covers that).
@@ -77,26 +83,41 @@ if [ ! -d "$CI_RENDER_DIR" ] || [ -z "$(ls -A "$CI_RENDER_DIR" 2>/dev/null)" ]; 
   ci_summary "cli-contract"; exit 1
 fi
 
-# Every distinct (command path, argv) the charts render, the env names they
-# set, plus the two controls (the exact forms that broke on 0.15.0).
+# Every distinct (executable, command path, argv) the charts render, the env
+# names each one sets, plus the controls. One JSON object per line.
 EXTRACT="$(python3 -c "
-import glob, sys, yaml, collections
-seen = collections.OrderedDict()
-envs = collections.OrderedDict()
+import glob, json, sys, yaml
+TOOLS = ('accessionflow', 'acflow', 'xnat-ingest')
+WORDS = {'xnat'}   # the store plugin word after label and store
+seen = {}
+
+def split(cmd):
+    # path = the command words; the rest of the command array is argv
+    i = 1
+    if i < len(cmd) and cmd[i] in ('label', 'store'):
+        i += 1
+        if i < len(cmd) and cmd[i] in WORDS:
+            i += 1
+    elif i < len(cmd):
+        i += 1
+    return cmd[1:i], cmd[i:]
 
 def walk(o):
     if isinstance(o, dict):
         for key in ('containers', 'initContainers'):
             for c in (o.get(key) or []):
                 cmd = [str(x) for x in (c.get('command') or [])]
-                if cmd[:2] == ['/bin/sh', '-c'] and cmd[3:4] and cmd[3] in ('accessionflow', 'xnat-ingest'):
+                if cmd[:2] == ['/bin/sh', '-c'] and cmd[3:4] and cmd[3] in TOOLS:
                     cmd = cmd[3:]
-                if cmd[:1] and cmd[0] in ('accessionflow', 'xnat-ingest'):
-                    path = ' '.join(cmd[1:])
-                    argv = ' '.join(str(a) for a in (c.get('args') or []))
-                    seen.setdefault((path, argv), None)
+                if cmd[:1] and cmd[0] in TOOLS:
+                    path, extra = split(cmd)
+                    argv = extra + [str(a) for a in (c.get('args') or [])]
+                    case = {'want': 'accept', 'exe': cmd[0], 'path': path, 'argv': argv}
+                    seen.setdefault(json.dumps(case, sort_keys=True), case)
                     for e in c.get('env') or []:
-                        envs.setdefault(e['name'], path)
+                        if e['name'].startswith(('ACFLOW_', 'XINGEST_')):
+                            env = {'want': 'env', 'exe': cmd[0], 'path': path, 'name': e['name']}
+                            seen.setdefault(json.dumps(env, sort_keys=True), env)
         for v in o.values():
             walk(v)
     elif isinstance(o, list):
@@ -110,18 +131,17 @@ for f in sorted(glob.glob(sys.argv[1] + '/*.yaml')):
         continue
     for d in docs:
         walk(d)
-
-for path, argv in seen:
-    print('accept|%s|%s' % (path, argv))
-for name, path in envs.items():
-    if name.startswith(('ACFLOW_', 'XINGEST_')):
-        print('env|%s|%s' % (path, name))
+for line in seen:
+    print(line)
 " "$CI_RENDER_DIR")"
+CONTROLS='{"want": "reject", "exe": "accessionflow", "path": ["deidentify"], "argv": ["/w/in", "/w/out", "/w/specs", "/w/reid"]}
+{"want": "reject", "exe": "accessionflow", "path": ["collate-orthanc"], "argv": ["http://orthanc:8042", "/w/store", "/w/grouped", "user", "pass", "--on-resource-clash", "avoid", "all"]}
+{"want": "reject-exe", "exe": "xnat-ingest", "path": ["deidentify"], "argv": ["/w/in", "/w/out", "/w/specs"]}
+{"want": "reject-env", "exe": "accessionflow", "path": ["store", "xnat"], "name": "ACFLOW_REID_ENCRYPT_KEY"}'
 CASES="$EXTRACT
-reject|deidentify|/w/in /w/out /w/specs /w/reid
-reject|collate-orthanc|http://orthanc:8042 /w/store /w/grouped user pass --on-resource-clash avoid all"
+$CONTROLS"
 
-if [ "$(printf '%s\n' "$CASES" | grep -c '^accept|')" -eq 0 ]; then
+if [ "$(printf '%s\n' "$EXTRACT" | grep -c '"want": "accept"')" -eq 0 ]; then
   ci_fail "no accessionflow container found in $CI_RENDER_DIR — the extraction is looking for the wrong shape"
   ci_summary "cli-contract"; exit 1
 fi
@@ -145,7 +165,7 @@ fi
 # One container for every case. A hard timeout as a backstop: make_context does
 # not run the command, so this returns in seconds.
 OUT="$(printf '%s\n' "$CASES" | timeout 300 docker run --rm -i --network none --entrypoint python3 "$IMAGE" -c '
-import os, sys, click
+import json, os, shutil, sys, click
 try:
     from accessionflow.cli import cli
 except ImportError:
@@ -158,47 +178,63 @@ for d in ("/w/in", "/w/out", "/w/specs", "/w/reid", "/w/store", "/w/grouped",
           "/data/packaged", "/data/reid", "/data/orthanc-storage", "/etc/xnat-ingest/deid-specs"):
     os.makedirs(d, exist_ok=True)
 
-def declared(cmd, ctx, out):
-    """Every envvar that the CLI declares, through every group."""
+def own_envvars(cmd):
+    out = set()
     for p in getattr(cmd, "params", []):
-        for name in ([p.envvar] if isinstance(p.envvar, str) else (p.envvar or [])):
-            out.add(name)
-    if isinstance(cmd, click.Group):
-        for n in cmd.list_commands(ctx):
-            sub = cmd.get_command(ctx, n)
-            if sub is not None:
-                declared(sub, click.Context(sub, parent=ctx, info_name=n), out)
+        out.update([p.envvar] if isinstance(p.envvar, str) else (p.envvar or []))
     return out
 
-root = click.Context(cli, info_name="accessionflow")
-envvars = declared(cli, root, set())
+def resolve(path):
+    """(command, its parent context, the envvars of it and its groups), or None."""
+    cmd, ctx, env = cli, click.Context(cli, info_name="accessionflow"), own_envvars(cli)
+    for i, n in enumerate(path):
+        sub = cmd.get_command(ctx, n) if isinstance(cmd, click.Group) else None
+        if sub is None:
+            return None
+        env |= own_envvars(sub)
+        if i < len(path) - 1:
+            ctx = click.Context(sub, parent=ctx, info_name=n)
+        cmd = sub
+    return cmd, ctx, env
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
-    want, path, rest = line.split("|", 2)
-    if want == "env":
-        if rest.startswith("XINGEST_"):
-            print("BAD\t%s\tsets %s, which this image never reads (it reads ACFLOW_*)" % (path, rest))
-        elif rest not in envvars:
-            print("BAD\t%s\tsets %s, which this image does not declare" % (path, rest))
+    case = json.loads(line)
+    want, exe, path = case["want"], case["exe"], case["path"]
+    label = " ".join([exe] + path)
+    if shutil.which(exe) is None:
+        if want == "reject-exe":
+            print("OK\t%s\trejected as expected: the image has no executable %s" % (label, exe))
         else:
-            print("OK\t%s\tsets %s (declared)" % (path, rest))
+            print("BAD\t%s\tthe image has no executable %r (it has accessionflow and acflow)" % (label, exe))
         continue
-    names, cmd, ctx = path.split(), cli, root
-    for i, n in enumerate(names):
-        sub = cmd.get_command(ctx, n) if isinstance(cmd, click.Group) else None
-        if sub is None:
-            cmd = None
-            break
-        if i < len(names) - 1:
-            ctx = click.Context(sub, parent=ctx, info_name=n)
-        cmd = sub
-    if cmd is None:
-        print("MISSING\t%s\tthe image has no command %r" % (path, path))
+    if want == "reject-exe":
+        print("BAD\t%s\tthe image HAS the executable %s: this control no longer discriminates" % (label, exe))
+        continue
+    found = resolve(path)
+    if found is None:
+        print("MISSING\t%s\tthe image has no command %r" % (label, " ".join(path)))
+        continue
+    cmd, ctx, env = found
+    if want in ("env", "reject-env"):
+        name = case["name"]
+        if name.startswith("XINGEST_"):
+            ok, why = False, "this image never reads XINGEST_* (it reads ACFLOW_*)"
+        elif name not in env:
+            ok, why = False, "the command does not declare it"
+        else:
+            ok, why = True, "declared by the command"
+        if want == "env":
+            print(("OK\t%s\tsets %s (%s)" if ok else "BAD\t%s\tsets %s: %s") % (label, name, why))
+        elif ok:
+            print("BAD\t%s\t%s is declared for this command: this control no longer discriminates" % (label, name))
+        else:
+            print("OK\t%s\trejected as expected: %s (%s)" % (label, name, why))
         continue
     try:
-        with cmd.make_context(names[-1], rest.split(), parent=ctx):
+        with cmd.make_context(path[-1], list(case["argv"]), parent=ctx):
             pass
         got, why = "accept", ""
     except click.exceptions.Exit:
@@ -206,11 +242,11 @@ for line in sys.stdin:
     except Exception as e:
         got, why = "reject", str(e).splitlines()[0]
     if got == want:
-        print("OK\t%s\t%s" % (path, "rejected as expected" if want == "reject" else ""))
+        print("OK\t%s\t%s" % (label, "rejected as expected" if want == "reject" else ""))
     elif want == "accept":
-        print("BAD\t%s\t%s" % (path, why))
+        print("BAD\t%s\t%s" % (label, why))
     else:
-        print("BAD\t%s\tACCEPTED an argv known to be broken — this probe is no longer discriminating" % path)
+        print("BAD\t%s\tACCEPTED an argv known to be broken: this probe is no longer discriminating" % label)
 ' 2>&1)"
 
 rc=$?

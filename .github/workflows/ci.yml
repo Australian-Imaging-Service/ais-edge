@@ -183,7 +183,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           CI_REQUIRE_RECLAIMER_IMAGE: "1"
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
 
       - name: Reclaimer fence (drain and resume fail closed)
         if: ${{ !cancelled() }}

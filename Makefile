@@ -119,7 +119,8 @@ pvc-retention: $(RENDER_DEP)
 # looking SKIP for the ONE component on this tier that permanently removes
 # patient imaging, so a regression that kept everything, or deleted a session
 # XNAT had not confirmed, would have passed CI in silence.
-reclaimer:
+# deid-sidecar.sh reads the rendered deidentify argv ($(CI_RENDER_DIR)).
+reclaimer: $(RENDER_DEP)
 	@tests/reclaimer/run-tests.sh
 	@tests/reclaimer/deid-sidecar.sh
 
