@@ -64,7 +64,6 @@ names are the same at every site:
 | `ais-edge-critical` | `files/prometheus-rules/critical.yaml` | `KubernetesAPIServerDown`, `NodeNotReady` |
 | `ais-edge-warning` | `files/prometheus-rules/warning.yaml` | `IngestPodCrashLoop`, `KubeJobFailed`, `ReclaimerNotSucceeding` |
 | `ais-edge-info` | `files/prometheus-rules/info.yaml` | `NodeCountChanged` |
-
 | `ais-edge-uploader` | `files/prometheus-rules/uploader.yaml` | `XNATUploaderRestarted`, `XNATUploaderMemoryGrowing`, plus six recording rules |
 
 This is eight first-party Prometheus alerts at the reviewed branch head.

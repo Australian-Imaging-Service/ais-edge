@@ -604,7 +604,6 @@ curl -fsS <XNAT_URL>            # reachability/TLS only; HTML is not upload proo
 | Scenario | What happens | Recovery |
 |----------|-------------|---------|
 | Unapproved sender reaches the DICOM port | The shipped receiver accepts calling AETs. Ingest does not consult the legacy AET map or quarantine that sender; usable source labels can take the data into the pipeline | Restrict port 4242 at the network boundary and investigate received input under the site's data-handling procedure |
-
 | Network drops mid-upload | The in-flight session upload fails | The upload loop retries the retained upload-source session on the next cycle |
 | Node reboots | Local data normally persists and k0s restarts, but in-flight work can be interrupted | Check disks, pod readiness, retained input, logs and the exact remote inventory. Do not infer completeness from the reboot finishing. |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
