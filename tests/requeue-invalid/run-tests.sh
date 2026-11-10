@@ -76,6 +76,9 @@ else
 fi
 expect "the files moved untouched" 0 "$(cmp -s "$R/assigned/test_project.MRN1.ACC1/1.localizer/DICOM/a.dcm" <(echo dicom); echo $?)" ""
 
+# No abbreviated options: "--ro" must not override --root (allow_abbrev=False).
+expect "the tool refuses an abbreviated option (--ro is not --root)" 2 "$(run --ro /nonexistent list)" "usage:"
+
 # THE EDGE COMMAND (scripts/files/ais-requeue): no kubectl, no repository. It finds the
 # running label container through k0s ctr and runs the chart's copy of the tool in it.
 # A fake k0s on PATH emulates ctr: it lists containers only for the asked namespace,
@@ -116,6 +119,18 @@ grep -qx c-new "$W/exec.log" && ! grep -qx c-old "$W/exec.log" \
   || ci_fail "edge command: exec went to $(sort -u "$W/exec.log" | tr '\n' ' ')"
 expect "edge command: AIS_NAMESPACE selects another namespace" 0 \
   "$(AIS_NAMESPACE=site-a FAKE_NS=site-a FAKE_RUNNING=c-a edge list)" "session=ACCESSIONNUMBER"
+expect "edge command: --namespace selects another namespace (no env var through sudo)" 0 \
+  "$(FAKE_NS=site-b FAKE_RUNNING=c-b edge --namespace site-b list)" "session=ACCESSIONNUMBER"
+# UNDER A SUDO RULE FOR THIS COMMAND ONLY the operator must not move the tool off /data
+# or forge the audit name: no option before the subcommand, none after it, no abbreviation.
+expect "edge command: an option before the subcommand is refused" 2 \
+  "$(FAKE_RUNNING=c-new edge --root /tmp list)" "first word must be list, show or requeue"
+expect "edge command: --root after the subcommand is refused by the tool" 2 \
+  "$(FAKE_RUNNING=c-new edge list --root /tmp)" "unrecognized arguments"
+expect "edge command: an unknown option after the subcommand is refused" 2 \
+  "$(FAKE_RUNNING=c-new edge requeue "$BAD" --ro /tmp --session ACC3)" "unrecognized arguments" "assigned/__invalid__/$BAD"
+expect "edge command: --operator cannot be forged" 2 \
+  "$(FAKE_RUNNING=c-new edge requeue "$BAD" --operator someone --session ACC3)" "unrecognized arguments" "assigned/__invalid__/$BAD"
 expect "edge command: no running label container is a clear refusal" 2 \
   "$(FAKE_RUNNING= FAKE_STOPPED=c-old edge list)" "no running label (assign) container"
 expect "edge command: a chart without the tool says to upgrade" 2 \

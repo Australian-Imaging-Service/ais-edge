@@ -31,7 +31,8 @@ move safe and repeatable:
 
 The labels come from the folder name only (accessionflow reads the label values
 from the name; __labels__ in the sidecar names the levels). No file is edited:
-not the metadata, not the DICOM headers.
+not the metadata, not the DICOM headers. The procedure and every way to run it:
+docs/recovering-invalid-sessions.md.
 Exit: 0 done, 2 refused or bad use, 3 folder not found, 4 lock not obtained.
 """
 import argparse
@@ -196,15 +197,18 @@ def cmd_requeue(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Requeue a session from assigned/__invalid__ (see the docstring).")
+    # allow_abbrev=False: "--ro" must not mean --root. ais-requeue sets --root and
+    # --operator itself, and an abbreviation could override them.
+    ap = argparse.ArgumentParser(description="Requeue a session from assigned/__invalid__ (see the docstring).",
+                                 allow_abbrev=False)
     ap.add_argument("--root", default="/data")
     ap.add_argument("--operator", default=f"{getpass.getuser()}@{socket.gethostname()}")
     ap.add_argument("--lock-wait", type=int, default=600)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
-    s = sub.add_parser("show")
+    sub.add_parser("list", allow_abbrev=False)
+    s = sub.add_parser("show", allow_abbrev=False)
     s.add_argument("folder")
-    r = sub.add_parser("requeue")
+    r = sub.add_parser("requeue", allow_abbrev=False)
     r.add_argument("folder")
     for lvl in LEVELS:
         r.add_argument(f"--{lvl}")
