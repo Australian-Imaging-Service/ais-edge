@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -134,6 +134,12 @@ reclaimer-fence:
 loki-rules:
 	@tests/loki-rules/run-tests.sh
 
+# Needs docker: reads the tool's source out of the PINNED image and checks that
+# every literal log phrase in the Loki rules still exists in the code that
+# writes it. Fixture tests cannot see a reworded message; this can.
+log-phrases:
+	@scripts/ci/log-phrases.sh
+
 # Needs docker: runs the REAL engine under the REAL busybox image the chart
 # deploys, over real directory trees, and asserts on WHAT SURVIVED rather than
 # on log text. This is the component that deletes patient-derived data.
@@ -209,6 +215,7 @@ help:
 	@echo 'useful env:'
 	@echo '  CI_REQUIRE_GREENFIELD=1  a skipped kind stage is a failure'
 	@echo '  CI_REQUIRE_LOKI_TESTS=1  a skipped Loki-rule stage is a failure'
+	@echo '  CI_REQUIRE_LOG_PHRASES=1  a skipped log-phrase stage is a failure'
 	@echo '  CI_REQUIRE_DATAPOLICY_TESTS=1  a skipped data-policy stage is a failure'
 	@echo '  CI_REQUIRE_RULE_TESTS=1  a rule file with no promtool test is a failure'
 	@echo '  CI_KIND_KEEP=1           leave the kind cluster up for inspection'

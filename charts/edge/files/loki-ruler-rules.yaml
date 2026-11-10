@@ -645,7 +645,7 @@ groups:
       or
       sum by (cluster) (count_over_time(
         {namespace="xnat-ingest", component="deidentify"}
-        |~ "(?i)traceback|error:|exception|no applicable spec" [10m])) > 0
+        |~ "(?i)traceback|error:|exception|no deidentification recipe file" [10m])) > 0
     for: 1m
     labels:
       severity: warning
