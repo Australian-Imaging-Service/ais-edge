@@ -159,6 +159,15 @@ jobs:
           CI_REQUIRE_LOKI_TESTS: "1"
         run: make loki-rules
 
+      # A Loki rule matches log TEXT that the pinned image writes. Fixture logs
+      # keep the old wording, so the test above cannot see a reworded message.
+      # This reads the image's source and fails when a rule's phrase is gone.
+      - name: Alert log phrases exist in the code that logs them
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_LOG_PHRASES: "1"
+        run: make log-phrases
+
       # The staged-reclaimer deletes the upload tree. Its tests ran only in
       # `make ci`, never here. They copy the uploader's label rule out of the
       # pinned xnat-ingest image (docker); without docker they would skip, so
