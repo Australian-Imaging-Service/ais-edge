@@ -131,8 +131,9 @@ and installed by step 3 of `./install.sh <site>`.
 
 REST API exposed as a ClusterIP Service
 `<release>-orthanc.xnat-ingest.svc.cluster.local:8042` (this is how
-`accessionflow collate orthanc` REST-pulls; `<release>` is the site name unless
-`AIS_RELEASE` overrides it). DICOM port 4242 is exposed via `hostPort` directly
+`accessionflow collate orthanc` queries metadata and updates labels; it reads
+DICOM bytes from the shared local store). `<release>` is the site name unless
+`AIS_RELEASE` overrides it. DICOM port 4242 is exposed via `hostPort` directly
 on the node's IP so modalities can reach it without an in-cluster Service —
 `orthanc.expose.dicom` can be switched to `nodePort` or `both` instead.
 

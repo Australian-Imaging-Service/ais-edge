@@ -112,7 +112,7 @@ operator can distinguish receiver errors from recipe-stage errors. Use
 synthetic fixtures when testing a query; do not copy patient identifiers into
 an alert example or a shared dashboard export.
 
-**accessionflow collate orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (0.20.0 logs `Could not resolve the labels of` for invalid sessions).
+**accessionflow collate orthanc / label xnat** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` queries Orthanc metadata over REST, hardlinks its local DICOM files and labels each staged study; `assign` derives the project/subject/session IDs and stages the session (0.20.0 logs `Could not resolve the labels of` for invalid sessions).
 The following synthetic record shows the current 0.20.0 cycle summary.
 Its timestamp is an example, not a captured production event:
 ```json

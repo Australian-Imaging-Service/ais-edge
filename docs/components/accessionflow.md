@@ -13,8 +13,9 @@ processed label, or successful upload is not proof of a complete privacy policy.
 
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
 is the AIS-maintained Python tool that:
-1. **Groups** DICOM instances into studies by REST-pulling them from Orthanc
-   (`group-orthanc`, running `accessionflow collate orthanc`)
+1. **Groups** DICOM instances into studies by querying Orthanc metadata over
+   REST and hardlinking its local files (`group-orthanc`, running
+   `accessionflow collate orthanc`)
 2. **Assigns** each study an XNAT project/subject/session identity and stages it
    as a structured directory (`assign`, running `accessionflow label xnat`)
 3. **De-identifies** assigned sessions with the site recipe (`deidentify`).
@@ -30,8 +31,8 @@ and chart wrappers below are the current operational contract.
 We run the default stages as four Deployments on the single node, all rendered by
 `charts/edge`:
 - **`accessionflow collate orthanc`** (`<release>-group-orthanc`, `component=group`)
-  REST-pulls original studies from Orthanc and hardlinks them into
-  `/data/grouped`
+  queries Orthanc study and attachment metadata over REST and hardlinks its
+  original local DICOM files into `/data/grouped` on the same filesystem
 - **`accessionflow label xnat`** (`<release>-assign`, `component=assign`); reads
   `/data/grouped`, assigns project/subject/session IDs, and collates into
   `/data/assigned`

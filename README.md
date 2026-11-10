@@ -232,9 +232,9 @@ intended networks; enabling observability does not make them part of DICOM.
   │                         No AET routing or header modification in ingest  │
   │       Ready-label filter is cleared; group waits for stable input        │
   │     env  AIS_DEID_HMAC_SALT (Secret orthanc-deid-salt)                     │
-  │     REST :8042 (ClusterIP) — how group-orthanc pulls                       │
+  │     REST :8042 (ClusterIP): study metadata and receipt labels             │
   │        │                                                                   │
-  │        ▼  REST-pull stable studies                                       │
+  │        ▼  Select stable studies through the REST API                     │
   │   <rel>-group-orthanc  loop 60s; hardlinks original DICOMs from              │
   │                        /data/orthanc-storage → /data/grouped               │
   │   <rel>-assign         loop 60s; assigns IDs, /data/grouped →              │
