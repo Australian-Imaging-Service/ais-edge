@@ -226,7 +226,7 @@ spec:
 {{- end }}
 {{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
 # THE REQUEUE TOOL for sessions in /data/assigned/__invalid__, in the label pod
-# (docs/components/accessionflow.md, "Recovering an invalid session"). It ships
+# (docs/recovering-invalid-sessions.md). It ships
 # with the chart so that an operator needs only kubectl, not this repository:
 #   kubectl -n <ns> exec deploy/<release>-assign -c assign -- \
 #     python3 /opt/ais-edge/requeue-invalid.py list | show <folder> | requeue ...

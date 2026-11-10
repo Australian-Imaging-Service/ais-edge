@@ -255,8 +255,8 @@ fi
 # linger in a world-readable directory.
 shred -u "${STAGE}/join-token" 2>/dev/null || rm -f "${STAGE}/join-token"
 
-# The operator command for sessions in assigned/__invalid__ (docs/components/
-# accessionflow.md, "Recovering an invalid session"): sudo ais-requeue list. It
+# The operator command for sessions in assigned/__invalid__
+# (docs/recovering-invalid-sessions.md): sudo ais-requeue list. It
 # runs the tool that the edge chart ships into the label container through k0s,
 # so this machine needs no kubectl and no repository. Root-owned, so a container
 # cannot change what root runs. A failure here does not undo the join.
