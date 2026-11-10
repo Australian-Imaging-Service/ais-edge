@@ -17,6 +17,8 @@ looks for them in the right source:
 Output: one line per check, tab separated: PASS|FAIL <alert> <detail>.
 Exit 1 when any check fails.
 """
+import glob
+import json
 import os
 import re
 import sys
@@ -64,7 +66,8 @@ class Unsupported(ValueError):
 FLAGS_ONLY = re.compile(r"\(\?[aiLmsux-]+\)")
 # Flags for a group whose content is a pattern: (?i:...).
 FLAGS_SCOPED = re.compile(r"\(\?[aiLmsux-]+:")
-INSENSITIVE = re.compile(r"\(\?[aLmsux]*i[aLmsux-]*[:)]")
+# Flags at the very start apply to the whole pattern: (?i), (?s)(?i), (?is).
+LEADING_FLAGS = re.compile(r"^(?:\(\?[aiLmsux]+\))+")
 
 
 def fragments(text, is_regex):
@@ -72,6 +75,8 @@ def fragments(text, is_regex):
     if not is_regex:
         return ([text] if len(text.strip()) >= MIN_LEN else []), False
     out, buf, i, alternation = [], "", 0, False
+    lead = LEADING_FLAGS.match(text)
+    lead_end = lead.end() if lead else 0
     while i < len(text):
         ch = text[i]
         if ch == "\\" and i + 1 < len(text):
@@ -98,10 +103,14 @@ def fragments(text, is_regex):
                 if end < 0:
                     raise Unsupported(f"unterminated group name at {text[i:i + 12]!r}")
                 i = end + 1
-            elif FLAGS_ONLY.match(text, i):          # inline flags, no content
-                i = FLAGS_ONLY.match(text, i).end()
-            elif FLAGS_SCOPED.match(text, i):        # flags with content
-                i = FLAGS_SCOPED.match(text, i).end()
+            elif FLAGS_ONLY.match(text, i) or FLAGS_SCOPED.match(text, i):
+                m = FLAGS_ONLY.match(text, i) or FLAGS_SCOPED.match(text, i)
+                # A case flag counts only at the very start, where it covers the
+                # whole pattern. Elsewhere it covers part of it, and this check
+                # does not track that scope: (?i:a) B is not (?i)a B.
+                if i >= lead_end and "i" in m.group(0):
+                    raise Unsupported(f"case flag {m.group(0)!r} is not at the start of the pattern")
+                i = m.end()
             else:                                    # lookaround, back-reference, other
                 raise Unsupported(f"group {text[i:i + 6]!r} is not read by this check")
             continue
@@ -131,7 +140,8 @@ def fragments(text, is_regex):
 def evaluate(pattern, is_regex, sources):
     """(frags, missing): the literals of a pattern and those no source holds."""
     frags, _ = fragments(pattern, is_regex)
-    insensitive = bool(is_regex and INSENSITIVE.search(pattern))
+    lead = LEADING_FLAGS.match(pattern) if is_regex else None
+    insensitive = bool(lead and "i" in lead.group(0))
     def found(frag):
         for src in sources:
             hay = src.lower() if insensitive else src
@@ -147,10 +157,20 @@ def evaluate(pattern, is_regex, sources):
 CONTROLS = (
     ("NEVER_LOGGED_SENTINEL_1f3a", True),
     ("(?:NEVER_LOGGED_SENTINEL_1f3a|ALSO_NEVER_LOGGED_9c2e)", True),
-    ("(?i:never_logged_sentinel_1f3a)", True),
+    ("(?i)never_logged_sentinel_1f3a", True),
     ("(?P<x>NEVER_LOGGED_SENTINEL_1f3a)", True),
 )
-REFUSED = "(?=NEVER_LOGGED_SENTINEL_1f3a)"
+# Case controls. The phrase is in the Orthanc Lua hook in lower case only.
+CASE_CONTROLS = (
+    ("FACILITY BACKUP WRITE FAILED", "missing"),
+    ("(?i)FACILITY BACKUP WRITE FAILED", "found"),
+)
+# Each must be refused: a lookaround, and case flags that cover part of a pattern.
+REFUSED = (
+    "(?=NEVER_LOGGED_SENTINEL_1f3a)",
+    "(?i:facility backup write failed) MUST STAY UPPER CASE",
+    "facility backup(?i) WRITE FAILED",
+)
 
 
 def corpus(paths, skip):
@@ -187,73 +207,116 @@ def rules(node):
             yield from rules(value)
 
 
+def loki_queries(node, title="", loki=False):
+    """(panel title, expr) for every Loki query in a Grafana dashboard."""
+    if isinstance(node, dict):
+        title = node.get("title", title)
+        ds = node.get("datasource")
+        if isinstance(ds, dict) and ds.get("type"):
+            loki = ds.get("type") == "loki"
+        if loki and isinstance(node.get("expr"), str):
+            yield title, node["expr"]
+        for value in node.values():
+            yield from loki_queries(value, title, loki)
+    elif isinstance(node, list):
+        for value in node:
+            yield from loki_queries(value, title, loki)
+
+
 def main():
     tool_dir, repo_root, rule_files = sys.argv[1], sys.argv[2], sys.argv[3:]
     skip = {os.path.abspath(f) for f in rule_files}
     tool = corpus([tool_dir], skip)
     ours = corpus([os.path.join(repo_root, p) for p in ("charts", "scripts")], skip)
-    failed = checked = 0
+    counts = {"failed": 0, "checked": 0}
+
+    def report(verdict, name, detail):
+        print(f"{verdict}\t{name}\t{detail}")
+        if verdict == "FAIL":
+            counts["failed"] += 1
+
+    def check_expr(name, expr, skip_variables=False):
+        comps = set()
+        for op, value in COMPONENT.findall(expr):
+            comps |= set(value.split("|")) if op == "=~" else {value}
+        if comps and comps <= TOOL_COMPONENTS:
+            sources, where = [tool], "the pinned image"
+        elif comps and not comps & TOOL_COMPONENTS:
+            sources, where = [ours], "this repo"
+        else:
+            sources, where = [tool, ours], "the image or this repo"
+        checks = [(unquote(t), op in ("|~", "!~")) for op, t in FILTER.findall(expr)]
+        # Drop stream selectors and json extraction parameters
+        # (`| json name="path"`): neither is log text.
+        body = re.sub(r'\|\s*json\b[^|]*', '| json ', SELECTOR.sub(" ", expr))
+        checks += [(unquote(t), op in ("=~", "!~")) for field, op, t in FIELD.findall(body)
+                   if field not in NOT_TEXT]
+        checks += [(unquote(t), True) for t in REGEXP.findall(expr)]
+        # A field filter can also match the line-filter pattern: check each once.
+        for pattern, is_regex in dict.fromkeys(checks):
+            if skip_variables and "$" in pattern:
+                continue   # a Grafana variable ($session): filled in when the panel runs
+            try:
+                frags, missing = evaluate(pattern, is_regex, sources)
+            except Unsupported as exc:
+                report("FAIL", name, f"cannot read '{pattern[:60]}': {exc}")
+                continue
+            if not frags:
+                continue
+            counts["checked"] += 1
+            # Each long branch of an alternation names its own message, so
+            # every one must exist; short ones were dropped above.
+            norm = lambda f: f.lower().strip().rstrip(":")
+            known = [KNOWN[norm(f)] for f in missing if norm(f) in KNOWN]
+            if not missing:
+                report("PASS", name, f"'{frags[0][:60]}' found in {where}")
+            elif known and len(known) == len(missing):
+                verdict, why = known[0]
+                report(verdict, name, f"'{missing[0][:50]}': {why}")
+            else:
+                report("FAIL", name, f"'{missing[0][:70]}' is in the query but not in {where}")
+
     for rule_file in rule_files:
         for rule in rules(yaml.safe_load(open(rule_file))):
-            expr, name = rule["expr"], rule["alert"]
-            comps = set()
-            for op, value in COMPONENT.findall(expr):
-                comps |= set(value.split("|")) if op == "=~" else {value}
-            if comps and comps <= TOOL_COMPONENTS:
-                sources, where = [tool], "the pinned image"
-            elif comps and not comps & TOOL_COMPONENTS:
-                sources, where = [ours], "this repo"
-            else:
-                sources, where = [tool, ours], "the image or this repo"
-            checks = [(unquote(t), op in ("|~", "!~")) for op, t in FILTER.findall(expr)]
-            # Drop stream selectors and json extraction parameters
-            # (`| json name="path"`): neither is log text.
-            body = re.sub(r'\|\s*json\b[^|]*', '| json ', SELECTOR.sub(" ", expr))
-            checks += [(unquote(t), op in ("=~", "!~")) for field, op, t in FIELD.findall(body)
-                       if field not in NOT_TEXT]
-            checks += [(unquote(t), True) for t in REGEXP.findall(expr)]
-            # A field filter can also match the line-filter pattern: check each once.
-            for pattern, is_regex in dict.fromkeys(checks):
-                try:
-                    frags, missing = evaluate(pattern, is_regex, sources)
-                except Unsupported as exc:
-                    print(f"FAIL\t{name}\tcannot read '{pattern[:60]}': {exc}")
-                    failed += 1
-                    continue
-                if not frags:
-                    continue
-                checked += 1
-                # Each long branch of an alternation names its own message, so
-                # every one must exist; short ones were dropped above.
-                ok = not missing
-                norm = lambda f: f.lower().strip().rstrip(":")
-                known = [KNOWN[norm(f)] for f in missing if norm(f) in KNOWN]
-                if ok:
-                    print(f"PASS\t{name}\t'{frags[0][:60]}' found in {where}")
-                elif known and len(known) == len(missing):
-                    verdict, why = known[0]
-                    print(f"{verdict}\t{name}\t'{missing[0][:50]}': {why}")
-                else:
-                    print(f"FAIL\t{name}\t'{missing[0][:70]}' is in the rule but not in {where}")
-                    failed += 1
-    if not checked:
-        print("FAIL\t(all rules)\tno rule gave a phrase to check: the extraction looks for the wrong shape")
-        failed += 1
-    for pattern, is_regex in CONTROLS:
-        frags, missing = evaluate(pattern, is_regex, [tool, ours])
-        if frags and missing == frags:
-            print(f"PASS\tcontrol\t'{pattern}' is reported missing")
-        else:
-            print(f"FAIL\tcontrol\t'{pattern}' is not reported missing (literals {frags}): the check no longer discriminates")
-            failed += 1
-    try:
-        evaluate(REFUSED, True, [tool, ours])
-        print(f"FAIL\tcontrol\t'{REFUSED}' was read, not refused: an unread shape would pass")
-        failed += 1
-    except Unsupported:
-        print(f"PASS\tcontrol\t'{REFUSED}' is refused")
-    return 1 if failed else 0
+            check_expr(rule["alert"], rule["expr"])
 
+    # DASHBOARD PANELS read the same log text. A panel whose phrase is gone
+    # shows zero, which reads as "healthy", so the same check applies to every
+    # Loki query in the charts' dashboards.
+    for dash in sorted(glob.glob(os.path.join(repo_root, "charts", "*", "files", "dashboards", "*.json"))):
+        for title, expr in loki_queries(json.load(open(dash))):
+            check_expr(f"dashboard {os.path.basename(dash)}: {title[:50]}", expr, skip_variables=True)
+
+    if not counts["checked"]:
+        report("FAIL", "(all rules)", "no rule gave a phrase to check: the extraction looks for the wrong shape")
+    for pattern, is_regex in CONTROLS:
+        try:
+            frags, missing = evaluate(pattern, is_regex, [tool, ours])
+        except Unsupported as exc:
+            report("FAIL", "control", f"'{pattern}' is refused ({exc}): fix the control")
+            continue
+        if frags and missing == frags:
+            report("PASS", "control", f"'{pattern}' is reported missing")
+        else:
+            report("FAIL", "control", f"'{pattern}' is not reported missing (literals {frags}): the check no longer discriminates")
+    for pattern, want in CASE_CONTROLS:
+        try:
+            frags, missing = evaluate(pattern, True, [tool, ours])
+        except Unsupported as exc:
+            report("FAIL", "control", f"'{pattern}' is refused ({exc}): fix the control")
+            continue
+        got = "missing" if missing else "found"
+        if frags and got == want:
+            report("PASS", "control", f"'{pattern}' is {got}: case is checked")
+        else:
+            report("FAIL", "control", f"'{pattern}' is {got}, want {want}: case handling is broken")
+    for pattern in REFUSED:
+        try:
+            evaluate(pattern, True, [tool, ours])
+            report("FAIL", "control", f"'{pattern}' was read, not refused: an unread shape would pass")
+        except Unsupported:
+            report("PASS", "control", f"'{pattern}' is refused")
+    return 1 if counts["failed"] else 0
 
 if __name__ == "__main__":
     sys.exit(main())
