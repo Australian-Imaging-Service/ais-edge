@@ -101,19 +101,20 @@ kube-prometheus-stack's *own* objects — `ais-kps-prometheus`,
 
 | File | Purpose |
 |---|---|
-| `sites/<site>/values.yaml` | `observability.stack.enabled` — the gate. `observability.stack.grafana.nodePort` — the port `install.sh` prints. |
+| `sites/<site>/values.yaml` | `observability.stack.enabled` gates the stack. `kube-prometheus-stack.grafana.service.nodePort` configures the Service and the installer's printed port. |
 | `sites/<site>/secrets.enc.yaml` | Secret `grafana-admin-credentials` (keys `admin-user`, `admin-password`), SOPS-encrypted, in the release namespace |
 | `charts/edge/values.yaml`, block `kube-prometheus-stack.grafana` | what the subchart is actually given: `admin.existingSecret`, `service.type: NodePort` + `nodePort`, `persistence`, `initChownData` |
 | `charts/edge/charts/kube-prometheus-stack-87.19.2.tgz` | the vendored chart itself — Grafana, its sidecars and the Kubernetes dashboards |
 
-**The port is stated in two places and only one of them opens it.**
-`observability.stack.grafana.nodePort` is read by `install.sh` (to print the
-URL) and by nothing in the chart; the Service's port comes from
-`kube-prometheus-stack.grafana.service.nodePort`. Both ship as `30030`. Change
-one and the installer's URL and the open port disagree, with no error from
-either. The same is true of `observability.stack.grafana.persistence` and
-`.existingSecret`: the values that reach Grafana are the ones under
-`kube-prometheus-stack.grafana`.
+**The Service and installer use the same NodePort key.**
+`install.sh` (`GRAFANA_PORT`) reads the site's
+`kube-prometheus-stack.grafana.service.nodePort`, or falls back to that key
+in `charts/edge/values.yaml` (default 30030). It no longer reads the removed
+`observability.stack.grafana.nodePort` for the URL it prints. Configure the
+subchart key, apply the site file, then compare the live Service and
+`helm get notes` after the upgrade. Persistence and the credentials Secret
+also belong under `kube-prometheus-stack.grafana`; old friendly parent keys
+under `observability.stack.grafana` do not configure the subchart.
 
 `initChownData` is disabled deliberately: it runs as root and fails under a
 restricted PSS namespace, and the `local-path` PVC is already writable by

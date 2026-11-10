@@ -673,11 +673,12 @@ Worth knowing before you tune anything, because the two layers look alike:
   `loki.loki.limits_config.retention_period`; PVC sizes and storage classes are
   likewise under `loki:` / `kube-prometheus-stack:`.
 - **The old parent storage/retention keys are not live subchart settings.**
-  Set NodePort and retention in the blocks above. The current installer still
-  reads `observability.stack.grafana.nodePort` only for its printed URL; that
-  legacy display value does not configure the Service. If you change the real
-  NodePort, read the Service or `helm get notes` for the correct address. This
-  display mismatch remains open in the source reviewed on 2026-11-10.
+  Set NodePort and retention in the blocks above. The installer now prints the
+  configured Service NodePort: `install.sh` (`GRAFANA_PORT`) reads the site's
+  `kube-prometheus-stack.grafana.service.nodePort`, falling back to the chart
+  default, 30030. The removed parent key no longer changes the printed URL.
+  The site file supplies both the Helm setting and the display value. After
+  applying a change, check the Service or `helm get notes` for the live address.
 - **`observability.stack.alerting.*` is wired.** The parent template loads
   `files/alertmanager-config.yaml`, substitutes the mail settings and references
   the mounted SMTP password file. `emailTo` and `smtpHost` cannot be empty when

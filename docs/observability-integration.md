@@ -41,7 +41,7 @@ So integration has three postures:
 |---|---|
 | `observability.enabled` | Vector DaemonSet on/off ([`charts/edge/templates/vector.yaml`](../charts/edge/templates/vector.yaml)) |
 | `observability.stack.enabled` | both subcharts on/off |
-| `observability.stack.grafana.nodePort` | **display only.** `install.sh` reads it to print `http://<nodeIP>:<port>` at the end of the run (default 30030). It does **not** open the port — see the caution below |
+| `kube-prometheus-stack.grafana.service.nodePort` | The Grafana Service NodePort and the port in the installer's printed URL. `install.sh` (`GRAFANA_PORT`) reads the site override, or the chart default of 30030. The removed `observability.stack.grafana.nodePort` key has no effect. |
 | `observability.stack.alerting.{emailTo,emailFrom,smtpHost,smtpPort,smtpUsername,requireTLS,existingSecret}` | alert mail routing — genuinely consumed, substituted into the Alertmanager config by `templates/observability.yaml`; SMTP password is the `alertmanager-smtp` Secret |
 | retention (logs / metrics) | **not a site-level `observability` key.** There was an `observability.stack.retentionDays`; it did nothing and was deleted. Set `loki.loki.limits_config.retention_period` and `kube-prometheus-stack.prometheus.prometheusSpec.retention` in the subchart blocks instead — see the caution below |
 | `nodeIP` | the address Grafana is reached on |
@@ -50,7 +50,7 @@ Grafana's admin login is the `grafana-admin-credentials` Secret and the SMTP pas
 
 > **Read this before you tune retention or the NodePort:** the *only* values that enforce anything are the subchart blocks at the bottom of [`charts/edge/values.yaml`](../charts/edge/values.yaml) — `loki.loki.limits_config.retention_period` (logs), `kube-prometheus-stack.prometheus.prometheusSpec.retention` (metrics), `kube-prometheus-stack.grafana.service.nodePort` (the port that actually opens, default 30030). Helm cannot template subchart values: no template in `charts/edge` can read a parent key and push it down into a subchart. A friendly parent key here would be read, trusted, and silently ignored, so the friendly parent keys that used to sit under `observability.stack` — `retentionDays`, `grafana.nodePort`, `lokiStorage` — were **removed from the chart** rather than left as decoration. `charts/edge/values.yaml` records the measurement that settled it: `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.
 >
-> One residue survives, and it is the trap: `install.sh` still reads `observability.stack.grafana.nodePort` from the site file to build the URL it prints. That is its whole effect. Move the port in the subchart block and the printed link points at a closed port unless you set the site-level key to the same number; set only the site-level key and you have changed nothing but the link.
+> The installer now follows the same subchart key as the Service: `install.sh` (`GRAFANA_PORT`) reads `kube-prometheus-stack.grafana.service.nodePort` from the site file, falling back to `charts/edge/values.yaml` (default 30030). The old parent key no longer controls the display. Apply the site file to change the deployed port; editing it alone does not change a running Service. Check that Service or `helm get notes` after the upgrade to confirm the live address.
 
 ---
 
