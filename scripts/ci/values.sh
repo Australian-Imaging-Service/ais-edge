@@ -352,6 +352,17 @@ ingest:
     enabled: false
 EOF
 
+# THE RE-IDENTIFICATION MAP KEY. deidentify must get it as
+# ACFLOW_REID_ENCRYPT_KEY (accessionflow 0.18.0 and later), read from the
+# Secret key XINGEST_REID_ENCRYPT_KEY, so a site's existing Secret keeps
+# working. A wrong variable name is SILENT: the maps are then written in plain
+# text. cli-contract checks the name; runtime-templates checks the Secret key.
+cat >"$V/edge-reid-key.yaml" <<'EOF'
+ingest:
+  deidentify:
+    reidEncryptKeySecret: reid-key
+EOF
+
 # THE PACKAGE STAGE ON, as it is by default under deid.engine=ingest. The
 # uploader, the policy engine and the staged-reclaimer move to /data/packaged,
 # and /data/deidentified becomes an intermediate tree the package stage
@@ -1297,6 +1308,7 @@ edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-upload-temp-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-custom.yaml
 edge-upload-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-default.yaml
 edge-upload-ingest-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-upload-temp-default.yaml
+edge-deid-ingest-reid-key	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-reid-key.yaml
 edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
 edge-upload-alerts	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml
 edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml edge-upload-custom.yaml

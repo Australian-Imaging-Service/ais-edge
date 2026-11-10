@@ -168,6 +168,13 @@ jobs:
           CI_REQUIRE_LOG_PHRASES: "1"
         run: make log-phrases
 
+      # The image is pinned by tag, so upstream can change the CLI under us:
+      # renamed commands and variables, moved options. This parses every
+      # rendered argv inside the pinned image and checks every ACFLOW_* name.
+      - name: Chart argv and env parse against the pinned image
+        if: ${{ !cancelled() }}
+        run: make cli-contract RENDER_DEP=
+
       # The staged-reclaimer deletes the upload tree. Its tests ran only in
       # `make ci`, never here. They copy the uploader's label rule out of the
       # pinned xnat-ingest image (docker); without docker they would skip, so

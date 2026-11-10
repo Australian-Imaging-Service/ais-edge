@@ -50,12 +50,33 @@ SIDECARS = {"__MANIFEST__.json", "MANIFEST.json", "__METADATA__.json"}
 DICOM_SERIES = {"medimage/dicom-series", "medimage/dicom-dir", "medimage/dicom-collection"}
 
 
+# Where the uploader's label rule lives: accessionflow (0.18.0 and later) or
+# xnat-ingest (before), so the rule follows the image that the chart pins.
+RULE_FILES = (("accessionflow", ("stores", "xnat", "scan_types.py")),
+              ("xnat_ingest", ("helpers", "xnat_scan_types.py")))
+
+
+def rule_file():
+    """The path of the label rule in the installed package, or None.
+    accessionflow is a namespace package, so every location is searched."""
+    for name, parts in RULE_FILES:
+        spec = importlib.util.find_spec(name)
+        for base in (spec.submodule_search_locations or []) if spec else []:
+            path = os.path.join(base, *parts)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
 def sop_label(sop_class_uids):
-    """The uploader's own rule, from the installed xnat-ingest. Loaded from its
-    file: the module imports only typing, and the package import is not needed."""
+    """The uploader's own rule, from the installed package. Loaded from its
+    file: the module imports only typing, and the package import is not needed.
+    CAUTION: when it cannot load, every DICOM resource is KEPT, so a wrong path
+    here fills the disk without an error."""
     try:
-        pkg = importlib.util.find_spec("xnat_ingest")
-        path = os.path.join(pkg.submodule_search_locations[0], "helpers", "xnat_scan_types.py")
+        path = rule_file()
+        if path is None:
+            raise FileNotFoundError("no accessionflow or xnat_ingest label rule in this image")
         spec = importlib.util.spec_from_file_location("xnat_scan_types", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

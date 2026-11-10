@@ -1084,13 +1084,25 @@ installs for the running Python, so the pod passes its own image in.
      trap until the sleep ends.
      scripts/ci/runtime-templates.sh runs the rendered wrappers with dash and
      sends these signals. */}}
+{{- /* The accessionflow command words of a pipeline stage. The keys are the
+     stage names that the lock trees and pod names use; they did not change when
+     xnat-ingest became accessionflow (0.18.0). A stage without an entry runs
+     under its own name, and CI cli-contract fails when the image has no such
+     command (a values file cannot reach this, so it is no render guard). */}}
+{{- define "edge.stageCommand" -}}
+{{- $argv := dict "group" (list "collate") "group-orthanc" (list "collate-orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
+- accessionflow
+{{- range (index $argv . | default (list .)) }}
+- {{ . | quote }}
+{{- end }}
+{{- end }}
+
 {{- define "edge.serialisedStage" -}}
 {{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
 - {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
-- xnat-ingest
-- {{ index . 1 | quote }}
+{{- include "edge.stageCommand" (index . 1) }}
 {{- end }}
 
 {{- /* (list $ "<stage>" <interval> ["<stage whose tree this one reads>"]). With
@@ -1110,6 +1122,5 @@ installs for the running Python, so the pod passes its own image in.
 - /bin/sh
 - -c
 - {{ printf "trap exit TERM INT; mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
-- xnat-ingest
-- {{ $stage | quote }}
+{{- include "edge.stageCommand" $stage }}
 {{- end }}

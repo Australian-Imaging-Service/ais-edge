@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases cli-contract
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -139,6 +139,12 @@ loki-rules:
 # writes it. Fixture tests cannot see a reworded message; this can.
 log-phrases:
 	@scripts/ci/log-phrases.sh
+
+# Needs docker and the render: parses every rendered argv in the PINNED image
+# (click make_context, never the command itself), and checks that every
+# ACFLOW_* variable the charts set is one that the image declares.
+cli-contract: $(RENDER_DEP)
+	@scripts/ci/cli-contract.sh
 
 # Needs docker: runs the REAL engine under the REAL busybox image the chart
 # deploys, over real directory trees, and asserts on WHAT SURVIVED rather than

@@ -381,7 +381,7 @@ groups:
         {namespace="xnat-ingest", app="xnat-ingest", component="assign", level="ERROR"}
         | json | __error__=""
         | json stage_message="message" | __error__=""
-        | stage_message =~ "(?s)^Could not resolve project/subject/session IDs for .*"
+        | stage_message =~ "(?s)^Could not resolve the labels of .*"
         [10m])) > 0
     for: 1m
     labels:
@@ -605,7 +605,7 @@ groups:
         | json | __error__=""
         | json stage_message="message" | __error__=""
         | level=~"(?i)ERROR|CRITICAL" or stage_message=~"(?s)^Traceback \\(most recent call last\\):.*"
-        | stage_message !~ "(?s)^(Could not resolve project/subject/session IDs for .*|Assign completed with [0-9]+ errors)$"
+        | stage_message !~ "(?s)^(Could not resolve the labels of .*|Label completed with [0-9]+ errors)$"
         [10m])) > 0
     # One event remains in the window long enough to meet this hold.
     for: 1m

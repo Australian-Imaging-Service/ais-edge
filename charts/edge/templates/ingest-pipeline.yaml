@@ -195,7 +195,7 @@ spec:
             # of the loop and this stage stops. Passing it restores 0.13.1 behaviour.
             #
             # ON THIS STAGE ONLY. `group-orthanc` has no such option and would die with
-            # "no such option", and NOT via XINGEST_ON_RESOURCE_CLASH: that variable is
+            # "no such option", and NOT via ACFLOW_ON_RESOURCE_CLASH: that variable is
             # still a plain click.Choice on `associate` and `deidentify`, where the pair
             # form "avoid all" is not a valid choice.
             - "--on-resource-clash"
@@ -212,7 +212,7 @@ spec:
             # copy and no facility backup, so the watched directory is the
             # only copy — which is why dataPolicy defaults this to never and
             # the chart refuses the combination while dataPolicy is enforced.
-            - name: XINGEST_UNLINK_SOURCE
+            - name: ACFLOW_UNLINK_SOURCE
               value: "all"
             {{- end }}
           volumeMounts:
@@ -445,7 +445,11 @@ spec:
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
-            - name: XINGEST_REID_ENCRYPT_KEY
+            # The tool reads ACFLOW_REID_ENCRYPT_KEY (accessionflow 0.18.0 and
+            # later). The key INSIDE the Secret keeps its old name, so a site's
+            # existing Secret works unchanged. CAUTION: a wrong variable name
+            # here is silent: the maps are then written in plain text.
+            - name: ACFLOW_REID_ENCRYPT_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.ingest.deidentify.reidEncryptKeySecret }}
@@ -593,7 +597,7 @@ spec:
         - name: associate
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "associate"]
+          command: ["accessionflow", "attach"]
           args:
             - "/data/assigned"
             {{- range splitList ";" .Values.ingest.associate.datatypes }}

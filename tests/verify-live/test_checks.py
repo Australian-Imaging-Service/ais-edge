@@ -92,9 +92,9 @@ class Checks(unittest.TestCase):
                     patch.dict(
                         os.environ,
                         {
-                            "XINGEST_HOST": host,
-                            "XINGEST_USER": "fake-user",
-                            "XINGEST_PASS": "fake-password",
+                            "ACFLOW_HOST": host,
+                            "ACFLOW_USER": "fake-user",
+                            "ACFLOW_PASS": "fake-password",
                         },
                     ),
                     patch.object(urllib.request, "HTTPSHandler", FakeHTTPS),

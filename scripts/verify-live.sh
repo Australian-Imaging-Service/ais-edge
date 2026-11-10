@@ -210,7 +210,7 @@ else
     code=$($K exec -n "$NS" "$up" -- env AIS_VERIFY_SSL="$VERIFY_SSL" sh -c '
         python3 - <<'"'"'PY'"'"' 2>/dev/null
 import os, ssl, urllib.request, urllib.parse, base64
-host=os.environ.get("XINGEST_HOST",""); u=os.environ.get("XINGEST_USER",""); p=os.environ.get("XINGEST_PASS","")
+host=os.environ.get("ACFLOW_HOST",""); u=os.environ.get("ACFLOW_USER",""); p=os.environ.get("ACFLOW_PASS","")
 if not host: print("000"); raise SystemExit
 if urllib.parse.urlsplit(host).scheme.lower() != "https":
     print("INSECURE_URL"); raise SystemExit
@@ -233,7 +233,7 @@ PY' 2>/dev/null | tr -d '[:space:]')
         301|302|303|307|308) bad "XNAT returned a redirect (HTTP $code)" "set the server in xnat-credentials to its final HTTPS URL; the reclaimer does not follow redirects" ;;
         200) ok "XNAT reachable and credentials accepted" ;;
         401|403) bad "XNAT rejected the credentials (HTTP $code)" "check xnat-credentials for ${SITE}" ;;
-        000|"") bad "XNAT unreachable from the uploader" "no session can be delivered; check egress and XINGEST_HOST (this probe verified TLS: upload.direct.verifySsl=${VERIFY_SSL})" ;;
+        000|"") bad "XNAT unreachable from the uploader" "no session can be delivered; check egress and ACFLOW_HOST (this probe verified TLS: upload.direct.verifySsl=${VERIFY_SSL})" ;;
         *) bad "XNAT returned HTTP $code" ;;
     esac
 fi

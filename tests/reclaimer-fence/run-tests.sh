@@ -49,7 +49,7 @@ writers() {   # <pod>:<wrapped|plain>:<phase>[:deleting] ...: writer pods
 w = sys.argv[1]; items = []
 for a in sys.argv[2:]:
     n, kind, ph, *d = a.split(":")
-    cmd = ["/bin/sh", "-c", w, "xnat-ingest", "assign"] if kind == "wrapped" else ["xnat-ingest", "assign"]
+    cmd = ["/bin/sh", "-c", w, "accessionflow", "label", "xnat"] if kind == "wrapped" else ["accessionflow", "label", "xnat"]
     m = {"name": n}
     if d: m["deletionTimestamp"] = "2026-10-14T00:00:00Z"
     items.append({"metadata": m, "spec": {"containers": [{"command": cmd}]}, "status": {"phase": ph}})
