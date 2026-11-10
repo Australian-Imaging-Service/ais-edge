@@ -55,6 +55,18 @@ def unquote(tok):
     return re.sub(r'\\(.)', r'\1', tok[1:-1])
 
 
+class Unsupported(ValueError):
+    """A regex shape the extraction does not read. It fails the check: a
+    skipped shape would pass without a check."""
+
+
+# Inline flags with no content: (?i), (?s), (?is), (?-i).
+FLAGS_ONLY = re.compile(r"\(\?[aiLmsux-]+\)")
+# Flags for a group whose content is a pattern: (?i:...).
+FLAGS_SCOPED = re.compile(r"\(\?[aiLmsux-]+:")
+INSENSITIVE = re.compile(r"\(\?[aLmsux]*i[aLmsux-]*[:)]")
+
+
 def fragments(text, is_regex):
     """The literal runs of a pattern, and whether ANY one is enough (alternation)."""
     if not is_regex:
@@ -76,9 +88,22 @@ def fragments(text, is_regex):
             i = end + 1 if end > 0 else i + 1
             continue
         if ch == "(" and text[i + 1:i + 2] == "?":
-            end = text.find(">", i) if text[i + 2:i + 3] == "P" else text.find(")", i)
+            # Read the group prefix, then the content as usual: a whole-group
+            # skip dropped every literal inside (?:...) and passed with no check.
             out.append(buf); buf = ""
-            i = end + 1
+            if text.startswith("(?:", i):            # non-capturing group
+                i += 3
+            elif text.startswith("(?P<", i):         # named group
+                end = text.find(">", i)
+                if end < 0:
+                    raise Unsupported(f"unterminated group name at {text[i:i + 12]!r}")
+                i = end + 1
+            elif FLAGS_ONLY.match(text, i):          # inline flags, no content
+                i = FLAGS_ONLY.match(text, i).end()
+            elif FLAGS_SCOPED.match(text, i):        # flags with content
+                i = FLAGS_SCOPED.match(text, i).end()
+            else:                                    # lookaround, back-reference, other
+                raise Unsupported(f"group {text[i:i + 6]!r} is not read by this check")
             continue
         if ch in "*+?":
             buf = buf[:-1]
@@ -101,6 +126,31 @@ def fragments(text, is_regex):
         i += 1
     out.append(buf)
     return [s for s in out if len(s.strip()) >= MIN_LEN], alternation
+
+
+def evaluate(pattern, is_regex, sources):
+    """(frags, missing): the literals of a pattern and those no source holds."""
+    frags, _ = fragments(pattern, is_regex)
+    insensitive = bool(is_regex and INSENSITIVE.search(pattern))
+    def found(frag):
+        for src in sources:
+            hay = src.lower() if insensitive else src
+            if (frag.lower() if insensitive else frag) in hay:
+                return True
+        return False
+    return frags, [f for f in frags if not found(f)]
+
+
+# CONTROLS. Each pattern names text that no source holds, so each must be
+# reported missing. If one passes, the check no longer tells found from
+# missing. The last shape must be refused, not skipped.
+CONTROLS = (
+    ("NEVER_LOGGED_SENTINEL_1f3a", True),
+    ("(?:NEVER_LOGGED_SENTINEL_1f3a|ALSO_NEVER_LOGGED_9c2e)", True),
+    ("(?i:never_logged_sentinel_1f3a)", True),
+    ("(?P<x>NEVER_LOGGED_SENTINEL_1f3a)", True),
+)
+REFUSED = "(?=NEVER_LOGGED_SENTINEL_1f3a)"
 
 
 def corpus(paths, skip):
@@ -142,7 +192,7 @@ def main():
     skip = {os.path.abspath(f) for f in rule_files}
     tool = corpus([tool_dir], skip)
     ours = corpus([os.path.join(repo_root, p) for p in ("charts", "scripts")], skip)
-    failed = 0
+    failed = checked = 0
     for rule_file in rule_files:
         for rule in rules(yaml.safe_load(open(rule_file))):
             expr, name = rule["expr"], rule["alert"]
@@ -164,21 +214,18 @@ def main():
             checks += [(unquote(t), True) for t in REGEXP.findall(expr)]
             # A field filter can also match the line-filter pattern: check each once.
             for pattern, is_regex in dict.fromkeys(checks):
-                frags, any_one = fragments(pattern, is_regex)
+                try:
+                    frags, missing = evaluate(pattern, is_regex, sources)
+                except Unsupported as exc:
+                    print(f"FAIL\t{name}\tcannot read '{pattern[:60]}': {exc}")
+                    failed += 1
+                    continue
                 if not frags:
                     continue
-                insensitive = "(?i)" in pattern
-                def found(frag):
-                    for src in sources:
-                        hay = src.lower() if insensitive else src
-                        if (frag.lower() if insensitive else frag) in hay:
-                            return True
-                    return False
-                hits = [f for f in frags if found(f)]
+                checked += 1
                 # Each long branch of an alternation names its own message, so
                 # every one must exist; short ones were dropped above.
-                ok = len(hits) == len(frags)
-                missing = [f for f in frags if f not in hits]
+                ok = not missing
                 norm = lambda f: f.lower().strip().rstrip(":")
                 known = [KNOWN[norm(f)] for f in missing if norm(f) in KNOWN]
                 if ok:
@@ -189,6 +236,22 @@ def main():
                 else:
                     print(f"FAIL\t{name}\t'{missing[0][:70]}' is in the rule but not in {where}")
                     failed += 1
+    if not checked:
+        print("FAIL\t(all rules)\tno rule gave a phrase to check: the extraction looks for the wrong shape")
+        failed += 1
+    for pattern, is_regex in CONTROLS:
+        frags, missing = evaluate(pattern, is_regex, [tool, ours])
+        if frags and missing == frags:
+            print(f"PASS\tcontrol\t'{pattern}' is reported missing")
+        else:
+            print(f"FAIL\tcontrol\t'{pattern}' is not reported missing (literals {frags}): the check no longer discriminates")
+            failed += 1
+    try:
+        evaluate(REFUSED, True, [tool, ours])
+        print(f"FAIL\tcontrol\t'{REFUSED}' was read, not refused: an unread shape would pass")
+        failed += 1
+    except Unsupported:
+        print(f"PASS\tcontrol\t'{REFUSED}' is refused")
     return 1 if failed else 0
 
 

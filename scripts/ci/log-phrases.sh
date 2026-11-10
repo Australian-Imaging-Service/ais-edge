@@ -106,12 +106,21 @@ while IFS= read -r pkg; do
   docker run --rm --network none --entrypoint tar "$IMAGE" -C "$pkg" -cf - . 2>/dev/null | tar -xf - -C "$SRC/$n"
 done <<< "$PKGS"
 
+# Capture first, then read: a process substitution drops the exit status, so a
+# crash (a rule file that does not parse) gave "0 passed, 0 failed" and exit 0.
+OUT="$(python3 "$HERE/log-phrases.py" "$SRC" "$REPO_ROOT" "${RULES[@]}" 2>&1)"
+rc=$?
+lines=0
 while IFS=$'\t' read -r verdict alert detail; do
   case "$verdict" in
-    PASS) ci_pass "$alert: $detail" ;;
-    FAIL) ci_fail "$alert: $detail" ;;
-    SKIP) ci_skip "$alert: $detail" ;;
+    PASS) ci_pass "$alert: $detail"; lines=$((lines + 1)) ;;
+    FAIL) ci_fail "$alert: $detail"; lines=$((lines + 1)) ;;
+    SKIP) ci_skip "$alert: $detail"; lines=$((lines + 1)) ;;
   esac
-done < <(python3 "$HERE/log-phrases.py" "$SRC" "$REPO_ROOT" "${RULES[@]}")
+done <<< "$OUT"
+if [ "$rc" -ne 0 ] && ! printf '%s\n' "$OUT" | grep -q $'^FAIL\t'; then
+  ci_fail "log-phrases.py stopped with exit $rc and no verdict: $(printf '%s' "$OUT" | tail -3 | tr '\n' ' ')"
+fi
+[ "$lines" -gt 0 ] || ci_fail "log-phrases.py gave no verdict at all"
 
 ci_summary "log-phrases ($IMAGE)"
