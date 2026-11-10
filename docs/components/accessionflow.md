@@ -17,8 +17,8 @@ XNAT-ready sessions and uploads them. The pinned version is **0.20.0**,
 from the upstream accessionflow image. It replaces the AIS fork build
 0.16.2.post1 (`ingest.image` in `charts/edge/values.yaml`). The old single `sort` command
 was split into these stages:
-1. **`group-orthanc`** (`accessionflow collate orthanc`): REST-pulls studies from Orthanc and
-   groups their DICOMs into per-session directories
+1. **`group-orthanc`** (`accessionflow collate orthanc`): queries Orthanc study
+   metadata over REST and hardlinks its stored DICOM files into per-session directories
 2. **`assign`** (`accessionflow label xnat`): extracts the XNAT project/subject/session/scan IDs from
    the grouped DICOMs and stages them as a structured directory
 3. **`deidentify`**: applies the site's de-identification recipe to each
@@ -65,9 +65,9 @@ succeeds (see [orthanc.md](orthanc.md)). REST arrivals bypass that backup.
 The Lua script also
 labels each stable study `xnat-ingest-ready`, under `ingest` too. That label
 does not show that the study is de-identified. `group-orthanc`
-REST-pulls each study that has been quiet for its wait period (under the
+queries Orthanc over REST for each study that has been quiet for its wait period (under the
 deprecated `orthanc` engine, only the studies labelled `xnat-ingest-ready`)
-and groups their DICOMs into `/data/grouped/<session>/`. Then `assign`
+and hardlinks its stored DICOMs into `/data/grouped/<session>/`. Then `assign`
 produces the `/data/assigned/<project>.<subject>.<visit>/` hierarchy:
 `accessionflow label xnat /data/grouped /data/assigned`
 (`charts/edge/templates/ingest-pipeline.yaml`), declared as
@@ -85,16 +85,18 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
 ### group-orthanc + assign pods (edge)
 - **The pipeline PVC, mounted at `/data`** — one hostPath-backed claim
   (`storage.pipeline.hostPath: /data/xnat-ingest`) that *every* stage
-  mounts at the same path. That is a requirement, not tidiness: the
-  stages hardlink between the directories and a hardlink cannot cross a
-  filesystem boundary, so splitting them makes `hardlink_or_copy`
-  silently degrade to a full byte copy of every study. group-orthanc
+  mounts at the same path. Orthanc collation calls `os.link()` directly:
+  its source and staging directories must share a filesystem. It cannot
+  fall back to copying across filesystems. Other stages can use their
+  configured copy mode; do not infer that fallback for group-orthanc. It
   reads `orthanc-storage/` and writes `grouped/`; assign reads
   `grouped/` and writes `assigned/`; deidentify reads `assigned/` and
   writes `deidentified/` and `reid/`
-- **In-cluster HTTP to Orthanc** — group-orthanc REST-pulls from
-  `edge-orthanc.xnat-ingest.svc.cluster.local:8042` (release-prefixed —
-  see [orthanc.md](orthanc.md)); assign is purely local filesystem work
+- **In-cluster HTTP to Orthanc**: group-orthanc queries study and attachment
+  metadata and updates labels through
+  `edge-orthanc.xnat-ingest.svc.cluster.local:8042` (release-prefixed;
+  see [orthanc.md](orthanc.md)). It reads DICOM bytes from the shared local
+  store. The assign stage uses the local filesystem.
 - **Orthanc REST credentials** — group-orthanc reads `orthanc-user` and
   `orthanc-password` from the `orthanc-credentials` Secret, because
   Orthanc's API is authenticated (`orthanc.auth.enabled: true` by

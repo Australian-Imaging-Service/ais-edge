@@ -43,8 +43,8 @@ Three jobs at each edge:
    study once it's been quiescent for `StableAge` seconds. Under `ingest` no
    stage waits for it: `group-orthanc` pulls each study that has been quiet
    for `ingest.orthancGroup.waitPeriod`. Under the deprecated `orthanc` engine
-   the label is the signal for `accessionflow collate orthanc` to REST-pull the
-   study. This callback has no `DeidEnabled` guard, so it also runs under
+   the label selects the study for `accessionflow collate orthanc`. It queries
+   metadata over REST and hardlinks the local DICOM files. This callback has no `DeidEnabled` guard, so it also runs under
    `ingest` whenever the script is loaded. The label shows that a study is
    stable. It does not show that the recipe ran.
 
@@ -72,7 +72,7 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
                               PUT /studies/{id}/labels/xnat-ingest-ready
                                                       │
                                                       ▼
-                                accessionflow collate orthanc REST-pulls,
+                                accessionflow collate orthanc queries metadata,
                                 hardlinks, PUTs label xnat-ingest-processed
                                 (under ingest it does not wait for the label)
 ```
