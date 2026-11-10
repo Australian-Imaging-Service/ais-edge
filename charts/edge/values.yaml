@@ -374,15 +374,19 @@ dataPolicy:
     # do not infer deduplication solely from a retained directory or marker.
     grouped:
       location: /data/grouped
-      # NO minAge HERE, deliberately. `accessionflow label xnat --unlink-source all` deletes each
-      # grouped tree at assign time, so a window measured from assign can never
-      # elapse — there is nothing left to wait on. What reaches the engine is
-      # only an ORPHAN: a tree assign copied but failed to unlink (crash, OOM,
-      # eviction). Those are cleaned up immediately; delaying an orphan buys
-      # no extra proof of a backup: other hardlinks or original copies may
-      # already have been reclaimed or never created for this input. Setting
-      # minAge here is rejected at render rather than ignored.
-      reclaim: onAssigned        # never | onAssigned (orphan cleanup)
+      # No minAge is accepted here: onAssigned enables the label stage's
+      # --unlink-source all after a successful save. Already-invalid skips
+      # bypass that cleanup, and crashes can leave grouped input behind.
+      # The policy engine does not currently recover normal grouped orphans:
+      # condition_met in charts/edge/files/data-policy.sh checks the unchanged
+      # grouped basename (_.<uid>) against assigned/ and upload markers named
+      # <project>.<subject>.<session>. Those names do not match in this chart.
+      # A retained grouped copy may contain late data; do not remove it merely
+      # because an assigned session or marker has the same study UID. Inspect
+      # the files and use docs/recovering-invalid-sessions.md for invalid input.
+      # Other hardlinks or originals may already be gone, so retention here
+      # is not proof of an independent backup. minAge is rejected at render.
+      reclaim: onAssigned        # never | onAssigned (label-stage source cleanup)
 
     # Output of assign; input to whichever upload mode is enabled.
     assigned:

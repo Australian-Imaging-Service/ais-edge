@@ -24,7 +24,7 @@ az aks create --resource-group ais-edge-rg --name ais-edge-mgmt \
 az network public-ip create --resource-group ais-edge-rg \
   --name ais-edge-lb-ip --sku Standard --allocation-method Static
 # Edit sites/<site>/values.yaml (topology: cloud, installMode: existing, etc.)
-./install.sh -y <site>          # the site argument is mandatory (install.sh)
+./install.sh -y <site>          # the site argument is mandatory (install.sh (`SITE_DIR`))
 ```
 
 ## Which ingress shape, and what the pre-flight checks
@@ -165,15 +165,15 @@ class does not exist there: Prometheus and Alertmanager `storageSpec`, Grafana
 A default cloud StorageClass does not override an explicit `local-path` name.
 
 `sites/<site>/values.yaml` is **YAML**, read with `yaml.safe_load`
-(`install.sh`) and then handed to Helm with `-f`. Nothing sources it,
+(`install.sh`, `cfg()`) and then handed to Helm with `-f`. Nothing sources it,
 so shell `export` lines in it are invalid YAML configuration ; and `CLOUD_PROVIDER`,
 `CLOUD_CREDENTIALS_FILE`, `LB_PUBLIC_IP`, `CERT_ISSUER` and `DNS_PROVIDER`
 have no reader anywhere in `charts/`, `scripts/`, `sites/` or `install.sh`.
 The live keys are:
 
 ```yaml
-installMode: existing        # we're using AKS; install.sh
-topology: cloud              # charts/mgmt/values.yaml; choices: onprem | cloud
+installMode: existing        # we're using AKS; install.sh (`INSTALL_MODE`)
+topology: cloud              # charts/mgmt/values.yaml (`topology`); choices: onprem | cloud
 
 domain:
   internal: aisedge.example.com
@@ -198,7 +198,7 @@ render without them, deliberately, so a missing solver surfaces at
 
 Pin the LB to your reserved IP in the same file. It is layered onto the
 management chart with `-f`, so a top-level `ingress-nginx:` key overrides the
-vendored subchart's defaults at `charts/mgmt/values.yaml`, whose settings are
+vendored subchart's defaults at `charts/mgmt/values.yaml` (`ingress-nginx.controller`), whose settings are
 the on-prem ones, `hostNetwork: true` + `service.type: ClusterIP`. Left
 untouched on AKS, the reserved 20.x.y.z never attaches and Step 6 can never
 pass:
@@ -226,7 +226,7 @@ Two traps in that block:
 - Override only the keys above. The inherited
   `controller.extraArgs.enable-ssl-passthrough: "true"` and
   `ingressNginx.sslPassthrough: true` must stay:
-  `charts/mgmt/templates/edge-clusters.yaml` hard-fails the render if
+  `charts/mgmt/templates/edge-clusters.yaml` (`ingressNginx.sslPassthrough`) hard-fails the render if
   passthrough is turned off, because the k0s API and konnectivity are mTLS end
   to end and terminating here breaks only the edge workers' join.
 
@@ -237,7 +237,7 @@ Two traps in that block:
 ```
 
 `install.sh` is a seven-step installer now, not the old numbered-script chain.
-`install.sh` records that steps 4 and 7 replaced
+`install.sh` (`Steps 4 and 7 replace`) records that steps 4 and 7 replaced
 `02b/02c/02d/03/04/07/07b/07c`, and there is no `01b` to skip — the repo
 installs no cloud controller in any topology, on AKS or anywhere else:
 
@@ -255,7 +255,7 @@ installs no cloud controller in any topology, on AKS or anywhere else:
 
 The ingress-nginx Service is part of the management release, so it carries the
 release prefix and lives in the release namespace (`mgmt` / `ais-mgmt`,
-`install.sh`) ; there is no `ingress-nginx` namespace:
+`install.sh` (`MGMT_NS`, `MGMT_RELEASE`)) ; there is no `ingress-nginx` namespace:
 
 ```bash
 kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller

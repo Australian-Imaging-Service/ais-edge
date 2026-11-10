@@ -27,20 +27,20 @@ konnectivity-edge-dev.aisedge.local  →  ssl-passthrough →  kmc-edge-dev-node
 Note the shape of the last two: the k0s API and konnectivity hostnames are
 **per-edge**, `<apiPrefix>-<name>.<domain>` and
 `<konnectivityPrefix>-<name>.<domain>`, with the prefixes defaulting to `k0s`
-and `konnectivity` (`charts/mgmt/values.yaml`,
-`charts/mgmt/templates/edge-clusters.yaml`). A site can pin its own
+and `konnectivity` (`charts/mgmt/values.yaml` (`k0smotron.hostnames`),
+`charts/mgmt/templates/edge-clusters.yaml` (`mgmt.edgeApiHost`, `mgmt.edgeKonnectivityHost`)). A site can pin its own
 names per edge via `edges[].apiHost` / `edges[].konnectivityHost`. Fleet-wide
 `hostnames.k0sApi` / `hostnames.konnectivity` keys are gone and their return
-is a render-time failure (`charts/mgmt/templates/edge-clusters.yaml`): they gave every edge
+is a render-time failure (`charts/mgmt/templates/edge-clusters.yaml`, `hostnames.k0sApi / hostnames.konnectivity are set`): they gave every edge
 the same two hostnames, so the second site's Ingress claimed a hostname the
 first one already owned and its workers were silently routed to the wrong
-API server. `charts/mgmt/values.yaml` carries the same warning next to
+API server. `charts/mgmt/values.yaml` (`hostnames`) carries the same warning next to
 the surviving fleet-wide `hostnames:` block, which holds only the three
 management names above.
 
 The three management backends are release-prefixed subchart Services —
 `<release>-seaweedfs`, `<release>-grafana`, `<release>-loki`, i.e. `mgmt-*`
-with the release name `install.sh` sets. `charts/mgmt/templates/observability.yaml`
+with the release name `install.sh` (`MGMT_RELEASE`) sets. `charts/mgmt/templates/observability.yaml` (`$grafanaSvc`, `$lokiSvc`)
 derives the Grafana and Loki names from `.Release.Name` rather than from
 `mgmt.fullname` precisely so a `fullnameOverride` cannot point these Ingresses
 at a Service that does not exist.
@@ -68,14 +68,14 @@ ssl-passthrough vs TLS terminate:
 
 - Cluster: management cluster only
 - Namespace: `ais-mgmt` — the management release's namespace
-  (`install.sh`). The subchart leaves `namespaceOverride: ""` and
+  (`install.sh`, `MGMT_NS`). The subchart leaves `namespaceOverride: ""` and
   `charts/mgmt` does not set it, so there is no separate `ingress-nginx`
   namespace to look in
 - Workload: Deployment `mgmt-ingress-nginx-controller` (single replica;
   one replica is the default on a single host; a Service can still select
   host-network Pods, but two Pods cannot bind the same host port). The name is
   `<release>-ingress-nginx-controller` — substitute your release name if it
-  is not the `mgmt` that `install.sh` sets
+  is not the `mgmt` that `install.sh` (`MGMT_RELEASE`) sets
 - Image: from the pinned subchart's default — `ingress-nginx/controller`
   `v1.15.1`, from `charts/mgmt/charts/ingress-nginx-4.15.1.tgz`
 - Metrics: `:10254/metrics`
@@ -85,13 +85,13 @@ ssl-passthrough vs TLS terminate:
 | File | Purpose |
 |---|---|
 | `charts/mgmt/charts/ingress-nginx-4.15.1.tgz` | the pinned upstream subchart — the controller itself is vendored, not fetched at install time |
-| `charts/mgmt/values.yaml` (`ingress-nginx:` key) | subchart values for hostNetwork, ssl-passthrough and body size limits. Overridable per site in `sites/<site>/values.yaml`, which is layered on with `-f` |
-| `charts/mgmt/values.yaml` (`ingressNginx:` key) | this chart's own view of the ingress: `enabled` and `sslPassthrough`. Read by `charts/mgmt` templates. The old `proxyBodySize` parent key was removed; set `ingress-nginx.controller.config.proxy-body-size` in the subchart block |
+| `charts/mgmt/values.yaml` (`ingress-nginx.controller`) (`ingress-nginx:` key) | subchart values for hostNetwork, ssl-passthrough and body size limits. Overridable per site in `sites/<site>/values.yaml`, which is layered on with `-f` |
+| `charts/mgmt/values.yaml` (`ingressNginx`) (`ingressNginx:` key) | this chart's own view of the ingress: `enabled` and `sslPassthrough`. Read by `charts/mgmt` templates. The old `proxyBodySize` parent key was removed; set `ingress-nginx.controller.config.proxy-body-size` in the subchart block |
 | `charts/mgmt/templates/seaweedfs.yaml` (S3) and `charts/mgmt/templates/observability.yaml` (Grafana, Loki) | the management Ingress definitions, with the right TLS / body-size / mTLS annotations |
 | `charts/mgmt/templates/edge-clusters.yaml` (`spec.ingress`) | the per-edge k0s API + konnectivity Ingresses are not written here — k0smotron creates them itself from this block, with `ssl-passthrough: "true"` and `backend-protocol: "HTTPS"` |
 
-Installed as part of the management release by `install.sh` (step 4/7),
-not by a script of its own ; `install.sh` records that the old
+Installed as part of the management release by `install.sh` (`MGMT_RELEASE`, `step 4/7`) (step 4/7),
+not by a script of its own ; `install.sh` (`Steps 4 and 7 replace`) records that the old
 `scripts/02c-install-nginx-ingress.sh` and the `*-ingress.yaml.tpl` templates
 were replaced by the two Helm releases.
 

@@ -65,7 +65,7 @@ tests:
                      deadline. (On this chart the Jobs carry no component label; the pods do.)
                        kubectl -n xnat-upload get pods -l component=s3-reclaimer
                   3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
-                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s
                 If the schedule was slowed, raise dataPolicy.derived.s3Staged.alertAfter with it: it
                 must stay above two periods plus deadlineSeconds.
                 Clears on the next successful run.
@@ -121,7 +121,7 @@ tests:
                      deadline. (On this chart the Jobs carry no component label; the pods do.)
                        kubectl -n xnat-upload get pods -l component=s3-reclaimer
                   3. What did the last run log? (a failed Job's pod may be gone; Loki keeps it)
-                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=50
+                       kubectl -n xnat-upload logs -l component=s3-reclaimer --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s
                 If the schedule was slowed, raise dataPolicy.derived.s3Staged.alertAfter with it: it
                 must stay above two periods plus deadlineSeconds.
                 Clears on the next successful run.

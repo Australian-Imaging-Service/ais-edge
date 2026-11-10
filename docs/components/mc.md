@@ -21,7 +21,7 @@ packaged output when packaging is enabled.
 document [`mc`](https://min.io/docs/minio/linux/reference/minio-mc.html),
 the MinIO client, which was the uploader until the client migration.
 `mc` is no longer a deployed client. The history in
-`charts/edge/files/s3-uploader.sh` names both older clients and identifies
+`charts/edge/files/s3-uploader.sh` (`The S3 client is rclone`) names both older clients and identifies
 rclone as the current one.
 
 **Migration history (2026-10), current status checked 2026-11-10.** The loop now runs `rclone copy` and copies only: it

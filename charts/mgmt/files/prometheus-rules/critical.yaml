@@ -49,9 +49,8 @@ groups:
             in {{ $labels.namespace }}. The selector matches deployment names containing
             seaweedfs; verify the actual workload before assuming a specific failure.
               kubectl -n {{ $labels.namespace }} get deployments,pods
-              kubectl -n {{ $labels.namespace }} logs -l app=seaweedfs --tail=100
+              kubectl -n {{ $labels.namespace }} logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s
             Edge transfers may fail or retry while the service is unavailable.
-
       - alert: EdgeWorkerDisconnected
         expr: kube_node_status_condition{condition="Ready",status="true"} == 0
         for: 5m

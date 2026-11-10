@@ -142,7 +142,7 @@ domain:
 ```
 Note that nip.io cannot satisfy a DNS-01 challenge, so a nip.io domain means
 staying on the internal `ais-edge-ca` issuer rather than Let's Encrypt
-(`charts/mgmt/values.yaml`).
+(`charts/mgmt/values.yaml`, `certManager.issuer`).
 
 **Prod** (Cloud DNS):
 ```bash
@@ -163,36 +163,36 @@ class does not exist there: Prometheus and Alertmanager `storageSpec`, Grafana
 A default cloud StorageClass does not override an explicit `local-path` name.
 
 `sites/<site>/values.yaml` is **YAML**, not a shell env file — `install.sh`
-parses it with `yaml.safe_load` (`install.sh`) and reads dotted paths
+parses it with `yaml.safe_load` (`install.sh`, `cfg()`) and reads dotted paths
 out of it. Shell `export` lines here are not config; they are a parse error.
 The same file is passed to both charts, so what you write below is also what
 `helm` sees.
 
 ```yaml
-topology: cloud            # install.sh ; skips the on-prem /etc/hosts writes
-installMode: existing      # install.sh ; GKE already runs; do not install k0s
+topology: cloud            # install.sh (`INSTALL_TOPOLOGY`) ; skips the on-prem /etc/hosts writes
+installMode: existing      # install.sh (`INSTALL_MODE`) ; GKE already runs; do not install k0s
 
 domain:
   internal: aisedge.example.com     # or dev.<ip-with-dashes>.nip.io for dev
-  mgmtNodeIP: "10.x.y.z"            # required (install.sh, no default) ;
+  mgmtNodeIP: "10.x.y.z"            # required (install.sh (`MGMT_NODE_IP`), no default) ;
                                     # a node IP inside the GKE cluster
 
 certManager:
   enabled: false                    # leave false: install.sh step 2/7 installs
                                     # cert-manager itself, before this chart
   issuer: letsencrypt-prod          # anything prefixed letsencrypt- takes the
-                                    # ACME path (charts/mgmt/templates/cert-issuers.yaml)
+                                    # ACME path (charts/mgmt/templates/cert-issuers.yaml (`$isAcme`))
   acme:
     email: ops@example.com          # required by this chart for ACME
     server: https://acme-v02.api.letsencrypt.org/directory
     dns01Solver:                    # passed through VERBATIM into
-      cloudDNS:                     # solvers[0].dns01 (charts/mgmt/templates/cert-issuers.yaml),
+      cloudDNS:                     # solvers[0].dns01 (charts/mgmt/templates/cert-issuers.yaml (`certManager.acme.dns01Solver`)),
         project: <your-project>     # so it must be a shape cert-manager knows.
                                     # No serviceAccountSecretRef: Workload
                                     # Identity supplies the token (see below).
 
 # The chart ships the ON-PREM ingress shape and expects cloud sites to override
-# it here; consult the CAUTION at charts/mgmt/values.yaml. All three lines
+# it here; consult the CAUTION at charts/mgmt/values.yaml (`ingress-nginx.controller`). All three lines
 # matter: the default binds the host's :443 with hostNetwork and a ClusterIP
 # Service, so on GKE no LB is ever provisioned and loadBalancerIP alone is inert.
 ingress-nginx:                      # subchart key — hyphenated, exactly this
@@ -208,7 +208,7 @@ ingress-nginx:                      # subchart key — hyphenated, exactly this
 There is no cloud-provider or credentials key to set. GCP credentials come from
 the ambient ADC / Workload Identity chain, and the DNS provider is expressed
 solely by which key appears inside `dns01Solver`. For a working solver block in
-this repo, see the route53 example at `scripts/ci/values.sh`; it uses the same
+this repo, see the route53 example at `scripts/ci/values.sh` (`mgmt-letsencrypt.yaml`); it uses the same
 shape, different provider key.
 
 ## Step 5 — Run install.sh
@@ -220,11 +220,11 @@ shape, different provider key.
 `install.sh` is a **seven-step** installer and prints `1/7` … `7/7` as it goes.
 The old per-script numbering (`01b`, `02c`, `02d`, `07c`) is gone: steps 4 and 7
 are Helm installs that replaced what used to be scripts 02b/02c/02d/03/04/07/
-07b/07c (`install.sh`).
+07b/07c (`install.sh`, `Steps 4 and 7 replace`).
 
 | Step | What happens on GCP |
 |---|---|
-| 1/7 k0s management cluster | Skipped ; `installMode: existing`; `scripts/01-install-k0s.sh` just verifies the GKE cluster answers and warns if there is no default StorageClass, then exits 0 |
+| 1/7 k0s management cluster | Skipped ; `installMode: existing`; `scripts/01-install-k0s.sh` (`INSTALL_MODE`) just verifies the GKE cluster answers and warns if there is no default StorageClass, then exits 0 |
 | 2/7 prerequisites: cert-manager CRDs + k0smotron operator | Standard. cert-manager is installed here rather than as a subchart, to break the conversion-webhook ordering loop |
 | 3/7 site Secrets (SOPS → cluster) | Standard; skipped if the site has no `secrets.enc.yaml` |
 | 4/7 helm: management chart | Installs the ingress-nginx subchart. With the Step 4 override above, GKE provisions a regional Network LB and attaches your reserved static IP |
@@ -239,7 +239,7 @@ kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
 # release `mgmt` in namespace `ais-mgmt` — there is no ingress-nginx namespace.
 # EXTERNAL-IP should equal your reserved static IP. It stays <none> unless the
 # ingress-nginx override from Step 4 is in the site file: the chart default is
-# service.type ClusterIP (charts/mgmt/values.yaml).
+# service.type ClusterIP (charts/mgmt/values.yaml (`ingress-nginx.controller.service.type`)).
 
 curl -v --cert <edge-loki-client.crt> --key <edge-loki-client.key> \
   https://loki.aisedge.example.com/ready

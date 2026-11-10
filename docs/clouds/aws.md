@@ -274,7 +274,7 @@ happens per step:
 |---|---|---|
 | 1/7 k0s management cluster | Installs k0s + kubectl/helm/local-path on the mgmt VM | **Skipped** — `installMode: existing` makes `scripts/01-install-k0s.sh` run `kubectl get nodes -o wide`, warn if there is no default StorageClass, and exit 0 |
 | 2/7 prerequisites | cert-manager v1.20.3 CRDs + k0smotron v2.0.3 operator, both pinned in `install.sh` | Same. These are prerequisites rather than subcharts because Helm validates a release against the API server before applying any of it, so the CRDs must exist first |
-| 3/7 site Secrets | Applies decrypted site Secrets; `scripts/site-secrets.sh` uses a protected temporary plaintext file for validation and removes it afterward | Same |
+| 3/7 site Secrets | Applies decrypted site Secrets; `scripts/site-secrets.sh` (`apply`) pipes `sops -d` through its empty-document filter into `kubectl apply -f -`. It does not write plaintext to a temporary file in this path. The separate S3 key append/re-encrypt path uses a temporary plaintext file and attempts to shred it afterward | Same |
 | 4/7 helm: management chart | One release: SeaweedFS, the XNAT uploader, observability, the CA/ClusterIssuers, ingress-nginx and the k0smotron hosted control planes | Same release; the ingress override requests a Service. The selected AWS controller, subnet configuration and annotations determine the NLB and address assignments; verify the resulting resources |
 | 5/7 per edge: child kubeconfig + join token | Mints the token once and reuses it, so an upgrade does not re-mint | Same |
 | 6/7 per edge: join the worker | Over SSH, or a bootstrap bundle when there is no SSH to that edge | Same — edges reach mgmt via NLB:443 |

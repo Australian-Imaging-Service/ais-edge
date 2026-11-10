@@ -254,7 +254,7 @@ only when `OnStoredInstance` sees `RequestOrigin == DicomProtocol`
 and does not see a file drop. Those paths bypass both its backup write and
 the deprecated de-identification branch. Under the deprecated
 engine the uploader reads `/data/assigned`
-(`charts/edge/templates/_helpers.tpl`, upload tree selection), so a dropped file goes to XNAT
+(`charts/edge/templates/_helpers.tpl`, `edge.uploadSourceDir`), so a dropped file goes to XNAT
 without de-identification.
 
 ## See also

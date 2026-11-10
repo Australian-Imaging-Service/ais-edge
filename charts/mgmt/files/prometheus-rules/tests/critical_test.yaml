@@ -60,7 +60,7 @@ tests:
               deployment: mgmt-seaweedfs
             exp_annotations:
               summary: "SeaweedFS deployment has zero ready replicas for 2+ minutes"
-              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin ais. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n ais get deployments,pods\n  kubectl -n ais logs -l app=seaweedfs --tail=100\nEdge transfers may fail or retry while the service is unavailable.\n"
+              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin ais. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n ais get deployments,pods\n  kubectl -n ais logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s\nEdge transfers may fail or retry while the service is unavailable.\n"
 
   - interval: 30s
     name: SeaweedFSDown still fires for the pre-chart flat name
@@ -77,7 +77,7 @@ tests:
               deployment: seaweedfs
             exp_annotations:
               summary: "SeaweedFS deployment has zero ready replicas for 2+ minutes"
-              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin seaweedfs. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n seaweedfs get deployments,pods\n  kubectl -n seaweedfs logs -l app=seaweedfs --tail=100\nEdge transfers may fail or retry while the service is unavailable.\n"
+              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin seaweedfs. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n seaweedfs get deployments,pods\n  kubectl -n seaweedfs logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s\nEdge transfers may fail or retry while the service is unavailable.\n"
 
   - interval: 30s
     name: SeaweedFSDown stays quiet while replicas are ready

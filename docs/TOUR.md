@@ -888,7 +888,7 @@ be the identical string:
 
 The edge name must be a DNS-1123 label: lowercase letters, digits and `-`, with
 a letter or a digit at the start and at the end. The management chart refuses
-any other name (`charts/mgmt/templates/_helpers.tpl`). The name becomes
+any other name (`charts/mgmt/templates/_helpers.tpl`, `mgmt.validate`, `edges[].name`). The name becomes
 the k0smotron Cluster name and its namespace, and it is part of the derived
 names: the bucket `ingest-<edge>`, the Secret `<edge>-s3` and the uploader
 `mgmt-upload-<edge>`. The Helm release names do not come from the site name on
@@ -1065,12 +1065,12 @@ membership. It defends itself:
 | shreds the token after use | it belongs in `/etc/k0s/join-token` at 0600, not in `/tmp` |
 
 Tokens are minted with `expiry: 2h` by default
-(`scripts/05-setup-edge-cluster.sh`). The ssh path consumes one in seconds, so
+(`scripts/05-setup-edge-cluster.sh`, `JOIN_TOKEN_TTL`). The ssh path consumes one in seconds, so
 the bound costs it nothing there.
 
 > **`joinTokenTTL` sets it per edge.** `install.sh` reads it into `EDGE_JOIN_TTL`
 > and passes it to step 5, which is where the token is actually minted
-> (`scripts/05-setup-edge-cluster.sh` reads it, `scripts/05-setup-edge-cluster.sh` writes it as the
+> (`scripts/05-setup-edge-cluster.sh` (`JOIN_TOKEN_TTL`) reads it, `scripts/05-setup-edge-cluster.sh` (`expiry: ${JOIN_TOKEN_TTL}`) writes it as the
 > Secret's `expiry`). Raise it only for a `join: bundle` edge whose bundle has to
 > travel further than the default — a bundle carried to a hospital by hand is the
 > case this exists for. It is a BEARER credential: anything holding it can join a

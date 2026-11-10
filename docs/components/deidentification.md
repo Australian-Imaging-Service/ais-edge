@@ -55,7 +55,7 @@ it for a new site. Its reference material is in one section of this page:
 `assign` files each session under three XNAT ids: project, subject and session.
 It reads each id from one DICOM tag. `ingest.assign.tagMapping` names the tags.
 Leave it empty and the chart fills it in for the engine
-(`charts/edge/templates/_helpers.tpl`). Under `ingest` the default is:
+(`charts/edge/templates/_helpers.tpl`, `edge.assignTagMapping`). Under `ingest` the default is:
 
 ```
 StudyID            -> project
@@ -68,13 +68,13 @@ be a format string over several tags, for example
 `{PatientID}_{StudyDate:%Y%m%d}` (see `accessionflow label xnat --help`).
 
 `ingest.assign.constantProjectId` files every session under one XNAT project.
-`assign` then ignores the project tag (`charts/edge/templates/ingest-pipeline.yaml`).
+`assign` then ignores the project tag (`charts/edge/templates/ingest-pipeline.yaml`, `--constant-project-id`).
 Use it for an edge that sends to one project only.
 
 Under `ingest`, nothing writes these tags for you. Only the deprecated Lua
 engine writes the `ClinicalTrial*` tags. So under `ingest` the chart refuses a
 `tagMapping` value that starts with `ClinicalTrial`
-(`charts/edge/templates/_helpers.tpl`).
+(`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.assign.tagMapping`).
 
 If a tag is empty or absent, `assign` cannot resolve that id. It then puts the
 session in `/data/assigned/__invalid__`. The placeholder name contains the tag
@@ -113,9 +113,9 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 > **CAUTION: `ingest` has no AE-title routing.**
 >
 > Orthanc accepts any calling AE title (`orthanc.json` has
-> `DicomModalities: {}`, `charts/edge/templates/orthanc-config.yaml`). Under
+> `DicomModalities: {}`, `charts/edge/templates/orthanc-config.yaml` (`DeidEnabled`)). Under
 > `ingest` the Lua script stops before its AE-title lookup
-> (`charts/edge/files/deidentify-and-forward.lua`, lookup at `charts/edge/files/deidentify-and-forward.lua`). So no
+> (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), lookup at `charts/edge/files/deidentify-and-forward.lua` (`routing.AETMap[calledAet]`). So no
 > study is routed by AE title, and no study is quarantined for its AE title. The
 > `deidentify` stage never sees the AE title. **You cannot get the project from
 > the machine that sent the study.**
@@ -187,10 +187,10 @@ headers does not get to the XNAT labels: `assign` reads them before
 
 `AIS_DEID_HMAC_SALT` in the Secret `orthanc-deid-salt` is a different salt.
 Only the Orthanc Lua script reads it. Under `ingest` the script never uses the
-value: it stops at `charts/edge/files/deidentify-and-forward.lua`, before it hashes anything.
+value: it stops at `charts/edge/files/deidentify-and-forward.lua` (`OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), before it hashes anything.
 But the Orthanc pod gets the variable whenever the facility backup is on
-(`charts/edge/templates/orthanc-deployment.yaml`). The script stops at
-load if the variable is not set (`charts/edge/files/deidentify-and-forward.lua`). So the Secret
+(`charts/edge/templates/orthanc-deployment.yaml`, `AIS_DEID_HMAC_SALT`). The script stops at
+load if the variable is not set (`charts/edge/files/deidentify-and-forward.lua`, `AIS_DEID_HMAC_SALT`). So the Secret
 must exist, but under `ingest` its value changes nothing. You can rotate it
 without an effect on XNAT. Restart Orthanc after a rotation, because the pod
 reads the value only at start.
@@ -266,7 +266,7 @@ recipe changes what gets to XNAT in this field. Nothing in the move tells you.
 
 Under `ingest`, `group-orthanc` does not filter on a label. The chart gives it
 `--to-process-label` only under the deprecated `orthanc` engine
-(`charts/edge/templates/ingest-pipeline.yaml`). So `group-orthanc` takes each
+(`charts/edge/templates/ingest-pipeline.yaml`, `toProcessLabel`). So `group-orthanc` takes each
 study that needs processing, including a changed source snapshot despite a
 prior processed label, and has been quiet for
 `ingest.orthancGroup.waitPeriod` seconds. After it stages a study, it applies
@@ -274,14 +274,14 @@ prior processed label, and has been quiet for
 
 When the facility backup is on, the chart loads the Lua script, and its
 `OnStableStudy` callback runs under `ingest` too. Under `ingest` the chart
-requires the facility backup (`charts/edge/templates/_helpers.tpl`), so the script is always
+requires the facility backup (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `storage.facilityBackup.enabled`), so the script is always
 loaded there. `OnStableStudy` has no `DeidEnabled` guard. Only
-`OnStoredInstance` returns early (`charts/edge/files/deidentify-and-forward.lua`).
-`OnStableStudy` (`charts/edge/files/deidentify-and-forward.lua`) applies the ready label to a stable study. It
+`OnStoredInstance` returns early (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`).
+`OnStableStudy` (`charts/edge/files/deidentify-and-forward.lua`, `OnStableStudy`) applies the ready label to a stable study. It
 removes `processedLabel` when a stable study gets new instances, and logs
 `study_reopened`. The ready label is `Defaults.ReadyLabel` in `routing.json`.
 The chart takes it from the raw `ingest.orthancGroup.toProcessLabel` value,
-`xnat-ingest-ready` by default (`charts/edge/templates/orthanc-config.yaml`). An empty value
+`xnat-ingest-ready` by default (`charts/edge/templates/orthanc-config.yaml`, `ReadyLabel`, `ProcessedLabel`). An empty value
 stops the label write.
 
 Under `ingest` no stage filters on the ready label. **So a ready label does
@@ -318,12 +318,12 @@ orthanc:
 ```
 
 Do not set `orthanc.deid.enabled`. The chart refuses that key and tells you to
-use `deid.engine` (`charts/edge/templates/_helpers.tpl`).
+use `deid.engine` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.enabled`).
 
 Under this engine the chart also refuses an empty `aetMap` and an empty
-`profile` (`charts/edge/templates/_helpers.tpl`). It refuses recipes in
-`ingest.deidentify` (`charts/edge/templates/_helpers.tpl`). It refuses a `tagMapping` that
-reads a tag the profile rewrites for another role (`charts/edge/templates/_helpers.tpl`).
+`profile` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.aetMap`). It refuses recipes in
+`ingest.deidentify` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `$supplied`). It refuses a `tagMapping` that
+reads a tag the profile rewrites for another role (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ClinicalTrialProtocolID`).
 
 `existingSaltSecret` is what makes the pseudonyms stable. The same patient
 always hashes to the same subject, so the second visit of a patient goes to the
@@ -334,7 +334,7 @@ the salt for the life of the site.
 ### Routing by called AE title
 
 The hook routes on the **called** AE title. That is the AE title that the
-modality sends to (`origin.CalledAet`, `charts/edge/files/deidentify-and-forward.lua`). It is
+modality sends to (`origin.CalledAet`, `charts/edge/files/deidentify-and-forward.lua` (`origin.CalledAet`)). It is
 not the AE title of the modality itself. Orthanc accepts any called AE title,
 so each modality can send to its own AE title, and `orthanc.deid.aetMap` maps
 that AE title to an XNAT project.
@@ -344,11 +344,11 @@ REST input returns before this path and can retain original identifiers:
 
 | step | what happens |
 |---|---|
-| backup | writes the original to the facility backup (`charts/edge/files/deidentify-and-forward.lua`) |
-| project | looks up the called AE title in `routing.json` `AETMap` (`charts/edge/files/deidentify-and-forward.lua`) |
-| subject / session | hashes `PatientID`, and `PatientID` with `StudyInstanceUID`, with the salt (`charts/edge/files/deidentify-and-forward.lua`) |
+| backup | writes the original to the facility backup (`charts/edge/files/deidentify-and-forward.lua`, `backupPath`) |
+| project | looks up the called AE title in `routing.json` `AETMap` (`charts/edge/files/deidentify-and-forward.lua`, `routing.AETMap[calledAet]`) |
+| subject / session | hashes `PatientID`, and `PatientID` with `StudyInstanceUID`, with the salt (`charts/edge/files/deidentify-and-forward.lua`, `subjectHash`, `sessionHash`) |
 | routing tags | the profile writes those values into the three `ClinicalTrial*` tags |
-| PHI | stripped per the JSON profile through Orthanc `/modify` (`charts/edge/files/deidentify-and-forward.lua`) |
+| PHI | stripped per the JSON profile through Orthanc `/modify` (`charts/edge/files/deidentify-and-forward.lua`, `DeidentificationProfileFile`, `DeidMode`) |
 
 `assign` then reads the routing tags. Under this engine the chart sets
 `tagMapping` to them:
@@ -362,7 +362,7 @@ ClinicalTrialTimePointID   -> session
 If a study does not carry them, `assign` puts it in `__invalid__`, with names
 such as `INVALID_MISSING_CLINICALTRIALPROTOCOLID_...`.
 
-**An unmapped called AE title is quarantined, not dropped** (`charts/edge/files/deidentify-and-forward.lua`). The
+**An unmapped called AE title is quarantined, not dropped** (`charts/edge/files/deidentify-and-forward.lua`, `if mapping == nil`). The
 hook writes the original to
 `<FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm`.
 Then it removes the instance from Orthanc. If the write fails, it keeps the
@@ -373,13 +373,13 @@ fires when quarantined data is older than
 title to `aetMap` and send them again.
 
 Under `ingest` none of this happens. The hook stops at
-`charts/edge/files/deidentify-and-forward.lua`, before the lookup.
+`charts/edge/files/deidentify-and-forward.lua` (`OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), before the lookup.
 
 ### Pseudonyms: salted djb2, not an HMAC
 
 The subject and session codes come from a function called `hmacShort`. **It is
 not an HMAC.** The code says so on the line above it
-(`charts/edge/files/deidentify-and-forward.lua`):
+(`charts/edge/files/deidentify-and-forward.lua`, `hmacShort`):
 
 ```lua
 -- Salted djb2. NOT cryptographic; jodogne/orthanc-plugins doesn't expose
@@ -436,7 +436,7 @@ PatientBirthDate: ${BirthYearOnly}0101
 ```
 
 The hook resolves `${BirthYearOnly}` from the first four characters of the
-incoming date (`charts/edge/files/deidentify-and-forward.lua`):
+incoming date (`charts/edge/files/deidentify-and-forward.lua`, `rawBirth`, `birthYear`):
 
 ```lua
 local birthYear = (rawBirth and #rawBirth >= 4) and string.sub(rawBirth, 1, 4) or "1900"
@@ -462,11 +462,11 @@ The shipped `ingest` recipe makes the opposite choice: `REMOVE PatientBirthDate`
 Under this engine the hook does two jobs. It de-identifies, **and** it applies
 the `xnat-ingest-ready` label in `OnStableStudy`. The chart then gives
 `group-orthanc` `--to-process-label xnat-ingest-ready`
-(`charts/edge/templates/ingest-pipeline.yaml-107`). So `group-orthanc` takes
+(`charts/edge/templates/ingest-pipeline.yaml`, `--to-process-label`). So `group-orthanc` takes
 only labelled studies. The label is meant to hold a study back until the hook
 has stripped it. It is not a receipt. `OnStableStudy` does not check each
 instance. If `/modify` fails for an instance, the hook keeps the original in
-Orthanc unchanged (`charts/edge/files/deidentify-and-forward.lua`), and the stable study
+Orthanc unchanged (`charts/edge/files/deidentify-and-forward.lua`, `pcall(RestApiPost`), and the stable study
 still gets the ready label.
 
 If the hook does not apply the label, `group-orthanc` filters out every study,
@@ -553,7 +553,7 @@ short recipe at a key replaces the complete one there:
 ```yaml
 # ingest IS THE DEFAULT ENGINE, so you need not set deid.engine. The chart
 # refuses these recipes under any other engine
-# (charts/edge/templates/_helpers.tpl). Without that guard they were
+# (charts/edge/templates/_helpers.tpl (`edge.validate`, `$supplied`)). Without that guard they were
 # discarded silently: helm succeeded, no pod was created and nothing warned.
 deid:
   engine: ingest
@@ -614,7 +614,7 @@ content and paths, and keep secrets out of that ConfigMap.
 ### 3. Optionally, an encryption key for the reversal map
 
 The chart gives the stage `--reid-dir /data/reid`
-(`charts/edge/templates/ingest-pipeline.yaml`). So the stage writes the
+(`charts/edge/templates/ingest-pipeline.yaml`, `--reid-dir`). So the stage writes the
 map back to the removed identities into `/data/reid`, one file per session. On
 the host that is `/data/xnat-ingest/reid`, on the same volume as the data that
 it de-identifies. Without a key, each map is plain JSON,
@@ -684,7 +684,7 @@ pipeline with one of these out of step rendered cleanly and then did not work:
 
 | derived | what it becomes under `ingest` |
 |---|---|
-| the Lua hook's `DeidEnabled` | `false`. The hook still attempts the original backup for DICOM-protocol arrivals. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`charts/edge/files/deidentify-and-forward.lua`). `OnStableStudy` does not read this flag: it still labels stable studies |
+| the Lua hook's `DeidEnabled` | `false`. The hook still attempts the original backup for DICOM-protocol arrivals. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`). `OnStableStudy` does not read this flag: it still labels stable studies |
 | `ingest.orthancGroup.toProcessLabel` | not given to `group-orthanc`, because no stage filters on the label under `ingest` |
 | `ingest.assign.tagMapping` | `StudyID`, `PatientID`, `AccessionNumber` when you leave it empty |
 | the `deidentify` stage | rendered |
@@ -694,7 +694,7 @@ pipeline with one of these out of step rendered cleanly and then did not work:
 To move an existing site:
 
 1. Add `ingest.deidentify.specs`. The chart refuses `ingest` without a recipe
-   (`charts/edge/templates/_helpers.tpl`).
+   (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specs`).
 2. Set `tagMapping` to tags that your studies carry (step 4), or set
    `constantProjectId`.
 3. Read the recipe, then set `deid.policyReviewed: true`.
@@ -711,7 +711,7 @@ Decide how to link the two before you move a site.
 An earlier version of this page told you to set `orthanc.deid.enabled: false`
 and `ingest.deidentify.enabled: true` by hand. Both keys are gone. The chart
 refuses to render if you set either one and tells you to use `deid.engine`
-(`charts/edge/templates/_helpers.tpl`). So that older advice fails loudly.
+(`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.enabled`). So that older advice fails loudly.
 
 **What did NOT fail loudly, and is the trap to know:** recipes in
 `ingest.deidentify.specs` while another engine is selected. When `orthanc` was
@@ -764,17 +764,17 @@ Two other tier-2 differences:
 | combination | why |
 |---|---|
 | both engines at once | you cannot express it: `deid.engine` selects one engine. Under the Lua engine the hook strips first, so a reid mapping would record pseudonyms as if they were originals. It would reverse to nothing while it seemed to work |
-| an unknown `deid.engine` word | it would select no engine (`charts/edge/templates/_helpers.tpl`) |
-| `ingest` with no `specs` and no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge (`charts/edge/templates/_helpers.tpl`) |
-| `specConfigMap` without `specFiles` | the ConfigMap mounts flat, so no recipe matches (`charts/edge/templates/_helpers.tpl`) |
-| `ingest.deidentify` recipes under another engine | nothing would mount them, so they would never run (`charts/edge/templates/_helpers.tpl`) |
-| `ingest` with a `tagMapping` value that starts with `ClinicalTrial` | nothing writes those tags under `ingest`, so every session would go to `__invalid__` with its PHI (`charts/edge/templates/_helpers.tpl`) |
-| `ingest` with `dataPolicy.derived.assigned.reclaim: onUploaded` | the uploader reads `/data/deidentified`, so the condition can never be true (`charts/edge/templates/_helpers.tpl`) |
-| `ingest` or `orthanc` with `deid.policyReviewed: false` | a human must confirm the recipe first (`charts/edge/templates/_helpers.tpl`) |
-| `none` with `policyReviewed: false` | identifiable data would reach XNAT unchanged (`charts/edge/templates/_helpers.tpl`) |
-| the removed keys `orthanc.deid.enabled`, `ingest.deidentify.enabled` and `orthanc.deid.policyReviewed` | they do nothing now, so they fail and name the new key (`charts/edge/templates/_helpers.tpl`, `charts/edge/templates/_helpers.tpl`) |
+| an unknown `deid.engine` word | it would select no engine (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.engine must be one of`) |
+| `ingest` with no `specs` and no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specs`) |
+| `specConfigMap` without `specFiles` | the ConfigMap mounts flat, so no recipe matches (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specFiles`) |
+| `ingest.deidentify` recipes under another engine | nothing would mount them, so they would never run (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `$supplied`) |
+| `ingest` with a `tagMapping` value that starts with `ClinicalTrial` | nothing writes those tags under `ingest`, so every session would go to `__invalid__` with its PHI (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.assign.tagMapping`) |
+| `ingest` with `dataPolicy.derived.assigned.reclaim: onUploaded` | the uploader reads `/data/deidentified`, so the condition can never be true (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `onDeidentified`) |
+| `ingest` or `orthanc` with `deid.policyReviewed: false` | a human must confirm the recipe first (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.policyReviewed`) |
+| `none` with `policyReviewed: false` | identifiable data would reach XNAT unchanged (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.engine=none`) |
+| the removed keys `orthanc.deid.enabled`, `ingest.deidentify.enabled` and `orthanc.deid.policyReviewed` | they do nothing now, so they fail and name the new key (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.policyReviewed has MOVED`), `charts/edge/templates/_helpers.tpl` (`edge.validate`, `orthanc.deid.enabled`) |
 | *(not caught by the chart)* | `tagMapping` names tags that the modalities of this site do not populate. The chart cannot see inside your DICOM, so this fails at runtime with every study in `__invalid__` |
-| `toProcessLabel` under `ingest` | not refused, and not needed: the chart does not give it to `group-orthanc` under `ingest` (`charts/edge/templates/ingest-pipeline.yaml`) |
+| `toProcessLabel` under `ingest` | not refused, and not needed: the chart does not give it to `group-orthanc` under `ingest` (`charts/edge/templates/ingest-pipeline.yaml`, `toProcessLabel`) |
 
 `deid.engine: none` is allowed only with `policyReviewed: true`. Use it for a
 site whose modalities de-identify upstream, or for one that stages into a

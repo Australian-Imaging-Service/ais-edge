@@ -25,7 +25,7 @@ Application Gateway and GCP HTTPS LB all break the worker's join, and break it
 asymmetrically: the ingress and API report healthy and only the edge fails, as an
 x509 error in a journal on a machine in a hospital.
 
-`charts/mgmt/templates/edge-clusters.yaml` already refuses to render a
+`charts/mgmt/templates/edge-clusters.yaml` (`ingressNginx.sslPassthrough`) already refuses to render a
 terminating configuration. This work makes the *cloud* shape follow the same
 rule rather than depending on an operator hand-copying a comment.
 
@@ -39,16 +39,16 @@ currently means *"resolve by real DNS instead of hosts files"*:
 
 | Branch point | Cloud behaviour |
 |---|---|
-| `install.sh` | skips the management `/etc/hosts` write |
-| `scripts/05-setup-edge-cluster.sh` | skips the management hosts edit |
-| `scripts/06c-post-join.sh` | leaves child-cluster CoreDNS at chart defaults |
-| `scripts/files/edge-join.sh` | skips the edge `/etc/hosts` write |
-| `charts/edge/templates/_helpers.tpl` | no `hostAliases` |
-| `charts/mgmt/templates/observability.yaml` | no IP SANs on certificates |
-| `charts/mgmt/templates/seaweedfs.yaml` | onprem-only block skipped |
+| `install.sh` (`OBS_MARKER`, `INSTALL_TOPOLOGY`) | skips the management `/etc/hosts` write |
+| `scripts/05-setup-edge-cluster.sh` (`HOSTS_MARKER`, `INSTALL_TOPOLOGY`) | skips the management hosts edit |
+| `scripts/06c-post-join.sh` (`INSTALL_TOPOLOGY`, `CoreDNS`) | leaves child-cluster CoreDNS at chart defaults |
+| `scripts/files/edge-join.sh` (`skipped (cloud topology resolves via real DNS)`) | skips the edge `/etc/hosts` write |
+| `charts/edge/templates/_helpers.tpl` (`edge.validate`, `dataPolicy.originals.fileDrop.reclaim`) | no `hostAliases` |
+| `charts/mgmt/templates/observability.yaml` (`topology`, `ipAddresses`) | no IP SANs on certificates |
+| `charts/mgmt/templates/seaweedfs.yaml` (`topology`, `ipAddresses`) | onprem-only block skipped |
 
 The ACME / DNS-01 `ClusterIssuer` is **fully implemented** in
-`charts/mgmt/templates/cert-issuers.yaml` with guards, and CI covers it (`mgmt-letsencrypt`).
+`charts/mgmt/templates/cert-issuers.yaml` (`certManager.acme.dns01Solver`) with guards, and CI covers it (`mgmt-letsencrypt`).
 
 ## Known-false things to delete, not preserve
 
@@ -60,7 +60,7 @@ fresh chart deployment. These items no longer request deletion of that record.
 * `CLOUD_PROVIDER` — appears in cloud docs, referenced **nowhere** in code.
 * `scripts/01b-install-cloud-controller.sh` — documented, never existed.
 * `scripts/00a-provision-cloud.sh` — documented, never existed.
-* `docs/clouds/openstack-nectar.md` claims this path is "end-to-end tested".
+* `docs/clouds/openstack-nectar.md` (`OpenStack / Nectar Research Cloud install`) claims this path is "end-to-end tested".
   Treat as unverified until we have done it ourselves.
 
 ---
@@ -107,7 +107,7 @@ under the subchart key, but does not synthesize them from unrelated parent keys.
 
 - [x] **2.1** The old `ingressNginx.loadBalancerIP` parent key was never
       consumed by a template. It was removed. The comment at
-      `charts/mgmt/values.yaml` records why an operator could set it
+      `charts/mgmt/values.yaml` (`ingressNginx`) records why an operator could set it
       without changing the load balancer address. Use the subchart path
       `ingress-nginx.controller.service.loadBalancerIP` in the site file.
       A parent values key cannot forward a value into the subchart by itself;
@@ -261,7 +261,7 @@ worker reconnects after shared-ingress changes. Moving from `ais-edge-ca` to Let
 plus `acme.email` and a `dns01Solver`.
 
 - [ ] **5.4** Public-CA support still needs an explicit chart policy. The
-      guard at `charts/edge/templates/_helpers.tpl` refuses an HTTPS
+      guard at `charts/edge/templates/_helpers.tpl` (`edge.validate`, `upload.s3.caBundleSecret`) refuses an HTTPS
       S3 endpoint with an empty `upload.s3.caBundleSecret`. The original
       reason involved an empty `AWS_CA_BUNDLE` in the old AWS CLI client.
       The client is now rclone; the chart comment records that its empty

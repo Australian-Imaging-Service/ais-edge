@@ -15,12 +15,12 @@
 
 The AIS-Edge codebase is **cloud-portable by design**, but the portability
 lives in the site file now rather than in a provider switch: `topology:`
-(`onprem | cloud`, `charts/mgmt/values.yaml`) picks the network shape, and
+(`onprem | cloud`, `charts/mgmt/values.yaml` (`topology`)) picks the network shape, and
 everything genuinely cloud-specific — the load balancer, the DNS
 zone, the pre-allocated LB address — is configured on those components
 themselves rather than consumed by this repo. There is no `CLOUD_PROVIDER`
 variable and no `provider_guard_*` function in `install.sh`; the installer
-reads the site file with `yaml.safe_load` (`install.sh`) and hands the
+reads the site file with `yaml.safe_load` (`install.sh`, `cfg()`) and hands the
 same file to Helm with `-f`.
 
 | Cloud | Doc | Status |
@@ -128,7 +128,7 @@ bypass. The heuristic does not justify a claim that all managed clouds pass.
   The provider integration or operator-managed pool supplies TCP forwarding. On the charts that is a site-file override of the
   vendored subchart under the `ingress-nginx:` key — its in-repo default is
   on-prem, `hostNetwork: true` + `service.type: ClusterIP`
-  (`charts/mgmt/values.yaml`)
+  (`charts/mgmt/values.yaml`, `ingress-nginx.controller`)
 - Edges resolve hostnames via real public DNS (no `/etc/hosts` hacks)
 - Pod manifests don't carry `hostAliases:` blocks
 - The k0s API server is exposed through the same SNI ingress as
@@ -142,7 +142,7 @@ bypass. The heuristic does not justify a claim that all managed clouds pass.
 - Credentials format (openrc.sh, ~/.aws/credentials, gcloud ADC, az login)
 - DNS-01 solver for cert-manager (Cloudflare, Route53, Cloud DNS, Azure DNS)
   — `certManager.acme.dns01Solver`, a provider-specific block passed through
-  verbatim (`charts/mgmt/values.yaml`)
+  verbatim (`charts/mgmt/values.yaml`, `certManager.acme.dns01Solver`)
 - LB attachment to pre-allocated addresses uses the selected controller
   interface under `ingress-nginx.controller.service`. It is not portable as
   one field: AWS uses EIP allocation-ID annotations; Azure recommends IP-name
@@ -179,7 +179,7 @@ what has not been replayed; the chart interface is the site YAML used here.
 
 1. **Provision the mgmt cluster.** Managed K8s (EKS/GKE/AKS) or a VM
    running k0s. Set `installMode: existing` for managed K8s,
-   `installMode: fresh` for a VM (`install.sh`). These are site-file keys,
+   `installMode: fresh` for a VM (`install.sh`, `INSTALL_MODE`). These are site-file keys,
    not env vars — `install.sh` overwrites its own variables from the file
    unconditionally, so exporting them changes nothing.
 2. **Build the load balancer and get its address.** Create the balancer, a
@@ -207,7 +207,7 @@ what has not been replayed; the chart interface is the site YAML used here.
    lines written into it are invalid configuration, not environment settings.
 5. **Run `./install.sh -y <site>`** with the credentials sourced in your
    shell. The site argument is mandatory — without it the run aborts at
-   `install.sh` with `usage: ./install.sh [-y] <site>`. There is no
+   `install.sh` (`SITE_DIR`) with `usage: ./install.sh [-y] <site>`. There is no
    `CLOUD_CREDENTIALS_FILE`: no install step reads cloud credentials, only the
    tools you run yourself (`az`, `aws`, `openstack`) do.
 
