@@ -23,6 +23,7 @@ from fileformats.medimage import DicomSeries
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, MRImageStorage, SecondaryCaptureImageStorage
 
+import attrs
 from accessionflow.model.accession import Accession
 from accessionflow.model.acquisition import Acquisition
 
@@ -86,9 +87,12 @@ with tempfile.TemporaryDirectory() as tmp:
     raw.mkdir()
     mr = [instance(raw / f"mr{n}.dcm", MRImageStorage, "MR", 1, n) for n in (1, 2)]
     sc = [instance(raw / "sc1.dcm", SecondaryCaptureImageStorage, "OT", 2, 1)]
+    # 0.20.0 renamed Accession.scans to Accession.acquisitions, with no alias. The probe runs
+    # in the pinned image, so it asks the class for the name it has (0.19.0 still works).
+    acq = "acquisitions" if "acquisitions" in attrs.fields_dict(Accession) else "scans"
     session = Accession(uid=STUDY, labels={"project": "PROJ", "subject": "SUBJ", "session": "SESS"},
-                        scans=[Acquisition(id="1", type="MR", resources={"DICOM": DicomSeries(mr)}),
-                               Acquisition(id="2", type="SC", resources={"DICOM": DicomSeries(sc)})])
+                        **{acq: [Acquisition(id="1", type="MR", resources={"DICOM": DicomSeries(mr)}),
+                                 Acquisition(id="2", type="SC", resources={"DICOM": DicomSeries(sc)})]})
     incoming = root / "assigned"
     incoming.mkdir()
     session.save(incoming)

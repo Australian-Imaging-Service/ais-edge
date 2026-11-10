@@ -252,7 +252,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against accessionflow 0.19.0 (api/collate_api.py:263-269).
+               it. RE-VERIFIED against accessionflow 0.20.0 (sources/orthanc/api/collate_api.py:72-78).
                The same historical raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
@@ -1099,7 +1099,7 @@ installs for the running Python, so the pod passes its own image in.
      under its own name, and CI cli-contract fails when the image has no such
      command (a values file cannot reach this, so it is no render guard). */}}
 {{- define "edge.stageCommand" -}}
-{{- $argv := dict "group" (list "collate") "group-orthanc" (list "collate-orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
+{{- $argv := dict "group" (list "collate" "folder") "group-orthanc" (list "collate" "orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
 - accessionflow
 {{- range (index $argv . | default (list .)) }}
 - {{ . | quote }}

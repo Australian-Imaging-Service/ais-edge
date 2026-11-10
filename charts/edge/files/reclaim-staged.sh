@@ -5,8 +5,8 @@
 # =============================================================================
 # GUIDING: accessionflow store xnat has no S3 retention of its own; it relists the
 # staging prefix every loop and never removes what it sent, so a delivered
-# session remains in staging without this job. In 0.19.0 a complete session
-# is skipped before the success line; the old repeated alerts are history. Full
+# session remains in staging without this job. Since 0.19.0 a complete session
+# is skipped before the success line (0.20.0: stores/xnat/api/store_api.py:274); the old repeated alerts are history. Full
 # design write-up: docs/TOUR.md, docs/components/seaweedfs.md.
 #
 # -----------------------------------------------------------------------------

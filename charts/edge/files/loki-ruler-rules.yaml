@@ -28,11 +28,11 @@
 # These alerts evaluate LogQL queries on a schedule inside Loki and emit to
 # the kube-prometheus-stack Alertmanager (configured in loki-values.yaml.tpl
 # rulerConfig.alertmanager_url). They cover the pipeline events emitted by the
-# Orthanc, accessionflow collate-orthanc/assign, and accessionflow store xnat pods.
+# Orthanc, accessionflow collate orthanc/label xnat, and accessionflow store xnat pods.
 #
 # TIER-1 (single node): the pipeline is
 #   Orthanc (receiver) -> group-orthanc -> assign -> deidentify -> upload -> XNAT.
-# The tool commands are accessionflow collate-orthanc, label xnat, deidentify
+# The tool commands (0.20.0) are accessionflow collate orthanc, label xnat, deidentify
 # and store xnat. Orthanc does not run the ingest recipe.
 # There is NO S3 hop and NO s3-uploader stage anymore, so rules that used to
 # key on the deleted s3-uploader component's events (upload_started /
@@ -143,7 +143,7 @@ groups:
   # The line is excluded rather than the threshold raised: a genuine storm looks
   # different (tracebacks, auth failures, connection errors) and those still count.
   #
-  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.19.0)
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.20.0)
   # the re-offer is answered from a file-set comparison rather than a label one,
   # so a session that really was delivered is skipped silently and the emitter
   # quoted above is gone. What the exclusion now buys is separation of concerns:
@@ -171,7 +171,7 @@ groups:
   #   * those event= fields come from our own files/s3-uploader.sh. The direct
   #     uploader is the accessionflow binary, which emits `message` strings and no
   #     upload_started/upload_completed event pair. The old live sample had
-  #     no event fields. Current 0.19.0 does emit other structured events.
+  #     no event fields. Current 0.20.0 does emit other structured events.
   # So the ONE alert covering a stalled delivery could never fire, on the branch
   # whose only delivery path is the one it was written to watch.
   #
@@ -180,7 +180,7 @@ groups:
   #
   # IT KEYS ON PROSE, NOT ON A STRUCTURED EVENT, so record what it depends on.
   # The "started" side matches stores/xnat/api/store_api.py:396-399 in
-  # accessionflow 0.19.0. The conditional remains:
+  # accessionflow 0.20.0 (the same lines as 0.19.0). The conditional remains:
   #
   #     if always_include:
   #         logger.info(f"Including {always_include} scans/files in upload from '{session.name}' to ...")
@@ -247,7 +247,7 @@ groups:
     # guards the same way), so catalogue lag no longer reads as a mismatch; and
     # CORRECTION: an earlier version of this note said the "please delete on
     # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
-    # become a no-op. BOTH WERE WRONG. It is still at stores/xnat/remotes.py:889-891 (0.19.0)
+    # become a no-op. BOTH WERE WRONG. It is still at stores/xnat/remotes.py:891-893 (0.20.0)
     # and carries no "Missing paths" line; the grep that produced the claim
     # missed it because the phrase is split across two adjacent string literals.
     # Dropping the matcher is therefore NOT cosmetic -- it genuinely widens the
@@ -290,7 +290,7 @@ groups:
     # case from a genuinely stuck resource, because they are the same rate; the
     # matcher separated them.
     #
-    # FROM 0.15.6 ON (PINNED 0.19.0) NEITHER SHOULD REACH THIS RULE. The name-only
+    # FROM 0.15.6 ON (PINNED 0.20.0) NEITHER SHOULD REACH THIS RULE. The name-only
     # comparison removes the second case at source, and the first now presents
     # as MISSING files, which the uploader repairs rather than reporting here.
     # The floor below is kept sized against the bounded burst anyway: it costs
@@ -342,7 +342,7 @@ groups:
              kubectl -n xnat-ingest logs deploy/edge-upload --since=60m \
                | grep "already exists on XNAT with different checksums"
         2. delete those resources on XNAT so the uploader can recreate them
-        3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.19.0 clears the cache every
+        3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.20.0 clears the cache every
            pass, stores/xnat/api/store_api.py:281): the deletion is picked up
            within one --loop interval. ON 0.15.0 AND EARLIER IT WAS, so do this
            step if a site is still on one of those. Those versions hold one XNAT
@@ -528,14 +528,14 @@ groups:
     # existed on XNAT with files missing (stores/xnat/api/store_api.py, repaired_on_xnat); a
     # first upload never does. Seen 2026-09-23 and 2026-09-28: XNAT restarted,
     # listed 0 of N files for sessions it held, and every edge re-sent them.
-    # AN ATTEMPT: stores/xnat/api/store_api.py:603-614 in 0.19.0 logs
+    # AN ATTEMPT: stores/xnat/api/store_api.py:603-611 in 0.20.0 logs
     # this line before the verdict, even when the re-send failed.
     # A separate Completed repair line and xnat_repair_completed event
-    # follow only a successful verdict (lines 668-680). This rule still
+    # follow only a successful verdict (lines 672-680). This rule still
     # matches the attempt. Inspect later errors and destination evidence.
     # $value is the number of scan resources (max, not sum: a retried repair
     # must not count twice).
-    # CAUTION: matches accessionflow 0.19.0 repair wording; a reword silences it.
+    # CAUTION: matches accessionflow 0.20.0 repair wording; a reword silences it.
     expr: |
       max by (cluster, session) (
         max_over_time(
