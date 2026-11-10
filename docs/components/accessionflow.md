@@ -629,12 +629,89 @@ To recover the session:
 
 1. Find the correct IDs: the values that the site's ID mapping (`ingest.assign`)
    would have produced, from the hospital's records. Make sure that the XNAT
-   project does not already have a session with that label.
-2. On the edge node, rename the folder to `<project>.<subject>.<session>` and
+   project does not already have a session with that label. Nothing finds the
+   value for you: the DICOM tag was empty. Who does what:
+   - The operator gets the alert and runs `list` and `show` (step 2). `show`
+     prints the study details: PatientID, the study date and time, the
+     description, the modality, the AccessionNumber and the StudyInstanceUID.
+     They are patient data: keep them on the terminal.
+   - A person with access to the hospital's records (a clinician or a data
+     manager, with the RIS or PACS) finds the missing value from those
+     details. That person needs no access to the edge.
+   - The operator gives the value to `requeue` (step 2).
+2. Move the session back with the requeue tool. The chart ships it into the
+   label (`assign`) pod at `/opt/ais-edge/requeue-invalid.py` (ConfigMap
+   `<release>-requeue-tool`). Run it in one of these ways; they run the same
+   tool:
+
+   **On the edge node**: tier-2, the edge VM; tier-1, the node. It needs no
+   kubectl and no copy of this repository:
+
+   ```bash
+   sudo ais-requeue list
+   sudo ais-requeue show <folder>
+   sudo ais-requeue requeue <folder> --session <value>
+   ```
+
+   `/usr/local/bin/ais-requeue` runs the tool in the running label container
+   through k0s (`k0s ctr`). `scripts/files/edge-join.sh` installs it when an
+   edge joins, by either join path. For an edge that joined before it existed,
+   copy it once from a clone of this repository:
+
+   ```bash
+   scp scripts/files/ais-requeue <edge-node>:/tmp/
+   ssh <edge-node> sudo install -o root -g root -m 0755 /tmp/ais-requeue /usr/local/bin/ais-requeue
+   ```
+
+   `AIS_NAMESPACE=<ns>` selects another namespace than `xnat-ingest`.
+
+   **With kubectl**: on the management node with the edge's kubeconfig. The
+   management node has the edge's kubectl; the edge VM does not:
+
+   ```bash
+   kubectl --kubeconfig kubeconfig-<edge> -n xnat-ingest exec deploy/<release>-assign -c assign -- \
+     python3 /opt/ais-edge/requeue-invalid.py --operator <your-name> list
+   ```
+
+   Use `show <folder>` and `requeue <folder> --session <value>` in place of
+   `list`. From a clone of this repository,
+   `scripts/requeue-invalid.sh --kubeconfig kubeconfig-<edge> list` does the
+   same and records `<user>@<host>` as the operator.
+
+   Give `--project`, `--subject` or `--session` for each ID that the folder
+   name misses, and only for those. `requeue` refuses, and moves nothing, when:
+
+   - a value is not a legal label: letters, digits, `_` and `-` only;
+   - a value is given for an ID that is not missing, or a missing one is not
+     given;
+   - `assigned/<new name>` or `deidentified/<new name>` already exists. If the
+     session in `deidentified/` is the same study (more data for it), add
+     `--allow-existing`. A folder that waits in `assigned/` is never merged:
+     wait until deidentify takes it, then run the command again;
+   - a `grouped/` copy of the same study is still there, because assign would
+     put that copy in `__invalid__/` again. Wait for it to clear, or remove it
+     first.
+
+   It moves the folder under the label stage's lock
+   (`/data/.locks/assigned.lock`), so a label pass cannot run at the same
+   time, and it checks that the folder left `__invalid__/`. It appends one line
+   per move to `/data/LOGS/requeue-audit.jsonl`: who, when, the old and new
+   names, and the values given. Exit codes: 0 moved, 2 refused, 3 folder not
+   found, 4 lock not obtained (a label pass is running: try again).
+
+   The upload takes the three IDs from the folder name. Do not edit the files.
+   Neither way changes the DICOM files. The session then goes on as
+   any other session: deidentify under `deid.engine: ingest`, the s3-uploader,
+   the bucket, and the management uploader.
+
+   **By hand** (the fallback, when the tool cannot run):
+
+   On the edge node, rename the folder to `<project>.<subject>.<session>` and
    move it up into `assigned/`. `/data` is the pipeline hostPath,
    `/data/xnat-ingest` by default. The commands stop if a folder of that name
    exists. `mv -nT` never replaces a folder and never moves into one, and the
-   last `test` checks that the folder really left `__invalid__/`:
+   last `test` checks that the folder really left `__invalid__/`. Unlike the
+   tool, these commands do not take the label stage's lock:
 
    ```bash
    ssh <edge-node>
@@ -649,10 +726,6 @@ To recover the session:
    anything else: a session with that name may already be waiting, or the next
    stage may already have taken the moved folder. Never repeat the move blindly.
 
-   The upload takes the three IDs from the folder name. Do not edit the files.
-   This procedure does not change the DICOM files. The session then goes on as
-   any other session: deidentify under `deid.engine: ingest`, the s3-uploader,
-   the bucket, and the management uploader.
 3. Look for the session in the log of `mgmt-upload-<edge>`, then in XNAT. When
    the data policy is armed, the reclaimers remove the edge and bucket copies
    after their proof.
@@ -907,7 +980,7 @@ deletes. A dry run makes the same checks and removes no data.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | Routes to `__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one, and `DICOMValidationFailureSpike` when this happens >10x/h |
+| DICOM missing AccessionNumber | Routes to `__invalid__/` | Requeue it with `sudo ais-requeue` on the edge node, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one, and `DICOMValidationFailureSpike` when this happens >10x/h |
 | XNAT login fails | upload pod crashes immediately | check `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down or uploader just slow | uploads queue in SeaweedFS; backlog grows | No dedicated backlog-rate alert today — see "Known upstream defects" below. `SessionStagedNotConfirmedInXNAT` (docs/alerting-architecture.md) still catches a session that never lands, just later (minAge + offset) |
 | S3 endpoint unreachable from upload pod | uploads fail | `AWS_ENDPOINT_URL` is in-cluster Service DNS — fails only if SeaweedFS pod down |
