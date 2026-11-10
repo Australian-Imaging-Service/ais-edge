@@ -17,7 +17,9 @@
 #
 # The charts never contain credentials — they reference Secrets by name. So
 # `apply` is the whole integration: create the Secrets, then `helm upgrade`.
-# No helm-secrets plugin, no decrypt-to-tempfile, no plaintext on disk.
+# No helm-secrets plugin. `apply` decrypts into a pipe: no plaintext file.
+# One exception: when add-edge appends an s3 key pair to an ENCRYPTED file, it
+# decrypts to a temporary file under `mktemp -d`, re-encrypts, then shreds it.
 # =============================================================================
 set -euo pipefail
 
