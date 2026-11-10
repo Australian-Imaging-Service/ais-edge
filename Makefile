@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes log-phrases
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes log-phrases requeue-invalid
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy s3-uploader-image greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -116,6 +116,11 @@ reclaimer: $(RENDER_DEP)
 
 # scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
 # error as "no cleanup Job runs", and never resume without a wrapped writer.
+# scripts/requeue-invalid.py on fixture trees, then the pinned image loads the
+# requeued folder (docker; CI_REQUIRE_REQUEUE_IMAGE=1 makes a missing image fail).
+requeue-invalid:
+	@tests/requeue-invalid/run-tests.sh
+
 reclaimer-fence:
 	@tests/reclaimer-fence/run-tests.sh
 
