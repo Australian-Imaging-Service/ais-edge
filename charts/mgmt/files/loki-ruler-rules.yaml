@@ -999,8 +999,9 @@ groups:
             prove that every matching line denotes a newly invalid DICOM session.
             Inspect the assign logs and the assigned/__invalid__ tree. Verify missing
             routing fields and scanner input before changing configuration. The pinned
-            0.19.0 missing-ID diagnostic has its own InvalidSessionAssigned rule;
-            this older text filter is not a complete detector for that diagnostic.
+            missing-ID error matches this filter through __invalid__ in its saved path;
+            the separate already-saved-as-invalid warning also matches. Use
+            InvalidSessionAssigned for the specific 0.19.0 missing-ID error prefix.
 
   # =====================================================================
   # INFO — observability + audit. Fires on every successful upload to XNAT

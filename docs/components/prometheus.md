@@ -91,7 +91,6 @@ firing alerts to Alertmanager.
 | `charts/mgmt/files/prometheus-rules/critical.yaml` | critical alerts |
 | `charts/mgmt/files/prometheus-rules/warning.yaml` | warning alerts |
 | `charts/mgmt/files/prometheus-rules/info.yaml` | info alerts |
-
 | `charts/mgmt/files/prometheus-rules/uploader.yaml` | Six recording rules and two uploader restart/memory alerts; scopes are substituted by the template. |
 | `charts/mgmt/files/prometheus-rules/cert-sync.yaml` | per-edge cert-sync staleness (`CertSyncStale`, `CertSyncNeverSucceeded`) |
 | `charts/mgmt/files/prometheus-rules/reclaimer.yaml` | per-edge reclaimer health (`ReclaimerNotSucceeding`). Uses namespace, release-prefix and threshold sentinels filled by `observability.yaml`; `uploader.yaml` also uses sentinels; not rendered under `s3Staged.reclaim: never` |

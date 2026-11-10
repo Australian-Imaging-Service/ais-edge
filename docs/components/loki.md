@@ -168,7 +168,6 @@ logcli --addr=https://loki.aisedge.local --tls-skip-verify=false \
 | Local PV corruption | Index, WAL or compactor state can be lost even when flushed chunks remain in S3 | Preserve the volume and investigate recovery before deleting anything. The 20Gi PVC holds more than the index. It is configured to survive Helm and StatefulSet deletion; S3 chunks alone do not prove that every accepted log can be recovered. |
 | Loki pod crash | The configured Vector sink uses its default memory buffer; pending events can be lost if Vector also restarts | Source checkpoints persist, but they are not an event queue. Long stalls can also outlast kubelet log retention. Verify recent ingestion after recovery; no disk sink buffer is configured. |
 | Edge client key leak | A reachable attacker can submit logs and query the shared tenant with an allowed client certificate | The ingress checks the signed certificate and allowed CN, not the submitted cluster label or query scope. Certificates last 90 days and renew 30 days before expiry. Deleting a Secret or renewing it does not revoke the old keypair; remove the CN from ingress admission when isolating a site, and assess trust-anchor replacement if that is insufficient. |
-
 | Label cardinality explosion | Stream count grows unbounded → memory / cost | Vector strips high-cardinality fields before pushing (we explicitly DO NOT label `session` for example, since each session is unique) |
 
 ### Why `compactor.delete_request_store` is `filesystem`, not `s3`
