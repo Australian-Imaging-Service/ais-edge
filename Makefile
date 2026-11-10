@@ -111,6 +111,7 @@ pvc-retention: $(RENDER_DEP)
 
 reclaimer:
 	@tests/reclaimer/run-tests.sh
+	@tests/reclaimer/deid-sidecar.sh
 
 # scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
 # error as "no cleanup Job runs", and never resume without a wrapped writer.

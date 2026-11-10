@@ -418,6 +418,14 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
+            # Keep SOPClassUID in the metadata sidecars of the output.
+            # accessionflow 0.18.0 (#247) keeps only __uid__ by default. The
+            # reclaimers (reclaim-files.py) read SOPClassUID from the sidecar
+            # to find the XNAT resource label, and they KEEP every series
+            # without it: no error, the disk fills. SOPClassUID is not PHI.
+            # CI: tests/reclaimer/deid-sidecar.sh.
+            - "--metadata-allowlist"
+            - "__uid__,SOPClassUID"
             {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
             # THIS TESTED "onAssigned" UNTIL NOW, WHICH COULD NEVER BE TRUE:
             # onAssigned belongs to the `grouped` key and is not in this key's
