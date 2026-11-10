@@ -87,7 +87,11 @@ NODE_IP="$(cfg nodeIP)"
 INSTALL_MODE="$(cfg installMode fresh)"
 UPLOAD_MODE="$(cfg upload.mode direct)"
 OBS_STACK="$(cfg observability.stack.enabled false)"
-GRAFANA_PORT="$(cfg observability.stack.grafana.nodePort 30030)"
+# The Service's real NodePort: the site's kube-prometheus-stack block, else the
+# chart default. Not observability.stack.grafana.nodePort: that key was removed,
+# and nothing reads it (a site that changed the real port got a wrong URL here).
+GRAFANA_PORT="$(cfg kube-prometheus-stack.grafana.service.nodePort)"
+[ -n "$GRAFANA_PORT" ] || GRAFANA_PORT="$(VALUES="${SCRIPT_DIR}/charts/edge/values.yaml" cfg kube-prometheus-stack.grafana.service.nodePort 30030)"
 RELEASE="${AIS_RELEASE:-$SITE}"
 
 # TIER-1 IS upload.mode=direct BY DEFINITION. s3 needs a SeaweedFS and a
