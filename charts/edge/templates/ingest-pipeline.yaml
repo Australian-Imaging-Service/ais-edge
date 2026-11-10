@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 The ingest pipeline: group -> assign.
 
@@ -329,7 +330,7 @@ spec:
   The de-identification recipes, from the site file.
 
   A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
-  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  accessionflow needs in the path cannot be stored as a key. Each path is
   sanitised into a legal key here and mapped back to the real path with
   items[].path on the volume below, so the operator writes real paths and never
   sees the restriction.
@@ -433,7 +434,11 @@ spec:
             # live edge, whose deidentify container had no --unlink-source.
             # Same reasoning as assign: without this, `--loop` rebuilds its
             # work list from a live listing every cycle and re-processes
-            # sessions it has already done. Deletes hardlinks, not data.
+            # sessions it has already done. With --unlink-source all, 0.18.0+
+            # removes the whole input snapshot, including unprocessed files.
+            # Do not add files to staging session folders by hand. Originals
+            # remain in the facility backup under the site retention policy;
+            # this stage does not verify that backup before it unlinks input.
             - "--unlink-source"
             - "all"
             {{- end }}
@@ -509,7 +514,7 @@ spec:
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
       {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
       # The package stage can start before deidentify creates its output
-      # directory, and `xnat-ingest package` refuses an input that is not there.
+      # directory, and `accessionflow package` refuses an input that is not there.
       initContainers:
         - name: init-deidentified-dir
           image: {{ $pkgImage }}

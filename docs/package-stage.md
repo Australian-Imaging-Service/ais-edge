@@ -1,5 +1,7 @@
 # Package stage: one zip per DICOM series
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 The package stage is optional and off by default. When a site turns it on,
 each DICOM series goes to XNAT as one zip file plus one sample DICOM file,
 instead of one file per image. Nothing else in the pipeline changes.
@@ -30,25 +32,31 @@ with the individual DICOM files in XNAT.
 
 ## What it needs
 
-**Status on 2026-10-21:** no released xnat-ingest image runs the default package stage.
-The latest release is 0.16.2. It lacks the library support from
-[xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
-The stage also needs xnat-ingest PRs #217, #218, #221 and #222.
-PR #219 adds a guard; the chart locks already keep the producer passes apart.
-The fileformats-extras `reproducible` option is released in fileformats-extras
-0.22.3 ([PR #168](https://github.com/python-fileformats/fileformats/pull/168)). Vendor v0.1.2 is tagged. The live tests used a local integration image
-with the pending fixes. Keep the stage off at a site until a release contains
-all required features and that release has passed the site's validation.
+**Current status (0.19.0):** the pinned accessionflow image includes
+fileformats 0.22.5, fileformats-medimage 0.15.5 and fileformats-extras 0.22.5.
+These meet the library requirements for the default package spec. The vendor
+package is not bundled; install the two pinned vendor packages below in both
+the package pod and the uploader that reads its output. Validate the enabled
+stage on the site's image and configuration before using it for patient data.
 
-- `deid.engine: ingest`. The stage runs after the xnat-ingest deidentify stage
+**Historical prerequisites:** the 2026-10-21 tests used an integration image.
+At that time xnat-ingest 0.16.2 lacked the support in PRs #216, #217, #218,
+#221 and #222. PR #219 added a guard; the chart locks already separated the
+producer passes. The fileformats-extras reproducible option was released in
+0.22.3 ([PR #168](https://github.com/python-fileformats/fileformats/pull/168)).
+These are historical requirements, not a reason to wait for a release after
+0.19.0. Vendor v0.1.2 remains the chart's explicit optional dependency.
+
+- `deid.engine: ingest`. The stage runs after the accessionflow deidentify stage
   only.
-- An xnat-ingest image with fileformats 0.22.1 and fileformats-medimage 0.15.4
-  or later. xnat-ingest 0.16.2 does not have them. With the default spec
-  (`reproducible=true`), that image stops at start with `ValueError: Invalid
-  option 'reproducible'`. With a spec without the option, it fails on every
-  series with `Incorrect type for field in 'in_file' field of create_zip
-  interface`. Use the first release that includes [xnat-ingest PR
-  #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
+- An accessionflow image with fileformats 0.22.1 and fileformats-medimage
+  0.15.4 or later. The current 0.19.0 pin meets both floors. Older xnat-ingest
+  0.16.2 failed at start with `ValueError: Invalid option 'reproducible'` for
+  the default spec. Removing that option did not fix its datatype mismatch:
+  conversion could fail with `Incorrect type for field in 'in_file' field of
+  create_zip interface`. Keep those errors as diagnostics for an old image
+  still running after an incomplete upgrade. The dependency update came from
+  [xnat-ingest PR #216](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/216).
 - The vendor package `fileformats-vendor-australianimagingservice` v0.1.2 or
   later. It holds the DICOM sample datatype and its converter, which takes the
   instance with the lowest SOPInstanceUID, so the sample of a series is the same
@@ -202,7 +210,8 @@ they cover every other upload.
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
   (`IngestStageError` fires) and keeps both the input and the packaged copy.
-  This refusal needs xnat-ingest PR #221. Without it, a smaller replacement zip
+  This refusal is present in 0.19.0, from xnat-ingest PR #221. In older images
+  without it, a smaller replacement zip
   can lose members of the packaged copy. Drop the whole series again in one go.
   Orthanc re-stages the whole study only while it still holds the complete
   study. If Orthanc has already retired it, a later arrival can be staged
@@ -212,3 +221,8 @@ they cover every other upload.
   Do this only when `/data/packaged` is empty: the upload stage reads
   `/data/deidentified` again after the change and does not look at
   `/data/packaged`.
+
+The package stage can read missing DICOM metadata from the headers and write
+fuller metadata sidecars in its output. The deidentify allowlist is not a
+metadata limit on packaged output. Review the package output when the site
+sets a metadata-minimisation policy, and preserve the reserved identity keys.

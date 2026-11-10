@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 The terminal step of the pipeline: staged sessions in SeaweedFS -> XNAT.
 
@@ -6,7 +7,7 @@ EDGE SITE.
 
 It used to be a single fleet-wide Deployment. That was wrong twice over.
 Correctness: with one staging bucket per site (see mgmt.edgeBucket), one
-uploader cannot serve them all — `xnat-ingest upload` takes exactly one
+uploader cannot serve them all; `accessionflow store xnat` takes exactly one
 s3://bucket/prefix. Reliability: a single uploader means one site's poison
 session, stuck multipart or expired credential stops delivery for EVERY site,
 and the failure is indistinguishable per-site because they share one log
@@ -153,7 +154,7 @@ spec:
             # the edge is still writing it into the bucket. See values.yaml.
             - "--wait-period"
             - {{ $root.Values.xnatUpload.waitPeriod | quote }}
-            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # Pass the choice both ways. With neither flag, accessionflow's CLI
             # does not require a manifest (its option default is unset).
             # See values.yaml.
             {{- if $root.Values.xnatUpload.requireManifest }}
@@ -199,7 +200,7 @@ spec:
             # anything reading /proc/*/cmdline on the node, shows it in full. argv is
             # world-readable; the environment is not.
             #
-            # The comment that used to sit above those arguments said xnat-ingest had no
+            # The comment that used to sit above those arguments said accessionflow had no
             # env path for this. It does: upload_cli.py declares
             # envvar="ACFLOW_STORE_CREDENTIALS" on the same option. Because the option
             # takes nargs=2, click splits the value on WHITESPACE, so one variable

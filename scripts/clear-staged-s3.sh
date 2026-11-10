@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Clean the SeaweedFS staging prefix WITHOUT destroying un-uploaded sessions.
 # =============================================================================
@@ -13,7 +14,7 @@
 # --------------------------------------------------------------------------
 # WHY EMPTY PREFIXES MATTER
 #
-# `xnat-ingest upload` has no S3 retention: it rebuilds its work list from a
+# `accessionflow store xnat` has no S3 retention: it rebuilds its work list from a
 # live listing of s3://<bucket>/staged every --loop pass. An EMPTY prefix is
 # still listed as a session; the uploader "uploads" its zero resources and logs
 #     Successfully uploaded all files in '<session>'

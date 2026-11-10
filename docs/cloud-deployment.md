@@ -1,5 +1,7 @@
 # Cloud deployment (managed-K8s topology)
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 This document describes the **cloud topology** — the deployment shape used
 when the management cluster runs on managed Kubernetes (EKS / GKE / AKS /
 OpenStack Magnum / Nectar k0s with Octavia). It is the equivalent of the
@@ -11,7 +13,7 @@ substitutions:
 | Inbound TLS | `nginx-ingress` on `hostNetwork: true` :443 | `nginx-ingress` Service `type: LoadBalancer`, cloud LB takes over :443 |
 | Hostname resolution | `hostAliases:` in every pod + `/etc/hosts` on every edge VM | Real public DNS (a domain you own, or `nip.io` for dev) |
 
-Nothing else changes — same application stack (xnat-ingest, Orthanc, Loki,
+Nothing else changes; same application stack (accessionflow, Orthanc, Loki,
 Vector, Prometheus, Grafana, k0smotron, SeaweedFS), same memory-leak fix,
 same dashboards, same alerts.
 
@@ -20,15 +22,15 @@ same dashboards, same alerts.
 `sites/<site>/values.yaml` is a **Helm values file**, not a shell script.
 install.sh reads the handful of fields it needs with a `yaml.safe_load` helper
 (`cfg`, install.sh:95-113) and hands the *same* file to both Helm releases with
-`-f` — the management chart at install.sh:364-367, each edge chart at
-install.sh:512-516. Nothing sources it, so there is nothing to `export`; an
+`-f`: the management chart at install.sh:538-541, each edge chart at
+install.sh:697-701. Nothing sources it, so there is nothing to `export`; an
 `export` line here is not merely inert, it breaks the YAML parse for every key
 after it. That is the whole point of the file: one fact, written once, visible
 to the installer and to the charts.
 
 ```yaml
 # sites/<site>/values.yaml
-topology: cloud            # onprem | cloud   (default onprem — charts/mgmt/values.yaml:32)
+topology: cloud            # onprem | cloud   (default onprem; see charts/mgmt/values.yaml:33)
 installMode: existing      # fresh | existing — managed K8s is always `existing`;
                            # it makes step 1/7 verify the cluster it is pointed at
                            # instead of installing k0s (scripts/01-install-k0s.sh:8)
@@ -40,7 +42,7 @@ domain:
 certManager:
   issuer: ais-edge-ca      # ais-edge-ca | letsencrypt-prod | letsencrypt-staging
                            # nip.io can satisfy neither ACME challenge, so dev
-                           # stays on the internal CA (charts/mgmt/values.yaml:365-370)
+                           # stays on the internal CA (charts/mgmt/values.yaml:530-535)
 ```
 
 `certManager.issuer` is literally the *name* of the ClusterIssuer the chart
@@ -80,7 +82,7 @@ not a guard inside install.sh.
 | `none` | No credentials — you're running with a BYO LB controller (e.g. MetalLB) you installed separately. |
 
 The chart does still carry a `cloud:` values block (`enabled`, `provider`,
-`cloudConfigSecretRef` — charts/mgmt/values.yaml:634-641), but it is **parked**,
+`cloudConfigSecretRef`; see charts/mgmt/values.yaml:815-822), but it is **parked**,
 and says so itself: "Kept as a values key so templates stay ready, not wired up —
 pre-creating an Octavia LB is Terraform work, not Helm work." Setting it today
 does nothing. `docs/TOUR.md` records the same status under known gaps: the
@@ -91,17 +93,17 @@ work, not as a path that has been run end to end.
 ## What `topology: cloud` actually changes
 
 install.sh is a seven-step installer: `1/7` k0s on the management node
-(install.sh:222), `2/7` cert-manager CRDs + the pinned k0smotron operator (:239),
-`3/7` the site Secrets decrypted from SOPS straight into the cluster (:352),
-`4/7` the management chart (:363), `5/7` each edge's child kubeconfig + join
-token (:447), `6/7` the join itself (:469/:480), `7/7` the edge chart (:488).
+(install.sh:275), `2/7` cert-manager CRDs + the pinned k0smotron operator (install.sh:292),
+`3/7` the site Secrets decrypted from SOPS straight into the cluster (install.sh:526),
+`4/7` the management chart (install.sh:537), `5/7` each edge's child kubeconfig + join
+token (install.sh:621), `6/7` the join itself (install.sh:654 and install.sh:665), `7/7` the edge chart (install.sh:673).
 Its own header notes that steps 4 and 7 "replace what used to be scripts
 02b/02c/02d/03/04/07/07b/07c" — so the per-concern step numbers this page used
 to cite (01b, 02c, 02d, 07c) no longer name anything.
 
 Against that installer, `topology: cloud` changes exactly three things:
 
-* **skips the `/etc/hosts` writes** — on the management node (install.sh:388)
+* **skips the `/etc/hosts` writes** on the management node (install.sh:562)
   and on every edge VM (scripts/05-setup-edge-cluster.sh:92,
   scripts/06c-post-join.sh:62, scripts/files/edge-join.sh:48). The child
   cluster's CoreDNS Corefile patch — the `hosts { … }` block that made
@@ -110,12 +112,12 @@ Against that installer, `topology: cloud` changes exactly three things:
   CoreDNS at chart defaults so resolution goes CoreDNS `forward` → the kubelet's
   `/etc/resolv.conf` → public DNS.
 * **strips the `hostAliases:` block from every edge pod**
-  (charts/edge/templates/_helpers.tpl:124,170). The `{{#ONPREM_ONLY}}` /
+  (charts/edge/templates/_helpers.tpl:477,523). The `{{#ONPREM_ONLY}}` /
   `{{#CLOUD_ONLY}}` markers in scripts/00-common.sh:86-103 do the equivalent for
   the files the join writes on the edge VM.
 * **drops the IP SAN from every server certificate** — Loki and Grafana
   (charts/mgmt/templates/observability.yaml:170,197) and SeaweedFS
-  (charts/mgmt/templates/seaweedfs.yaml:541). In cloud mode the address a client
+  (charts/mgmt/templates/seaweedfs.yaml:646). In cloud mode the address a client
   connects to is the LB's, not the serving node's, so an IP SAN would be both
   wrong and unnecessary: cloud certs are pure DNS-named.
 
@@ -123,7 +125,7 @@ Everything else runs unchanged — the same management chart, the same edge char
 the same observability stack, the same join sequence. Note what is **not** in
 that list: nothing in `topology` touches the ingress Service type. The chart
 pins `hostNetwork: true` + `service.type: ClusterIP` in both topologies
-(charts/mgmt/values.yaml:526,535-536); getting a real cloud LoadBalancer is a
+(charts/mgmt/values.yaml:691,700-701); getting a real cloud LoadBalancer is a
 separate site-file override, covered below.
 
 ## Dev DNS via nip.io (zero registration)
@@ -160,7 +162,7 @@ certManager:
   issuer: letsencrypt-prod
   acme:
     # Required whenever issuer is letsencrypt-prod — the chart refuses to
-    # render without it (charts/mgmt/templates/_helpers.tpl:248-250).
+    # render without it (charts/mgmt/templates/_helpers.tpl:332-334).
     email: ops@uq.edu.au
     server: https://acme-v02.api.letsencrypt.org/directory
     # 3. The DNS-01 solver, passed through verbatim into solvers[0].dns01.
@@ -223,10 +225,10 @@ you install the OCCM and its `cloud.conf` Secret out of band, before the install
 as noted above.
 
 **The knob is the subchart block, and `loadBalancerIP` alone is not enough.**
-The chart's on-prem defaults are `hostNetwork: true` (charts/mgmt/values.yaml:526)
-and `service.type: ClusterIP` (:536), and `loadBalancerIP` is inert on a
+The chart's on-prem defaults are `hostNetwork: true` (charts/mgmt/values.yaml:691)
+and `service.type: ClusterIP` (charts/mgmt/values.yaml:701), and `loadBalancerIP` is inert on a
 ClusterIP Service. Override the whole block in the site file, exactly as the
-CAUTION at charts/mgmt/values.yaml:511-522 prescribes:
+CAUTION at charts/mgmt/values.yaml:676-687 prescribes:
 
 ```yaml
 # sites/<site>/values.yaml
@@ -285,9 +287,15 @@ pre-allocated address, it does not reserve one for you.
 ## End-to-end trace of one edge request in cloud mode
 
 ```
-   xnat-ingest-group pod (edge cluster)
+   edge-group-orthanc pod (accessionflow collate-orthanc)
+         │ stdout / stderr
+         ▼
+   kubelet container log files on the edge worker
+         │ read by the Vector DaemonSet
+         ▼
+   edge-vector pod (edge cluster)
          │
-         │ HTTP push to  loki.dev-nectar-test.203-101-227-222.nip.io:443
+         │ HTTPS push to loki.dev-nectar-test.203-101-227-222.nip.io:443
          ▼
    edge worker DNS resolver (kubelet's /etc/resolv.conf chain)
          │
@@ -320,12 +328,12 @@ node binding) and one resolution mechanism (DNS instead of /etc/hosts).
 
 TLS is terminated **at the ingress controller**, using the `loki-tls` server
 certificate (`observability.loki.ingress.tlsSecretName`,
-charts/mgmt/values.yaml:595), and the push is authenticated there by
+charts/mgmt/values.yaml:776), and the push is authenticated there by
 client-certificate mTLS. Loki itself runs `auth_enabled: false` and trusts
 anything that reaches it, so that Ingress is the *only* authentication point —
 which is why the client-cert annotations above are not optional hardening. The
 edge side presents the cert cert-sync delivers as `loki-push-client-tls`
-(charts/edge/values.yaml:646).
+(charts/edge/values.yaml:1242).
 
 **The S3 upload path can carry the same mTLS, and on cloud for the same
 reason.** The load balancer above is **layer 4** — it forwards TCP and does not
@@ -334,18 +342,21 @@ request a client certificate. Nothing about `auth-tls-*` behaves differently
 here from on-prem. Turning it on is `seaweedfs.ingress.clientCerts` plus the
 matching `certSync` entry (see `docs/components/seaweedfs.md` for the four-step
 rollout, which must not be short-cut). One cloud-specific nuance: the SeaweedFS
-**server** certificate may legitimately come from a public CA here, so an edge's
-`upload.s3.caBundleSecret` can be empty — but its **client** certificate still
-comes from the fleet's own CA via cert-sync. Server trust
-(`RCLONE_CA_CERT`) and our own identity (`RCLONE_CLIENT_CERT` /
-`RCLONE_CLIENT_KEY`) are independent settings and the chart keeps them that way.
+**server** certificate may come from a public CA here. The current chart still
+requires `upload.s3.caBundleSecret` for every HTTPS S3 endpoint, including a
+public one (`charts/edge/templates/_helpers.tpl:130-134`). Supply the required
+trust roots through that Secret. The edge's **client** certificate still
+comes from the fleet CA via cert-sync. Server trust (`RCLONE_CA_CERT`) and
+client identity (`RCLONE_CLIENT_CERT` / `RCLONE_CLIENT_KEY`) are separate
+settings. A public server certificate does not remove the client-certificate
+requirement when `seaweedfs.ingress.clientCerts.require` is enabled.
 
 Note the scope of ssl-passthrough. `ingressNginx.sslPassthrough: true` enables
 the controller *feature*, but the passthrough annotation is set only on each
 edge's k0s API and konnectivity Ingresses
-(charts/mgmt/templates/edge-clusters.yaml:257), whose traffic is mTLS end to end
+(charts/mgmt/templates/edge-clusters.yaml:273), whose traffic is mTLS end to end
 and must not be terminated. The Loki, Grafana and SeaweedFS hostnames all
-terminate TLS at the ingress — charts/mgmt/templates/seaweedfs.yaml:466 spells
+terminate TLS at the ingress. The comment at `charts/mgmt/templates/seaweedfs.yaml:510` spells
 out that this coexistence is deliberate, not an oversight.
 
 ## Test matrix (what to run after deployment)
@@ -356,9 +367,9 @@ out that this coexistence is deliberate, not an oversight.
 | TLS termination | `curl -kv https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/` — expect TLS handshake + 404 default backend |
 | Loki push mTLS | `curl --cert tls.crt --key tls.key --resolve loki.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/ready` — expect Loki's `ready` response. The cert/key are the `tls.crt` / `tls.key` of the edge's `loki-push-client-tls` Secret; **without them the request is rejected at the handshake**, because the Ingress sets `auth-tls-verify-client: on`. That rejection is the test passing. |
 | S3 upload mTLS (only if `seaweedfs.ingress.clientCerts.require` is on) | `curl --cert tls.crt --key tls.key --resolve seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io/` — expect an S3 error document (no credentials), **not** a TLS failure. Re-run without `--cert/--key`: the handshake must be rejected, and that rejection is the test passing. The cert/key are those of the edge's `s3-client-tls` Secret. Run this **before** flipping `require`, using the certificates cert-sync has already delivered. Measured: a missing client certificate gives HTTP 400 with an HTML body that rclone reports as an S3 XML parse failure, so if you discover it from the uploader's logs instead it looks like an unreachable endpoint. |
-| Edge resolves via real DNS | `kubectl --kubeconfig kubeconfig-edge-dev exec -n xnat-ingest deploy/edge-s3-uploader -- nslookup seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io` — should resolve via the worker's standard resolver. (`edge-` is the Helm release name install.sh:512 uses; a site that sets `fullnameOverride` changes the prefix.) |
-| Full pipeline | drop a DICOM into Orthanc (via `dcmsend`, `storescu`, or the Orthanc REST upload), wait for group-orthanc + assign to stage it, watch `upload_completed` event land in Loki + dashboards |
-| Memory leak fix | sample `kubectl top pod -n xnat-upload` over 2 hours — should stay flat ±20 MiB |
+| Edge resolves via real DNS | `kubectl --kubeconfig kubeconfig-edge-dev exec -n xnat-ingest deploy/edge-s3-uploader -- nslookup seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io`. The name should resolve via the worker's standard resolver. (`edge` is the Helm release name set by `install.sh:697`; a site that sets `fullnameOverride` changes the prefix.) |
+| Full pipeline | Send a synthetic DICOM to Orthanc. Follow group-orthanc, assign and deidentify. An `upload_completed` event from the S3 uploader proves that hop only. Check the management uploader's `Successfully uploaded all files in` message and the files on XNAT to establish final delivery. |
+| Uploader memory | Sample `kubectl top pod -n xnat-upload` during a representative two-hour workload. Record the peak, resource sizes, worker concurrency and restart count. The 0.19.0 image still uses XNAT client archive buffering. The old fork's flat-memory claim is not a verified limit for this image. |
 
 ## When to use on-prem vs cloud
 
@@ -374,7 +385,7 @@ Both topologies are first-class in the codebase. There's no implicit
 preference — the `topology` key in `sites/<site>/values.yaml` is the single
 switch. (`INSTALL_TOPOLOGY` still exists, but only as an internal export
 install.sh derives from that key at install.sh:133 and hands to
-scripts/00-common.sh at :155; setting it in your shell is overwritten and has
+scripts/00-common.sh at install.sh:197; setting it in your shell is overwritten and has
 no effect.) The one caveat is the LB: on-prem is exercised continuously, while
 the cloud path's `loadBalancerIP` handling is still listed as unfinished in
 `docs/TOUR.md`.

@@ -19,9 +19,9 @@ because:
   store-gateway, compactor, distributor); operational overhead
 
 The 15 days is `kube-prometheus-stack.prometheus.prometheusSpec.retention`
-(`charts/mgmt/values.yaml:671`, "THE one place Prometheus retention is set")
-on a 20Gi `local-path` PVC (`:581`, `:692`). Don't confuse it with the 30d at
-`charts/mgmt/values.yaml:849`, which is **Loki's** `retention_period` for logs
+(`charts/mgmt/values.yaml:852`, "THE one place Prometheus retention is set")
+on a 20Gi `local-path` PVC (`charts/mgmt/values.yaml:762`, `charts/mgmt/values.yaml:873`). Don't confuse it with the 30d at
+`charts/mgmt/values.yaml:1030`, which is **Loki's** `retention_period` for logs
 — the two stores are sized and retained separately on purpose, because log
 volume and metric volume grow at different rates.
 
@@ -53,14 +53,14 @@ data source becomes Mimir instead of Prometheus.
 
 - **Object storage** for chunks + index — would use a SeaweedFS
   `metrics-bucket`, added as a third entry under `seaweedfs.buckets`
-  alongside `ingest` and `logs` (`charts/mgmt/values.yaml:285-289`), with a
+  alongside `ingest` and `logs` (`charts/mgmt/values.yaml:349-353`), with a
   `mimir-writer` identity scoped to it only. There is no `scripts/03-*` to
   edit any more: S3 identities are assembled **inside the pod** by the
   `build-s3-identities` init container from projected Secrets
   (`charts/mgmt/templates/seaweedfs.yaml:150-257`), so adding one means an
   `emit 'mimir-writer' "$SRC/mimir" '["Read:metrics-bucket",…]'` line there
   plus a `mimirS3SecretRef` alongside `observability.loki.s3SecretRef`
-  (`charts/mgmt/values.yaml:593`). The init container refuses to start on a
+  (`charts/mgmt/values.yaml:774`). The init container refuses to start on a
   blank or duplicated access key, so a half-added identity fails loudly
   rather than 403-ing days later.
 - **No direct cluster API** — receives metrics via remote_write from
@@ -83,11 +83,11 @@ data source becomes Mimir instead of Prometheus.
 ## Configuration sketch
 
 A new `mimir:` block in `charts/mgmt/values.yaml` would mirror the `loki:`
-one at `:813-928` — the subchart is configured inline there, not from a
+one at `charts/mgmt/values.yaml:994-1115`. This subchart is configured inline in that file, not from a
 template file. There are no `*-values.yaml.tpl` files left in the repo.
 
 One trap inherited from that block, recorded at
-`charts/mgmt/values.yaml:650-661`: **Helm does not template `values.yaml`**.
+`charts/mgmt/values.yaml:831-842`: **Helm does not template `values.yaml`**.
 A subchart value cannot say `{{ .Release.Name }}-something` unless the
 subchart itself runs `tpl` over that field. Loki's S3 `endpoint` works only
 because the loki chart does; every other cross-reference below is a literal
@@ -121,7 +121,7 @@ mimir:
   minio: { enabled: false }
 
 # Then under the existing `kube-prometheus-stack:` key in the same file
-# (charts/mgmt/values.yaml:663-810):
+# (charts/mgmt/values.yaml:844-991):
 kube-prometheus-stack:
   prometheus:
     prometheusSpec:

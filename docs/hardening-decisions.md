@@ -1,5 +1,7 @@
 # Hardening — findings, decisions, and a critique of how we got here
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Status: **superseded as a blocker list — most of it has shipped.** When this
 was written the charts rendered and validated but were not safe to install on
 the existing management cluster. They have since been installed on it: the
@@ -54,7 +56,7 @@ other site's staged imaging.** Prefix-scoped actions are not a thing here.
 
 This is the only change that makes the isolation claim true.
 
-**What it changes on the management side.** `xnat-ingest upload` takes one
+**What it changes on the management side.** `accessionflow store xnat` takes one
 `s3://bucket/prefix` argument, so one uploader cannot serve N buckets. The
 uploader becomes **one Deployment per edge**, ranged from the `edges` list,
 and likewise the reclaimer CronJob.
@@ -324,7 +326,7 @@ knowledge from two external systems* — which is why it needs a completeness
 heuristic at all. Move the responsibility:
 
 * **The mgmt uploader deletes its own staged session** immediately after it
-  has verified its upload, using knowledge it already holds. `xnat-ingest`
+  has verified its upload, using knowledge it already holds. `accessionflow`
   already auto-generates a per-session `MANIFEST.json`, so "did everything
   arrive" is answerable against a real artifact rather than inferred.
 * **The reclaimer becomes a garbage collector for residue only** — orphaned
@@ -603,7 +605,7 @@ Measurements are from the live cluster.
 ## R1. "The uploader deletes what it delivered" is not implementable — §4 revised
 
 The recommendation was architecturally right and practically wrong. The
-management uploader **is** `xnat-ingest upload`, an upstream binary. It does
+management uploader **is** `accessionflow store xnat`, an upstream binary. It does
 not delete from S3, and with `--loop` it processes every session in one
 invocation, so there is no per-session hook to attach a deletion to. Making
 "the component with the knowledge deletes" true would mean wrapping it and
@@ -614,11 +616,11 @@ fragile coupling I rejected for the edge `assign` stage two days ago.
 rather than the architecture:
 
 * Compare **`MANIFEST.json` against XNAT's actual resource inventory** for the
-  session. `xnat-ingest` already writes that manifest, so this is a real
+  session. `accessionflow` already writes that manifest, so this is a real
   file-by-file completeness check, not a heuristic — it answers "is everything
   that was staged now in XNAT", which is the question that matters.
 * Keep minAge, and keep the two-consecutive-runs rule for empty prefixes.
-* Separately, **open an upstream issue/PR on xnat-ingest for S3 retention**.
+* Separately, **open an upstream issue/PR on accessionflow for S3 retention**.
   The absence of it is the root cause; everything here is a workaround, and it
   should be labelled as one rather than quietly owned forever.
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Site secret management with SOPS + age.
 # =============================================================================
@@ -103,7 +104,7 @@ new)
   mgmt   the management node — SeaweedFS, observability, control planes,
          the XNAT uploader, the reclaimer, and the fleet-wide data policy.
          ONE per deployment.
-  edge   one facility node: Orthanc, the facility backup, the xnat-ingest
+  edge   one facility node: Orthanc, the facility backup, the accessionflow
          de-identification recipe, the S3 uploader. ONE per site.
 
   A new edge also needs an entry under \`edges:\` in the management site's

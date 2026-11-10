@@ -1,5 +1,7 @@
 # Grafana dashboards: what every panel measures
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 The `AIS Edge` Grafana folder contains four dashboards and 26 panels. Their
 source is `charts/mgmt/files/dashboards/`. The management chart loads these
 files through ConfigMaps and the Grafana sidecar. Edit the source files so
@@ -11,7 +13,7 @@ that the pipeline or its log delivery is healthy. Check the data source and
 an expected activity signal before treating zero as good news.
 
 Orthanc receives and archives the DICOM instances. In the receiver-only
-configuration, de-identification runs in **xnat-ingest**. The dashboards do
+configuration, de-identification runs in **accessionflow**. The dashboards do
 not require Orthanc de-identification.
 
 ## Data sources, time ranges, and limits
@@ -150,15 +152,15 @@ exist. That fallback cannot establish that the log collector is working.
 
 | Panel | Query input and window | Meaning |
 |---|---|---|
-| **Invalid sessions (last 1h)** | Assign `level="ERROR"`, `message =~ "^Invalid IDs found.*"`, `[1h]`. | Invalid identifier reports. The summary error line is excluded, but a repeated attempt can report the same session again. |
-| **Assign cycles with errors (last 1h)** | Assign `message =~ "(?s)^Staging completed with.*"`, `[1h]`. | Cycle summary lines. The `(?s)` flag includes newlines in the summary. |
+| **Invalid sessions (last 1h)** | Assign `level="ERROR"`, `message =~ "^Could not resolve the labels of .*"`, `[1h]`. | Invalid identifier reports. The summary error line is excluded, but a repeated attempt can report the same session again. |
+| **Assign cycles with errors (last 1h)** | Assign `message =~ "^Label completed with [0-9]+ errors"`, `[1h]`. | One-line cycle summaries from 0.19.0. Each failed cycle contributes one line, regardless of how many sessions failed. |
 | **Edge sites with assign logs (last 1h)** | Distinct non-empty, non-`mgmt` cluster labels on `component="assign"`, `[1h]`. | Recent assign log delivery. This excludes management reclaimers whose cluster label identifies the edge they serve. It is not a pod-health test. |
 
 ### Recent invalid sessions
 
 ```logql
 {namespace="xnat-ingest",component="assign"}
-  | json | level="ERROR" | message =~ "^Invalid IDs found.*"
+  | json | level="ERROR" | message =~ "^Could not resolve the labels of .*"
 ```
 
 The panel displays the cluster and message and has a one-hour relative
@@ -203,7 +205,7 @@ healthy Kubernetes nodes. All panels use the selected edge and worker.
 | Panel | Query input | Meaning |
 |---|---|---|
 | **Completed uploads (last 10m)** | Uploader `upload_completed`, `[10m]`. | Completed S3 attempts. A zero value is normal when idle; with expected scanner traffic, inspect the stages and log delivery. |
-| **Invalid session reports (last 1h)** | Assign `ERROR` messages beginning `Invalid IDs found`, `[1h]`. | Invalid identifier reports, not every assign error. |
+| **Invalid session reports (last 1h)** | Assign `ERROR` messages beginning `Could not resolve the labels of`, `[1h]`. | Invalid identifier reports, not every assign error. |
 | **Upload failures (last 1h)** | Uploader `upload_failed`, `[1h]`. | Failed attempts, including failures followed by recovery. |
 | **Unmapped AE rejection logs (last 1h)** | Orthanc raw lines containing `REJECT: no project mapped for CalledAET`, `[1h]`. | Legacy AET-map rejection log lines. This does not count studies. In receiver-only mode it is expected to stay zero. |
 
@@ -215,7 +217,7 @@ healthy Kubernetes nodes. All panels use the selected edge and worker.
 | **Upload events per minute** | Uploader non-empty event fields over `[1m]`. | One series per event type, not a unique-session count. |
 
 In receiver-only mode, `deidentify-and-forward.lua` returns before the
-legacy AET-map lookup. De-identification occurs in xnat-ingest, so the AE
+legacy AET-map lookup. De-identification occurs in accessionflow, so the AE
 rejection tile does not test its routing or de-identification. The legacy
 rejection path preserves originals in the facility quarantine; a rejection
 log alone is not evidence that the source bytes were lost. The same raw

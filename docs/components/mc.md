@@ -1,19 +1,23 @@
 # s3-uploader (AWS CLI)
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 The edge S3 uploader is a bash loop. It ran inside the
 [AWS CLI](https://docs.aws.amazon.com/cli/) image until October 2026 and now
 runs in a pinned Ubuntu (`upload.s3.shell.image`) with the rclone binary
-staged in by an initContainer; see the status note below. It pushes assigned
-session directories from the edge's working volume into that site's
-staging bucket in SeaweedFS.
+staged in by an initContainer; see the status note below. It copies session
+directories from the selected source tree into that site's staging bucket
+in SeaweedFS. Under the ingest engine this is `/data/deidentified`, or the
+packaged output when packaging is enabled.
 
 **This file is still named `mc.md` for link stability.** It used to
 document [`mc`](https://min.io/docs/minio/linux/reference/minio-mc.html),
 the MinIO client, which was the uploader until the client migration.
-`mc` is gone from the deployment entirely — no chart, script or installer
-references it (`charts/edge/files/s3-uploader.sh:5-7` says so outright).
+`mc` is no longer a deployed client. The history in
+`charts/edge/files/s3-uploader.sh:6-9` names both older clients and identifies
+rclone as the current one.
 
 **Status (2026-10).** The loop now runs `rclone copy` and copies only: it
 never deletes the local copy, and `RECLAIM` and `DRY_RUN` are gone from the
@@ -22,7 +26,7 @@ every file in the bucket (same size, ETag = MD5 of the bytes on disk) and
 leaves a repair request the uploader answers when a file fails. Steps 5 and 6
 below, the `aws s3 sync` call and the `rm -rf` describe the AWS CLI
 generation and are kept as history; the current behaviour is in
-[xnat-ingest.md, "S3 mode: prove, then delete"](xnat-ingest.md).
+[accessionflow.md, "S3 mode: prove, then delete"](accessionflow.md).
 The loop no longer runs in the AWS CLI image either: that image has every
 GNU tool the loop uses and no `flock`, and the first live run with the
 writer lock skipped every copy as lock contention for five hours (2026-10-14).
@@ -31,10 +35,12 @@ tool it needs by use at startup and stops the pod with the tool named
 (`dependency_missing`), and CI runs one real copy inside the pinned image
 (`tests/s3-uploader/image-tests.sh`). The image table and the "full
 userland" bullet below describe the AWS CLI generation.
-The S3 client is now the AWS CLI, so that edge, management and any future
-cloud target speak one client with one set of credential and endpoint
-conventions. Where behaviour differs from the `mc` era, this doc says so,
-because live alert rules and dashboards still carry `mc`-era names.
+The S3 client in the AWS CLI generation was selected to use the same
+credential and endpoint conventions across edge and management. The current
+edge copy loop uses rclone, while accessionflow handles management-side
+retrieval. The historical steps below retain the older commands for context.
+Use the current loop and its image settings when diagnosing a deployed site;
+do not install either older client based on those steps.
 
 The client remains vendor-neutral: it speaks plain S3 against SeaweedFS,
 AWS S3, MinIO, Garage or Ceph RGW.
@@ -48,7 +54,7 @@ single-replica Deployment (`s3-uploader`) whose loop runs every
 1. Scan `/data/assigned/*/` for settled session directories — **not**
    `/data/staging/`, which does not exist anywhere in the edge chart.
    `staged` is the *S3 prefix*, not a local directory.
-2. Skip xnat-ingest's internal directories (`__build__`, `__invalid__`,
+2. Skip accessionflow's internal directories (`__build__`, `__invalid__`,
    `__metadata__`) and any session touched within the last
    `settleMinutes` (default 5) — assign may still be writing into it.
 3. Skip any session containing dangling symlinks. The assigned tree is
@@ -65,9 +71,9 @@ single-replica Deployment (`s3-uploader`) whose loop runs every
    so — `rm -rf` the local copy
 7. Emit a JSON log line per event
 
-Why not write the upload logic in Python (as part of xnat-ingest)?
+Why not write the upload logic in Python (as part of accessionflow)?
 Three reasons, unchanged by the client swap:
-- xnat-ingest's upload command pushes to **XNAT**, not to S3
+- accessionflow's upload command pushes to **XNAT**, not to S3
 - the AWS CLI handles multipart, parallel, resumable uploads natively —
   no point reimplementing
 - the client is a thin wrapper; the s3-uploader pod is the CLI plus one
@@ -75,7 +81,7 @@ Three reasons, unchanged by the client swap:
 
 This whole Deployment renders only when `upload.mode: s3`. The
 alternative, `upload.mode: direct`, replaces it with a pod running
-`xnat-ingest upload` straight to XNAT and no object store in the path.
+`accessionflow store xnat` straight to XNAT and no object store in the path.
 The mode is a single enum rather than two booleans because both at once
 would deliver every session to XNAT twice.
 
@@ -86,7 +92,7 @@ would deliver every session to XNAT twice.
   default). It reads `/data/assigned/`, writes state under
   `/data/LOGS/s3-uploader-state/`, and deletes session directories after
   a verified upload. Every pipeline stage shares this one filesystem or
-  xnat-ingest's `hardlink_or_copy` degrades to a full copy (EXDEV).
+  accessionflow's `hardlink_or_copy` degrades to a full copy (EXDEV).
 - **Outbound HTTPS** to `https://seaweedfs.aisedge.local:443` (derived
   from `domain.internal`, or set explicitly via `upload.s3.endpoint`)
 - **Secret `s3-edge-credentials`**, keys `access-key` / `secret-key` —
@@ -279,7 +285,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
 | Disk full on edge | `aws s3 sync` fails to stage; nothing reclaims | `/data/xnat-ingest` is the worker's hostPath behind the pipeline PVC; size accordingly. `EdgeDiskLow` alerts before it bites. |
 | Deletes the wrong session | Data loss | Reclaim is reached only after a zero-exit `sync`, only when `RECLAIM=onUploaded`, and never when `DRY_RUN=true`; re-runs are idempotent |
 | Session still being written | Partial upload | `SETTLE_MINUTES` quiet-period guard, plus a dangling-symlink check that skips rather than uploads an incomplete tree |
-| Image pulled from registry | Edge needs internet to pull the shell image (`ubuntu:noble-<date>`, about 30 MB compressed; `amazon/aws-cli:2.31.19` before 2026-10) and `rclone/rclone:1.75.0` the first time | Same as xnat-ingest: in air-gap, pre-import via `ctr`. The Ubuntu image is smaller than the AWS CLI one was. |
+| Image pulled from registry | Edge needs internet to pull the shell image (`ubuntu:noble-<date>`, about 30 MB compressed; `amazon/aws-cli:2.31.19` before 2026-10) and `rclone/rclone:1.75.0` the first time | Same as accessionflow: in air-gap, pre-import via `ctr`. The Ubuntu image is smaller than the AWS CLI one was. |
 
 ## Replacements / future
 
@@ -288,7 +294,7 @@ KUBECONFIG=kubeconfig-edge-dev kubectl exec -n xnat-ingest \
   alias-as-local-path failure mode described above. Not going back.
 - **`rclone`** — broader provider support, similar feature set. Worth
   considering if we ever need to sync to multiple targets at once
-- **Native xnat-ingest S3 push** — xnat-ingest could write to S3
+- **Native accessionflow S3 push**; accessionflow could write to S3
   directly, removing the uploader pod entirely. Currently it only reads
   from S3 (in the upload command); a `--s3-target` flag for the assign
   command is a candidate upstream PR

@@ -1,5 +1,7 @@
 # Alerting architecture — why Loki ruler, not Prometheus remote-write
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## TL;DR
 
 Pipeline-event alerts (upload_failed spikes, stalled sessions, sessions staged
@@ -62,7 +64,7 @@ here that no longer ships reads as coverage that does not exist.
 | `SessionStagedNotConfirmedInXNAT` | Loki ruler | The absence alert: an `event=~"reclaim_.*"` for a session in a 24h window `offset 48h`, with no `reclaim_confirmed` since. Its staged half is why the reclaimer must keep speaking through an outage — see the last section. Under `upload.mode: s3` the edge's own reclaimer (namespace `xnat-ingest`) proves against the bucket, not XNAT: its lines carry `proof=s3` and its `reclaim_confirmed` is kept out of the confirming half, so a session the edge saw and XNAT never confirmed still fires. |
 | `ReclaimerRunUnavailable` | Loki ruler | `event="reclaim_unavailable"` with `session=""` (the run-level line) and no `reclaim_finished` in the last 70m, per cluster and namespace: under `upload.mode: s3` the edge's reclaimer (`xnat-ingest`) and the management one (`xnat-upload`) are judged apart, so one finishing cannot hide the other's aborts. This is what an operator acts on. |
 | `RecopyLoop` | Loki ruler | `event="recopy_done"` from the edge's s3-uploader, more than 3 for one session in 24h: completed re-copies, not claimed requests, because an uploader that cannot copy claims the same request on every pass and that failure is `SessionUploadStalled`'s and `S3UploaderRestartedRecently`'s. The edge's staged-reclaimer keeps asking for the same session: a local file is not in the bucket as it is on disk, and after each copy it is gone again, which is the management reclaimer removing the bucket copy before the edge has proven its own against it (the two clocks crossing). Nothing is lost while it fires; fix the clocks: `dataPolicy.derived.s3Staged.minAge` must exceed `stagedReclaimer.minAge` plus its interval by a wide margin. |
-| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's accessionflow store xnat container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
 | `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for each edge's `<release>-reclaim-<edge>` CronJob: no successful run for `dataPolicy.derived.s3Staged.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot. `cluster=<edge>` is taken from the CronJob name, and an inhibit rule with `equal: [cluster]` holds it back while `ReclaimerRunUnavailable` fires for the same edge, so one outage raises one alert per edge rather than two. |
 | `KubeStateMetricsDown` | Prometheus | `absent(up{job="kube-state-metrics"} == 1)` for 15m. Every CronJob alert here (`CertSyncStale`, `CertSyncNeverSucceeded`, `ReclaimerNotSucceeding`) reads kube-state-metrics, so without it they have nothing to evaluate and stay quiet; `defaultRules` is off, so nothing upstream covers it. |
@@ -75,13 +77,13 @@ here that no longer ships reads as coverage that does not exist.
 | `PipelineSessionStuck` | Loki ruler | `event="stage_stuck"` from the data-policy pod, per edge and stage: one session has failed its reclaim condition for longer than it should. |
 | `DataPolicyReporterSilent` | Loki ruler | One series per edge in `edges` (minus any with `dataPolicyReporter: false`), dropped by `unless` for each edge that sent a `stage_report` within `dataPolicy.reporterSilentAfter` (30m). Keyed on the configuration, so an edge that never reported fires too. `EdgeDiskLow`, `StageBacklogAgeing` and `QuarantinedDataUnresolved` read only those lines, so this is what says they have gone blind for that edge. It cannot see its own evaluator: with this Loki down, nothing fires. |
 | `XNATUploadSuccess` | Loki ruler | `info`-severity receipt: `Successfully uploaded all files in '<session>'`, grouped by session. Range `[10m]`, deliberately wider than the uploader's ~62s loop — see the duplicate-mail section. Sessions with a `Repaired` line in the last 20m are left out: those are `XNATRepairAttempted`. |
-| `XNATResourceIncompleteAndStuck` | Loki ruler | xnat-ingest's `already exists on XNAT with different checksums` ERROR from the management uploader, counted per session over 60m above the configured threshold, for 15m. XNAT holds a resource whose files differ from staging, and an upload cannot repair it. |
-| `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line in the `xnat-upload` namespace: XNAT already held the session with files missing, and the uploader tried to re-send them from staging. Logged whether or not that worked, so it claims only the attempt; a session that stays incomplete is never confirmed, and `SessionStagedNotConfirmedInXNAT` follows. Seen on 2026-09-23 and 2026-09-28 after XNAT restarts. One firing-only mail per edge per burst. |
+| `XNATResourceIncompleteAndStuck` | Loki ruler | accessionflow's `already exists on XNAT with different checksums` ERROR from the management uploader, counted per session over 60m above the configured threshold, for 15m. XNAT holds a resource whose files differ from staging, and an upload cannot repair it. |
+| `XNATRepairAttempted` | Loki ruler | accessionflow's `Repaired N incomplete resource(s)` line in the `xnat-upload` namespace: XNAT already held the session with files missing, and the uploader tried to re-send them from staging. Logged whether or not that worked, so it claims only the attempt; a session that stays incomplete is never confirmed, and `SessionStagedNotConfirmedInXNAT` follows. Seen on 2026-09-23 and 2026-09-28 after XNAT restarts. One firing-only mail per edge per burst. |
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` to drop progress-bar lines that happen to contain the digits. |
 | `XNATUploadRetryStorm` | Loki ruler | More than 2 ERROR or traceback records from the management uploader (`component="upload"` in `xnat-upload`) in 10 minutes, for 10 minutes. The different-checksums phrase is excluded, as in tier-1's rule of the same name; `XNATResourceIncompleteAndStuck` covers that conflict per session. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log. Under `ingest`, the default, the script writes the facility backup, so an error can leave an original out of the archive. Under the deprecated `orthanc` engine the script also de-identifies, so an error there is a PHI risk, not a cosmetic one. |
 | `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Uses existing Vector logs; no remote-edge Kubernetes metrics are assumed. Missing-ID diagnostics are covered by `InvalidSessionAssigned` and `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
-| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` / `dependency_missing` / `lock_failed` — the uploader's own refusals and stops (the pre-flight probe, a tool the image lacks, a writer lock that cannot be opened or taken), which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"}` — only meaningful from mgmt Prometheus. |
 | `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
@@ -154,7 +156,7 @@ that we'd otherwise need, and one source of truth for pipeline alerts.
 and the inbox fills with identical "upload completed" mails — typically one
 every few minutes, continuing for days after the drop.
 
-**Cause.** `xnat-ingest upload` has **no S3 retention**. It rebuilds its work
+**Cause.** `accessionflow store xnat` has **no S3 retention**. It rebuilds its work
 list from a live listing of `s3://<bucket>/staged` on every `--loop` pass and
 never deletes what it uploaded, so a session lingers and is re-processed
 forever. The failure becomes *permanent* if the staging prefix contains
@@ -193,7 +195,7 @@ on), and then discovers the filer and both uploaders **by label**
 (`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
 rather than by hardcoded name.
 
-> **What changed since.** The uploader pinned today (xnat-ingest 0.16.2; the key rule is at helpers/remotes.py:581)
+> **What changed since.** The pinned uploader is accessionflow 0.19.0 (`helpers/remotes.py`, `iterate_s3_sessions`)
 > builds its session list from the object keys and skips a key that ends in
 > `/`, so an empty folder is not a session to it, and `mgmt-reclaim-<edge>`
 > leaves the session folder behind on purpose: it deletes the objects one by
@@ -259,6 +261,11 @@ kubectl --kubeconfig=kubeconfig-<edge> -n xnat-ingest exec deploy/edge-s3-upload
 
 Any `Successfully uploaded all files in '<same session>'` repeating on a ~60 s
 cadence means staged sessions (or empty prefixes) are still present.
+
+The following explanation records older uploader behavior. In accessionflow
+0.19.0 a complete-session skip bypasses the success line, and the loop waits
+for the remainder of its interval. The existing alert window remains in
+place; the old measurements explain its origin.
 
 **A second, independent cause of duplicate mail: range shorter than the
 emitter's loop period.** The uploader re-scans staging every ~62s and logs

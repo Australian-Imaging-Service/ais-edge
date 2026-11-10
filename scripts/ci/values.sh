@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # The values matrix — the single definition of every case CI renders.
 # =============================================================================
@@ -1267,7 +1268,7 @@ orthanc:
     existingSecret: ""
 EOF
 
-# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# accessionflow's Orthanc grouping accepts ONLY hardlink_or_copy and raises
 # NotImplementedError at RUN TIME for anything else, so without this guard the
 # pod renders, starts and then CrashLoops with a message that never names the
 # setting that caused it.

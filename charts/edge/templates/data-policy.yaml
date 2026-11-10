@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 =============================================================================
 The data-policy engine — one component that enforces the whole dataPolicy block
@@ -6,7 +7,7 @@ WHY THIS IS ITS OWN WORKLOAD AND NOT A SIDECAR.
 
 dataPolicy's rules used to be implemented inside whichever component was
 nearby: an `rm -rf` in the S3 uploader, a `--unlink-source` flag on
-xnat-ingest, a CronJob on the management side. Three stages, three mechanisms,
+accessionflow, a CronJob on the management side. Three stages, three mechanisms,
 each welded to one tool. That is why most of the block was never implemented
 (adding a rule meant writing a new program) and why replacing a component
 silently took its policy with it.

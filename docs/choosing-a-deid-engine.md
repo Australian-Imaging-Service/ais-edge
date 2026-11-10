@@ -1,5 +1,7 @@
 # De-identification engines: two architectures
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Two engines can de-identify studies. **Use `deid.engine: ingest`.** It is the
 default (key `deid.engine` in `charts/edge/values.yaml`), and it is the only
 engine for a new site. The Orthanc Lua engine, `deid.engine: orthanc`, is
@@ -18,7 +20,7 @@ reference material for the deprecated engine is in one section of that page.
 `assign` files a study into XNAT under three ids. It reads each id from one
 DICOM tag, and `ingest.assign.tagMapping` names the three tags. When you leave
 it empty, the chart sets it from the engine
-(`charts/edge/templates/_helpers.tpl:850-857`):
+(`charts/edge/templates/_helpers.tpl:851-858`):
 
 ```
                  ingest (default)    orthanc (deprecated)
@@ -83,7 +85,7 @@ scanner protocol or the operator at the console puts them there. `assign` reads
 the tags that `tagMapping` names, so **no AE-title map is involved and none is
 needed**. The routing question has its answer before the data arrives.
 
-Then de-identification is the only job that stays. The **xnat-ingest
+Then de-identification is the only job that stays. The **accessionflow
 `deidentify` stage** does it, between `assign` and `upload`:
 
 | step | what happens |
@@ -112,7 +114,7 @@ Then de-identification is the only job that stays. The **xnat-ingest
   not apply. A recipe hash can use a `<format>.salt` side-car file, which the
   chart does not supply.
 
-This is the architecture upstream xnat-ingest is written for, and it is the
+This is the architecture upstream accessionflow is written for, and it is the
 default here.
 
 **Why new sites use it:**
@@ -171,7 +173,7 @@ way, for example `INVALID_MISSING_STUDYID_...`. The chart now refuses the
 
 ## Side by side
 
-| | A: Orthanc Lua hook (deprecated) | B: xnat-ingest deidentify |
+| | A: Orthanc Lua hook (deprecated) | B: accessionflow deidentify |
 |---|---|---|
 | values key | `deid.engine: orthanc` | `deid.engine: ingest` |
 | chart default | no, deprecated | **yes** |
@@ -192,8 +194,8 @@ output one directory level deeper than `assign` does. So `upload` reported
 `Found 0 sessions` and data stopped there. That was
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144),
 closed on 2026-08-31. The pinned image,
-`ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`, writes the same layout as
-`assign` (`xnat_ingest/api/deidentify_api.py:542` at `v0.16.2.post1`). Data
+`ghcr.io/australian-imaging-service/accessionflow:0.19.0`, writes the same layout as
+`assign` (`accessionflow/model/accession.py`, `save()` in 0.19.0). Data
 now goes all the way to XNAT.
 
 **The `ais_deid` salt caveat does not apply to the pinned image.** Older
@@ -211,7 +213,7 @@ by brute force, and two sites produce identical codes for the same patient.
 That is
 [xnat-ingest#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143),
 still open upstream. The pinned image does not depend on `ais_deid` (see
-`pyproject.toml` at `v0.16.2.post1`). Its recipes change only the tags that
+the installed 0.19.0 distribution dependencies). Its recipes change only the tags that
 they name, and the shipped recipe removes the identifiers. It does not hash
 them.
 
@@ -222,12 +224,12 @@ from a `<format>.salt` side-car file, and the chart does not supply one. The
 
 ## Where the data enters
 
-Orthanc is the only DICOM **network** receiver in this stack. xnat-ingest ships
+Orthanc is the only DICOM **network** receiver in this stack. accessionflow ships
 no DICOM network stack — `pynetdicom` is not installed and no subcommand listens
 on a port — so a scanner performing a C-STORE association has nothing else to
 talk to.
 
-Orthanc is not the only way in, though. `ingest.fileDrop` runs `xnat-ingest
+Orthanc is not the only way in, though. `ingest.fileDrop` runs `accessionflow
 group` over a filesystem glob. So data that arrives as *files* gets into the
 pipeline without Orthanc's REST pull: a share, a vendor export or an rsync.
 
@@ -236,11 +238,11 @@ Only the `ingest` engine de-identifies that path. A dropped file goes from
 only on instances that Orthanc receives over DICOM
 (`charts/edge/files/deidentify-and-forward.lua:130`). Under the deprecated
 engine the uploader reads `/data/assigned`
-(`charts/edge/templates/_helpers.tpl:867-870`), so a dropped file goes to XNAT
+(`charts/edge/templates/_helpers.tpl:868-871`), so a dropped file goes to XNAT
 without de-identification.
 
 ## See also
 
 * [components/deidentification.md](components/deidentification.md): how to configure the `ingest` engine, and the reference for the deprecated one
 * [components/orthanc.md](components/orthanc.md) — the receiver
-* [components/xnat-ingest.md](components/xnat-ingest.md) — the pipeline stages
+* [components/accessionflow.md](components/accessionflow.md); the pipeline stages

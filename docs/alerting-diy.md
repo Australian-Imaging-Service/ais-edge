@@ -1,5 +1,7 @@
 # DIY — adding your own alert rules
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 The "I want a new alert tomorrow" recipe. Assumes the mgmt chart is installed
 with `observability.enabled: true` (the default). For the *why* of the
 Prometheus/Loki split, see [`alerting-architecture.md`](alerting-architecture.md).
@@ -25,7 +27,7 @@ Is the thing you want to alert on …
   │  cert-manager certificate expiry, etc.)
   │     → Prometheus rule.
   │
-  ├─ a JSON log line from xnat-ingest / s3-uploader / Orthanc /
+  ├─ a JSON log line from accessionflow / s3-uploader / Orthanc /
   │  kube-prometheus components?
   │     → Loki ruler rule.
   │

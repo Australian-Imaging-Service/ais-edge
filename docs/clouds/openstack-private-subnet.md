@@ -65,23 +65,23 @@ certManager:
   enabled: false                  # install.sh step 2/7 installs cert-manager
   issuer: letsencrypt-prod        # real LE certs once you have real DNS;
                                   # anything prefixed letsencrypt- takes the
-                                  # ACME path (cert-issuers.yaml:80)
+                                  # ACME path (charts/mgmt/templates/cert-issuers.yaml:80)
   acme:
     email: ops@example.com
     server: https://acme-v02.api.letsencrypt.org/directory
     # REQUIRED on a letsencrypt-* issuer: an empty dns01Solver fails the render
-    # (cert-issuers.yaml:265), because a ClusterIssuer with no solver leaves
+    # (charts/mgmt/templates/cert-issuers.yaml:265), because a ClusterIssuer with no solver leaves
     # every Certificate Pending while nginx serves its default self-signed cert
     # — which reads as a browser warning rather than a misconfiguration. The
     # block is passed through VERBATIM into solvers[0].dns01
-    # (cert-issuers.yaml:291), so it must be a shape cert-manager understands.
+    # (charts/mgmt/templates/cert-issuers.yaml:291), so it must be a shape cert-manager understands.
     dns01Solver:
       # <provider-key>:           # route53 / cloudDNS / azureDNS / webhook / ...
       #   <provider fields>       # see the DNS-01 note below
 
 # The chart ships the ON-PREM ingress shape (hostNetwork on the host's :443,
 # Service type ClusterIP) and expects cloud sites to override it here — see the
-# CAUTION at charts/mgmt/values.yaml:511-522. All three lines matter: without
+# CAUTION at charts/mgmt/values.yaml:676-687. All three lines matter: without
 # them no Octavia LB is ever requested and loadBalancerIP alone does nothing.
 ingress-nginx:                    # subchart key — hyphenated, exactly this
   controller:
@@ -111,10 +111,10 @@ Designate; the built-ins are the big public providers. Either run a
 cert-manager DNS-01 *webhook* solver for Designate (installed separately — this
 chart does not ship one) and reference it under `dns01Solver`, or host the zone
 with a provider cert-manager supports natively. For a working solver block in
-this repo, see `scripts/ci/values.sh:166-175`, which uses route53 — same shape,
+this repo, see `scripts/ci/values.sh:292-301`, which uses route53 with the same configuration shape,
 different provider key. If you have no resolvable domain at all, leave
 `certManager.issuer: ais-edge-ca` and skip ACME entirely: nip.io cannot satisfy
-a DNS-01 challenge (`charts/mgmt/values.yaml:366-370`).
+a DNS-01 challenge (`charts/mgmt/values.yaml:531-535`).
 
 `install.sh` runs the standard cloud path: one `helm upgrade --install` of the
 management chart at step 4/7 creates the `Service type=LoadBalancer`, and OCCM
@@ -199,7 +199,7 @@ kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
 # release `mgmt` in namespace `ais-mgmt` (install.sh:121-122); there is no
 # ingress-nginx namespace. EXTERNAL-IP stays <none> if the ingress-nginx
 # override is missing from the site file — the chart default is
-# service.type ClusterIP (charts/mgmt/values.yaml:536).
+# service.type ClusterIP (charts/mgmt/values.yaml:701).
 ```
 
 ## Security group rules (same as Nectar QLD)

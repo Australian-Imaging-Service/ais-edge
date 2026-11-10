@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # reclaim-files.py: the data-pass worker of reclaim-staged.sh.
 # =============================================================================
@@ -14,10 +15,10 @@
 # PROOF, per file: the ONE row of the experiment's file listing in the resource the
 # uploader maps this folder to, with the same path in it. Then HEAD its URI: only
 # 200 with a Content-Length equal to the staged size passes. The mapping is the
-# uploader's (xnat-ingest 0.16 get_xnat_resource): the same scan id; for a DICOM
+# uploader's (accessionflow 0.19 stores/xnat/remotes.py, get_xnat_resource): the same scan id; for a DICOM
 # series, the ONE label that xnat_resource_label_from_sop_class gives for the SOP
 # classes in the resource's __METADATA__.json (loaded from the installed
-# xnat-ingest, so it is the pinned rule); for a non-DICOM folder, its name. All
+# accessionflow, so it is the pinned rule); for a non-DICOM folder, its name. All
 # files must be in one XNAT resource. Not mapped, so kept: a series split by
 # modality (<id>-<modality>), a single DICOM image, and a series whose metadata
 # has no SOPClassUID key (the uploader would read the headers). The deidentify

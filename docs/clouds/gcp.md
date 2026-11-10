@@ -122,7 +122,7 @@ domain:
 ```
 Note that nip.io cannot satisfy a DNS-01 challenge, so a nip.io domain means
 staying on the internal `ais-edge-ca` issuer rather than Let's Encrypt
-(`charts/mgmt/values.yaml:366-370`).
+(`charts/mgmt/values.yaml:531-535`).
 
 **Prod** (Cloud DNS):
 ```bash
@@ -153,18 +153,18 @@ certManager:
   enabled: false                    # leave false: install.sh step 2/7 installs
                                     # cert-manager itself, before this chart
   issuer: letsencrypt-prod          # anything prefixed letsencrypt- takes the
-                                    # ACME path (cert-issuers.yaml:80)
+                                    # ACME path (charts/mgmt/templates/cert-issuers.yaml:80)
   acme:
     email: ops@example.com          # omitted from the ClusterIssuer if empty
     server: https://acme-v02.api.letsencrypt.org/directory
     dns01Solver:                    # passed through VERBATIM into
-      cloudDNS:                     # solvers[0].dns01 (cert-issuers.yaml:291),
+      cloudDNS:                     # solvers[0].dns01 (charts/mgmt/templates/cert-issuers.yaml:291),
         project: <your-project>     # so it must be a shape cert-manager knows.
                                     # No serviceAccountSecretRef: Workload
                                     # Identity supplies the token (see below).
 
 # The chart ships the ON-PREM ingress shape and expects cloud sites to override
-# it here — see the CAUTION at charts/mgmt/values.yaml:511-522. All three lines
+# it here; consult the CAUTION at charts/mgmt/values.yaml:676-687. All three lines
 # matter: the default binds the host's :443 with hostNetwork and a ClusterIP
 # Service, so on GKE no LB is ever provisioned and loadBalancerIP alone is inert.
 ingress-nginx:                      # subchart key — hyphenated, exactly this
@@ -180,7 +180,7 @@ ingress-nginx:                      # subchart key — hyphenated, exactly this
 There is no cloud-provider or credentials key to set. GCP credentials come from
 the ambient ADC / Workload Identity chain, and the DNS provider is expressed
 solely by which key appears inside `dns01Solver`. For a working solver block in
-this repo, see the route53 example at `scripts/ci/values.sh:166-175` — same
+this repo, see the route53 example at `scripts/ci/values.sh:292-301`; it uses the same
 shape, different provider key.
 
 ## Step 5 — Run install.sh
@@ -211,7 +211,7 @@ kubectl -n ais-mgmt get svc mgmt-ingress-nginx-controller
 # release `mgmt` in namespace `ais-mgmt` — there is no ingress-nginx namespace.
 # EXTERNAL-IP should equal your reserved static IP. It stays <none> unless the
 # ingress-nginx override from Step 4 is in the site file: the chart default is
-# service.type ClusterIP (charts/mgmt/values.yaml:536).
+# service.type ClusterIP (charts/mgmt/values.yaml:701).
 
 curl -v https://loki.aisedge.example.com/ready
 # Expect 200 with a valid Let's Encrypt cert

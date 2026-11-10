@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 
 ======================================================================
 FIRST, PROVE IT WORKS
@@ -42,7 +43,7 @@ DE-IDENTIFICATION
   is written to /facility-backup/__unmapped_aet__/<AET>/... and only then
   removed from Orthanc. Add the AET above and re-send to ingest it.
 {{- else if (eq (include "edge.deidEngine" .) "ingest") }}
-  Enabled. The xnat-ingest deidentify stage runs between assign and upload,
+  Enabled. The accessionflow deidentify stage runs between assign and upload,
   and the uploader reads only its output, {{ include "edge.uploadSourceDir" . }}.
   {{- if .Values.ingest.deidentify.specs }}
   {{ len .Values.ingest.deidentify.specs }} recipe(s):

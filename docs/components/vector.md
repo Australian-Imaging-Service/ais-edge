@@ -1,5 +1,7 @@
 # Vector
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 [Vector](https://vector.dev/) is a high-performance, single-binary
@@ -28,7 +30,7 @@ Two deployments, both DaemonSets:
    (cert-manager, ingress-nginx, k0smotron, seaweedfs, xnat-upload).
 2. **Edge-side** (`xnat-ingest` on each child cluster — `.Values.namespace`,
    the same namespace as the pipeline it tails; one pod per worker). Tails
-   xnat-ingest group-orthanc + assign + s3-uploader + system pods, pushes
+   accessionflow collate-orthanc + assign + s3-uploader + system pods, pushes
    to Loki via the management nginx-ingress on `https://loki.aisedge.local:443`.
 
 Both shape the data identically before it hits Loki, with exactly two

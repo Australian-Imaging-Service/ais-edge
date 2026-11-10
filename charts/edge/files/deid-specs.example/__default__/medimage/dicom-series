@@ -1,7 +1,8 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # Example de-identification recipe for medimage/dicom-series.
 #
 # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
-# xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+# accessionflow's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
 # is the category and the FILE is the format: medimage/dicom-series. It skips
 # anything at the top level that is not a directory, so a flat file named
 # `medimage@dicom-series.json` is never read and every session fails with

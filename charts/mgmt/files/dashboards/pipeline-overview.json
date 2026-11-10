@@ -188,7 +188,7 @@
     {
       "type": "stat",
       "title": "Invalid sessions (last 1h)",
-      "description": "Count of Invalid IDs found ERROR messages from xnat-ingest assign. These indicate missing or invalid session identifiers. Repeated attempts can count the same session again. Inspect the message and staged data before correcting identifiers and retrying.",
+      "description": "Count of ERROR messages beginning Could not resolve the labels of from accessionflow label xnat in the last hour. These sessions need routing-label review in assigned/__invalid__. The separate Label completed with N errors summary is excluded. A repeated attempt can report the same session again; this is not a distinct-session count.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -235,7 +235,7 @@
     {
       "type": "stat",
       "title": "Assign cycles with errors (last 1h)",
-      "description": "Each xnat-ingest assign cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex uses (?s) so `.` matches the newlines that follow the colon in the multi-line summary.",
+      "description": "Count of accessionflow label xnat messages beginning Label completed with N errors in the last hour. The summary is one line and records a failed cycle, regardless of how many sessions failed in it. It is not a distinct-session count. The query matches the 0.19.0 summary prefix and a numeric error count.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -324,7 +324,7 @@
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
       "timeFrom": "1h",
-      "description": "Invalid session identifier messages from assign. Inspect the stated errors and the staged files before correcting identifiers and retrying. A session can appear more than once after repeated attempts.",
+      "description": "ERROR messages beginning Could not resolve the labels of from accessionflow label xnat. Inspect the stated missing fields and assigned/__invalid__ before correcting routing labels and retrying. A session can appear more than once. The panel uses a one-hour relative time override.",
       "gridPos": {
         "h": 9,
         "w": 24,

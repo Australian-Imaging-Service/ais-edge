@@ -33,10 +33,10 @@ mgmt host     ──►  203.x.x.x:443         (nginx-ingress, ssl-passthrough)
 The upstream name is **per edge**, not fleet-wide. `charts/mgmt` derives it as
 `<apiPrefix>-<edge>.<domain.internal>` — `k0s-edge-dev.aisedge.local` for the
 site above (`charts/mgmt/templates/edge-clusters.yaml:24`, matching
-`install.sh:442`). It used to be a single `k0s.<domain>` for the whole fleet,
+`install.sh:616`). It used to be a single `k0s.<domain>` for the whole fleet,
 which meant the second site's Ingress claimed a hostname the first already
 owned; the chart now refuses to render if the old fleet-wide
-`hostnames.k0sApi` is still set (`edge-clusters.yaml:86`). Pin a different name
+`hostnames.k0sApi` is still set (`charts/mgmt/templates/edge-clusters.yaml:86`). Pin a different name
 per site with `apiHost` on that edge's `edges[]` entry if you need one.
 
 ## What haproxy has access to
@@ -68,8 +68,8 @@ We don't write its YAML — k0smotron does. But we DO control:
 
 | File | Purpose |
 |---|---|
-| `sites/<site>/values.yaml` (`edges[]`) → `charts/mgmt/templates/edge-clusters.yaml` | the `Cluster` CR. `spec.ingress.deploy: true` (`edge-clusters.yaml:251`) is what makes k0smotron generate the haproxy DS at all; `apiHost` / `konnectivityHost` on the same block are the names haproxy dials upstream |
-| `manifests/01-management/edge-cluster.yaml.tpl` | **legacy, no longer applied.** `install.sh:445` exports `CLUSTER_CR_MANAGED_BY_HELM=1` and `scripts/05-setup-edge-cluster.sh:47` then skips rendering it. It hardcoded one fleet-wide NodePort pair (30443 / 30132), so a second site was impossible, and `persistence: emptyDir`, which the chart refuses. Edit the chart values, not this file |
+| `sites/<site>/values.yaml` (`edges[]`) → `charts/mgmt/templates/edge-clusters.yaml` | the `Cluster` CR. `spec.ingress.deploy: true` (`charts/mgmt/templates/edge-clusters.yaml:267`) is what makes k0smotron generate the haproxy DS at all; `apiHost` / `konnectivityHost` on the same block are the names haproxy dials upstream |
+| `manifests/01-management/edge-cluster.yaml.tpl` | **legacy, no longer applied.** `install.sh:619` exports `CLUSTER_CR_MANAGED_BY_HELM=1` and `scripts/05-setup-edge-cluster.sh:47` then skips rendering it. It hardcoded one fleet-wide NodePort pair (30443 / 30132), so a second site was impossible, and `persistence: emptyDir`, which the chart refuses. Edit the chart values, not this file |
 | `scripts/00-common.sh` → `stage_edge_join_payload()` | extracts the cluster CA from Secret `<cluster>-ca` in namespace `<cluster>`, mints the server cert with the right SANs (localhost / kubernetes[.default[.svc[.cluster.local]]] / 10.96.0.1 / `<node-ip>`, `-days 3650`), then shreds the CA private key — it signs cluster identities and must never leave the management node |
 | `scripts/06-join-edge-worker.sh` (`join: ssh`) and `scripts/06b-make-bootstrap.sh` (`join: bundle`) | delivery only. 06 scps `k0s-ca.crt` + `haproxy-server.pem` + `join-token` to the edge; 06b tars the same three files into the carry-over bundle. Both call the one function above, so an ssh-joined and a bundle-joined edge cannot end up with different certs |
 | `scripts/files/edge-join.sh` (step 5 of 6, runs **on** the edge) | `install -m 0644` puts them in place as `/etc/haproxy/certs/ca.crt` and `/etc/haproxy/certs/server.pem` |

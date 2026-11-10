@@ -152,7 +152,7 @@ The live keys are:
 
 ```yaml
 installMode: existing        # we're using AKS; install.sh:134
-topology: cloud              # charts/mgmt/values.yaml:32 — onprem | cloud
+topology: cloud              # charts/mgmt/values.yaml:33; choices: onprem | cloud
 
 domain:
   internal: aisedge.example.com
@@ -177,7 +177,7 @@ render without them, deliberately, so a missing solver surfaces at
 
 Pin the LB to your reserved IP in the same file. It is layered onto the
 management chart with `-f`, so a top-level `ingress-nginx:` key overrides the
-vendored subchart's defaults at `charts/mgmt/values.yaml:523-550` — which are
+vendored subchart's defaults at `charts/mgmt/values.yaml:688-715`, whose settings are
 the on-prem ones, `hostNetwork: true` + `service.type: ClusterIP`. Left
 untouched on AKS, the reserved 20.x.y.z never attaches and Step 6 can never
 pass:

@@ -9,14 +9,14 @@
 > shell variables they set (`CLOUD_PROVIDER`, `LB_PUBLIC_IP`, `CERT_ISSUER`,
 > `DNS_PROVIDER`, `CLOUD_CREDENTIALS_FILE`) no longer exist anywhere outside
 > `docs/`. `topology: cloud` survives as a chart value
-> (`charts/mgmt/values.yaml:32`) but is parked, not ported — every site under
+> (`charts/mgmt/values.yaml:33`) but is parked rather than ported; every site under
 > `sites/` ships `topology: onprem`, annotated "cloud   parked, not ported to
 > the charts yet". Read the guides below as design records, not as an install
 > path.
 
 The AIS-Edge codebase is **cloud-portable by design**, but the portability
 lives in the site file now rather than in a provider switch: `topology:`
-(`onprem | cloud`, `charts/mgmt/values.yaml:32`) picks the network shape, and
+(`onprem | cloud`, `charts/mgmt/values.yaml:33`) picks the network shape, and
 everything genuinely cloud-specific — the load balancer, the DNS
 zone, the pre-allocated LB address — is configured on those components
 themselves rather than consumed by this repo. There is no `CLOUD_PROVIDER`
@@ -131,7 +131,7 @@ real hole.
   controller does the rest). On the charts that is a site-file override of the
   vendored subchart under the `ingress-nginx:` key — its in-repo default is
   on-prem, `hostNetwork: true` + `service.type: ClusterIP`
-  (`charts/mgmt/values.yaml:523-550`)
+  (`charts/mgmt/values.yaml:688-715`)
 - Edges resolve hostnames via real public DNS (no `/etc/hosts` hacks)
 - Pod manifests don't carry `hostAliases:` blocks
 - The k0s API server is exposed through the same SNI ingress as
@@ -145,7 +145,7 @@ real hole.
 - Credentials format (openrc.sh, ~/.aws/credentials, gcloud ADC, az login)
 - DNS-01 solver for cert-manager (Cloudflare, Route53, Cloud DNS, Azure DNS)
   — `certManager.acme.dns01Solver`, a provider-specific block passed through
-  verbatim (`charts/mgmt/values.yaml:426`)
+  verbatim (`charts/mgmt/values.yaml:591`)
 - LB attachment to a pre-allocated public IP —
   `ingress-nginx.controller.service.loadBalancerIP` in the site file
 

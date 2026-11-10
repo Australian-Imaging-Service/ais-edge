@@ -1,5 +1,7 @@
 # AIS Edge — medical imaging ingest from hospital to XNAT
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Receives DICOM inside a hospital, de-identifies it on the edge in that hospital, and
 delivers it to XNAT — without the hospital network ever needing an inbound
 route, and without XNAT credentials ever leaving the management node.
@@ -100,7 +102,7 @@ chart is not needed.
 | **s3-uploader** | edge | `rclone copy` each settled session to `s3://ingest-<edge>/staged/`, inside the upload-tree writer lock. Copies only: it never deletes the local copy, and it copies a session again when the staged-reclaimer leaves a repair request for it. Emits a JSON event schema that the alert rules consume. |
 | **Vector** | edge | Ships pod logs to Loki on the management node over TLS. |
 | **SeaweedFS** | mgmt | S3 staging. One bucket per edge, one scoped identity per edge. |
-| **mgmt-upload-\<edge\>** | mgmt | `xnat-ingest upload` — pulls staged sessions and writes them into XNAT. |
+| **mgmt-upload-\<edge\>** | mgmt | `accessionflow store xnat`; pulls staged sessions and writes them into XNAT. |
 | **mgmt-reclaim-\<edge\>** | mgmt | Removes staged sessions **only after XNAT confirms it holds every file**: one object at a time, each delete conditional on the ETag it listed (`If-Match`), never a folder. The only component that deletes patient data. |
 | **staged-reclaimer** | edge | The same script as `mgmt-reclaim-<edge>`, run with `STORAGE=filesystem` against the terminal stage directory, in **both upload modes**. Under `upload.mode: s3` it deletes a local file only after the bucket holds it with the same size and an ETag equal to the MD5 of the bytes read from disk now (`PROOF=s3`); a file that fails gets one repair request, which the s3-uploader answers with a new copy. Under `upload.mode: direct` it deletes only what XNAT proves, file by file (`PROOF=xnat`). Without it nothing retires the tree: the uploader never deletes, so `onUploaded` would be unsatisfiable and the tree would grow unbounded. Also deletes patient data, one proved resource at a time, inside the upload-tree writer lock. |
 | **cert-sync** | mgmt | Copies the CA bundle, each edge's Loki push **client certificate**, and that edge's **S3 key pair** into that edge's cluster, on a schedule, so CA rotation does not require visiting sites. |
@@ -599,7 +601,7 @@ wrong. A pure condition rule frees nothing once the signal breaks.
 experiment on the first resource POST, so "the experiment exists" is true even
 for a partial upload. The reclaimer reads every `__MANIFEST__.json` for the
 file names of a resource, finds each name's row in the one XNAT resource the
-uploader maps that folder to (the same scan id, the label xnat-ingest derives
+uploader maps that folder to (the same scan id, the label accessionflow derives
 from the SOP class), and sends a HEAD for the file: only a 200 with a
 Content-Length equal to the staged size counts. Per-resource totals are not
 trusted; on xnat-test they stayed correct after XNAT had lost the files. Every
@@ -1049,7 +1051,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| xnat-ingest | `0.16.2.post1`: the fork build `ghcr.io/akshitbeniwal/xnat-ingest`, upstream 0.16.2 plus AIS fixes that upstream has not released, in both charts |
+| accessionflow | `0.19.0`: upstream `ghcr.io/australian-imaging-service/accessionflow`, in both charts. Replaces the former xnat-ingest 0.16.2.post1 fork; deployed object names, paths and Orthanc receipt labels stay the same |
 
 Every one is what is **verified working**, read out of a live deployment rather
 than chosen from a changelog. The previous installer used `/latest/` and

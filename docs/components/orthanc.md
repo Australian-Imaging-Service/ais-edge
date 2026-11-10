@@ -1,13 +1,15 @@
 # Orthanc
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
 open-source DICOM server. In ais-edge it sits at the edge of each site,
 acts as the **DICOM receiver** for local modalities, and runs the AIS
 **Lua hook**, which writes the facility backup and labels stable studies
-before xnat-ingest groups and stages the data. Under the default
-`deid.engine: ingest` the hook does not de-identify: the xnat-ingest
+before accessionflow groups and stages the data. Under the default
+`deid.engine: ingest` the hook does not de-identify: the accessionflow
 `deidentify` stage does that later. The Lua
 de-identification engine (`deid.engine: orthanc`) is deprecated. See
 [deidentification.md](deidentification.md).
@@ -25,26 +27,26 @@ Three jobs at each edge:
 2. **Lua `OnStoredInstance` hook** writes the ORIGINAL DICOM to
    `/facility-backup` (site-controlled retention). Under the default
    `deid.engine: ingest` it then returns, and the instance stays in Orthanc
-   unchanged (`deidentify-and-forward.lua:167`). Only the deprecated
+   unchanged (`charts/edge/files/deidentify-and-forward.lua:167`). Only the deprecated
    `orthanc` engine runs `/instances/{id}/modify` to produce a de-identified
    copy, deletes the original and keeps the de-identified instance.
 3. **Lua `OnStableStudy` hook** PUTs the `xnat-ingest-ready` label on each
    study once it's been quiescent for `StableAge` seconds. Under `ingest` no
    stage waits for it: `group-orthanc` pulls each study that has been quiet
    for `ingest.orthancGroup.waitPeriod`. Under the deprecated `orthanc` engine
-   the label is the signal for `xnat-ingest group-orthanc` to REST-pull the
+   the label is the signal for `accessionflow collate-orthanc` to REST-pull the
    study. This callback has no `DeidEnabled` guard, so it also runs under
    `ingest` whenever the script is loaded. The label shows that a study is
    stable. It does not show that the recipe ran.
 
 After `group-orthanc` hardlinks the instances into `/data/grouped/`, it
 PUTs the `xnat-ingest-processed` label on the study so subsequent
-`group-orthanc` cycles skip it. `xnat-ingest assign` then collates the
+`group-orthanc` cycles skip it. `accessionflow label xnat` then collates the
 grouped session into `/data/assigned/`, and the `deidentify` stage writes the
 de-identified copy to `/data/deidentified/`. That is the tree the edge
 s3-uploader syncs to SeaweedFS (`/data/packaged/` with the optional package
 stage). (There is no `staging/` directory on the edge;
-"staged" refers to the S3 side. See [xnat-ingest.md](xnat-ingest.md).)
+"staged" refers to the S3 side. See [accessionflow.md](accessionflow.md).)
 
 ```
 Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
@@ -61,7 +63,7 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
                               PUT /studies/{id}/labels/xnat-ingest-ready
                                                       │
                                                       ▼
-                                xnat-ingest group-orthanc REST-pulls,
+                                accessionflow collate-orthanc REST-pulls,
                                 hardlinks, PUTs label xnat-ingest-processed
                                 (under ingest it does not wait for the label)
 ```
@@ -73,9 +75,9 @@ unstable again. When it is stable, `OnStableStudy` removes the
 `study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
 study is never re-staged.
 
-The chart default image is the fork build xnat-ingest 0.16.2.post1
+The chart default image is upstream accessionflow 0.19.0
 (`ingest.image` in `charts/edge/values.yaml`). It contains xnat-ingest PR #211,
-which upstream merged on 2026-10-28 and has not released yet. An image without
+which upstream merged on 2026-10-28 and released before this pin. An image without
 it, such as upstream 0.16.2, writes no snapshot label. With such an image an
 armed data policy keeps every Orthanc study (`reclaim_kept`, reason
 `export_state_unknown`), and `/data/orthanc-storage` grows. With PR #211,
@@ -100,7 +102,7 @@ deletes, it logs `WOULD delete` (`reclaim_skipped`).
 | Three ConfigMaps, mounted at **two** paths | `orthanc-config` (orthanc.json) and `orthanc-scripts` (the Lua hook) under `/etc/orthanc/`; `orthanc-routing` — which carries **both** `routing.json` and `deidentification-profile.json` — under `/etc/ais-edge/`. The split is load-bearing, not tidiness: see "Configuration" below |
 | One Secret env var | `AIS_DEID_HMAC_SALT`, the salt of the Lua hook. The script stops at load without it, so the pod needs it whenever the facility backup is on. Only the deprecated `orthanc` engine uses the value, for SubjectHash / SessionHash |
 | One mounted Secret | `orthanc-credentials` → `/etc/orthanc/users.json` (one key, by `subPath`). It is a configuration fragment that Orthanc merges, because it scans `/etc/orthanc`. Orthanc has no `RegisteredUsersFile` option. The REST API can delete studies, so it is authenticated rather than protected only by being ClusterIP-only |
-| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. xnat-ingest group-orthanc and the data-policy engine talk to it (in-cluster Service). |
+| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. accessionflow collate-orthanc and the data-policy engine talk to it (in-cluster Service). |
 
 ## Where it runs
 
@@ -175,7 +177,7 @@ two**, because three different things consume it:
 | Key | Consumed by |
 |---|---|
 | `users.json` | Orthanc itself, mounted at `/etc/orthanc/users.json`. Orthanc merges every `.json` in `/etc/orthanc` as configuration. Shape: `{"RegisteredUsers":{"admin":"<password>"}}`. The password is **plaintext inside that JSON**, which is why this Secret belongs in the SOPS-encrypted site file |
-| `orthanc-user`, `orthanc-password` | `xnat-ingest group-orthanc`, which calls the REST API to list and label studies, and the data-policy engine, which reclaims the Orthanc store over the same API |
+| `orthanc-user`, `orthanc-password` | `accessionflow collate-orthanc`, which calls the REST API to list and label studies, and the data-policy engine, which reclaims the Orthanc store over the same API |
 
 If those disagree with the user in `users.json`, Orthanc answers 401:
 `group-orthanc` crash-loops with data sitting in Orthanc, and the store
@@ -208,7 +210,7 @@ storescu -aec AISEDGE -aet TEST_MOD <edge-ip> 4242 /path/to/study/*.dcm
 
 - **Orthanc storage is cleaned only by the data policy.** Under the default `deid.engine: ingest` Orthanc holds the instances as they arrived, identifiable. `dataPolicy.derived.orthancStorage` (backend `orthanc-rest`, `reclaim: onGrouped`, `minAge: 7d`) deletes a study after `group-orthanc` staged it and its snapshot label matches, and only when the policy is armed (`enabled: true`, `dryRun: false`). Until then Orthanc storage grows. See the snapshot label paragraph above.
 - **Deprecated engine only: a pure-Lua salted hash instead of a true HMAC** for SubjectHash / SessionHash, because `jodogne/orthanc-plugins` doesn't expose `Compute*` crypto in Lua. Adequate for research deid; switch to `jodogne/orthanc-python` for HMAC-grade. Under `ingest` the hook makes no hash.
-- **Recipe authoring is by hand.** Nothing checks that the tags in a recipe exist before deployment. What replaced the old `07c` prompt is a **render-time gate**: `deid.policyReviewed` (`charts/edge/values.yaml`, top level, not under `orthanc:`, because it gates every engine) has no safe default, and the chart refuses to install until a human sets it true. Under `ingest` that confirms the recipe in `ingest.deidentify.specs` (`charts/edge/templates/_helpers.tpl:242-246`). Under the deprecated `orthanc` engine it confirms the profile and the AET map, and the chart also fails an empty `aetMap` and an empty `profile` (`_helpers.tpl:249-259`). It is a gate, not a validator: it confirms a human read the policy, not that the tags in it exist.
+- **Recipe authoring is by hand.** Nothing checks that the tags in a recipe exist before deployment. What replaced the old `07c` prompt is a **render-time gate**: `deid.policyReviewed` (`charts/edge/values.yaml`, top level, not under `orthanc:`, because it gates every engine) has no safe default, and the chart refuses to install until a human sets it true. Under `ingest` that confirms the recipe in `ingest.deidentify.specs` (`charts/edge/templates/_helpers.tpl:243-247`). Under the deprecated `orthanc` engine it confirms the profile and the AET map, and the chart also fails an empty `aetMap` and an empty `profile` (`charts/edge/templates/_helpers.tpl:250-260`). It is a gate, not a validator: it confirms a human read the policy, not that the tags in it exist.
 - **Hardlinks require a shared filesystem** — `orthanc-storage/`, `grouped/` and `assigned/` must live on one mount, or group-orthanc's `hardlink_or_copy` degrades to a full byte copy (and a true hardlink would fail with EXDEV). This is structurally guaranteed rather than left to the operator: every stage mounts the **same pipeline PVC** at `/data`, backed by `storage.pipeline.hostPath: /data/xnat-ingest`. Splitting them across volumes is the way to break it.
-- **Deprecated engine only: modalities with unmapped CalledAETs are rejected for ingest, but not discarded.** Under the default `ingest` engine the script returns before this lookup (`deidentify-and-forward.lua:167`), so no AE title is rejected. Under `deid.engine: orthanc` the original instance is written to `<FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm` and only then removed from Orthanc. If that quarantine write fails the instance is kept in Orthanc instead, and if no `FacilityBackupDir` is configured the hook aborts without deleting anything. A `REJECT: no project mapped for CalledAET <AET>` line is logged, which is what the `DICOMRejectedUnmappedAET` alert matches. Add the AET to `routing.json` AETMap and re-send to ingest the quarantined studies.
+- **Deprecated engine only: modalities with unmapped CalledAETs are rejected for ingest, but not discarded.** Under the default `ingest` engine the script returns before this lookup (`charts/edge/files/deidentify-and-forward.lua:167`), so no AE title is rejected. Under `deid.engine: orthanc` the original instance is written to `<FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm` and only then removed from Orthanc. If that quarantine write fails the instance is kept in Orthanc instead, and if no `FacilityBackupDir` is configured the hook aborts without deleting anything. A `REJECT: no project mapped for CalledAET <AET>` line is logged, which is what the `DICOMRejectedUnmappedAET` alert matches. Add the AET to `routing.json` AETMap and re-send to ingest the quarantined studies.
 - **Deprecated engine only: `AIS_DEID_HMAC_SALT` rotation breaks subject linkage.** Under `deid.engine: orthanc`, rotating the salt produces a different SubjectHash for the same patient. Under `ingest` nothing uses the value, so a rotation changes no XNAT label.

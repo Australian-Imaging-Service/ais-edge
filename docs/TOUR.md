@@ -1,5 +1,7 @@
 # A guided tour of this repository
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Written to be read start to finish by someone who has never seen it. It follows
 the order you would actually do things in: understand the shape, fill in the
 config, install, then operate.
@@ -190,7 +192,7 @@ ever dialled the node port from outside. It buys nothing here.
 
 ```yaml
 deid:
-  engine: ingest               # the default: the xnat-ingest deidentify stage
+  engine: ingest               # the default: the accessionflow deidentify stage
   policyReviewed: false        # NO SAFE DEFAULT. You must set this to true.
 
 ingest:
@@ -313,7 +315,7 @@ file listing and checks it with a HEAD request: present, with the same size
 files it proved, inside the upload-tree writer lock, and keeps everything it
 cannot prove. The first upgrade to this check, and any rollback to a release
 without the lock, need the drain in
-[xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
+[accessionflow.md, "Upgrade or roll back while the cleanup can delete"](components/accessionflow.md).
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule,
 its minimum age (counted from when the newest file reached the tree), whether
 it verifies against XNAT under `direct` (with `false` it removes nothing), and
@@ -1035,7 +1037,7 @@ the bound costs it nothing there.
 
 > **`joinTokenTTL` sets it per edge.** `install.sh` reads it into `EDGE_JOIN_TTL`
 > and passes it to step 5, which is where the token is actually minted
-> (`scripts/05-setup-edge-cluster.sh:128` reads it, `:139` writes it as the
+> (`scripts/05-setup-edge-cluster.sh:128` reads it, `scripts/05-setup-edge-cluster.sh:139` writes it as the
 > Secret's `expiry`). Raise it only for a `join: bundle` edge whose bundle has to
 > travel further than the default — a bundle carried to a hospital by hand is the
 > case this exists for. It is a BEARER credential: anything holding it can join a
@@ -1530,6 +1532,13 @@ patient data — is still sitting on that machine.
 
 Stated plainly so you can weigh them.
 
+Items 1 and 2 below preserve measurements from older xnat-ingest releases.
+They are fixed in the pinned accessionflow 0.19.0 image. A complete session
+now produces a skip message and bypasses the success line. The uploader
+clears xnatpy caches before object operations. Do not apply the old restart
+advice below to routine recovery on 0.19.0. The history explains the alert
+design; see the current status notes in [the component guide](components/accessionflow.md#known-upstream-defects-candidate-reports).
+
 **1. `Successfully uploaded all files in '<session>'` is a LEVEL, not an
 event.** The uploader re-scans staging roughly every 62 seconds and logs that
 line on every pass — including the passes where it correctly decides the
@@ -1543,7 +1552,7 @@ This matters to anything that keys on it. `XNATUploadSuccess` uses a `[10m]`
 range for exactly this reason — see the comment on that rule, and the range
 floor `scripts/ci/promtool.sh` enforces.
 
-**2. The uploader caches XNAT state across a `--loop` lifetime.** `xnat-ingest upload --loop` opens one XNAT connection and xnatpy caches the
+**2. The uploader caches XNAT state across a `--loop` lifetime.** The historical `xnat-ingest upload --loop` opens one XNAT connection and xnatpy caches the
 project/experiment listing on it. A connection opened while a session does not
 yet exist keeps returning that stale view.
 
@@ -1656,7 +1665,7 @@ share a group and re-notify on every membership change. That alone was not
 enough: grouping cannot suppress an alert that resolves and re-fires, because
 each re-fire is a new alert instance. The second change was giving
 `XNATUploadSuccess` a range longer than the uploader's loop period so it stops
-flapping. Verified live — with the uploader still re-emitting the success line
+flapping. In that historical live test, the uploader still re-emitted the success line
 every ~62s, the notification count stayed flat.
 
 **9. Four alert rules were removed, not fixed, because a fix would have
@@ -1679,8 +1688,8 @@ fire for two independent reasons, only the second of which is fixable in
 this repo: the RHS parsed a JSON `event` key the management uploader's log
 format has never emitted (its lines carry `logger`/`message`/`ts`, no
 `event`), and even fixed to match on the real success string, that string is
-a **level** (docs/components/xnat-ingest.md, "Known upstream defects" §1) —
-its count grows with the size of the static backlog sitting in staging, not
+a **level** (docs/components/accessionflow.md, "Known upstream defects" §1),
+in the old release. Its count grew with the size of the static backlog sitting in staging, not
 with new arrivals in the window, so a genuine backlog would make the
 subtraction more negative, exactly the wrong direction for a `> 3` alert.
 Deleted rather than shipped as an alert that reads as backlog coverage and
@@ -1715,7 +1724,7 @@ already reach Loki with a correct `cluster` label via Vector, unlike the
 dead Prometheus approach.
 
 All four are recorded in `docs/alerting-architecture.md` and
-`docs/components/xnat-ingest.md` rather than silently dropped. None of the
+`docs/components/accessionflow.md` rather than silently dropped. None of the
 gaps are currently covered by another rule: `SessionStagedNotConfirmedInXNAT`
 is
 the closest existing backstop for the XNATBacklogGrowing case, but fires only
@@ -1751,7 +1760,11 @@ accession replaced per the profile) → `group-orthanc` labels it within one
 the 5-minute settle guard → `mgmt-upload-edge-dev` picks it up on its own
 60s poll and lands it in XNAT (`test_project`), confirmed both by the
 `Successfully uploaded all files` line and by checking XNAT directly.
-Two things surfaced along the way, neither in the plumbing:
+Two things surfaced along the way, neither in the plumbing. These are
+historical observations, not a replay with the current image. In 0.19.0,
+`stores/xnat/remotes.py` can use `OtherDicomSessionData` for an otherwise
+unmapped modality when the XNAT server exposes that class. The old OT failure
+below does not establish that all current OT uploads fail:
 
 - A first attempt used `Modality: OT` (Other), which XNAT's session-type
   mapping does not support. The uploader does not quarantine a permanently
@@ -1771,7 +1784,7 @@ Two things surfaced along the way, neither in the plumbing:
   unknown finding came out of the same run: a benign ERROR-level checksum
   mismatch that `xnat-ingest` re-logs every loop for several minutes after
   a session first lands, before XNAT's own catalog catches up — see
-  `docs/components/xnat-ingest.md`, "Known upstream defects" §3.
+  `docs/components/accessionflow.md`, "Known upstream defects" §3.
   That paragraph records the 0.15.0 behavior. The empty-digest ERROR was fixed
   in 0.15.3. Section 3 now separates that history from real content mismatches
   and the remaining name-only comparison when XNAT has no computed digest.

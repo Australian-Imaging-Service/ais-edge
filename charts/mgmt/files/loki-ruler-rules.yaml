@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Loki ruler rules — log-derived alerts.
 # =============================================================================
@@ -144,7 +145,7 @@ groups:
         # alert on, which is exactly why an absence alert is the only thing that
         # catches it.
         #
-        # Observed for real: xnat-ingest's all_uploaded() inspects only
+        # Historical diagnosis (later disproved): xnat-ingest's all_uploaded() inspects only
         # session-level resources and misses scan-level ones, so it skipped a
         # session while logging "all the resources already exist on XNAT" — about
         # an EMPTY XNAT. It ran that way for two days looking like success. This
@@ -255,7 +256,7 @@ groups:
                  "Skipping ... all the resources already exist on XNAT" against an
                  empty XNAT meant the upstream all_uploaded() bug, which compared
                  resource LABELS and so called an empty resource uploaded. Fixed in
-                 0.15.3; from then on (pinned 0.16.2) that line means the file sets really
+                 0.15.3; from then on (pinned 0.19.0) that line means the file sets really
                  did match, so check XNAT itself before believing it.
               3. Does XNAT actually hold it?
               4. What did the reclaimer decide? reclaim_kept with incomplete_in_xnat
@@ -350,14 +351,14 @@ groups:
         #
         # 0.15.3 fixes the FALSE POSITIVE at source: a file whose digest is
         # empty is compared by NAME only (compare_resource_with_xnat, and
-        # api/check_upload_api.py guards the same way), so catalogue lag no
+        # stores/xnat/api/check_store_api.py guards the same way), so catalogue lag no
         # longer reads as a mismatch. That is what made dropping the matcher
         # safe, and it is the only part of the original claim that held.
         #
         # CORRECTION. An earlier version of this note said the "please delete on
         # XNAT to overwrite" emitter was GONE in 0.15.6 and that the matcher had
         # therefore become a no-op. BOTH WERE WRONG. The emitter is still there,
-        # at helpers/remotes.py:861-866 (0.15.6; :949 in 0.16.1; :1188 in 0.16.2), and it carries
+        # at stores/xnat/remotes.py:889-891 (0.19.0), and it carries
         # no "Missing paths" line.
         # The grep that produced the claim missed it because the phrase is split
         # across two adjacent string literals, which is the documented trap with
@@ -428,8 +429,8 @@ groups:
 
             2. delete those resources on XNAT so the uploader can recreate them
 
-            3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.16.2 clears the cache
-               every pass, upload_api.py:157). The deletion is picked
+            3. NO RESTART IS NEEDED FROM 0.15.6 ON (pinned 0.19.0 clears the cache
+               every pass, stores/xnat/api/store_api.py:281). The deletion is picked
                up within one --loop interval. MEASURED: deleted at 07:17,
                re-uploaded at 07:18:26 with the pod never restarting.
 
@@ -865,7 +866,8 @@ groups:
             Check the assign logs and assigned/__invalid__ on the edge node under storage.pipeline.hostPath.
             Keep these files for manual review. If facility backup is off, they can be
             the only copy. Do not delete them to clear this alert.
-              kubectl --kubeconfig kubeconfig-{{ $labels.cluster }} -n xnat-ingest logs -l app=xnat-ingest,component=assign --since=15m
+            Use the affected edge's kubeconfig for this command:
+              kubectl -n xnat-ingest logs -l app=xnat-ingest,component=assign --since=15m
             The alert clears when the log leaves the 10-minute window. This does not
             prove that the session has recovered.
 
@@ -899,11 +901,13 @@ groups:
         # upload completed emails".
         #
         # CAUTION — RANGE MUST EXCEED THE UPLOADER'S ~62s LOOP PERIOD, or
-        # duplicate mail returns. The matched string is re-emitted every
-        # pass (a LEVEL, not an event — see docs/components/xnat-ingest.md,
+        # duplicate mail returned on older releases. The old string was re-emitted every
+        # pass (a LEVEL, not an event; see docs/components/accessionflow.md,
         # "Known upstream defects"), so too short a range lets the series go
         # empty between passes and the alert flaps once per loop. 10m gives
         # ~10x headroom; scripts/ci/promtool.sh asserts it stays that way.
+        # In 0.19.0, a complete-session skip bypasses this success line.
+        # The retained range and repair exclusion are existing alert policy.
         # `group_by: session` (files/alertmanager-config.yaml) is necessary
         # but not sufficient on its own — it only collapses alerts firing at
         # the same time, not a resolve/re-fire cycle.
@@ -913,7 +917,7 @@ groups:
         # SessionStagedNotConfirmedInXNAT below is the backstop for exactly
         # that failure: staged, and never confirmed.
         #
-        # A REPAIR IS NOT AN UPLOAD. xnat-ingest logs the same success line
+        # A REPAIR IS NOT AN UPLOAD. accessionflow logs the same success line
         # after re-sending files XNAT had lost, so `unless` drops any session
         # with a "Repaired" line in the last 20m; XNATRepairAttempted
         # reports those. 20m = this rule's 10m window + up to 10m between the
@@ -955,20 +959,20 @@ groups:
 
       - alert: XNATRepairAttempted
         # XNAT HELD THE SESSION WITH FILES MISSING, AND THE UPLOADER TRIED TO
-        # RE-SEND THEM. xnat-ingest logs "Repaired" only when a resource
-        # already existed on XNAT with files missing (upload_api.py,
+        # RE-SEND THEM. accessionflow logs "Repaired" only when a resource
+        # already existed on XNAT with files missing (stores/xnat/api/store_api.py,
         # repaired_on_xnat); a first upload never does. Seen 2026-09-23 and
         # 2026-09-28: XNAT restarted, listed 0 of N files for sessions it held,
         # and the uploader re-sent them for cai-lfs3 (3 sessions, 10 resources
         # on 2026-09-28).
-        # AN ATTEMPT, NOT A RESULT: the line is logged after the transfers
-        # whether or not they failed (upload_api.py:490, before the verdict),
-        # and no log line ties a later success to this attempt. So this claims
-        # only the attempt. A repair that keeps failing leaves the session
-        # unconfirmed, which SessionStagedNotConfirmedInXNAT reports.
+        # AN ATTEMPT: stores/xnat/api/store_api.py:603-614 in 0.19.0 logs
+        # this line before the verdict, even when the re-send failed.
+        # A separate Completed repair line and xnat_repair_completed event
+        # follow only a successful verdict (lines 668-680). This rule still
+        # matches the attempt. Inspect later errors and destination evidence.
         # $value is the number of scan resources (max, not sum: a retried
         # repair must not count twice).
-        # CAUTION: matches xnat-ingest's own wording (0.15.6, unchanged in 0.16.2); a reword
+        # CAUTION: matches accessionflow 0.19.0 repair wording; a reword
         # silences it.
         expr: |
           max by (cluster, session) (
@@ -1016,7 +1020,7 @@ groups:
         # THE BARE NUMBERS NEED HTTP CONTEXT, AND PROGRESS BARS MUST BE
         # EXCLUDED. This used to be \b(401|403|unauthorized|forbidden)\b,
         # which fires on ANY log line containing 401 or 403 as a word — and
-        # xnat-ingest writes tqdm progress bars into this namespace:
+        # accessionflow writes tqdm progress bars into this namespace:
         #
         #   Processing staged sessions found in 's3://.../staged':
         #     0%|          | 0/1 [00:00<?, ?it/s]100%|####| 1/1 [00:01<00:00...
@@ -1137,7 +1141,7 @@ groups:
           source: loki-ruler
           category: edge-pipeline
         annotations:
-          summary: "xnat-ingest {{ $labels.component }} logged an error on {{ $labels.cluster }}"
+          summary: "accessionflow {{ $labels.component }} logged an error on {{ $labels.cluster }}"
           description: |
             The {{ $labels.component }} stage logged ERROR, CRITICAL, or a Python
             traceback within the last 10 minutes. Inspect the stage logs on this
@@ -1149,7 +1153,7 @@ groups:
             remain silent here. Check pod status and previous container logs too.
 
       - alert: DeidentifyStageError
-        # Counterpart to OrthancDeidLuaError for the xnat-ingest engine. Whichever
+        # Counterpart to OrthancDeidLuaError for the accessionflow engine. Whichever
         # engine a site runs, a failure to de-identify has to be visible; without
         # this, switching to ingest.deidentify silences OrthancDeidLuaError and puts
         # nothing in its place, leaving the one thing you cannot afford to miss
@@ -1175,7 +1179,7 @@ groups:
           source: loki-ruler
           category: deid
         annotations:
-          summary: xnat-ingest deidentify errored on {{ $labels.cluster }}
+          summary: accessionflow deidentify errored on {{ $labels.cluster }}
           description: >
             The deidentify stage logged an error in the last 10 minutes. Check
             the pod logs and confirm the recipes under ingest.deidentify.specConfigMap

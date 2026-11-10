@@ -1,5 +1,6 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # Uploader process health. These selectors cover only this release's
-# xnat-ingest upload containers; they do not inspect the remote XNAT server.
+# accessionflow store xnat containers; they do not inspect the remote XNAT server.
 # The template supplies the namespace, release and exact deployment names.
 # Follow Kubernetes ownership rather than assuming generated pod-name lengths.
 groups:

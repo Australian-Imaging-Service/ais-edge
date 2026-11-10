@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # AIS Edge — management cluster chart
 # =============================================================================
@@ -66,7 +67,7 @@ dataPolicy:
   # `location` is WHERE each stage lives inside the edge pods. Defaults match
   # the edge chart's own volume mounts, so a fresh install needs no edit. They
   # exist so the policy engine walks declared paths instead of knowing about
-  # Orthanc or xnat-ingest — swap the de-identifier and you repoint a location
+  # Orthanc or accessionflow; swap the de-identifier and you repoint a location
   # rather than rewrite a reclaimer. MUST match charts/edge/values.yaml.
   # quarantine has no location of its own: it is subPath UNDER facilityBackup.
   originals:
@@ -112,10 +113,11 @@ dataPolicy:
     grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine
     assigned:       {location: /data/assigned, reclaim: onUploaded, minAge: 0}
 
-    # Owned by THIS chart. xnat-ingest upload has no S3 retention of its own —
+    # Owned by THIS chart. accessionflow store xnat has no S3 retention of its own:
     # it rebuilds its work list from a live S3 listing every loop, so an
-    # already-uploaded session stays there and is re-listed/re-uploaded/
-    # re-alerted forever without this reclaimer.
+    # already-uploaded session stays there and is re-listed without this
+    # reclaimer. In 0.19.0 a complete session skips before the success line.
+    # Repeated success alerts from the old skip path are historical.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
       # THE TWO CLOCKS: this minAge must exceed the edge's
@@ -154,7 +156,8 @@ dataPolicy:
       # an unpinned tag is worst on the job that deletes data.
       image:
         # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
-        # release has every fix that the fork build 0.16.2.post1 carried.
+        # release replaces the fork build 0.16.2.post1. Validate each required fix;
+        # its version number alone does not prove behavioral equivalence.
         # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
         # ACFLOW_*). Every pin of the tool in both charts must name the same image
         # (CI: log-phrases and cli-contract), and the templates follow this version.
@@ -416,7 +419,8 @@ xnatUpload:
   namespace: xnat-upload
   image:
     # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
-    # release has every fix that the fork build 0.16.2.post1 carried.
+    # release replaces the fork build 0.16.2.post1. Validate each required fix;
+    # its version number alone does not prove behavioral equivalence.
     # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
     # ACFLOW_*). Every pin of the tool in both charts must name the same image
     # (CI: log-phrases and cli-contract), and the templates follow this version.
@@ -482,7 +486,7 @@ xnatUpload:
   # in it matches. A resource that the edge has sent in part waits for the
   # next pass (the partial upload measured above). This does not wait for a
   # whole session: a resource that has not arrived yet goes up on a later
-  # pass. Edge sessions carry manifests: xnat-ingest writes one in each
+  # pass. Edge sessions carry manifests: accessionflow writes one in each
   # resource and the edge copies it with the files.
   # false: upload the objects that are there.
   requireManifest: true
@@ -494,10 +498,11 @@ xnatUpload:
 
   resources:
     requests: {memory: 256Mi, cpu: 100m}
-    # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
-    # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
-    # session with many large scans. Lower this only after the image
-    # writes archives to disk (xnat-ingest PR #200).
+    # CAUTION: accessionflow 0.19.0 calls xnat 0.8.1 upload_dir. Its
+    # tar_file/tgz_file methods use a 256 MiB SpooledTemporaryFile. Up to
+    # 10 workers can hold archives at once, as in the older 0.16.2 warning.
+    # Do not assume the fork archive fix (xnat-ingest PR #200) is present.
+    # Keep this limit until memory and temporary disk use are measured.
     limits:   {memory: 4Gi,   cpu: "2"}
 
 

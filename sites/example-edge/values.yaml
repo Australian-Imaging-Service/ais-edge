@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # EXAMPLE EDGE SITE — what is LOCAL to one edge
 # =============================================================================
@@ -43,7 +44,7 @@
 clusterLabel: example-edge
 
 # The de-identification engine. ingest is the default and the only engine for
-# a new site: the xnat-ingest deidentify stage applies the recipe under
+# a new site: the accessionflow deidentify stage applies the recipe under
 # ingest.deidentify.specs below. The chart derives the stage, the group label
 # and the reclaim condition from this one key. orthanc, the Lua engine, is
 # deprecated (docs/components/deidentification.md).
@@ -165,7 +166,7 @@ ingest:
         # Example de-identification recipe for medimage/dicom-series.
         #
         # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
-        # xnat-ingest's load_specs walks <spec-dir>/<category>/<format>, so the DIRECTORY
+        # accessionflow's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
         # is the category and the FILE is the format: medimage/dicom-series. It skips
         # anything at the top level that is not a directory, so a flat file named
         # `medimage@dicom-series.json` is never read and every session fails with

@@ -22,7 +22,7 @@ Application Gateway and GCP HTTPS LB all break the worker's join, and break it
 asymmetrically: the ingress and API report healthy and only the edge fails, as an
 x509 error in a journal on a machine in a hospital.
 
-`charts/mgmt/templates/edge-clusters.yaml:67` already refuses to render a
+`charts/mgmt/templates/edge-clusters.yaml:72-74` already refuses to render a
 terminating configuration. This work makes the *cloud* shape follow the same
 rule rather than depending on an operator hand-copying a comment.
 
@@ -36,16 +36,16 @@ currently means *"resolve by real DNS instead of hosts files"*:
 
 | Branch point | Cloud behaviour |
 |---|---|
-| `install.sh:422` | skips the management `/etc/hosts` write |
+| `install.sh:562` | skips the management `/etc/hosts` write |
 | `scripts/05-setup-edge-cluster.sh:92` | skips the management hosts edit |
 | `scripts/06c-post-join.sh:62` | leaves child-cluster CoreDNS at chart defaults |
 | `scripts/files/edge-join.sh:100` | skips the edge `/etc/hosts` write |
-| `charts/edge/templates/_helpers.tpl:124,170` | no `hostAliases` |
+| `charts/edge/templates/_helpers.tpl:477,523` | no `hostAliases` |
 | `charts/mgmt/templates/observability.yaml:170,197` | no IP SANs on certificates |
-| `charts/mgmt/templates/seaweedfs.yaml:541` | onprem-only block skipped |
+| `charts/mgmt/templates/seaweedfs.yaml:646` | onprem-only block skipped |
 
 The ACME / DNS-01 `ClusterIssuer` is **fully implemented** in
-`cert-issuers.yaml:265-291` with guards, and CI covers it (`mgmt-letsencrypt`).
+`charts/mgmt/templates/cert-issuers.yaml:265-291` with guards, and CI covers it (`mgmt-letsencrypt`).
 
 ## Known-false things to delete, not preserve
 
@@ -83,16 +83,18 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with rea
 
 ### 2 — The dead `loadBalancerIP` key  ·  DONE (both keys removed, 5 docs corrected)
 
-- [x] **2.1** `charts/mgmt/values.yaml:555` declares
-      `ingressNginx.loadBalancerIP: ""` and **no template consumes it**. It is
-      exactly the key an operator reaches for to pin a pre-allocated floating
-      IP, and it does nothing. Either wire it or delete it — do not leave a key
-      that reads as configured and is not.
-      Decision: **delete it**, and document the subchart path
-      (`ingress-nginx.controller.service.loadBalancerIP`) in its place, because
-      the parent cannot forward into the subchart.
-- [x] **2.2** Same audit for `ingressNginx.proxyBodySize` — flagged as possibly
-      dead by the earlier values-consumers work. Confirm and resolve.
+- [x] **2.1** The old `ingressNginx.loadBalancerIP` parent key was never
+      consumed by a template. It was removed. The comment at
+      `charts/mgmt/values.yaml:718-735` records why an operator could set it
+      without changing the load balancer address. Use the subchart path
+      `ingress-nginx.controller.service.loadBalancerIP` in the site file.
+      A parent values key cannot forward a value into the subchart by itself;
+      the subchart must read the actual setting.
+- [x] **2.2** The same audit found `ingressNginx.proxyBodySize` unused and
+      removed it too. Set `ingress-nginx.controller.config.proxy-body-size`.
+      The chart retains only `ingressNginx.enabled` and `sslPassthrough`.
+      Keep the parent and subchart settings distinct when adding site values;
+      a successful render alone does not show that an unused key had an effect.
 
 ### 3 — Load balancer address  ·  verify-live check DONE; 3.2 still open
 
@@ -199,13 +201,17 @@ that passes through nginx untouched. Switching issuers therefore cannot break a
 join, and moving from `ais-edge-ca` to Let's Encrypt later is `certManager.issuer`
 plus `acme.email` and a `dns01Solver`.
 
-- [ ] **5.4** ONE KNOWN WRINKLE, not zero work: `charts/edge/templates/_helpers.tpl:63`
-      refuses an `https` S3 endpoint with an empty `upload.s3.caBundleSecret`,
-      because an empty `AWS_CA_BUNDLE` *disables* verification rather than
-      falling back to the system trust store. With a publicly-trusted
-      certificate the right answer is system trust, so that guard needs an
-      explicit "use the system store" value rather than treating empty as a
-      mistake. Same question for `observability.loki.caBundleSecret`.
+- [ ] **5.4** Public-CA support still needs an explicit chart policy. The
+      guard at `charts/edge/templates/_helpers.tpl:130-134` refuses an HTTPS
+      S3 endpoint with an empty `upload.s3.caBundleSecret`. The original
+      reason involved an empty `AWS_CA_BUNDLE` in the old AWS CLI client.
+      The client is now rclone; the chart comment records that its empty
+      `RCLONE_CA_CERT` uses system trust. The guard remains because the
+      normal SeaweedFS endpoint uses the fleet's internal CA. A public
+      certificate does not bypass this guard: provide a CA-bundle Secret
+      with the needed trust roots until an explicit system-trust option is
+      implemented and tested. Check Vector's configured CA separately;
+      the two clients do not inherit one another's trust settings.
 
 ### 8 — Live test on OpenStack (Nectar)
 

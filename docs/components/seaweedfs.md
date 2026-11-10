@@ -1,5 +1,7 @@
 # SeaweedFS
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 [SeaweedFS](https://seaweedfs.com/) is a distributed file/object store with
@@ -12,7 +14,7 @@ The DICOM staging buffer. Edge sites copy session directories with
 `rclone copy` (`charts/edge/files/s3-uploader.sh` — the `minio/mc` and AWS
 CLI implementations are gone) into the `staged/` prefix of **their own**
 bucket, and keep their own copy until the edge's staged-reclaimer has proved
-the bucket's copy against it ([xnat-ingest.md](xnat-ingest.md), "S3 mode:
+the bucket's copy against it ([accessionflow.md](accessionflow.md), "S3 mode:
 prove, then delete"). With `seaweedfs.perSiteBuckets: true`, the default, that bucket
 is `ingest-<edge>`; the single shared `ingest-bucket` survives only for
 sites not yet migrated off it. The management-side `mgmt-upload-<edge>`
@@ -240,7 +242,7 @@ That is no longer how it works, for two reasons measured on 4.34:
   attribute the folder was gone within 3 minutes.
 
 Deletion of a local upload tree (the edge's staged-reclaimer) is in
-[xnat-ingest.md](xnat-ingest.md); both deleters run the same
+[accessionflow.md](accessionflow.md); both deleters run the same
 `reclaim-files.py`.
 
 ## Benefits
@@ -266,7 +268,7 @@ Deletion of a local upload tree (the edge's staged-reclaimer) is in
 
 ## Staged-data reclaim (shipped, not future work)
 
-`xnat-ingest upload` has **no S3 retention of its own**: it rebuilds its
+`accessionflow store xnat` has **no S3 retention of its own**: it rebuilds its
 work list from a live listing every `--loop` pass, so a delivered session
 stays in the bucket, is listed again, "uploaded" again and re-fires
 `XNATUploadSuccess` forever while staging grows without bound. The
@@ -277,7 +279,7 @@ reclaimer is the only thing that deletes from staging.
 | Object | CronJob `mgmt-reclaim-<edge>`, **one per `edges[]` entry**, namespace `xnat-upload` |
 | Driven by | `dataPolicy.derived.s3Staged` in `charts/mgmt/values.yaml` |
 | Schedule | `17 * * * *` |
-| Age gate | `minAge: 36h`, the longer of the two clocks (and at most 36h: the XNAT proof runs only after it, and `SessionStagedNotConfirmedInXNAT` counts a session unconfirmed after 48h; the chart refuses more): the edge's staged-reclaimer must prove its local copy against the bucket (`stagedReclaimer.minAge`, a day) before this removes the bucket copy, or the two ping-pong (`RecopyLoop`); see [xnat-ingest.md](xnat-ingest.md), "S3 mode: prove, then delete" |
+| Age gate | `minAge: 36h`, the longer of the two clocks (and at most 36h: the XNAT proof runs only after it, and `SessionStagedNotConfirmedInXNAT` counts a session unconfirmed after 48h; the chart refuses more): the edge's staged-reclaimer must prove its local copy against the bucket (`stagedReclaimer.minAge`, a day) before this removes the bucket copy, or the two ping-pong (`RecopyLoop`); see [accessionflow.md](accessionflow.md), "S3 mode: prove, then delete" |
 | Per-run cap | `maxRemovals: 50` — bounds a "delete everything" bug to 50 sessions per hour, while still draining ~1200/day if genuinely needed |
 | Confirmation | `verifyAgainstXnat: true` — re-queries XNAT before deleting, rather than trusting the uploader's exit code, which only means the call returned |
 | Deletion path | one S3 `DeleteObject` per object, with `If-Match` set to the ETag listed before the proof, never a folder and never `aws s3 rm` or a filer folder delete — see "Deleting staged objects" above for why; the bucket must carry the cleaner opt-out and its attestation first |

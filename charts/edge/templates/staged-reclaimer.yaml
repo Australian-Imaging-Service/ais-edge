@@ -1,8 +1,9 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 TERMINAL-STAGE RECLAIMER, both upload modes.
 
 The uploader never deletes what it sent: under upload.mode=s3 the s3-uploader
-copies, under upload.mode=direct xnat-ingest upload only uploads. So nothing
+copies, under upload.mode=direct accessionflow store xnat only uploads. So nothing
 would ever retire the terminal tree (/data/assigned, or /data/deidentified
 under deid.engine=ingest), and `onUploaded`, the site default for that tree,
 would be permanently unsatisfiable. MEASURED on .240 under direct upload:

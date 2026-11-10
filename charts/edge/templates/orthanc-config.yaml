@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 Orthanc configuration, split across TWO ConfigMaps mounted at TWO paths.
 
@@ -145,7 +146,7 @@ data:
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
-        "_DeidEnabledREADME": "false when deid.engine is not orthanc. OnStoredInstance then writes the original to FacilityBackupDir and returns. It does not read AETMap, it quarantines nothing and it does not modify the instance. Under deid.engine: ingest the xnat-ingest deidentify stage de-identifies instead. OnStableStudy does not read this flag.",
+        "_DeidEnabledREADME": "false when deid.engine is not orthanc. OnStoredInstance then writes the original to FacilityBackupDir and returns. It does not read AETMap, it quarantines nothing and it does not modify the instance. Under deid.engine: ingest the accessionflow deidentify stage de-identifies instead. OnStableStudy does not read this flag.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
         "_LabelsREADME": "Label names from ingest.orthancGroup. OnStableStudy runs under every engine while this script is loaded. It applies ReadyLabel to a stable study (an empty value stops that) and removes ProcessedLabel when a stable study has new instances, so group-orthanc stages it again. group-orthanc filters on ReadyLabel only under deid.engine: orthanc. A ReadyLabel does not prove that de-identification ran.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},

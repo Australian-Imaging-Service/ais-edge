@@ -117,7 +117,7 @@
     {
       "type": "stat",
       "title": "Invalid session reports (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of Invalid IDs found ERROR messages from xnat-ingest assign for the selected edge and node. This excludes other assign errors. A repeated attempt can report the same session again.",
+      "description": "Count of ERROR messages beginning Could not resolve the labels of from accessionflow label xnat for the selected cluster and node in the last hour. Other assign errors and cycle summaries are excluded. Repeated attempts can count the same session again. Check log delivery and the InvalidSessionAssigned alert before treating zero as healthy.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -255,7 +255,7 @@
     {
       "type": "stat",
       "title": "Unmapped AE rejection logs (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of legacy Orthanc AET-map rejection log lines, not studies. In the receiver-only mode used with xnat-ingest de-identification, Orthanc returns before this lookup, so zero is expected and does not validate routing or de-identification. Legacy rejection handling preserves originals in the facility quarantine.",
+      "description": "Count of legacy Orthanc AET-map rejection log lines, not studies. In the receiver-only mode used with accessionflow de-identification, Orthanc returns before this lookup, so zero is expected and does not validate routing or de-identification. Legacy rejection handling preserves originals in the facility quarantine.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -321,7 +321,7 @@
     },
     {
       "type": "logs",
-      "title": "Live log tail — xnat-ingest pods on $cluster / $node",
+      "title": "Live log tail; accessionflow pods on $cluster / $node",
       "description": "Edge pipeline log lines for the selected cluster and worker. The node dropdown is limited to the edge pipeline namespace, excluding management reclaimers that carry an edge cluster label. Raw messages are retained when JSON message is absent.",
       "gridPos": {
         "h": 12,
