@@ -9,7 +9,7 @@ checks. This page explains the default pipeline and its configuration.
 ## Overview
 
 **Review date: 2026-11-10.** This page describes the pinned accessionflow
-0.19.0 implementation. The facility-backup write in `OnStoredInstance` is
+0.20.0 implementation. The facility-backup write in `OnStoredInstance` is
 limited to `RequestOrigin == "DicomProtocol"`. REST uploads and file-drop
 input do not get that backup copy. Verify the retained originals separately
 from recipe output. Orthanc/Lua de-identification was deprecated on 2026-11-02;
@@ -97,9 +97,10 @@ entry. Use the network boundary to restrict senders. Use source tags or the
 constant project to select XNAT placement.
 
 **A recipe cannot change an assigned label.** `assign` takes values from the
-source metadata. `ImagingSession.new_empty()` preserves `project_id`,
-`subject_id` and `session_id` while deidentify builds a new session. The saved
-directory and the uploader use those IDs. Changing PatientID in the output
+configured metadata mappings or constants. `Accession.new_empty()` preserves
+the `uid`, `labels`, `store_type` and `run_uid` while deidentify builds a new
+accession. It also copies custom `fields`. The saved directory and
+`accessionflow store xnat` use those labels. Changing PatientID in the output
 DICOM therefore does not change the subject label already stored in the session.
 
 With `subject: PatientID`, a raw MRN becomes an XNAT label even when the recipe
@@ -471,7 +472,7 @@ ingest:
         REMOVE PatientID
 ```
 
-The key is the path under `SPEC_DIR`; the value is the recipe. Changing a
+The key is the path under `RECIPE_DIR`; the value is the recipe. Changing a
 policy later is a `helm upgrade` with the edited site file — still no
 `kubectl`.
 
@@ -692,10 +693,10 @@ for DICOM-protocol input when the callback succeeds, and its own retention
 policy may remove copies later. `--unlink-source all` does not prove that
 an original or encrypted mapping remains recoverable.
 
-This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.19.0`.
+This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.20.0`.
 The locally inspected image has image ID
-`sha256:a83355455edba6b7fa9f64da7fb7096d577998c1b54bde1ce1b7257b1ebc64e9`
-and reports package version `0.19.0`. The former fork image reported
+`sha256:8da884b0ea8cd8804e06b9c2a76fa0a8e78ff3c70c93c3a828c9c04777f319ac`
+and reports package version `0.20.0`. The former fork image reported
 `0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
 The registry tag and installed package version are different identifiers.
 Record the deployed digest when checking a site; do not infer a live version

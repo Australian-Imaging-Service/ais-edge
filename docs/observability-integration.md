@@ -28,7 +28,7 @@ They are orthogonal **on purpose**. `observability.enabled` decides whether a co
 
 > **Caution:** the key must *exist and be false*, not be absent. A Helm dependency whose condition path does not resolve is treated as ENABLED.
 
-The pipeline (Orthanc receiver → collate-orthanc → label xnat → deidentify → optional package → store xnat → XNAT) installs and runs **completely independently** of this stack ; verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
+The pipeline (Orthanc receiver → collate orthanc → label xnat → deidentify → optional package → store xnat → XNAT) installs and runs **completely independently** of this stack ; verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
 
 So integration has three postures:
 1. **Leave it off** and run only your own tooling.
@@ -112,15 +112,15 @@ operator can distinguish receiver errors from recipe-stage errors. Use
 synthetic fixtures when testing a query; do not copy patient identifiers into
 an alert example or a shared dashboard export.
 
-**accessionflow collate-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (0.19.0 logs `Could not resolve the labels of` for invalid sessions).
-The following synthetic record shows the current 0.19.0 cycle summary.
+**accessionflow collate orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (0.20.0 logs `Could not resolve the labels of` for invalid sessions).
+The following synthetic record shows the current 0.20.0 cycle summary.
 Its timestamp is an example, not a captured production event:
 ```json
 {"ts": "2026-11-10T00:00:00+0000", "level": "INFO", "logger": "accessionflow", "message": "Label completed successfully"}
 ```
 This current record contains `ts`, `level`, `logger` and `message`. The
-older logger name was `xnat-ingest`; it is not the 0.19.0 logger name.
-Current 0.19.0 records use logger `accessionflow`. The JSON formatter always
+older logger name was `xnat-ingest`; it is not the 0.20.0 logger name.
+Current 0.20.0 records use logger `accessionflow`. The JSON formatter always
 adds those four fields and passes through any structured fields supplied by
 the call site. Native output or uncaught tracebacks can still be plain text.
 The ordinary label-completion message is `Label completed successfully`;
@@ -130,7 +130,7 @@ it has no per-session `session` or `event` key and counts a cycle, not a study.
 ```json
 {"ts": "…", "level": "INFO", "logger": "accessionflow", "message": "Successfully uploaded all files in 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
 ```
-This synthetic 0.19.0 example has `ts`, `level`, `logger` and `message`. The
+This synthetic 0.20.0 example has `ts`, `level`, `logger` and `message`. The
 **terminal-success signal** is `Successfully uploaded all files in '<session>'`.
 Extract the session from that message. A complete session skipped on a later
 pass emits no new success message. Other store records can carry structured
@@ -165,7 +165,7 @@ Fields: `ts, component, edge, event, stage, message` on every line; `stage_repor
 
 **Session correlation and current limits.** The normal label and upload
 messages put the name inside `message`. Extract it from the relevant message
-format; do not require `| json | session != ""` for every stage. Some 0.19.0
+format; do not require `| json | session != ""` for every stage. Some 0.20.0
 records do have a structured `session`, including `deid_failed` and
 `xnat_repair_completed`, but the key is optional at the call site. Orthanc's
 legacy `instance_deidentified` event is absent under the ingest engine and
@@ -272,7 +272,7 @@ The tables below describe the 21 custom Loki alerts and eight custom Prometheus 
 | `SessionUploadStalled` | warning | Loki | An `Including ... scans/files in upload from` message in 15m with no success for the same session in 15m; held for 5m. Requires non-empty `upload.direct.alwaysInclude`, as explained in §2c. |
 | `XNATBacklogGrowing` | warning | Loki | The current query subtracts upload-success messages from assign records with `session != ""` over 30m and tests >3 for 30m. Normal label-completion records have no such key. This is not a reliable pending-session count; see §2c. |
 | `InvalidSessionAssigned` | warning | Loki | One assign ERROR for missing routing IDs in 10m, held for 1m. Check `assigned/__invalid__` and retain the files for review; alert expiry does not prove recovery. |
-| `DICOMValidationFailureSpike` | warning | Loki | >10 lines matching the older `invalid\|validation.*fail` text filter in 1h, held for 5m. This is not a distinct-session count; `InvalidSessionAssigned` covers the 0.19.0 missing-ID diagnostic. |
+| `DICOMValidationFailureSpike` | warning | Loki | >10 lines matching the older `invalid\|validation.*fail` text filter in 1h, held for 5m. This is not a distinct-session count; `InvalidSessionAssigned` covers the 0.20.0 missing-ID diagnostic. |
 | `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (completion-line notification, not a heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window ; a `[1m]` range flapped against an older emitter's ~62s loop and was widened. Current complete-session skips are quiet. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
 | `XNATRepairAttempted` | warning | Loki | accessionflow's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |

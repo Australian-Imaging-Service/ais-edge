@@ -94,7 +94,7 @@ green, no LogQL alert ever delivered.
 
 ## What the shipped configuration actually does
 
-**Current event semantics:** accessionflow 0.19.0 emits upload success after new files were uploaded or a repair was attempted. An unchanged session no longer emits success on every loop. A success line is a file-level verdict; it does not prove header reconciliation or downstream pipelines. The long repeat interval and session grouping remain useful notification guards. Historical duplicate-mail measurements below describe the older emitter, not the current one.
+**Current event semantics:** accessionflow 0.20.0 emits upload success after new files were uploaded or a repair was attempted. An unchanged session no longer emits success on every loop. A success line is a file-level verdict; it does not prove header reconciliation or downstream pipelines. The long repeat interval and session grouping remain useful notification guards. Historical duplicate-mail measurements below describe the older emitter, not the current one.
 
 `charts/edge` does **not** leave Alertmanager on the subchart default. It points
 `kube-prometheus-stack.alertmanager.alertmanagerSpec.configSecret` at

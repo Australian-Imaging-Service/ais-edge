@@ -361,7 +361,7 @@ On tier-2 that condition is satisfied by the s3-uploader's marker. **This tier
 has no s3-uploader**, so nothing would ever write it, and for a long time nothing
 did. In that historical implementation, the tree was retained and repeated
 upload attempts could emit checksum messages. This is not the behavior of
-0.19.0, which skips sessions whose current file listing is complete. The
+0.20.0, which skips sessions whose current file listing is complete. The
 `staged-reclaimer` CronJob supplies the missing cleanup proof. It runs
 hourly. For each resource of a session it finds every local file in XNAT's file
 listing and checks it with a HEAD request: present, with the same size (no

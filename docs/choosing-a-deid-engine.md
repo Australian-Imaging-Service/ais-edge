@@ -169,9 +169,9 @@ The invalid input may still be needed to correct the site's source mapping.
 ## Upstream caveats affecting Architecture B
 
 The pinned chart image is
-`ghcr.io/australian-imaging-service/accessionflow:0.19.0`. Treat the image reference and
+`ghcr.io/australian-imaging-service/accessionflow:0.20.0`. Treat the image reference and
 its installed Python version as separate identifiers. The locally inspected
-image reports `0.19.0` as its package version. The previous fork reported
+image reports `0.20.0` as its package version. The previous fork reported
 `0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier from
 the 2026-10-21 integration build, retained for comparing old run records.
 Record the deployed image digest when comparing behavior across installations.
@@ -206,7 +206,7 @@ files and the Orthanc REST API; the chart does not expose a second DICOM receive
 Network restrictions must enforce the intended sender boundary because the
 shipped Orthanc configuration accepts any calling AE title.
 
-`ingest.fileDrop` is the other entry path. It runs `accessionflow collate` over a
+`ingest.fileDrop` is the other entry path. It runs `accessionflow collate folder` over a
 filesystem glob, for example an approved share or vendor export. It bypasses
 Orthanc and its facility-backup callback. Keep the input files as originals;
 `dataPolicy.originals.fileDrop.reclaim: never` is the default. A file-drop age

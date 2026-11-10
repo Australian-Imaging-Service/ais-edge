@@ -26,7 +26,7 @@ natural source of truth for each alert**, not about network topology.
 
 Two kinds of signal, two natural homes:
 
-1. **Pipeline events are JSON log lines.** `accessionflow collate-orthanc`,
+1. **Pipeline events are JSON log lines.** `accessionflow collate orthanc`,
    `accessionflow label xnat`, the `accessionflow store xnat` pod and the data-policy
    reporter emit structured events (`{event: "upload_failed", session: "...",
    ...}`). The source of truth for "did an upload fail?" is the event itself, not
@@ -86,8 +86,8 @@ with `.Files.Get` and Helm never templates it.
 | Upload failing / retry storm | Loki ruler | Derived from `event="upload_failed"` vs `event="upload_completed"` JSON events on the upload pod (`{component="upload"}`). |
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
-| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Could not resolve the labels of` in 0.19.0), `{component="assign"}`. |
-| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. The 0.19.0 missing-ID diagnostic is covered by `InvalidSessionAssigned`; the older `DICOMValidationFailureSpike` text filter is not equivalent; redundant assign summaries are suppressed. |
+| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Could not resolve the labels of` in 0.20.0), `{component="assign"}`. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. The 0.20.0 missing-ID diagnostic is covered by `InvalidSessionAssigned`; the older `DICOMValidationFailureSpike` text filter is not equivalent; redundant assign summaries are suppressed. |
 | `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for a retained `__unmapped_aet__` subtree. Ingest creates no unknown-AET quarantine entries. Preserve historical content and consult the deprecated-engine reference before resolving it. |

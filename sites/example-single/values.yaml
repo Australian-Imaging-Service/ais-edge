@@ -171,7 +171,7 @@ ingest:
     processedLabel: xnat-ingest-processed
   deidentify:
     # THE RECIPE. The chart turns this map into a ConfigMap and mounts it at
-    # SPEC_DIR; the KEY is the path under SPEC_DIR, so it must be the one
+    # RECIPE_DIR; the KEY is the path under RECIPE_DIR, so it must be the one
     # accessionflow looks for: __default__/<category>/<format>.
     #
     # THIS IS THE POLICY. Nothing downstream re-checks what was removed, so read
@@ -349,7 +349,7 @@ upload:
   direct:
     existingSecret: xnat-credentials
     # Upload loop interval; the chart default is 120 seconds. The pinned
-    # 0.19.0 loop waits for the remainder after work, so a long pass can exceed
+    # 0.20.0 loop waits for the remainder after work, so a long pass can exceed
     # the interval. A value of 60 does not guarantee a 60-second end-to-end delay.
     loop: 60
     # Quiet period used for eligibility. It does not prove study completeness
@@ -482,7 +482,7 @@ dataPolicy:
     # Whatever the uploader reads is what it re-reads every loop. `upload` never
     # deletes what it delivered, deliberately: you do not erase a study because an
     # HTTP call returned OK. Historical older releases repeatedly misclassified some complete
-    # resources. Current 0.19.0 rechecks file evidence and skips a complete
+    # resources. Current 0.20.0 rechecks file evidence and skips a complete
     # session without re-sending it or repeating its success line. Retaining
     # the tree still consumes disk and can cause repeated scans, so the
     # proof-based staged reclaimer remains necessary for automatic retirement.

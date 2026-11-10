@@ -71,7 +71,7 @@ Do not treat a successful C-STORE response as proof that a separate backup copy
 exists, that a study was assigned, or that de-identification succeeded.
 
 The group stage uses processed state to avoid exporting unchanged input on every
-pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.19.0` image includes
+pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.20.0` image includes
 snapshot support. It writes a label of the form
 `xnat-ingest-processed-<LastUpdate>-<digest>`. A processed study whose update
 state changed can be staged again. This is important when a later series arrives
@@ -131,7 +131,7 @@ and installed by step 3 of `./install.sh <site>`.
 
 REST API exposed as a ClusterIP Service
 `<release>-orthanc.xnat-ingest.svc.cluster.local:8042` (this is how
-`accessionflow collate-orthanc` REST-pulls; `<release>` is the site name unless
+`accessionflow collate orthanc` REST-pulls; `<release>` is the site name unless
 `AIS_RELEASE` overrides it). DICOM port 4242 is exposed via `hostPort` directly
 on the node's IP so modalities can reach it without an in-cluster Service —
 `orthanc.expose.dicom` can be switched to `nodePort` or `both` instead.

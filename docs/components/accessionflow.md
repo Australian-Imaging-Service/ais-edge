@@ -5,7 +5,7 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 ## Overview
 
 **Verified scope (2026-11-10):** descriptions below follow this branch
-and accessionflow 0.19.0. Orthanc is the receiver; the default `ingest` engine
+and accessionflow 0.20.0. Orthanc is the receiver; the default `ingest` engine
 de-identifies downstream. The Orthanc/Lua de-identification engine was
 deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
 Recipe output and source retention must be checked separately: a stage name,
@@ -14,7 +14,7 @@ processed label, or successful upload is not proof of a complete privacy policy.
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
 is the AIS-maintained Python tool that:
 1. **Groups** DICOM instances into studies by REST-pulling them from Orthanc
-   (`group-orthanc`, running `accessionflow collate-orthanc`)
+   (`group-orthanc`, running `accessionflow collate orthanc`)
 2. **Assigns** each study an XNAT project/subject/session identity and stages it
    as a structured directory (`assign`, running `accessionflow label xnat`)
 3. **De-identifies** assigned sessions with the site recipe (`deidentify`).
@@ -25,11 +25,11 @@ The default `deid.engine: ingest` renders the deidentify stage. Use it for new
 sites. Review the selected source labels before the recipe runs.
 
 Historical releases split the old `sort` command into stages; the exact first
-release for every split is not verified (2026-11-10). The 0.19.0 command names
+release for every split is not verified (2026-11-10). The 0.20.0 command names
 and chart wrappers below are the current operational contract.
 We run the default stages as four Deployments on the single node, all rendered by
 `charts/edge`:
-- **`accessionflow collate-orthanc`** (`<release>-group-orthanc`, `component=group`)
+- **`accessionflow collate orthanc`** (`<release>-group-orthanc`, `component=group`)
   REST-pulls original studies from Orthanc and hardlinks them into
   `/data/grouped`
 - **`accessionflow label xnat`** (`<release>-assign`, `component=assign`); reads
@@ -49,7 +49,7 @@ We run the default stages as four Deployments on the single node, all rendered b
   replaced by a `DICOM-zip` resource, holding the whole series as an
   uncompressed zip, and one DICOM sample that XNAT can read headers from.
   A session with no `dicom-series` scan resource passes through unchanged
-  in 0.19.0. This behavior came from xnat-ingest PR #217. The earlier
+  in 0.20.0. This behavior came from xnat-ingest PR #217. The earlier
   implementation logged `Skipping '<session>' because it has no <datatype>
   scan resources` and left that input in `/data/deidentified`. That old
   limitation does not apply to the current pin. Each
@@ -161,15 +161,15 @@ No AET routing or unknown-AET quarantine applies to either ingest input path.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/accessionflow:0.19.0`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/accessionflow:0.20.0`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-deidentify` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
 
 `<release>` is the Helm release name, which `install.sh` sets to the site name.
 
-The chart pins the upstream 0.19.0 image shown above. The inspected package
-reports `0.19.0`. The previous fork reported
+The chart pins the upstream 0.20.0 image shown above. The inspected package
+reports `0.20.0`. The previous fork reported
 `0.16.3.dev49+ais.20261021.r13.g3182cc6`; that version is migration history. Record the deployed digest and chart values when comparing a site to a
 source review. A tag name alone is not a receipt for a running deployment.
 
@@ -182,10 +182,26 @@ is in [deidentification.md](deidentification.md#deprecated-orthanc-lua-engine).
 
 ## Configuration
 
+Version 0.20.0 uses source subcommands: `collate orthanc` and
+`collate folder`. The Orthanc command takes
+`URL STORE_DIR OUTPUT_DIR USER PASSWORD`, the same five positional arguments as 0.19.0.
+The file-drop options are `--accession-uid` and `--acquisition-id`,
+with `ACFLOW_ACCESSION_UID` and `ACFLOW_ACQUISITION_ID`. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
+The third deidentify argument is `RECIPE_DIR`. It accepts
+`ACFLOW_RECIPE_DIR`; `ACFLOW_SPEC_DIR` remains a compatible alias.
+The old `check-upload` command is now `check-store xnat`.
+
+The Python model uses `Accession.acquisitions`, `Acquisition.accession`
+and `Resource.acquisition`. XNAT still calls these sessions and scans.
+The staging folders, namespace, receipt labels and chart stage names
+keep their existing names. See the upstream
+[migration guide](https://github.com/Australian-Imaging-Service/accessionflow/blob/b496af05/MIGRATING.md)
+when adapting custom commands or Python scripts.
+
 Version 0.18.0 renamed the tool, collate/label commands and environment
 variables. Version 0.19.0 renamed upload to store. The chart keeps
 its stage and Kubernetes names. `group-orthanc` runs `accessionflow
-collate-orthanc`; `group-fs` runs `accessionflow collate`; `assign` runs
+collate orthanc`; `group-fs` runs `accessionflow collate folder`; `assign` runs
 `accessionflow label xnat`; `upload` runs `accessionflow store xnat`. The
 legacy associate template would require `accessionflow attach`, but enabling
 `ingest.associate.enabled` is rejected: the chart does not supply the required
@@ -364,7 +380,7 @@ restarts, and recovery on the test deployment before applying a site profile.
 ### group-orthanc arguments
 
 ```
-accessionflow collate-orthanc \
+accessionflow collate orthanc \
   http://<release>-orthanc.xnat-ingest.svc.cluster.local:8042  # Orthanc REST URL
   /data/orthanc-storage                    # Orthanc storage dir (as mounted)
   /data/grouped                            # output: grouped studies
@@ -428,7 +444,7 @@ sh -c 'trap exit TERM INT; mkdir -p /data/.locks && exec 9>>/data/.locks/assigne
 ```
 
 Each successful pass sleeps the full configured stage interval. This differs
-from 0.19.0 store's internal loop, which subtracts time spent uploading.
+from 0.20.0 store's internal loop, which subtracts time spent uploading.
 A failed pass exits the wrapper. TERM/INT interrupt idle wait; during a
 foreground pass the shell handles the signal after that pass. A signal during
 lock wait can therefore allow that one pass before exit. Kubernetes can still
@@ -450,10 +466,10 @@ it is not an optimisation. `assign` rebuilds its work list from a live
 listing of `/data/grouped` every pass, so without it the same sessions are
 considered again. Re-created output can cause extra work. Historical duplicate
 mail was recorded under the older emitter (date not verified, reviewed
-2026-11-10); 0.19.0 suppresses unchanged-session success. This option
+2026-11-10); 0.20.0 suppresses unchanged-session success. This option
 unlinks input paths, which can include hardlinks, symlinks, or copied files.
 The last link can be removed; neither an Orthanc copy nor a facility backup
-is proved by this operation. See the 0.19.0 source-retirement warning below.
+is proved by this operation. See the 0.20.0 source-retirement warning below.
 
 The derived ingest mapping selects StudyID, PatientID and AccessionNumber.
 An explicit mapping can select other supported tags. The chart rejects tags
@@ -669,7 +685,7 @@ after the grace period, possibly during a pass, as before this change.
 
 Each pass starts a new `accessionflow` process. A historical fork measurement recorded about 1.6 s of
 CPU per pass (measurement date not verified, reviewed 2026-11-10). Startup
-cost for the current 0.19.0 image and each site workload was not benchmarked
+cost for the current 0.20.0 image and each site workload was not benchmarked
 in this review; do not use that old number as a capacity guarantee. A new process for each pass also returns its memory after the pass.
 
 The data-policy loop also stops from idle sleep and after a current foreground
@@ -723,7 +739,8 @@ follows the lock path for the reclaimer.
 
 The container reads `ACFLOW_REID_ENCRYPT_KEY`. The existing Secret still uses
 the key `XINGEST_REID_ENCRYPT_KEY`; the chart maps that key to the new variable.
-An old environment-variable name is not a supported alias in 0.19.0.
+The old `XINGEST_*` environment-variable names are not supported aliases
+in 0.20.0. This does not rename the compatible key inside the Secret.
 
 The ingest deidentification engine writes maps under the pipeline `reid`
 directory, normally `/data/xnat-ingest/reid` on the host. Without
@@ -777,7 +794,7 @@ deletes. A dry run makes the same checks and removes no data.
 
 - **Battle-tested DICOM parsing** — handles edge cases (missing
   AccessionNumber, multi-frame, multi-series) we don't want to re-implement
-- **Repeat handling:** the 0.19.0 upload verdict can skip a complete session,
+- **Repeat handling:** the 0.20.0 upload verdict can skip a complete session,
   repair missing files where supported, or refuse a conflict. Matching names
   without XNAT checksums is weaker than byte equality; inspect the verdict
 - **Loop mode** — every stage runs continuously; new studies are grouped, staged,
@@ -817,13 +834,17 @@ deletes. A dry run makes the same checks and removes no data.
   Prometheus histogram buckets or exact counts of delivered sessions.
 - **Custom pipeline-event names** in log lines (an `event` field with values like
   `session_staged`, `xnat_upload_completed`) to reduce fragile text matching.
-  Version 0.19.0 already emits selected structured events, including
+  Version 0.20.0 already emits selected structured events, including
   `xnat_identity_adoption` and `xnat_repair_completed`; broader coverage is
   still a proposal, not an absence of all event names.
 - **Structured DICOM SHA256** in the staging-event log for end-to-end integrity
   verification against XNAT.
 
 ## Source retirement and metadata in 0.19.0
+
+**Current status (2026-11-10):** these 0.19.0 migration cautions also apply
+to the 0.20.0 image source. The dated 0.19.0 test results are historical
+evidence. They do not establish a 0.20.0 end-to-end result.
 
 With `--unlink-source all`, a successful label or deidentify pass removes the
 session input paths captured before it loaded the session. This includes files
@@ -847,6 +868,12 @@ be empty. Missing header-backed metadata can be read from the DICOM files.
 The optional package stage writes fuller sidecars; the deidentify allowlist
 is not a metadata restriction on every later stage.
 
+In 0.20.0, `Accession.new_empty()` also copies the accession's custom
+`fields`. These are separate from metadata sidecars. `save()` writes
+them without the metadata allowlist, and `store xnat` sends them as
+XNAT custom fields. The chart does not run `select-fields`; if a custom
+step populates these fields, review their contents separately.
+
 ## XNAT grouping identity after the migration
 
 The XNAT custom field `xnat_ingest_uid` records the exact saved grouping UID
@@ -862,6 +889,6 @@ the upload path can adopt it after the subject check and log the WARNING
 does not prove the identity of files already stored there. A mismatched UID
 or subject is refused. Keep this distinction when validating in-flight data.
 
-The 0.19.0 upload loop waits for the remainder of its interval. A historical tier-2 test on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
+The 0.20.0 upload loop waits for the remainder of its interval. A historical tier-2 test with 0.19.0 on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
 running again (loop every 60 seconds)`. The chart's separate writer shell loops
 still sleep for their configured full interval after a pass.

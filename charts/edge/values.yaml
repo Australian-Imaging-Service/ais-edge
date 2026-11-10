@@ -862,7 +862,7 @@ ingest:
     # ConfigMap and mounts it at the required project/format paths, so a
     # fresh install needs no kubectl and no pre-existing namespace.
     #
-    # Key is the path under SPEC_DIR, value is the recipe:
+    # Key is the path under RECIPE_DIR, value is the recipe:
     #
     #   specs:
     #     "__default__/medimage/dicom-series": |
@@ -882,7 +882,7 @@ ingest:
     # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
     # external pipeline, recipes too large to sit in the site file). Set both,
     # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
-    # under SPEC_DIR>, doing by hand what specs does automatically.
+    # under RECIPE_DIR>, doing by hand what specs does automatically.
     specConfigMap: ""
 
     # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
@@ -973,17 +973,19 @@ upload:
   direct:
     replicas: 1
     existingSecret: xnat-credentials    # keys: server, username, password
-    # Poll interval. Every other stage in the pipeline runs at 60, so a large
-    # value here is the whole delivery latency. It is also NOT the only wait: a
-    # session touched within waitPeriod is skipped for the WHOLE next cycle, so
-    # the worst case is loop + waitPeriod, not loop. Both shipped site files
-    # use 60.
+    # Poll interval for store xnat. Each pass subtracts the time spent working
+    # before it sleeps. It is one part of delivery latency: waitPeriod also
+    # delays sessions whose source was modified recently. A skipped session
+    # waits for a later pass. Long uploads and retries can extend the delay;
+    # loop + waitPeriod is not a strict worst-case bound. Both shipped site
+    # files use 60 for this interval.
     loop: 120
     waitPeriod: 60
     # CAUTION: this also feeds an alert. The SessionUploadStalled rule detects a
     # started-but-never-finished upload by matching the uploader's log line
     #   "Including <alwaysInclude> scans/files in upload from '<session>'"
-    # and upload_api.py only emits it `if always_include`. Setting this to "" is a
+    # and stores/xnat/api/store_api.py emits it `if always_include`. Setting this
+    # to "" is a
     # legitimate choice, but it removes that signal and the stall alert then never
     # fires. Nothing else notices: no render error, no runtime error, just an alert
     # that has quietly stopped watching the delivery path.

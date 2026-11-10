@@ -37,7 +37,7 @@ with the individual DICOM files in XNAT.
 
 ## What it needs
 
-**Current status (0.19.0):** the pinned accessionflow image includes
+**Current status (0.20.0):** the pinned accessionflow image includes
 fileformats 0.22.5, fileformats-medimage 0.15.5 and fileformats-extras 0.22.5.
 These meet the library requirements for the default package spec. The vendor
 package is not bundled; install the two pinned vendor packages below in both
@@ -50,12 +50,12 @@ At that time xnat-ingest 0.16.2 lacked the support in PRs #216, #217, #218,
 producer passes. The fileformats-extras reproducible option was released in
 0.22.3 ([PR #168](https://github.com/python-fileformats/fileformats/pull/168)).
 These are historical requirements, not a reason to wait for a release after
-0.19.0. Vendor v0.1.2 remains the chart's explicit optional dependency.
+0.20.0. Vendor v0.1.2 remains the chart's explicit optional dependency.
 
 - `deid.engine: ingest`. The stage runs after the accessionflow deidentify stage
   only.
 - An accessionflow image with fileformats 0.22.1 and fileformats-medimage
-  0.15.4 or later. The current 0.19.0 pin meets both floors. Older xnat-ingest
+  0.15.4 or later. The current 0.20.0 pin meets both floors. Older xnat-ingest
   0.16.2 failed at start with `ValueError: Invalid option 'reproducible'` for
   the default spec. Removing that option did not fix its datatype mismatch:
   conversion could fail with `Incorrect type for field in 'in_file' field of
@@ -206,7 +206,7 @@ they cover every other upload.
   more images of a series that was already packaged, the new zip would hold
   fewer images than the packaged one. The stage refuses it, logs an error
   (`IngestStageError` fires) and keeps both the input and the packaged copy.
-  This refusal is present in 0.19.0, from xnat-ingest PR #221. In older images
+  This refusal is present in 0.20.0, from xnat-ingest PR #221. In older images
   without it, a smaller replacement zip
   can lose members of the packaged copy. Preserve the complete original series
   and both refused copies. Re-stage a verified complete series through the

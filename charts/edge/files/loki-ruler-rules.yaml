@@ -194,7 +194,7 @@ groups:
   # different (tracebacks, auth failures, connection errors) and those still count.
   #
   # Historical rationale retained below; its current disposition follows.
-  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.19.0)
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.20.0)
   # the re-offer is answered from a file-set comparison rather than a label one,
   # so a session that really was delivered is skipped silently and the emitter
   # quoted above is gone. What the exclusion now buys is separation of concerns:
@@ -205,7 +205,7 @@ groups:
   # thing. Removing the exclusion would be safe on this pin and wrong on any
   # older one, so it stays.
   # Current review (2026-11-10):
-  # The phrase-only differing-checksums emitter still exists in 0.19.0. Complete-session
+  # The phrase-only differing-checksums emitter still exists in 0.20.0. Complete-session
   # checks prevent the historical false mismatch for an already complete resource, but
   # real conflicts still emit the phrase. Its exclusion separates this dedicated per-
   # session rule from the generic retry alert.
@@ -248,7 +248,7 @@ groups:
   #     left side of the `unless` is always empty, and this alert silently never
   #     fires again. See the note on alwaysInclude in charts/edge/values.yaml.
   #
-  # The unconditional alternative, store_api.py:575 "Uploaded '<resource>' in '<session>'",
+  # The unconditional alternative, stores/xnat/api/store_api.py:575 "Uploaded '<resource>' in '<session>'",
   # was considered and rejected: it fires only after a resource has moved, so a
   # session that stalls at auth, project lookup or connection would emit nothing
   # and the earliest failures - the ones most worth paging on - would go unseen.
@@ -353,7 +353,7 @@ groups:
     # to read mid-write) but ANY interrupted upload reaches the same state: a
     # pod evicted mid-transfer, a dropped connection, an XNAT restart.
     # Current review (2026-11-10):
-    # The pinned 0.19.0 store attempts missing-file repair on later passes. Interrupted
+    # The pinned 0.20.0 store attempts missing-file repair on later passes. Interrupted
     # transfer alone does not establish the conflict matched by this rule. Persistent
     # extra or differing files need a separate reconciliation.
     #
@@ -393,7 +393,7 @@ groups:
     # configurations, crossing in about 32 minutes at loop=60 and 52 at
     # loop=120, plus the 15m `for:`.
     # Current review (2026-11-10):
-    # In pinned 0.19.0, the loop sleeps for the remainder of the configured interval
+    # In pinned 0.20.0, the loop sleeps for the remainder of the configured interval
     # after work. The retained max(20, 1800 / (loop + 35)) threshold uses an older
     # conservative timing model. Its 35-second observation and derived crossing times
     # are historical, not a current timing guarantee. Expression changes are outside
@@ -406,7 +406,7 @@ groups:
     # never fire. scripts/ci/render.sh uses this same model, so the two files
     # measure the same quantity.
     # Current review (2026-11-10):
-    # This argument uses the older full-sleep timing model. Current 0.19.0 sleeps for
+    # This argument uses the older full-sleep timing model. Current 0.20.0 sleeps for
     # the interval remainder. The chart and CI retain the conservative formula; their
     # agreement verifies implementation consistency, not the accuracy of the old
     # measured cycle model.
@@ -430,7 +430,7 @@ groups:
         The uploader repeatedly reports a resource whose file set or checksums
         conflict with the staged copy. XNAT may contain files absent from staging,
         or a same-named file may have different content. A resource that is only
-        short is handled separately: accessionflow 0.19.0 attempts to upload the
+        short is handled separately: accessionflow 0.20.0 attempts to upload the
         missing files and logs a repair attempt.
 
         1. Identify the exact project, experiment, scan and resource in the logs:
@@ -442,7 +442,7 @@ groups:
         3. Check the reclaimer's decision and the configured retention policy.
            Reclaim requires its own proof, but this alert alone cannot establish
            that all source data is intact or that another cleanup path did not run.
-        4. The pinned 0.19.0 store clears cached XNAT listings on later passes.
+        4. The pinned 0.20.0 store clears cached XNAT listings on later passes.
            A restart is not required solely to refresh that cache. Do not delete a
            destination resource or restart a deployment just to clear this alert.
 
@@ -452,7 +452,7 @@ groups:
         at 07:18:26 without a restart. The run dates and release attribution of
         those old measurements are not verified (2026-11-10). They do not establish
         that deletion is safe for a current conflict. Current cache behavior is
-        verified directly in the pinned store_api.py implementation.
+        verified directly in the pinned stores/xnat/api/store_api.py implementation.
       summary: "Repeated XNAT file conflicts for {{ $labels.session }}"
     # Line breaks match the tier-2 rule character for character. The cross-tier
     # check in scripts/ci/promtool.sh compares the rendered rule as a string, so
@@ -541,7 +541,7 @@ groups:
         routing fields and scanner input before changing configuration. The pinned
         missing-ID error matches this filter through __invalid__ in its saved path;
         the separate already-saved-as-invalid warning also matches. Use
-        InvalidSessionAssigned for the specific 0.19.0 missing-ID error prefix.
+        InvalidSessionAssigned for the specific 0.20.0 missing-ID error prefix.
   - alert: SessionStagedNotConfirmedInXNAT
     # SHARED WITH charts/mgmt: expr, for and labels are the tier-2 rule verbatim
     # (the namespace regex already covers xnat-ingest). Only the steps differ,
@@ -579,7 +579,7 @@ groups:
            could not establish proof. Review ReclaimerRunUnavailable as applicable.
 
         Historical context: old label-only all_uploaded checks could skip an empty
-        resource. The pinned 0.19.0 store compares file sets/checksums and refreshes
+        resource. The pinned 0.20.0 store compares file sets/checksums and refreshes
         listings. Its success or skip line still does not certify header extraction
         or all downstream XNAT processing. Keep source evidence until verified.
   - alert: ReclaimerRunUnavailable
@@ -672,7 +672,7 @@ groups:
     # existed on XNAT with files missing (stores/xnat/api/store_api.py, repaired_on_xnat); a
     # first upload never does. Seen 2026-09-23 and 2026-09-28: XNAT restarted,
     # listed 0 of N files for sessions it held, and every edge re-sent them.
-    # AN ATTEMPT: stores/xnat/api/store_api.py:603-611 in 0.20.0 logs
+    # AN ATTEMPT: stores/xnat/api/store_api.py:603-614 in 0.20.0 logs
     # this line before the verdict, even when the re-send failed.
     # A separate Completed repair line and xnat_repair_completed event
     # follow only a successful verdict (lines 672-680). This rule still
@@ -704,7 +704,7 @@ groups:
         unique repairs. This notification does not establish that the repair worked.
           kubectl -n xnat-ingest logs -l component=upload --since=1h | grep -F -- "{{ $labels.session }}"
 
-        In accessionflow 0.19.0, the Repaired line precedes the final verdict. Look
+        In accessionflow 0.20.0, the Repaired line precedes the final verdict. Look
         for Completed repair or xnat_repair_completed and inspect later errors and
         the actual destination listing. File completion does not certify metadata
         header extraction. XNATUploadSuccess excludes a session with recent repair
@@ -737,7 +737,7 @@ groups:
         2. Check account status, role and the configured credentials Secret without
            printing the password. For the tier-1 direct path, the Secret is selected
            by upload.direct.existingSecret; management has its own configured Secret.
-        3. accessionflow 0.19.0 refreshes connections/listings on later loop passes.
+        3. accessionflow 0.20.0 refreshes connections/listings on later loop passes.
            Credentials supplied through environment variables still require a pod
            replacement after a verified Secret change. Identify the deployment from
            pod labels before an authorized rollout; do not guess it from cluster.
@@ -775,7 +775,7 @@ groups:
     # The assign missing-ID diagnostic belongs to DICOMValidationFailureSpike.
     # Its per-pass summary adds no cause; each other concrete error still fires.
     # Current review (2026-11-10):
-    # The 0.19.0 assign missing-ID diagnostic is covered by InvalidSessionAssigned.
+    # The 0.20.0 assign missing-ID diagnostic is covered by InvalidSessionAssigned.
     # DICOMValidationFailureSpike retains an older broad text match and is not a
     # complete detector for that diagnostic. Other concrete stage errors remain
     # relevant.

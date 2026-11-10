@@ -49,7 +49,7 @@ Is the thing you want to alert on …
   │  kubelet_volume_stats_*, container_memory_*, up, …)
   │     → Prometheus rule. See "Prometheus rules" below.
   │
-  ├─ a JSON log line emitted by accessionflow collate-orthanc / label xnat / store xnat /
+  ├─ a JSON log line emitted by accessionflow collate orthanc / label xnat / store xnat /
   │  Orthanc's de-id hook / data-policy?
   │     → Loki ruler rule. See "Loki ruler rules" below.
   │
@@ -336,7 +336,7 @@ number of them load side by side.
 
 The rule itself is an ordinary Loki rule group:
 
-This is a **deprecated Orthanc-engine example**: `instance_deidentified` is not emitted by the default ingest engine, where Orthanc only receives DICOM. Its name also does not imply a once-per-day trigger; the expression remains active while any matching line is in the last hour. For a current pipeline rule, use the stage-specific stream and captured 0.19.0 message. The heartbeat example later uses periodic `stage_report` events: upload success is not a heartbeat because an idle or already-complete session is quiet.
+This is a **deprecated Orthanc-engine example**: `instance_deidentified` is not emitted by the default ingest engine, where Orthanc only receives DICOM. Its name also does not imply a once-per-day trigger; the expression remains active while any matching line is in the last hour. For a current pipeline rule, use the stage-specific stream and captured 0.20.0 message. The heartbeat example later uses periodic `stage_report` events: upload success is not a heartbeat because an idle or already-complete session is quiet.
 
 ```yaml
 apiVersion: v1

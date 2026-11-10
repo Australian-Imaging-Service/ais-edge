@@ -34,7 +34,7 @@ pushes off the box to someone else's Loki; a tier-1 appliance sets both true.
 
 A single **DaemonSet** in the `xnat-ingest` namespace (`.Values.namespace`; one
 pod, because there is one node). It tails every pod's stdout — Orthanc,
-`accessionflow collate-orthanc`, `accessionflow label xnat`, the upload pod, the
+`accessionflow collate orthanc`, `accessionflow label xnat`, the upload pod, the
 data-policy reporter, plus kube-system and the observability subcharts that
 install alongside them — and pushes the lines to the in-cluster Loki Service.
 

@@ -79,7 +79,7 @@ match.
 
 Tier-1 runs everything in ONE namespace (`namespace:` in the site file,
 `xnat-ingest` by default) on ONE node, so the panels are driven entirely by the
-pod logs Vector tails there: `collate-orthanc`, `label xnat` and the direct XNAT
+pod logs Vector tails there: `collate orthanc`, `label xnat` and the direct XNAT
 uploader. There is no s3-uploader and no SeaweedFS layer on this tier.
 
 ---
@@ -98,8 +98,8 @@ stages apart, and it is copied straight from the pod label the chart sets.
 | `component` | pod | rendered when |
 |---|---|---|
 | `dicom-receiver` | Orthanc | always |
-| `group` | `accessionflow collate-orthanc` | `ingest.orthancGroup.enabled` |
-| `group-fs` | `accessionflow collate` over the watched directory | `ingest.fileDrop.enabled` (off) |
+| `group` | `accessionflow collate orthanc` | `ingest.orthancGroup.enabled` |
+| `group-fs` | `accessionflow collate folder` over the watched directory | `ingest.fileDrop.enabled` (off) |
 | `assign` | `accessionflow label xnat` | either ingest path enabled |
 | `associate` | Historical Siemens side-file attach | Setting `ingest.associate.enabled: true` currently fails validation; it is unsupported by this pinned CLI |
 | `upload` | `accessionflow store xnat` → XNAT | `upload.mode: direct` |
@@ -115,7 +115,7 @@ cheap form; `| json | level="ERROR"` also works, because a label filter reads
 stream labels as well as extracted ones.
 
 **The direct uploader does not emit the S3 uploader event names.**
-accessionflow 0.19.0 does emit selected events, including
+accessionflow 0.20.0 does emit selected events, including
 `xnat_identity_adoption` and `xnat_repair_completed`.
 `event=upload_started|upload_completed|upload_failed` is the convention of
 `charts/edge/files/s3-uploader.sh`, which only runs under `upload.mode: s3`.
@@ -164,8 +164,8 @@ cannot reach.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Could not resolve the labels of .*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. The current matcher selects the 0.19.0 assignment-error prefix and excludes the separate cycle summary. Repeated attempts can count the same session again. Read the assign logs and `InvalidSessionAssigned` alert; see the validation note below. |
-| **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "^Label completed with [0-9]+ errors" [1h])) or vector(0)` | The query matches the current `Label completed with N errors` message and a numeric error count. The 0.19.0 summary is one line. Each matching line counts one failed cycle, regardless of how many sessions were rejected within it. It is not a distinct-session count or a sum of the error counts. Inspect the per-session ERROR messages to identify which sessions need review. A quiet cycle or a missing log stream contributes nothing, so confirm collection separately. |
+| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Could not resolve the labels of .*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. The current matcher selects the 0.20.0 assignment-error prefix and excludes the separate cycle summary. Repeated attempts can count the same session again. Read the assign logs and `InvalidSessionAssigned` alert; see the validation note below. |
+| **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "^Label completed with [0-9]+ errors" [1h])) or vector(0)` | The query matches the current `Label completed with N errors` message and a numeric error count. The 0.20.0 summary is one line. Each matching line counts one failed cycle, regardless of how many sessions were rejected within it. It is not a distinct-session count or a sum of the error counts. Inspect the per-session ERROR messages to identify which sessions need review. A quiet cycle or a missing log stream contributes nothing, so confirm collection separately. |
 | **Pipeline liveness** | `(count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > bool 0) or vector(0)` | `1` means that an assign stream delivered a line in the lookback, which can be an error. It does not prove downstream liveness. The expression is per stream, so several series can coexist. `0` can mean silence, an unmatched selector, or failed collection. |
 
 The `bool` modifier is load-bearing and easy to drop. A bare `> 0` is a *filter*:
@@ -184,7 +184,7 @@ LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | me
 form is not LogQL and renders literally, which looks like a data problem rather
 than a query one.
 
-The query and current alert both use the 0.19.0 prefix
+The query and current alert both use the 0.20.0 prefix
 `Could not resolve the labels of ...`. A blank panel can still miss
 a real assignment failure if collection, selected labels or the time range is wrong. Inspect the assign logs and
 `InvalidSessionAssigned` alert as well.
@@ -269,7 +269,7 @@ Query: `{namespace="xnat-ingest"} |= "$session" | json | line_format "{{.cluster
 `|=` is a line match, not a label match, which is why this works even though
 nothing promotes `session` to a stream label: some stage messages include the name. Receiver messages containing only a DICOM UID or records omitting the label will not match; the result is not a complete audit trail.
 
-`{{.event}}` can be empty on a normal store success line. Current 0.19.0
+`{{.event}}` can be empty on a normal store success line. Current 0.20.0
 also emits structured events, such as `deid_failed`, `xnat_repair_completed`
 and `xnat_identity_adoption`, so the field is not always empty on tier-1.
 The data-policy and Orthanc backup hooks have their own event fields too.
@@ -293,7 +293,7 @@ not proof that the session never existed: the query can be narrower than the
 current log schema or outside its time window.
 
 The invalid-session panels and `InvalidSessionAssigned` alert now match the
-0.19.0 prefix `Could not resolve the labels of`. The cycle-summary panel
+0.20.0 prefix `Could not resolve the labels of`. The cycle-summary panel
 separately matches `Label completed with [0-9]+ errors`. Older dashboards
 used `Invalid IDs found` and `Staging completed`; those expressions missed
 the new messages. Update the dashboard source with the migration. Even with
