@@ -325,7 +325,8 @@ dataPolicy:
     # applies, so this needs no new signal.
     # CAUTION: needs an accessionflow that writes the export snapshot label
     # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
-    # The default upstream image, accessionflow 0.19.0, writes it. With an older
+    # The default upstream image, accessionflow 0.20.0, writes it
+    # (sources/orthanc/staging.py:156-167). With an older
     # image this backend keeps every study and logs export_state_unknown.
     orthancStorage:
       # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
@@ -744,11 +745,13 @@ ingest:
     # its version number alone does not prove behavioral equivalence.
     # CAUTION: 0.18.0 renamed group-orthanc to collate-orthanc, group to
     # collate, assign to label xnat, and XINGEST_* variables to ACFLOW_*.
-    # Version 0.19.0 renamed upload to store. The templates follow this version:
+    # Version 0.19.0 renamed upload to store. Version 0.20.0 made collate a
+    # group: collate orthanc and collate folder, with no aliases for the old
+    # names (upstream MIGRATING.md). The templates follow this version:
     # move the tag only together with them, and with both pins in
     # charts/mgmt/values.yaml (CI: log-phrases and cli-contract compare them).
     repository: ghcr.io/australian-imaging-service/accessionflow
-    tag: "0.19.0"
+    tag: "0.20.0"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -930,7 +933,7 @@ ingest:
   # that were removed. Set reidEncryptKeySecret and keep that key somewhere
   # other than the volume the mappings are written to.
   deidentify:
-    # NO DEFAULT MEMORY LIMIT, on purpose. deid 0.4.13 (in accessionflow 0.19.0)
+    # NO DEFAULT MEMORY LIMIT, on purpose. deid 0.4.13 (in accessionflow 0.19.0 and 0.20.0)
     # keeps every file it parses in memory until the pass ends (pydicom/deid#301):
     # about 200 MiB + the bytes of the sessions in one pass. Measured: 1.6 GiB
     # for one 0.9 GB study. A fixed limit stops a larger session on every pass.
@@ -1003,12 +1006,12 @@ ingest:
   # block is ignored and the uploader reads /data/assigned as before.
   #
   # A session without a sourceDatatype scan resource passes through unchanged
-  # in 0.19.0. This support came from xnat-ingest PR #217.
+  # in 0.20.0 (api/package_api.py:144). This support came from xnat-ingest PR #217.
   # An empty input directory is normal while waiting for new work.
   package:
     enabled: false
-    # Runs on ingest.image.tag like every stage. The 0.19.0 image has the
-    # required library versions. Install the AIS vendor extra package for
+    # Runs on ingest.image.tag like every stage. The 0.20.0 image has the
+    # required library versions (the same as 0.19.0). Install the AIS vendor extra package for
     # the default conversions. See What it needs in docs/package-stage.md.
     interval: 60
     copyMode: hardlink_or_copy
@@ -1204,7 +1207,7 @@ upload:
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
-      # CAUTION: accessionflow 0.19.0 calls xnat 0.8.1 upload_dir. Its
+      # CAUTION: accessionflow 0.20.0 (as 0.19.0) calls xnat 0.8.1 upload_dir. Its
       # tar_file/tgz_file methods use a 256 MiB SpooledTemporaryFile. Up to
       # 10 workers can hold archives at once, as in the older 0.16.2 warning.
       # Do not assume the fork archive fix (xnat-ingest PR #200) is present.

@@ -24,6 +24,12 @@
 # env rename is SILENT: an unset ACFLOW_REID_ENCRYPT_KEY writes the
 # re-identification maps in plain text with no error.
 #
+# MEASURED, 0.19.0 -> 0.20.0 (2026-11-10): collate became a GROUP (collate
+# orthanc, collate folder) and the old names lost their aliases. This check
+# then PASSED "collate <glob>" while the image failed it at run time ("no
+# source plugin named <glob>"): make_context on a group does not check that the
+# next word is a subcommand. Now a command path that ends at a group fails.
+#
 # WHAT IT ASKS ABOUT. Every container in $CI_RENDER_DIR that runs the tool,
 # directly or under the stage lock wrapper (/bin/sh -c <loop> accessionflow
 # <command...>), across every values combination the render stage covers,
@@ -88,13 +94,13 @@ fi
 EXTRACT="$(python3 -c "
 import glob, json, sys, yaml
 TOOLS = ('accessionflow', 'acflow', 'xnat-ingest')
-WORDS = {'xnat'}   # the store plugin word after label and store
+WORDS = {'xnat', 'folder', 'orthanc'}   # the plugin word after label, store and collate (0.20.0)
 seen = {}
 
 def split(cmd):
     # path = the command words; the rest of the command array is argv
     i = 1
-    if i < len(cmd) and cmd[i] in ('label', 'store'):
+    if i < len(cmd) and cmd[i] in ('label', 'store', 'collate'):
         i += 1
         if i < len(cmd) and cmd[i] in WORDS:
             i += 1
@@ -135,7 +141,7 @@ for line in seen:
     print(line)
 " "$CI_RENDER_DIR")"
 CONTROLS='{"want": "reject", "exe": "accessionflow", "path": ["deidentify"], "argv": ["/w/in", "/w/out", "/w/specs", "/w/reid"]}
-{"want": "reject", "exe": "accessionflow", "path": ["collate-orthanc"], "argv": ["http://orthanc:8042", "/w/store", "/w/grouped", "user", "pass", "--on-resource-clash", "avoid", "all"]}
+{"want": "reject", "exe": "accessionflow", "path": ["collate", "orthanc"], "argv": ["http://orthanc:8042", "/w/store", "/w/grouped", "user", "pass", "--on-resource-clash", "avoid", "all"]}
 {"want": "reject-exe", "exe": "xnat-ingest", "path": ["deidentify"], "argv": ["/w/in", "/w/out", "/w/specs"]}
 {"want": "reject-env", "exe": "accessionflow", "path": ["store", "xnat"], "name": "ACFLOW_REID_ENCRYPT_KEY"}'
 CASES="$EXTRACT
@@ -218,6 +224,13 @@ for line in sys.stdin:
         print("MISSING\t%s\tthe image has no command %r" % (label, " ".join(path)))
         continue
     cmd, ctx, env = found
+    # A GROUP IS NOT A COMMAND. make_context on a group does not check that the
+    # next word names one of its subcommands, so "collate <glob>" passed here
+    # while 0.20.0 fails it at run time ("no source plugin named <glob>").
+    if isinstance(cmd, click.Group):
+        print("BAD\t%s\tis a command group: name one of its subcommands (%s)"
+              % (label, ", ".join(sorted(cmd.list_commands(ctx)))))
+        continue
     if want in ("env", "reject-env"):
         name = case["name"]
         if name.startswith("XINGEST_"):

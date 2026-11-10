@@ -670,7 +670,7 @@ import re, sys, yaml
 
 path, locked, plain, serialised = sys.argv[1:5]
 # The same map as edge.stageCommand in _helpers.tpl.
-ARGV = {"group": ["collate"], "group-orthanc": ["collate-orthanc"], "assign": ["label", "xnat"],
+ARGV = {"group": ["collate", "folder"], "group-orthanc": ["collate", "orthanc"], "assign": ["label", "xnat"],
         "deidentify": ["deidentify"], "package": ["package"]}
 tool = lambda stage: ["accessionflow"] + ARGV[stage]
 tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
@@ -788,7 +788,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
             if c["name"] in ("group", "group-fs", "assign"):
                 expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
                 tree = "assigned" if expected == "assign" else "grouped"
-                argv = {"group-orthanc": ["collate-orthanc"], "group": ["collate"], "assign": ["label", "xnat"]}[expected]
+                argv = {"group-orthanc": ["collate", "orthanc"], "group": ["collate", "folder"], "assign": ["label", "xnat"]}[expected]
                 if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["accessionflow"] + argv:
                     raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
                 if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):

@@ -275,7 +275,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
          It is a RUNTIME raise, so the pod renders, schedules, starts and then
          CrashLoops, and the message says nothing about which value caused it.
-         RE-VERIFIED against accessionflow 0.19.0 (api/collate_api.py:263-269).
+         RE-VERIFIED against accessionflow 0.20.0 (sources/orthanc/api/collate_api.py:72-78).
          The historical
          raise is in 0.13.1 and 0.15.6, so this is not a version regression, it
          is a long-standing footgun
@@ -1035,7 +1035,7 @@ installs for the running Python, so the pod passes its own image in.
      under its own name, and CI cli-contract fails when the image has no such
      command (a values file cannot reach this, so it is no render guard). */}}
 {{- define "edge.stageCommand" -}}
-{{- $argv := dict "group" (list "collate") "group-orthanc" (list "collate-orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
+{{- $argv := dict "group" (list "collate" "folder") "group-orthanc" (list "collate" "orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
 - accessionflow
 {{- range (index $argv . | default (list .)) }}
 - {{ . | quote }}

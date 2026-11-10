@@ -116,7 +116,8 @@ dataPolicy:
     # Owned by THIS chart. accessionflow store xnat has no S3 retention of its own:
     # it rebuilds its work list from a live S3 listing every loop, so an
     # already-uploaded session stays there and is re-listed without this
-    # reclaimer. In 0.19.0 a complete session skips before the success line.
+    # reclaimer. Since 0.19.0 a complete session skips before the success line
+    # (0.20.0: stores/xnat/api/store_api.py:274).
     # Repeated success alerts from the old skip path are historical.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
@@ -162,7 +163,7 @@ dataPolicy:
         # ACFLOW_*). Every pin of the tool in both charts must name the same image
         # (CI: log-phrases and cli-contract), and the templates follow this version.
         repository: ghcr.io/australian-imaging-service/accessionflow
-        tag: "0.19.0"
+        tag: "0.20.0"
         pullPolicy: IfNotPresent
 
   telemetry:
@@ -425,7 +426,7 @@ xnatUpload:
     # ACFLOW_*). Every pin of the tool in both charts must name the same image
     # (CI: log-phrases and cli-contract), and the templates follow this version.
     repository: ghcr.io/australian-imaging-service/accessionflow
-    tag: "0.19.0"
+    tag: "0.20.0"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password
@@ -498,7 +499,7 @@ xnatUpload:
 
   resources:
     requests: {memory: 256Mi, cpu: 100m}
-    # CAUTION: accessionflow 0.19.0 calls xnat 0.8.1 upload_dir. Its
+    # CAUTION: accessionflow 0.20.0 (as 0.19.0) calls xnat 0.8.1 upload_dir. Its
     # tar_file/tgz_file methods use a 256 MiB SpooledTemporaryFile. Up to
     # 10 workers can hold archives at once, as in the older 0.16.2 warning.
     # Do not assume the fork archive fix (xnat-ingest PR #200) is present.
