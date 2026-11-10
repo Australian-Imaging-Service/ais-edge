@@ -185,15 +185,26 @@ report_disk() {
 # file, which makes every sweep O(files) in process spawns. Measured in this
 # image over 2000 files, 24.5s vs 1.6s under a 100m quota. busybox find
 # supports `+`; verified in curlimages/curl:8.11.1.
+# ORTHANC'S OWN DATABASE IS NOT DATA. Orthanc keeps its SQLite index (index,
+# index-wal, index-shm) in its storage folder, and an idle Orthanc does not
+# touch those files. Counted as entries, they aged past stageAgeAlertAfter and
+# StageBacklogAgeing fired on an Orthanc with no study (edge-dev, 2026-11-04).
+# They are left out for derived.orthancStorage only: attachments there have
+# UUID names, and another stage may hold a real file named "index".
 report_age() {
     path="$1"
-    ENTRIES=$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${2:-}" = "derived.orthancStorage" ]; then
+        set -- "$path" ! -name index ! -name 'index-*'
+    else
+        set -- "$path"
+    fi
+    ENTRIES=$(find "$@" -type f 2>/dev/null | wc -l | tr -d ' ')
     case "${ENTRIES:-}" in ''|*[!0-9]*) ENTRIES=0 ;; esac
     if [ "$ENTRIES" -eq 0 ]; then
         OLDEST_AGE_S=0
         return 0
     fi
-    oldest=$(find "$path" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n1)
+    oldest=$(find "$@" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n1)
     case "${oldest:-}" in
         ''|*[!0-9]*) OLDEST_AGE_S=-1; return 1 ;;
     esac
@@ -733,7 +744,7 @@ while true; do
         fi
 
         report_disk "$name" "$location" || continue
-        report_age "$location"
+        report_age "$location" "$name"
 
         extra=",\"location\":\"$(jsan "$location")\",\"kind\":\"$(jsan "$kind")\""
         extra="${extra},\"free_pct\":${FREE_PCT},\"size_kb\":${SIZE_KB},\"avail_kb\":${AVAIL_KB}"

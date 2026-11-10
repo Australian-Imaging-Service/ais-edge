@@ -424,6 +424,31 @@ else
 fi
 check orthanc_no_url_nodelete "$R" assigned/s1 exist "and deleted nothing while unconfigured"
 
+# 19b — the Orthanc storage census counts DATA, not Orthanc's own database.
+#       Orthanc keeps its SQLite index (index, index-wal) in the storage folder.
+#       An idle Orthanc does not touch them, so they age, and the stage report
+#       said "2 file(s), oldest 13d" with no study in Orthanc: StageBacklogAgeing
+#       fired on an empty Orthanc (edge-dev, from 2026-11-04). The control
+#       (one attachment, 2 days old) must still be counted.
+R="$WORK/c19b"; build_case "$R"; mkdir -p "$R/orthanc-storage/ab/cd"
+for f in index index-wal; do echo db > "$R/orthanc-storage/$f"; touch -d "13 days ago" "$R/orthanc-storage/$f"; done
+ORTHANC_URL_T="" run_engine "$R" "derived.orthancStorage${TAB}derived${TAB}/data/orthanc-storage${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest" true false
+rep=$(grep '"event":"stage_report"' "$R/out.jsonl" 2>/dev/null | grep '"stage":"derived.orthancStorage"' | head -1)
+if printf '%s' "$rep" | grep -q '"entries":0,"oldest_age_s":0'; then
+    pass orthanc_census_no_index "an Orthanc with only its index reports 0 entries"
+else
+    fail orthanc_census_no_index "expected entries 0 and oldest 0; got: $(printf '%s' "$rep" | grep -o '"entries":[0-9]*,"oldest_age_s":[0-9-]*')"
+fi
+echo dicom > "$R/orthanc-storage/ab/cd/0a1b2c3d-attachment"; touch -d "2 days ago" "$R/orthanc-storage/ab/cd/0a1b2c3d-attachment"
+ORTHANC_URL_T="" run_engine "$R" "derived.orthancStorage${TAB}derived${TAB}/data/orthanc-storage${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest" true false
+rep=$(grep '"event":"stage_report"' "$R/out.jsonl" 2>/dev/null | grep '"stage":"derived.orthancStorage"' | head -1)
+age=$(printf '%s' "$rep" | sed -n 's/.*"oldest_age_s":\([0-9]*\).*/\1/p')
+if printf '%s' "$rep" | grep -q '"entries":1,' && [ "${age:-0}" -ge 172000 ] && [ "${age:-0}" -lt 260000 ]; then
+    pass orthanc_census_counts_data "an attachment is still counted, with its own age"
+else
+    fail orthanc_census_counts_data "expected entries 1 and an age near 2 days; got: $(printf '%s' "$rep" | grep -o '"entries":[0-9]*,"oldest_age_s":[0-9-]*')"
+fi
+
 # 20 — an unsatisfied condition past stuckAfter IS reported as stage_stuck.
 # The baseline for case 21: without it, 21 could pass because nothing fires at
 # all rather than because the delegation suppressed it.
