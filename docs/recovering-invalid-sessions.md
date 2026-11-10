@@ -46,7 +46,9 @@ guesses it.
    StudyInstanceUID. These are patient data. Keep them on the terminal.
 3. Give the details to the person with the hospital's records. That person
    finds the missing value.
-4. Make sure that the XNAT project has no session with the new label.
+4. Make sure that the XNAT project has no session with the new label. XNAT
+   keeps each session label once in a project, and the upload refuses a label
+   that another subject already has (see [After the move](#after-the-move)).
 5. Run `requeue <folder> --session <value>`. Give `--project`, `--subject` or
    `--session` for each ID that the folder misses, and only for those.
 6. Look for the session in the log of `mgmt-upload-<edge>`, then in XNAT.
@@ -248,6 +250,15 @@ their proof.
 
 Do not send the study again to correct it. Orthanc keeps the instances that it
 already has, and it ignores a copy with the same SOPInstanceUID.
+
+If XNAT already has a session with the new label under another subject, the
+upload refuses the session. On each pass, the log of `mgmt-upload-<edge>` says
+`Cannot verify XNAT session identity`, and `XNATUploadRetryStorm` fires. The
+session waits in the bucket. The management reclaimer keeps it there, because
+XNAT does not confirm it (the edge copy goes, as usual, once the bucket holds
+every file). There is no command yet to change the label of a session after it
+left `__invalid__/`. Do not remove the bucket copy, and ask the maintainers of
+this repository.
 
 ## More data for the same study
 
