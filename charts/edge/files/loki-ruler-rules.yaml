@@ -400,8 +400,11 @@ groups:
       description: |
         Assign reported a session with missing project, subject, or session IDs.
         Check the assign logs and assigned/__invalid__ on the edge node under storage.pipeline.hostPath.
-        Keep these files for manual review. If facility backup is off, they can be
-        the only copy. Do not delete them to clear this alert.
+        Keep these files. If facility backup is off, they can be the only copy.
+        Do not delete them to clear this alert.
+        To recover the session, on the edge node: sudo ais-requeue list, then
+        show <folder>, then requeue <folder> --session <value> once a person has
+        found the value (docs/components/accessionflow.md, "Recovering an invalid session").
         Use the affected edge's kubeconfig for this command:
           kubectl -n xnat-ingest logs -l app=xnat-ingest,component=assign --since=15m
         The alert clears when the log leaves the 10-minute window. This does not

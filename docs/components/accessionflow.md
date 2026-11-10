@@ -611,12 +611,83 @@ To recover the session:
 
 1. Find the correct IDs: the values that the site's ID mapping (`ingest.assign`)
    would have produced, from the hospital's records. Make sure that the XNAT
-   project does not already have a session with that label.
-2. Rename the folder to `<project>.<subject>.<session>` and move it up into
-   `assigned/`. On the node, `/data` is the pipeline hostPath,
-   `/data/xnat-ingest` by default. The commands stop if a folder of that name
-   exists. `mv -nT` never replaces a folder and never moves into one, and the
-   last `test` checks that the folder really left `__invalid__/`:
+   project does not already have a session with that label. Nothing finds the
+   value for you: the DICOM tag was empty. Who does what:
+   - The operator gets the alert and runs `list` and `show` (step 2). `show`
+     prints the study details: PatientID, the study date and time, the
+     description, the modality, the AccessionNumber and the StudyInstanceUID.
+     They are patient data: keep them on the terminal.
+   - A person with access to the hospital's records (a clinician or a data
+     manager, with the RIS or PACS) finds the missing value from those
+     details. That person needs no access to the node.
+   - The operator gives the value to `requeue` (step 2).
+2. Move the session back with the requeue tool. The chart ships it into the
+   label (`assign`) pod at `/opt/ais-edge/requeue-invalid.py` (ConfigMap
+   `<release>-requeue-tool`). Run it in one of these ways on the node; they run
+   the same tool:
+
+   **The node command**, with no kubectl and no copy of this repository:
+
+   ```bash
+   sudo ais-requeue list
+   sudo ais-requeue show <folder>
+   sudo ais-requeue requeue <folder> --session <value>
+   ```
+
+   `/usr/local/bin/ais-requeue` runs the tool in the running label container
+   through k0s (`k0s ctr`). `install.sh` installs it. On a node installed
+   before it existed, install it once from the repository clone:
+
+   ```bash
+   sudo install -o root -g root -m 0755 scripts/files/ais-requeue /usr/local/bin/ais-requeue
+   ```
+
+   `AIS_NAMESPACE=<ns>` selects another namespace than `xnat-ingest`.
+
+   **With kubectl**:
+
+   ```bash
+   kubectl -n xnat-ingest exec deploy/<release>-assign -c assign -- \
+     python3 /opt/ais-edge/requeue-invalid.py --operator <your-name> list
+   ```
+
+   Use `show <folder>` and `requeue <folder> --session <value>` in place of
+   `list`. From the repository clone, `scripts/requeue-invalid.sh list` does
+   the same and records `<user>@<host>` as the operator.
+
+   Give `--project`, `--subject` or `--session` for each ID that the folder
+   name misses, and only for those. `requeue` refuses, and moves nothing, when:
+
+   - a value is not a legal label: letters, digits, `_` and `-` only;
+   - a value is given for an ID that is not missing, or a missing one is not
+     given;
+   - `assigned/<new name>` or `deidentified/<new name>` already exists. If the
+     session in `deidentified/` is the same study (more data for it), add
+     `--allow-existing`. A folder that waits in `assigned/` is never merged:
+     wait until deidentify takes it, then run the command again;
+   - a `grouped/` copy of the same study is still there, because assign would
+     put that copy in `__invalid__/` again. Wait for it to clear, or remove it
+     first.
+
+   It moves the folder under the label stage's lock
+   (`/data/.locks/assigned.lock`), so a label pass cannot run at the same
+   time, and it checks that the folder left `__invalid__/`. It appends one line
+   per move to `/data/LOGS/requeue-audit.jsonl`: who, when, the old and new
+   names, and the values given. Exit codes: 0 moved, 2 refused, 3 folder not
+   found, 4 lock not obtained (a label pass is running: try again).
+
+   The upload takes the three IDs from the folder name. Do not edit the files.
+   Neither way changes the DICOM files. Under `deid.engine: ingest`, the
+   deidentify stage takes the session from `assigned/` first, as for any other
+   session.
+
+   **By hand** (the fallback, when the tool cannot run): rename the folder to
+   `<project>.<subject>.<session>` and move it up into `assigned/`. On the
+   node, `/data` is the pipeline hostPath, `/data/xnat-ingest` by default. The
+   commands stop if a folder of that name exists. `mv -nT` never replaces a
+   folder and never moves into one, and the last `test` checks that the folder
+   really left `__invalid__/`. Unlike the tool, these commands do not take the
+   label stage's lock:
 
    ```bash
    cd /data/xnat-ingest/assigned
@@ -630,10 +701,6 @@ To recover the session:
    anything else: a session with that name may already be waiting, or the next
    stage may already have taken the moved folder. Never repeat the move blindly.
 
-   The upload takes the three IDs from the folder name. Do not edit the files.
-   This procedure does not change the DICOM files. Under
-   `deid.engine: ingest`, the deidentify stage takes the session from
-   `assigned/` first, as for any other session.
 3. Look for the session in the upload log, then in XNAT. When the data policy
    is armed, the reclaimer removes the local copy after XNAT holds every file.
 
@@ -775,7 +842,7 @@ deletes. A dry run makes the same checks and removes no data.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Rename and move it, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
+| DICOM missing AccessionNumber | `assign` routes the session to `/data/assigned/__invalid__/` | Requeue it with `sudo ais-requeue` on the node, as in "Recovering an invalid session". `InvalidSessionAssigned` fires when assign reports one. `DICOMValidationFailureSpike` in `charts/edge/files/loki-ruler-rules.yaml` covers the >10/h case. It selects `component="assign"`, so it is one of the rules that works unchanged on a single node, and it needs `observability.stack.enabled` for the Loki ruler to evaluate it |
 | Secret missing at install | pod sits in `CreateContainerConfigError` with nothing saying why | `install.sh` applies `sites/<site>/secrets.enc.yaml` *before* the chart, deliberately in that order |
 | XNAT login fails | upload pod crashes / errors | check the `xnat-credentials` Secret; XNAT user must be a local account, not AAF/OIDC |
 | XNAT down | Output accumulates in `/data/deidentified`, or `/data/packaged` when packaging is on | Check direct-upload logs, current delivery alerts and free disk. The retained source is retried; a quiet log or a later success line does not prove that a conflicting resource was repaired. |
