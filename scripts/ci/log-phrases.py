@@ -42,9 +42,6 @@ NOT_TEXT = {"namespace", "app", "component", "container", "pod", "job", "stream"
 KNOWN = {
     "traceback (most recent call last)":
         ("PASS", "printed by the Python interpreter for any uncaught exception"),
-    "new stored instance":
-        ("SKIP", "Orthanc server text. Orthanc 1.12.11 writes 'New instance stored', "
-                 "and only with --verbose, so OrthancStorageGrowing cannot fire as written"),
 }
 REGEXP = re.compile(r'\|\s*regexp\s+("(?:[^"\\]|\\.)*"|`[^`]*`)')
 COMPONENT = re.compile(r'component\s*(=~|=)\s*"([^"]+)"')
