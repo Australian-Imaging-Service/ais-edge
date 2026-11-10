@@ -204,8 +204,8 @@ output one directory level deeper than `assign` does. So `upload` reported
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144),
 closed on 2026-08-31 (GitHub state checked 2026-11-10). This is historical
 behavior in 0.13.1. The pinned image,
-`ghcr.io/australian-imaging-service/accessionflow:0.19.0`, writes the same layout as
-`assign` (`accessionflow/model/accession.py`, `save()` in 0.19.0). The
+`ghcr.io/australian-imaging-service/accessionflow:0.20.0`, writes the same layout as
+`assign` (`accessionflow/model/accession.py`, `save()` in 0.20.0). The
 2026-11-10 test run reached XNAT with this layout. That result does not prove
 delivery for a different site or guarantee header extraction after upload.
 
@@ -225,7 +225,7 @@ by brute force, and two sites produce identical codes for the same patient.
 That is
 [xnat-ingest#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143),
 open upstream when checked on 2026-11-10. The pinned image does not depend on `ais_deid` (see
-the installed 0.19.0 distribution dependencies). Its recipes change only the tags that
+the installed 0.20.0 distribution dependencies). Its recipes change only the tags that
 they name, and the shipped recipe removes the identifiers. It does not hash
 them.
 

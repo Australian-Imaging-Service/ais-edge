@@ -155,7 +155,7 @@ exist. That fallback cannot establish that the log collector is working.
 | Panel | Query input and window | Meaning |
 |---|---|---|
 | **Invalid sessions (last 1h)** | Assign `level="ERROR"`, `message =~ "^Could not resolve the labels of .*"`, `[1h]`. | Invalid identifier reports. The summary error line is excluded, but a repeated attempt can report the same session again. |
-| **Assign cycles with errors (last 1h)** | Assign `message =~ "^Label completed with [0-9]+ errors"`, `[1h]`. | One-line cycle summaries from 0.19.0. Each failed cycle contributes one line, regardless of how many sessions failed. |
+| **Assign cycles with errors (last 1h)** | Assign `message =~ "^Label completed with [0-9]+ errors"`, `[1h]`. | One-line cycle summaries from 0.20.0. Each failed cycle contributes one line, regardless of how many sessions failed. |
 | **Edge sites with assign logs (last 1h)** | Distinct non-empty, non-`mgmt` cluster labels on `component="assign"`, `[1h]`. | Recent assign log delivery. This excludes management reclaimers whose cluster label identifies the edge they serve. It is not a pod-health test. |
 
 ### Recent invalid sessions

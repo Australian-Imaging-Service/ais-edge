@@ -1093,7 +1093,7 @@ like a bug in the charts.
 | Vector | `0.57.0` |
 | ingress-nginx | `4.15.1` |
 | Orthanc | `1.12.11` |
-| accessionflow | `0.19.0`: upstream `ghcr.io/australian-imaging-service/accessionflow`, in both charts. Replaces the former xnat-ingest 0.16.2.post1 fork; deployed object names, paths and Orthanc receipt labels stay the same |
+| accessionflow | `0.20.0`: upstream `ghcr.io/australian-imaging-service/accessionflow`, in both charts. Replaces the former xnat-ingest 0.16.2.post1 fork; deployed object names, paths and Orthanc receipt labels stay the same |
 
 These are **source pins reviewed on 2026-11-10**, not a new live compatibility
 or vulnerability certification. Vector has separate versions: management chart

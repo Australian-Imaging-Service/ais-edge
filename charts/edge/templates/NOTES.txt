@@ -111,7 +111,7 @@ DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun 
   NOTE: grouped.reclaim = never. The assign wrapper runs one CLI pass per
   cycle, retaining grouped input. Later passes can revisit the session; whether
   they rewrite output depends on the current manifest and stage behavior.
-  In accessionflow 0.19.0 a complete XNAT session is skipped without another
+  In accessionflow 0.20.0 a complete XNAT session is skipped without another
   success line. Historical repeated-success incidents do not establish that
   every retained input produces another notification now. Hardlinks preserve
   bytes only while another link still exists; an enabled backup is not proof

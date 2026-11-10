@@ -467,7 +467,7 @@ Certificates, it does not remove the CA path. Everything else is unchanged.
 
 **Historical environment and result.** The addresses, component names and
 `upload_completed` line below belong to the 2026-05-25 run. The current engine
-is accessionflow 0.19.0 with collate-orthanc, label and store commands. The
+is accessionflow 0.20.0 with collate orthanc, label and store commands. The
 old bytes/DICOM/file counts are not a current acceptance test or a capacity
 claim; no fresh provider replay was performed for this documentation review.
 

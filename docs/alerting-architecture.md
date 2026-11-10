@@ -86,7 +86,7 @@ here that no longer ships reads as coverage that does not exist.
 | `XNATAuthFailure` | Loki ruler | 401/403 patterns in the `xnat-upload` namespace, with `!= "it/s"` retained as defense if progress output is re-enabled. `TQDM_DISABLE=1` has disabled it since 2026-10-28; the guard is not evidence of current progress lines. |
 | `XNATUploadRetryStorm` | Loki ruler | More than 2 ERROR or traceback records from the management uploader (`component="upload"` in `xnat-upload`) in 10 minutes, for 10 minutes. The different-checksums phrase is excluded, as in tier-1's rule of the same name; `XNATResourceIncompleteAndStuck` covers that conflict per session. |
 | `OrthancDeidLuaError` | Loki ruler | Lua traceback in the Orthanc log. Under `ingest`, the default, the script writes the facility backup, so an error can leave an original out of the archive. Under the deprecated `orthanc` engine the script also de-identifies, so an error there is a PHI risk, not a cosmetic one. |
-| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Uses existing Vector logs; no remote-edge Kubernetes metrics are assumed. The 0.19.0 missing-ID diagnostic is covered by `InvalidSessionAssigned`; the older `DICOMValidationFailureSpike` text filter is not equivalent; redundant assign summaries are suppressed. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Uses existing Vector logs; no remote-edge Kubernetes metrics are assumed. The 0.20.0 missing-ID diagnostic is covered by `InvalidSessionAssigned`; the older `DICOMValidationFailureSpike` text filter is not equivalent; redundant assign summaries are suppressed. |
 | `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` / `dependency_missing` / `lock_failed` — the uploader's own refusals and stops (the pre-flight probe, a tool the image lacks, a writer lock that cannot be opened or taken), which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"} == 0` from management Prometheus. A failed scrape is the signal, not proof the entire cluster is down; missing series or a failed evaluator cannot fire this expression. |
@@ -201,7 +201,7 @@ on; it does not honor every per-edge bucket override or bucket-prefix value), an
 (`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
 rather than by hardcoded name.
 
-> **What changed since.** The pinned uploader is accessionflow 0.19.0 (`helpers/remotes.py`, `iterate_s3_sessions`)
+> **What changed since.** The pinned uploader is accessionflow 0.20.0 (`helpers/remotes.py`, `iterate_s3_sessions`)
 > builds its session list from the object keys and skips a key that ends in
 > `/`, so an empty folder is not a session to it, and `mgmt-reclaim-<edge>`
 > leaves the session folder behind on purpose: it deletes the objects one by
@@ -268,10 +268,10 @@ kubectl --kubeconfig=kubeconfig-<edge> -n xnat-ingest exec deploy/edge-s3-upload
 > script itself. `scripts/clear-staged-s3.sh` prints the exact management-side
 > command for the site you ran it against; verify names and the resolved bucket against rendered manifests before using any diagnostic command.
 
-Repeated success for the same session in 0.19.0 needs investigation of new writes, repair attempts, image identity, and multiple workers. Empty prefixes alone no longer explain it. Read-only listings do not prove that content reached XNAT; use the reclaimer proof and file inventory for that determination.
+Repeated success for the same session in 0.20.0 needs investigation of new writes, repair attempts, image identity, and multiple workers. Empty prefixes alone no longer explain it. Read-only listings do not prove that content reached XNAT; use the reclaimer proof and file inventory for that determination.
 
 The following explanation records older uploader behavior. In accessionflow
-0.19.0 a complete-session skip bypasses the success line, and the loop waits
+0.20.0 a complete-session skip bypasses the success line, and the loop waits
 for the remainder of its interval. The existing alert window remains in
 place; the old measurements explain its origin.
 

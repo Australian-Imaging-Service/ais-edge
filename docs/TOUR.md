@@ -191,7 +191,7 @@ ever dialled the node port from outside. It buys nothing here.
 > **Historical capacity sample (measurement date not recorded; reviewed
 > 2026-11-10):** one older uploader used roughly **231Mi**, and the old note
 > estimated about **15 sites** on a 16Gi node. This is not a current capacity
-> limit. The 0.19.0 management uploader requests 256Mi and has a 4Gi memory
+> limit. The 0.20.0 management uploader requests 256Mi and has a 4Gi memory
 > limit per edge. Archive creation and concurrent resources can need more
 > memory than the old idle sample. Measure the full workload before sizing.
 
@@ -1373,7 +1373,7 @@ kubectl -n ais-mgmt create job seed --from=cronjob/mgmt-cert-sync-edge-syd
 ### Two things to know
 
 **Measure capacity before adding a site.** The historical 231Mi uploader
-sample and 15-site estimate are not a 0.19.0 capacity guarantee. Each edge adds
+sample and 15-site estimate are not a 0.20.0 capacity guarantee. Each edge adds
 an uploader, hosted control-plane resources and observability load. Use the
 current requests and limits plus measurements from representative large
 studies. Account for simultaneous archive buffers and node memory headroom.
@@ -1605,17 +1605,17 @@ patient data — is still sitting on that machine.
 Stated plainly so you can weigh them.
 
 Items 1 and 2 below preserve measurements from older xnat-ingest releases.
-They are fixed in the pinned accessionflow 0.19.0 image. A complete session
+They are fixed in the pinned accessionflow 0.20.0 image. A complete session
 now produces a skip message and bypasses the success line. The uploader
 clears xnatpy caches before object operations. Do not apply the old restart
-advice below to routine recovery on 0.19.0. The history explains the alert
+advice below to routine recovery on 0.20.0. The history explains the alert
 design; see the current status notes in [the component guide](components/accessionflow.md#known-upstream-defects-candidate-reports).
 
 **1. Fixed old behavior: repeated upload-success lines (historical, older
 xnat-ingest release; measurement date not recorded).** The old sample contained
 30 success lines, 14 `already exists` lines and 14 `Skipping` lines in 30 minutes.
 It reasserted success while a completed session remained staged. That sample
-explains the original alert range; it does not describe accessionflow 0.19.0.
+explains the original alert range; it does not describe accessionflow 0.20.0.
 
 **Current status (2026-11-10):** `stores/xnat/api/store_api.py` skips a complete
 session at the `session_listing.all_uploaded()` branch before the success line.
@@ -1788,7 +1788,7 @@ fire for two independent reasons, only the second of which is fixable in
 this repo: the RHS parsed a JSON `event` key the management uploader's log
 format did not emit at that audit (its lines carried `logger`/`message`/`ts`,
 without the expected event). In that old release the success string was a
-repeated state report. Current 0.19.0 structured events and complete-session
+repeated state report. Current 0.20.0 structured events and complete-session
 skips differ; they do not restore this deleted rule automatically. Its count grew with the size of the static backlog sitting in staging, not
 with new arrivals in the window, so a genuine backlog would make the
 subtraction more negative, exactly the wrong direction for a `> 3` alert.
@@ -1857,12 +1857,13 @@ name, rather than assuming it always will.
 Lua de-identification was deprecated on 2026-11-02. The steps below preserve
 that old experiment, not current deployment guidance.
 
-**Current evidence (2026-11-10, tier-2 test environment):** saved accessionflow
+**Historical test evidence (2026-11-10, tier-2 test environment):** saved accessionflow
 0.19.0 test results cover in-flight upgrade, a new study, late series into an
 old session, invalid-label recovery, restart and rollback/re-upgrade. The
 saved AFRB4 inventory has 13 expected and 13 remote filenames, an exact
 directory-form grouping UID and two passing header samples. These checks do
-not prove the configuration of every site or every DICOM field. The old run follows. `storescu` against `edge-orthanc:4242` with AE title `AISEDGE` →
+not prove the configuration of every site or every DICOM field. They also do
+not establish an end-to-end result for the 0.20.0 image. The old run follows. `storescu` against `edge-orthanc:4242` with AE title `AISEDGE` →
 synchronous de-identification (`PatientIdentityRemoved: YES`, name/ID/
 accession replaced per the profile) → `group-orthanc` labels it within one
 60s pass → `assign` stages it under the mapped project within the next →
@@ -1871,7 +1872,7 @@ the 5-minute settle guard → `mgmt-upload-edge-dev` picks it up on its own
 60s poll and lands it in XNAT (`test_project`), confirmed both by the
 `Successfully uploaded all files` line and by checking XNAT directly.
 Two things surfaced along the way, neither in the plumbing. These are
-historical observations, not a replay with the current image. In 0.19.0,
+historical observations, not a replay with the current image. In 0.20.0,
 `stores/xnat/remotes.py` can use `OtherDicomSessionData` for an otherwise
 unmapped modality when the XNAT server exposes that class. The old OT failure
 below does not establish that all current OT uploads fail:

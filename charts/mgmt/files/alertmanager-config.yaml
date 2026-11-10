@@ -128,7 +128,7 @@ route:
   # three. The other half is in files/loki-ruler-rules.yaml, where that rule's
   # range now comfortably exceeds the uploader's loop period so the series
   # stays continuous; scripts/ci/promtool.sh keeps it that way.
-  # Current: The pinned 0.19.0 store skips complete sessions without repeating the
+  # Current: The pinned 0.20.0 store skips complete sessions without repeating the
   # success line. The old approximately 62-second emitter period is historical. The
   # retained range and grouping still govern observed events, not exactly-once delivery.
   #
@@ -225,7 +225,7 @@ route:
       # false and nothing is ever reclaimed). Any repeat_interval short enough
       # to be a "reminder" is therefore just recurring mail about an upload that
       # already worked.
-      # Current: This was older emitter behavior. In 0.19.0, a complete-session skip is
+      # Current: This was older emitter behavior. In 0.20.0, a complete-session skip is
       # quiet. A retained session is scanned again but not re-sent merely because it
       # remains staged. The 720-hour repeat interval is retained policy, not an infinite
       # suppression guarantee.
@@ -278,7 +278,7 @@ route:
       # mail every five minutes.
       # Current: A repeated conflict requires file comparison and an authority decision.
       # Do not delete a destination resource or restart the uploader solely to clear
-      # this alert. Current 0.19.0 refreshes cached listings on later passes.
+      # this alert. Current 0.20.0 refreshes cached listings on later passes.
       #
       # It DOES repeat, unlike email-upload-success above, and the distinction is
       # deliberate: this is an unfinished operator TASK, not a notification about

@@ -9,7 +9,7 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 ## Overview
 
 **Review date: 2026-11-10.** This page describes the pinned accessionflow
-0.19.0 implementation. The facility-backup write in `OnStoredInstance` is
+0.20.0 implementation. The facility-backup write in `OnStoredInstance` is
 limited to `RequestOrigin == "DicomProtocol"`. REST uploads and file-drop
 input do not get that backup copy. Verify the retained originals separately
 from recipe output. Orthanc/Lua de-identification was deprecated on 2026-11-02;
@@ -40,7 +40,7 @@ it for a new site. Its reference material is in one section of this page:
 | source of the XNAT project, subject and session | the called AE title and hashes of the patient ID | the DICOM tags that `ingest.assign.tagMapping` names, or `ingest.assign.constantProjectId` |
 | needs an AE-title map | yes | no |
 | changes selected metadata | JSON profile via Orthanc `/modify`; only DICOM-protocol arrivals reach this callback | format-specific recipe per project or fallback; no general guarantee for pixels or unnamed fields |
-| pseudonymises the XNAT labels | yes (salted djb2, not an HMAC) | **no**, the labels are the tag values, verbatim. See *Routing identifiers* |
+| pseudonymises the XNAT labels | yes (salted djb2, not an HMAC) | **no**, labels come from configured tags or constants, with character escaping for tag-derived values. See *Routing identifiers* |
 | re-identification evidence | originals remain in the backup if written and retained; weak hashes are not irreversible | sensitive mapping records transformed metadata; it is not a complete original archive |
 | identifiable data on the pipeline volume | can remain in Orthanc storage after a failure or REST bypass; profile output also needs review | original/intermediate data, assigned labels, and reid maps can remain after the stage runs |
 | `group-orthanc` waits for the ready label | yes | no, it takes each study that has been quiet for `waitPeriod` |
@@ -84,7 +84,7 @@ that was missing, for example:
 /data/assigned/__invalid__/INVALID_MISSING_STUDYID_<8 random characters>.<subject>.<session>/
 ```
 
-(accessionflow 0.19.0, `helpers/arg_types.py:426-447` and
+(accessionflow 0.20.0, `helpers/arg_types.py:426-447` and
 `api/label_api.py:224-230`.)
 
 Check the tags on a study that a modality actually sends:
@@ -137,15 +137,16 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 > `ingest` the default is `StudyID`, `PatientID` and `AccessionNumber`. They
 > are values, not constants. Set them to the tags that your modalities fill in.
 
-> **CAUTION: the tags that you name become the XNAT labels, verbatim and not
-> de-identified.**
+> **CAUTION: the configured tag values become XNAT labels after character
+> escaping. The DICOM recipe does not de-identify those labels.**
 >
-> `assign` reads the three tags and puts their values into the session object.
-> All later steps use the values, not the tags. `deidentify` builds its
-> output with `ImagingSession.new_empty()`, which copies `project_id`,
-> `subject_id` and `session_id` unchanged. `save()` names the directory
-> `<project>.<subject>.<session>`. `upload` creates the XNAT subject and
-> experiment from the same ids.
+> `assign` resolves each configured tag mapping or constant into the
+> accession's `labels` dictionary. Later steps use those saved values.
+> `deidentify` builds its output with `Accession.new_empty()`, which
+> copies `uid`, `labels`, `store_type` and `run_uid`. It also copies
+> custom `fields`. `save()` names an XNAT-labelled directory
+> `<project>.<subject>.<session>`. `accessionflow store xnat` creates the
+> XNAT subject and experiment from the same labels.
 >
 > **A recipe cannot change them.** The recipe changes DICOM tags. But `assign`
 > has already read the values before `deidentify` runs. So the tag that you
@@ -178,7 +179,7 @@ only the tags that it names. The shipped recipe removes `PatientID`,
 A recipe can hash a value. accessionflow reads the `var:` and `func:` values of
 a recipe from a `<format>.transforms.yaml` side-car file. A `<format>.salt`
 side-car file can hold a key for those hashes (`accessionflow deidentify --help`,
-`accessionflow/cli/deidentify_cli.py`, recipe-sidecar help in 0.19.0). The chart does not
+`accessionflow/cli/deidentify_cli.py`, recipe-sidecar help in 0.20.0). The chart does not
 supply a salt side-car. `ingest.deidentify.specs` writes its files into a
 ConfigMap, and a ConfigMap is not a place for a secret. Also, a hash in the
 headers does not get to the XNAT labels: `assign` reads them before
@@ -236,7 +237,7 @@ package contains its own `__default__` recipe. The chart does not use it: the
 stage reads only the recipes in `ingest.deidentify.specs`. If you copy the
 upstream recipe, also read its side-car,
 `accessionflow/specs/__default__/medimage/dicom-series.transforms.yaml` (in
-0.19.0). It sets these values:
+0.20.0). It sets these values:
 
 ```yaml
 anon_patient_name:   {tag: PatientID}
@@ -499,7 +500,7 @@ that is not in a directory. So a flat file named `medimage@dicom-series.json`
 is never read. The stage then finds no recipes and fails each session with
 `No deidentification recipe files found for '<project>' and no default
 recipe files provided.` (`accessionflow/api/deidentify_api.py:136-137` in
-0.19.0). The data stays in `/data/assigned`.
+0.20.0). The data stays in `/data/assigned`.
 
 **The file is a pydicom `deid` recipe, not JSON, whatever its extension.** The
 upstream default is named `dicom-series.json`. The example in this repository
@@ -575,7 +576,7 @@ ingest:
         REMOVE PatientName
 ```
 
-The key is the path under `SPEC_DIR`; the value is the recipe. Changing a
+The key is the path under `RECIPE_DIR`; the value is the recipe. Changing a
 policy later is a `helm upgrade` with the edited site file — still no
 `kubectl`.
 
@@ -646,7 +647,7 @@ kubectl -n xnat-ingest create secret generic reid-key \
 ```
 
 With the key, the stage writes each map as `<project>.<subject>.<session>.json.enc`
-(`accessionflow/api/deidentify_api.py`, re-identification map encryption in 0.19.0). You cannot read
+(`accessionflow/api/deidentify_api.py`, re-identification map encryption in 0.20.0). You cannot read
 it without the key. **Keep the key somewhere other than the volume the maps are
 on.** Together, they are just a slower way to store the identifiers.
 
@@ -753,7 +754,7 @@ Two other tier-2 differences:
   `OrthancDeidLuaError`.
 * `accessionflow` is pinned in **both** charts: `charts/edge` for the pipeline
   stages and `charts/mgmt` for the S3 -> XNAT uploader. Both pin the upstream image
-  `ghcr.io/australian-imaging-service/accessionflow:0.19.0` (`ingest.image` in
+  `ghcr.io/australian-imaging-service/accessionflow:0.20.0` (`ingest.image` in
   `charts/edge/values.yaml`; `xnatUpload.image` and
   `dataPolicy.derived.s3Staged.image` in `charts/mgmt/values.yaml`). Both must
   move together, because the CLI contract is shared.
@@ -810,7 +811,7 @@ and no session metadata raises an error. A metadata-only skeleton is skipped
 with event `deid_skeleton_skipped`. Each loop logs
 `Deidentification completed with N errors` when sessions failed
 (`accessionflow/api/deidentify_api.py` and
-`accessionflow/cli/deidentify_cli.py` in 0.19.0).
+`accessionflow/cli/deidentify_cli.py` in 0.20.0).
 
 ## Current limitation
 
@@ -834,9 +835,10 @@ closed on 2026-08-31 (upstream status checked 2026-11-10).
 
 The limits that stay:
 
-* The XNAT labels are the tag values, verbatim. Hashing at the `assign` step is
-  a known second-pass item (the comment on `ingest.assign.tagMapping` in
-  `charts/edge/values.yaml`). Choose pseudonymous tags.
+* XNAT labels come from the configured tags or constants. Character escaping
+  of tag-derived values is not pseudonymisation. The chart does not hash those
+  labels at the `assign` step (`ingest.assign.tagMapping` in
+  `charts/edge/values.yaml`). Choose approved research identifiers.
 * The chart supplies no salt side-car for hash transforms (see *Pseudonym
   strength*).
 * No retention rule removes the maps in `/data/reid`. See
@@ -862,14 +864,14 @@ an original or encrypted mapping remains recoverable.
 
 **Historical minimum for the old interface:** xnat-ingest 0.13.1 first
 contained those fixes. It is not a supported downgrade target for this
-0.19.0 chart and its current CLI contract. 0.12.x shipped
+0.20.0 chart and its current CLI contract. 0.12.x shipped
 `dicom_deidentify` as a stub that raised `NotImplementedError`, so the engine
 did nothing; 0.13.0 implemented it but could not import at all because its
 `fileformats-medimage` floor was too low. Both are fixed in 0.13.1
 ([#138](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/138),
 [#139](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/139)).
 
-The charts pin the upstream image `ghcr.io/australian-imaging-service/accessionflow:0.19.0`
+The charts pin the upstream image `ghcr.io/australian-imaging-service/accessionflow:0.20.0`
 (`ingest.image` in `charts/edge/values.yaml`). Current source references on this
-page refer to 0.19.0. The former 0.16.2.post1 fork is migration history;
+page refer to 0.20.0. The former 0.16.2.post1 fork is migration history;
 its old module names and source line numbers are not the current interface.

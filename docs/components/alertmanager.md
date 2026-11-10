@@ -63,7 +63,7 @@ sends the appropriate message to each configured receiver.
 
 ## Routing tree (configured in `charts/mgmt/files/alertmanager-config.yaml`)
 
-**Current event semantics:** accessionflow 0.19.0 emits upload success after new files were uploaded or a repair was attempted. An unchanged session no longer emits success on every loop. A success line is a file-level verdict; it does not prove header reconciliation or downstream pipelines. The long repeat interval and session grouping remain useful notification guards. Historical duplicate-mail measurements below describe the older emitter, not the current one.
+**Current event semantics:** accessionflow 0.20.0 emits upload success after new files were uploaded or a repair was attempted. An unchanged session no longer emits success on every loop. A success line is a file-level verdict; it does not prove header reconciliation or downstream pipelines. The long repeat interval and session grouping remain useful notification guards. Historical duplicate-mail measurements below describe the older emitter, not the current one.
 
 These sibling routes use the default or explicit `continue: false`. Alertmanager
 stops at the first matching sibling, so their order matters. The config explains this at the
@@ -91,7 +91,7 @@ route (root) ──► email-primary             every alert no branch below cla
  │     deprecated deid.engine: orthanc rejects; under ingest it never fires.
  ├─ alertname = "XNATUploadSuccess" ────────► email-upload-success
  │     group_by session, group_wait 10s, repeat_interval 720h. One mail per
- │     session event group while it remains firing. Version 0.19.0 suppresses
+ │     session event group while it remains firing. Version 0.20.0 suppresses
  │     unchanged-session success logs. The repeat guard does not promise
  │     exactly-once mail across a resolve/refire, state loss, or repair.
  ├─ alertname = "XNATRepairAttempted" ──────► email-xnat-repair

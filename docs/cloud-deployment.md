@@ -16,7 +16,7 @@ substitutions:
 The application components, dashboards and alert rules are shared. Cloud
 networking, storage classes, identity and access controls still need site
 configuration. Memory behavior must be validated for the pinned accessionflow
-image; the old fork's memory fix is not a performance guarantee for 0.19.0.
+image; the old fork's memory fix is not a performance guarantee for 0.20.0.
 
 ## One key picks the topology
 
@@ -308,7 +308,7 @@ reserves or attaches the same resource on every cloud.
 ## End-to-end trace of one edge request in cloud mode
 
 ```
-   edge-group-orthanc pod (accessionflow collate-orthanc)
+   edge-group-orthanc pod (accessionflow collate orthanc)
          │ stdout / stderr
          ▼
    kubelet container log files on the edge worker
@@ -394,7 +394,7 @@ out that this coexistence is deliberate, not an oversight.
 | S3 upload mTLS (only if `seaweedfs.ingress.clientCerts.require` is on) | `curl --cacert <server-ca.crt> --cert tls.crt --key tls.key --resolve seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io:443:<lb-ip> https://seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io/` ; expect an S3 error document (no credentials), **not** a TLS failure. Re-run without `--cert/--key`: the request must be rejected (an HTTP certificate error is possible), and that rejection is the negative test. The cert/key are those of the edge's `s3-client-tls` Secret. First check certificate delivery before flipping `require`; test rejection on a controlled endpoint enforcing mTLS, then repeat after rollout. Historical measurement, date not recorded; not replayed on 2026-11-10: a missing client certificate gives HTTP 400 with an HTML body that rclone reports as an S3 XML parse failure, so if you discover it from the uploader's logs instead it looks like an unreachable endpoint. |
 | Edge resolves via real DNS | `kubectl --kubeconfig kubeconfig-edge-dev exec -n xnat-ingest deploy/edge-s3-uploader -- nslookup seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io`. The name should resolve through the pod resolver. If the uploader image has no nslookup, use an approved diagnostic container; tool availability is not verified here (2026-11-10). (`edge` is the Helm release name set by `install.sh`; a site that sets `fullnameOverride` changes the prefix.) |
 | Full pipeline | Send a synthetic DICOM to Orthanc. Follow group-orthanc, assign and deidentify. An `upload_completed` event from the S3 uploader proves that hop only. Check the management uploader's `Successfully uploaded all files in` message and the files on XNAT to establish final delivery. |
-| Uploader memory | Sample `kubectl top pod -n xnat-upload` during a representative two-hour workload. Record the peak, resource sizes, worker concurrency and restart count. The 0.19.0 image still uses XNAT client archive buffering. The old fork's flat-memory claim is not a verified limit for this image. |
+| Uploader memory | Sample `kubectl top pod -n xnat-upload` during a representative two-hour workload. Record the peak, resource sizes, worker concurrency and restart count. The 0.20.0 image still uses XNAT client archive buffering. The old fork's flat-memory claim is not a verified limit for this image. |
 
 ## When to use on-prem vs cloud
 

@@ -5,7 +5,7 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 ## Overview
 
 **Verified scope (2026-11-10):** descriptions below follow this branch
-and accessionflow 0.19.0. Orthanc is the receiver; the default `ingest` engine
+and accessionflow 0.20.0. Orthanc is the receiver; the default `ingest` engine
 de-identifies downstream. The Orthanc/Lua de-identification engine was
 deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
 Recipe output and source retention must be checked separately: a stage name,
@@ -13,11 +13,11 @@ processed label, or successful upload is not proof of a complete privacy policy.
 
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
 is the AIS-maintained Python tool that groups, labels, and de-identifies DICOMs into
-XNAT-ready sessions and uploads them. The pinned version is **0.19.0**,
+XNAT-ready sessions and uploads them. The pinned version is **0.20.0**,
 from the upstream accessionflow image. It replaces the AIS fork build
 0.16.2.post1 (`ingest.image` in `charts/edge/values.yaml`). The old single `sort` command
 was split into these stages:
-1. **`group-orthanc`** (`accessionflow collate-orthanc`): REST-pulls studies from Orthanc and
+1. **`group-orthanc`** (`accessionflow collate orthanc`): REST-pulls studies from Orthanc and
    groups their DICOMs into per-session directories
 2. **`assign`** (`accessionflow label xnat`): extracts the XNAT project/subject/session/scan IDs from
    the grouped DICOMs and stages them as a structured directory
@@ -29,7 +29,7 @@ was split into these stages:
 We run these as accessionflow pods, plus one non-accessionflow
 uploader that carries the sessions between the edge and the management
 node:
-- **`accessionflow collate-orthanc`**, **`accessionflow label xnat`** and
+- **`accessionflow collate orthanc`**, **`accessionflow label xnat`** and
   **`accessionflow deidentify`** on each edge VM
 - **`s3-uploader`** on each edge VM — an `rclone copy` loop, not
   accessionflow at all (see "Where it runs"). It was `aws s3 sync` until the
@@ -117,7 +117,7 @@ from SeaweedFS (an `s3://` source) and pushes to XNAT.
   the writer keeps for its whole life. This does not change how a stage
   removes its own input (`--unlink-source`). The chart runs each pass from a shell loop, then sleeps for the full
   configured interval. That stage has no `--loop` argument. The upload
-  command uses different timing; see the 0.19.0 loop note below. A pass that
+  command uses different timing; see the 0.20.0 loop note below. A pass that
   fails stops the container, as an exception out of `--loop` did. A stop
   (SIGTERM) ends the loop at once in the sleep. In a pass, it ends the loop
   when the pass ends: the pass is not stopped during a write, and no pass
@@ -176,11 +176,11 @@ recorded in a shell history.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.19.0` |
-| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.19.0` |
-| `edge-deidentify` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.19.0` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
+| `edge-deidentify` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
 | `edge-s3-uploader` | edge | `xnat-ingest` | `ubuntu:noble-20260917` (`upload.s3.shell.image`, NOT accessionflow), with rclone lifted from `rclone/rclone:1.75.0` by an initContainer |
-| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/accessionflow:0.19.0` |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
 `install.sh` installs the edge chart as release `edge` and the management
@@ -201,7 +201,7 @@ one site be paused without touching the others. Measured cost of a
 single uploader in a historical run was 231Mi resident and 4m CPU
 (measurement date not verified, reviewed 2026-11-10). The old estimate of
 around 15 sites on a 16Gi node was not a tested ceiling. Measure concurrent
-0.19.0 uploads, temporary storage, Orthanc load, and observability before
+0.20.0 uploads, temporary storage, Orthanc load, and observability before
 setting a site count or memory limit.
 
 A site can also skip S3 entirely with `upload.mode: direct`, which
@@ -215,7 +215,7 @@ XNAT twice.
 The previous `0.16.2.post1` tag was a **fork build**, pulled from
 `ghcr.io/akshitbeniwal/xnat-ingest`: upstream 0.16.2 plus the AIS changes
 tracked in xnat-ingest PRs #210-#231. The charts now use the upstream
-`ghcr.io/australian-imaging-service/accessionflow:0.19.0` image. The package
+`ghcr.io/australian-imaging-service/accessionflow:0.20.0` image. The package
 name and environment-variable prefix changed at 0.18.0, along with the
 collate and label command names. Version 0.19.0 renamed upload to store.
 The namespace, stage labels, storage paths and receipt labels did not change. The earlier AIS-Edge patch set (including the
@@ -231,9 +231,25 @@ side-loads the image into the container runtime. Override the tag via
 
 ## Configuration
 
+Version 0.20.0 uses source subcommands: `collate orthanc` and
+`collate folder`. The Orthanc command takes
+`URL STORE_DIR OUTPUT_DIR USER PASSWORD`, the same five positional arguments as 0.19.0.
+The file-drop options are `--accession-uid` and `--acquisition-id`,
+with `ACFLOW_ACCESSION_UID` and `ACFLOW_ACQUISITION_ID`. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
+The third deidentify argument is `RECIPE_DIR`. It accepts
+`ACFLOW_RECIPE_DIR`; `ACFLOW_SPEC_DIR` remains a compatible alias.
+The old `check-upload` command is now `check-store xnat`.
+
+The Python model uses `Accession.acquisitions`, `Acquisition.accession`
+and `Resource.acquisition`. XNAT still calls these sessions and scans.
+The staging folders, namespace, receipt labels and chart stage names
+keep their existing names. See the upstream
+[migration guide](https://github.com/Australian-Imaging-Service/accessionflow/blob/b496af05/MIGRATING.md)
+when adapting custom commands or Python scripts.
+
 The chart keeps
 its stage and Kubernetes names. `group-orthanc` runs `accessionflow
-collate-orthanc`; `group-fs` runs `accessionflow collate`; `assign` runs
+collate orthanc`; `group-fs` runs `accessionflow collate folder`; `assign` runs
 `accessionflow label xnat`; `upload` runs `accessionflow store xnat`. The
 legacy associate template would require `accessionflow attach`, but enabling
 `ingest.associate.enabled` is rejected: the chart does not supply the required
@@ -770,7 +786,7 @@ after the grace period, possibly during a pass, as before this change.
 
 Each pass starts a new `accessionflow` process. A historical fork measurement recorded about 1.6 s of
 CPU per pass (measurement date not verified, reviewed 2026-11-10). Startup
-cost for the current 0.19.0 image and each site workload was not benchmarked
+cost for the current 0.20.0 image and each site workload was not benchmarked
 in this review; do not use that old number as a capacity guarantee. A new process for each pass also returns its memory after the pass.
 
 The data-policy loop also stops from idle sleep and after a current foreground
@@ -836,7 +852,8 @@ follows the lock path for the reclaimer.
 
 The container reads `ACFLOW_REID_ENCRYPT_KEY`. The existing Secret still uses
 the key `XINGEST_REID_ENCRYPT_KEY`; the chart maps that key to the new variable.
-An old environment-variable name is not a supported alias in 0.19.0.
+The old `XINGEST_*` environment-variable names are not supported aliases
+in 0.20.0. This does not rename the compatible key inside the Secret.
 
 The ingest deidentification engine writes maps under the pipeline `reid`
 directory, normally `/data/xnat-ingest/reid` on the host. Without
@@ -905,7 +922,7 @@ deletes. A dry run makes the same checks and removes no data.
   AccessionNumber, multi-frame, multi-series) that we don't want to
   re-implement
 - **Idempotent**: a complete session is skipped with an explicit skip line
-  in 0.19.0. The success line is gated on the upload verdict. See the
+  in 0.20.0. The success line is gated on the upload verdict. See the
   historical measurements under "Known upstream defects" before comparing
   old alert behavior with a current deployment.
 - **Loop mode with label tracking** — group-orthanc marks each pulled
@@ -925,7 +942,7 @@ deletes. A dry run makes the same checks and removes no data.
 | S3 endpoint unreachable from upload pod | uploads fail | Check Service endpoints, DNS, network policy, credentials, and SeaweedFS health. An in-cluster URL can fail even while the SeaweedFS pod is running |
 | group/assign pod restarts | in-flight stage interrupted; resumes on next loop | The quiet-period check reduces incomplete input; snapshots detect changed studies. Late series and a process killed mid-pass still need retry and output validation |
 | A writer pass stops or its pod is killed | the pass stops; its lock goes with it | The kernel releases a `flock` when the last process that holds it stops, so the next pass can take it. A child process that a pass leaves keeps the lock until that child stops |
-| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.19.0` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
+| Node cannot reach ghcr.io (registry outage, air-gapped site) | New or rescheduled pods sit in `ImagePullBackOff`; already-running pods are unaffected | Both charts use `imagePullPolicy: IfNotPresent`, so a node that has already pulled `0.20.0` keeps starting pods with no registry at all. There is no image-import step in `install.sh`. An air-gapped site must seed the tag into each node's container runtime itself |
 | Orthanc REST credentials drift from `users.json` | group-orthanc gets 401 on every poll; studies pile up in Orthanc with nothing failing downstream | All three keys live in one Secret (`orthanc-credentials`) so they are rotated together; the edge chart refuses to render with `orthanc.auth.enabled` and no Secret named |
 
 ## Known upstream defects (candidate reports)
@@ -933,7 +950,7 @@ deletes. A dry run makes the same checks and removes no data.
 **Historical record (measurement dates not verified; reviewed 2026-11-10):**
 the measurements in this section describe older
 xnat-ingest releases. The status notes below distinguish them from the
-pinned accessionflow 0.19.0 behavior. Keep the measurements for incident
+pinned accessionflow 0.20.0 behavior. Keep the measurements for incident
 comparison; do not apply their old restart or alert advice without the status
 notes.
 
@@ -947,7 +964,7 @@ measurement to interpret a deployed site.
 
 ### 1. The success line is logged on the SKIP path
 
-**Current status: fixed in the pinned image.** In 0.19.0,
+**Current status: fixed in the pinned image.** In 0.20.0,
 `stores/xnat/api/store_api.py:272-277` logs
 `Skipping upload of ... as all the resources already exist on XNAT` and
 continues before the success line. The success line at line 682 is gated by
@@ -997,7 +1014,7 @@ false coverage; a real version needs the fix above, or a distinct
 
 ### 2. The XNAT listing is cached for the lifetime of a `--loop` run
 
-**Current status: fixed in the pinned image.** The 0.19.0 upload path clears
+**Current status: fixed in the pinned image.** The 0.20.0 upload path clears
 xnatpy caches before object operations (`stores/xnat/api/store_api.py:281`)
 and uses fresh evidence for completion checks. The following account and
 restart advice describe the old failure. A restart is not required merely
@@ -1028,7 +1045,7 @@ exists on XNAT with different checksums` now means a real difference. XNAT holds
 a file that staging does not, or a file with other content.
 `XNATResourceIncompleteAndStuck` alerts on it. In 0.16.2, and in the
 then-pinned fork build 0.16.2.post1, the upload logged this ERROR and continued.
-In 0.19.0 a failed session verdict suppresses the success line. A success line
+In 0.20.0 a failed session verdict suppresses the success line. A success line
 still does not establish byte equality when XNAT supplies no checksums. The record below is the 0.15.0 measurement. Its statement
 that no alert rule matches the phrase is out of date.
 
@@ -1036,7 +1053,7 @@ The opposite gap remains. When XNAT lists no digests (site checksums off, as on
 the AIS test XNAT, or digests not computed yet), the upload compares file names
 only. Upstream 0.16.2 logs this at DEBUG only. xnat-ingest PR #227 logs one
 WARNING per resource and upload attempt. Upstream merged it on 2026-10-27, and
-both the previous fork build 0.16.2.post1 and current 0.19.0 contain it. Content comparison needs
+both the previous fork build 0.16.2.post1 and current 0.20.0 contain it. Content comparison needs
 computed XNAT digests. A site administrator must configure checksums and
 populate the catalogs. Do not treat a name-only check as proof of unchanged
 bytes.
@@ -1107,7 +1124,7 @@ deliberately scoped out of the current change set:
   buckets are a separate unimplemented interface.
 - **Custom pipeline-event names** in log lines — e.g. an `event` field
   with values `session_staged`, `xnat_upload_completed`, etc.
-  The 0.19.0 uploader has structured events for selected paths, including
+  The 0.20.0 uploader has structured events for selected paths, including
   `xnat_identity_adoption` and `xnat_repair_completed`. Other messages remain
   free-form. More event names could make Loki queries easier to maintain.
 - **Structured DICOM SHA256** in the staging-event log — for
@@ -1117,6 +1134,10 @@ These would be small, additive PRs upstream — none of them require
 touching the core group-orthanc / assign / upload logic.
 
 ## Source retirement and metadata in 0.19.0
+
+**Current status (2026-11-10):** these 0.19.0 migration cautions also apply
+to the 0.20.0 image source. The dated 0.19.0 test results are historical
+evidence. They do not establish a 0.20.0 end-to-end result.
 
 With `--unlink-source all`, a successful label or deidentify pass removes the
 session input paths captured before it loaded the session. This includes files
@@ -1140,6 +1161,12 @@ be empty. Missing header-backed metadata can be read from the DICOM files.
 The optional package stage writes fuller sidecars; the deidentify allowlist
 is not a metadata restriction on every later stage.
 
+In 0.20.0, `Accession.new_empty()` also copies the accession's custom
+`fields`. These are separate from metadata sidecars. `save()` writes
+them without the metadata allowlist, and `store xnat` sends them as
+XNAT custom fields. The chart does not run `select-fields`; if a custom
+step populates these fields, review their contents separately.
+
 ## XNAT grouping identity after the migration
 
 The XNAT custom field `xnat_ingest_uid` records the exact saved grouping UID
@@ -1155,6 +1182,6 @@ the upload path can adopt it after the subject check and log the WARNING
 does not prove the identity of files already stored there. A mismatched UID
 or subject is refused. Keep this distinction when validating in-flight data.
 
-The 0.19.0 upload loop waits for the remainder of its interval. A historical tier-2 test on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
+The 0.20.0 upload loop waits for the remainder of its interval. A historical tier-2 test with 0.19.0 on 2026-11-10 recorded `Upload took 10.8 seconds, waiting another 49.2 seconds before
 running again (loop every 60 seconds)`. The chart's separate writer shell loops
 still sleep for their configured full interval after a pass.

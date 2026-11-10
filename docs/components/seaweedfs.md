@@ -297,7 +297,7 @@ The table below states chart defaults. Site values can change schedules and
 limits, and disabled retention can intentionally leave data indefinitely.
 
 `accessionflow store xnat` has **no S3 retention of its own**. It lists live
-staging each loop, but 0.19.0 suppresses unchanged-session success messages and
+staging each loop, but 0.20.0 suppresses unchanged-session success messages and
 clears cached XNAT state for each pass. The earlier repeated-success behavior
 is historical and was fixed before this review (2026-11-10). Unchanged objects
 still occupy space: the per-edge management reclaimer performs the configured

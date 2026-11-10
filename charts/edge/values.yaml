@@ -331,7 +331,7 @@ dataPolicy:
   # ---------------------------------------------------------------------
   derived:
 
-    # Receiver copy, still identifiable under ingest, held until collate-orthanc exports
+    # Receiver copy, still identifiable under ingest, held until collate orthanc exports
     # it. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
     # CAUTION: needs an accessionflow that writes the export snapshot label
@@ -724,7 +724,7 @@ orthanc:
 
     # DEPRECATED ENGINE ONLY. Called AE title -> XNAT project. An AE title
     # that is not listed is quarantined under the facility backup, not
-    # discarded after successful quarantine handling. Version 0.19.0 project
+    # discarded after successful quarantine handling. Version 0.20.0 project
     # identifiers allow letters, digits, underscore and hyphen; validate the
     # intended XNAT project as well as the source tag.
     aetMap: {}
@@ -930,10 +930,10 @@ ingest:
   # still carrying its PHI.
   #
   # THE TAGS YOU NAME BECOME XNAT LABELS after CLI identifier normalization. assign lifts the
-  # values out before this stage runs, and ImagingSession.new_empty copies them
-  # into the de-identified session unchanged, so no recipe can alter them.
+  # values out before this stage runs. Accession.new_empty copies the labels
+  # dictionary into the de-identified accession, so no DICOM recipe can alter them.
   # They are whatever the modality sent. If PatientID holds a medical record
-  # number, pointing subject at it puts that raw number into XNAT while the
+  # number, pointing subject at it puts that raw number into XNAT while
   # a later recipe changes selected headers. Pixel/private-tag cleanup depends
   # on the actual recipe and format; it is not guaranteed by this setting. Choose tags that are already
   # pseudonymous at the modality.
@@ -965,7 +965,7 @@ ingest:
     # pre-existing namespace. A recipe for a project replaces __default__ for
     # that project, and only the tags a recipe names are changed.
     #
-    # Key is the path under SPEC_DIR, value is the recipe:
+    # Key is the path under RECIPE_DIR, value is the recipe:
     #
     #   specs:
     #     "__default__/medimage/dicom-series": |
@@ -985,7 +985,7 @@ ingest:
     # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
     # external pipeline, recipes too large to sit in the site file). Set both,
     # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
-    # under SPEC_DIR>, doing by hand what specs does automatically.
+    # under RECIPE_DIR>, doing by hand what specs does automatically.
     specConfigMap: ""
 
     # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is

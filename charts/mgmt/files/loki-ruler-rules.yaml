@@ -186,7 +186,7 @@ groups:
         # alert on, which is exactly why an absence alert is the only thing that
         # catches it.
         # Current review (2026-11-10):
-        # This historical diagnosis is not current 0.19.0 behavior. Authentication and
+        # This historical diagnosis is not current 0.20.0 behavior. Authentication and
         # routing failures can log errors; complete-session checks compare file
         # evidence. An absence comparison remains useful for missing confirmation, but
         # is not the only detector.
@@ -324,7 +324,7 @@ groups:
                could not establish proof. Review ReclaimerRunUnavailable as applicable.
 
             Historical context: old label-only all_uploaded checks could skip an empty
-            resource. The pinned 0.19.0 store compares file sets/checksums and refreshes
+            resource. The pinned 0.20.0 store compares file sets/checksums and refreshes
             listings. Its success or skip line still does not certify header extraction
             or all downstream XNAT processing. Keep source evidence until verified.
       - alert: XNATResourceIncompleteAndStuck
@@ -366,7 +366,7 @@ groups:
         # (xnatUpload.waitPeriod), but ANY partial upload reaches this state:
         # an interrupted pod, a dropped connection, an XNAT hiccup.
         # Current review (2026-11-10):
-        # That behavior belongs to the older implementation. The pinned 0.19.0 store
+        # That behavior belongs to the older implementation. The pinned 0.20.0 store
         # attempts shortfall repair. An interruption alone does not establish a
         # persistent differing-file conflict. Quiet-time staging reduces mid-write reads
         # but does not prove study completeness.
@@ -483,7 +483,7 @@ groups:
         # exactly twice the threshold by construction. It is 20 at the shipped
         # loop of 60, crossing in about 32 minutes plus the 15m `for:`.
         # Current review (2026-11-10):
-        # In pinned 0.19.0, the loop sleeps for the remainder of the configured interval
+        # In pinned 0.20.0, the loop sleeps for the remainder of the configured interval
         # after work. The retained max(20, 1800 / (loop + 35)) threshold uses an older
         # conservative timing model. Its 35-second observation and derived crossing
         # times are historical, not a current timing guarantee. Expression changes are
@@ -497,7 +497,7 @@ groups:
         # the two files measure the same quantity, and it enforces the upper
         # bound at loop=137 where a single stuck resource drops below the floor.
         # Current review (2026-11-10):
-        # This argument uses the older full-sleep timing model. Current 0.19.0 sleeps
+        # This argument uses the older full-sleep timing model. Current 0.20.0 sleeps
         # for the interval remainder. The chart and CI retain the conservative formula;
         # their agreement verifies implementation consistency, not the accuracy of the
         # old measured cycle model.
@@ -518,7 +518,7 @@ groups:
             The uploader repeatedly reports a resource whose file set or checksums
             conflict with the staged copy. XNAT may contain files absent from staging,
             or a same-named file may have different content. A resource that is only
-            short is handled separately: accessionflow 0.19.0 attempts to upload the
+            short is handled separately: accessionflow 0.20.0 attempts to upload the
             missing files and logs a repair attempt.
 
             1. Identify the exact project, experiment, scan and resource in the logs:
@@ -530,7 +530,7 @@ groups:
             3. Check the reclaimer's decision and the configured retention policy.
                Reclaim requires its own proof, but this alert alone cannot establish
                that all source data is intact or that another cleanup path did not run.
-            4. The pinned 0.19.0 store clears cached XNAT listings on later passes.
+            4. The pinned 0.20.0 store clears cached XNAT listings on later passes.
                A restart is not required solely to refresh that cache. Do not delete a
                destination resource or restart a deployment just to clear this alert.
 
@@ -540,7 +540,7 @@ groups:
             at 07:18:26 without a restart. The run dates and release attribution of
             those old measurements are not verified (2026-11-10). They do not establish
             that deletion is safe for a current conflict. Current cache behavior is
-            verified directly in the pinned store_api.py implementation.
+            verified directly in the pinned stores/xnat/api/store_api.py implementation.
       - alert: ReclaimerRunUnavailable
         # THE RECLAIMER FAILING IS NOT A DATA-LOSS EVENT. IT IS A BLINDNESS
         # EVENT, WHICH IN THIS PIPELINE IS WORSE.
@@ -1001,7 +1001,7 @@ groups:
             routing fields and scanner input before changing configuration. The pinned
             missing-ID error matches this filter through __invalid__ in its saved path;
             the separate already-saved-as-invalid warning also matches. Use
-            InvalidSessionAssigned for the specific 0.19.0 missing-ID error prefix.
+            InvalidSessionAssigned for the specific 0.20.0 missing-ID error prefix.
 
   # =====================================================================
   # INFO — observability + audit. Fires on every successful upload to XNAT
@@ -1097,7 +1097,7 @@ groups:
         # 2026-09-28: XNAT restarted, listed 0 of N files for sessions it held,
         # and the uploader re-sent them for cai-lfs3 (3 sessions, 10 resources
         # on 2026-09-28).
-        # AN ATTEMPT: stores/xnat/api/store_api.py:603-611 in 0.20.0 logs
+        # AN ATTEMPT: stores/xnat/api/store_api.py:603-614 in 0.20.0 logs
         # this line before the verdict, even when the re-send failed.
         # A separate Completed repair line and xnat_repair_completed event
         # follow only a successful verdict (lines 672-680). This rule still
@@ -1130,7 +1130,7 @@ groups:
             unique repairs. This notification does not establish that the repair worked.
               kubectl -n xnat-upload logs -l component=upload --since=1h | grep -F -- "{{ $labels.session }}"
 
-            In accessionflow 0.19.0, the Repaired line precedes the final verdict. Look
+            In accessionflow 0.20.0, the Repaired line precedes the final verdict. Look
             for Completed repair or xnat_repair_completed and inspect later errors and
             the actual destination listing. File completion does not certify metadata
             header extraction. XNATUploadSuccess excludes a session with recent repair
@@ -1189,7 +1189,7 @@ groups:
         # before the mail was composed, and because the root route sent resolved
         # notifications it cost two mails each time.
         # Current review (2026-11-10):
-        # The pinned 0.19.0 loop refreshes connection/listing state on later passes.
+        # The pinned 0.20.0 loop refreshes connection/listing state on later passes.
         # Historical cookie-expiry incidents and the old approximately 62-second loop
         # measurement are not a current recovery guarantee. Environment-injected
         # credentials do not refresh merely because a Secret changes.
@@ -1237,7 +1237,7 @@ groups:
             2. Check account status, role and the configured credentials Secret without
                printing the password. For the tier-1 direct path, the Secret is selected
                by upload.direct.existingSecret; management has its own configured Secret.
-            3. accessionflow 0.19.0 refreshes connections/listings on later loop passes.
+            3. accessionflow 0.20.0 refreshes connections/listings on later loop passes.
                Credentials supplied through environment variables still require a pod
                replacement after a verified Secret change. Identify the deployment from
                pod labels before an authorized rollout; do not guess it from cluster.
@@ -1287,7 +1287,7 @@ groups:
         # The assign missing-ID diagnostic belongs to DICOMValidationFailureSpike.
         # Its per-pass summary adds no cause; each other concrete error still fires.
         # Current review (2026-11-10):
-        # The 0.19.0 assign missing-ID diagnostic is covered by InvalidSessionAssigned.
+        # The 0.20.0 assign missing-ID diagnostic is covered by InvalidSessionAssigned.
         # DICOMValidationFailureSpike retains an older broad text match and is not a
         # complete detector for that diagnostic. Other concrete stage errors remain
         # relevant.

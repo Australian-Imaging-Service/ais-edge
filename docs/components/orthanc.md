@@ -43,7 +43,7 @@ Three jobs at each edge:
    study once it's been quiescent for `StableAge` seconds. Under `ingest` no
    stage waits for it: `group-orthanc` pulls each study that has been quiet
    for `ingest.orthancGroup.waitPeriod`. Under the deprecated `orthanc` engine
-   the label is the signal for `accessionflow collate-orthanc` to REST-pull the
+   the label is the signal for `accessionflow collate orthanc` to REST-pull the
    study. This callback has no `DeidEnabled` guard, so it also runs under
    `ingest` whenever the script is loaded. The label shows that a study is
    stable. It does not show that the recipe ran.
@@ -72,7 +72,7 @@ Modality ──C-STORE──► Orthanc :4242 (AET=AISEDGE)
                               PUT /studies/{id}/labels/xnat-ingest-ready
                                                       │
                                                       ▼
-                                accessionflow collate-orthanc REST-pulls,
+                                accessionflow collate orthanc REST-pulls,
                                 hardlinks, PUTs label xnat-ingest-processed
                                 (under ingest it does not wait for the label)
 ```
@@ -84,7 +84,7 @@ unstable again. When it is stable, `OnStableStudy` removes the
 `study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
 study is never re-staged.
 
-The chart default image is upstream accessionflow 0.19.0
+The chart default image is upstream accessionflow 0.20.0
 (`ingest.image` in `charts/edge/values.yaml`). It contains xnat-ingest PR #211,
 historically recorded as merged on 2026-10-28. The merge date was not
 re-verified for this review (2026-11-10); the pinned source itself verifies
@@ -201,7 +201,7 @@ two**, because three different things consume it:
 | Key | Consumed by |
 |---|---|
 | `users.json` | Orthanc itself, mounted at `/etc/orthanc/users.json`. Orthanc merges every `.json` in `/etc/orthanc` as configuration. Shape: `{"RegisteredUsers":{"admin":"<password>"}}`. The password is **plaintext inside that JSON**, which is why this Secret belongs in the SOPS-encrypted site file |
-| `orthanc-user`, `orthanc-password` | `accessionflow collate-orthanc`, which calls the REST API to list and label studies, and the data-policy engine, which reclaims the Orthanc store over the same API |
+| `orthanc-user`, `orthanc-password` | `accessionflow collate orthanc`, which calls the REST API to list and label studies, and the data-policy engine, which reclaims the Orthanc store over the same API |
 
 If those disagree with the user in `users.json`, Orthanc answers 401:
 `group-orthanc` crash-loops with data sitting in Orthanc, and the store
