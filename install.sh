@@ -224,8 +224,8 @@ if step "3/3  helm: the pipeline (Orthanc, de-id, group, assign, direct upload)"
         --wait --timeout 10m
 fi
 
-# The operator command for sessions in assigned/__invalid__ (docs/components/
-# accessionflow.md, "Recovering an invalid session"): sudo ais-requeue list. It
+# The operator command for sessions in assigned/__invalid__
+# (docs/recovering-invalid-sessions.md): sudo ais-requeue list. It
 # runs the tool that the chart ships into the label container, through k0s, so
 # no kubectl and no repository are needed later. Root-owned, so a container
 # cannot change what root runs. -n: never wait for a password here.

@@ -64,6 +64,10 @@ must not need a working path to the internet to reinstall). Both carry a
 
 ### System-level references
 
+- [`recovering-invalid-sessions.md`](recovering-invalid-sessions.md): how to
+  requeue a session that `assign` put in `__invalid__`, with every method (the
+  node command, a sudo rule for this command only, kubectl, the repository
+  script, by hand)
 - [`package-stage.md`](package-stage.md) describes the optional package stage: one zip
   per DICOM series, what it needs, how a site turns it on, what to check
 - [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event

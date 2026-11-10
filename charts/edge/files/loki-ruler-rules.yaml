@@ -404,7 +404,7 @@ groups:
         Do not delete them to clear this alert.
         To recover the session, on the edge node: sudo ais-requeue list, then
         show <folder>, then requeue <folder> --session <value> once a person has
-        found the value (docs/components/accessionflow.md, "Recovering an invalid session").
+        found the value (docs/recovering-invalid-sessions.md).
         Use the affected edge's kubeconfig for this command:
           kubectl -n xnat-ingest logs -l app=xnat-ingest,component=assign --since=15m
         The alert clears when the log leaves the 10-minute window. This does not

@@ -12,8 +12,7 @@
 # Tier-2: run it on the management node with the edge's kubeconfig
 # (--kubeconfig kubeconfig-<edge>). Tier-1: run it on the node.
 #
-# The steps (docs/components/accessionflow.md, "Recovering an invalid
-# session"):
+# The steps, and the other ways to run the tool (docs/recovering-invalid-sessions.md):
 #   1. InvalidSessionAssigned fires.
 #   2. `list` shows what waits in __invalid__ and which label is missing.
 #      `show <folder>` prints the study details to look the value up with.
