@@ -385,7 +385,9 @@ dataPolicy:
       # because an assigned session or marker has the same study UID. Inspect
       # the files and use docs/recovering-invalid-sessions.md for invalid input.
       # Other hardlinks or originals may already be gone, so retention here
-      # is not proof of an independent backup. minAge is rejected at render.
+      # is not proof of an independent backup. The reporter still counts these
+      # entries; StageBacklogAgeing uses dataPolicy.stageAgeAlertAfter.
+      # Inspect retained orphans before removal. minAge is rejected at render.
       reclaim: onAssigned        # never | onAssigned (label-stage source cleanup)
 
     # Output of assign; input to whichever upload mode is enabled.

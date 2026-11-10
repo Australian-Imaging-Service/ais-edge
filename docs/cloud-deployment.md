@@ -122,11 +122,11 @@ runs the limited cloud preflight and lifecycle checks:
   scripts/06c-post-join.sh (`INSTALL_TOPOLOGY`, `CoreDNS`), scripts/files/edge-join.sh (`TOPOLOGY`)). The child
   cluster's CoreDNS Corefile patch — the `hosts { … }` block that made
   konnectivity-agent able to resolve the management hostnames *from inside a
-  pod* ; is skipped by the same branch (scripts/06c-post-join.sh-97), leaving
+  pod* ; is skipped by the same branch (`scripts/06c-post-join.sh`, `INSTALL_TOPOLOGY` and `COREDNS_TMP`), leaving
   CoreDNS at chart defaults so resolution goes CoreDNS `forward` → the kubelet's
   `/etc/resolv.conf` → public DNS.
 * **strips the `hostAliases:` block from every edge pod**
-  (charts/edge/templates/_helpers.tpl (`edge.validate`, `dataPolicy.originals.fileDrop.reclaim`)). The `{{#ONPREM_ONLY}}` /
+  (charts/edge/templates/_helpers.tpl (`edge.hostAliases`, `hostAliases.enabled`)). The `{{#ONPREM_ONLY}}` /
   `{{#CLOUD_ONLY}}` markers in scripts/00-common.sh (`render_with_topology()`) do the equivalent for
   the files the join writes on the edge VM.
 * **drops the IP SAN from every server certificate** — Loki and Grafana

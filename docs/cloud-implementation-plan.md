@@ -43,7 +43,7 @@ currently means *"resolve by real DNS instead of hosts files"*:
 | `scripts/05-setup-edge-cluster.sh` (`HOSTS_MARKER`, `INSTALL_TOPOLOGY`) | skips the management hosts edit |
 | `scripts/06c-post-join.sh` (`INSTALL_TOPOLOGY`, `CoreDNS`) | leaves child-cluster CoreDNS at chart defaults |
 | `scripts/files/edge-join.sh` (`skipped (cloud topology resolves via real DNS)`) | skips the edge `/etc/hosts` write |
-| `charts/edge/templates/_helpers.tpl` (`edge.validate`, `dataPolicy.originals.fileDrop.reclaim`) | no `hostAliases` |
+| `charts/edge/templates/_helpers.tpl` (`edge.hostAliases`, `hostAliases.enabled`) | no `hostAliases` |
 | `charts/mgmt/templates/observability.yaml` (`topology`, `ipAddresses`) | no IP SANs on certificates |
 | `charts/mgmt/templates/seaweedfs.yaml` (`topology`, `ipAddresses`) | onprem-only block skipped |
 

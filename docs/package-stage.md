@@ -162,8 +162,10 @@ output resources, and `copyMode: hardlink_or_copy`.
    container does not start, so it cannot emit the package ERROR line that
    `IngestStageError` needs. Pod or job alerts can still apply, depending on
    the enabled rules and their wait periods. `StageBacklogAgeing` requires the oldest
-   session in `/data/deidentified` to exceed the edge setting
-   `dataPolicy.reporter.stageAgeAlertAfter` (default 7d). So check the init container
+   session in `/data/deidentified` to exceed the management chart setting
+   `dataPolicy.stageAgeAlertAfter` (default 7d in `charts/mgmt/values.yaml`).
+   The management template substitutes it into `StageBacklogAgeing`
+   (`charts/mgmt/templates/observability.yaml`, `__DP_STAGE_AGE_ALERT_AFTER_S__`). So check the init container
    after each change to the package settings.
 
 2. The stage reports each pass:

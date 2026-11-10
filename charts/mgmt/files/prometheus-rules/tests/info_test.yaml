@@ -75,7 +75,9 @@ tests:
     name: CertificateRenewed fires when the renewal timestamp moves
     input_series:
       # Constant for an hour, then a step: that is what a renewal looks like.
-      - series: 'certmanager_certificate_renewal_timestamp_seconds{name="loki-tls",namespace="observability"}'
+      # namespace identifies the cert-manager scrape target; exported_namespace
+      # identifies the Certificate, as in the expiration-warning fixtures.
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{name="loki-tls",namespace="cert-manager",exported_namespace="ais-mgmt"}'
         values: "1000+0x60 2000+0x60"
     alert_rule_test:
       - eval_time: 30m
@@ -87,9 +89,10 @@ tests:
           - exp_labels:
               severity: info
               name: loki-tls
-              namespace: observability
+              namespace: cert-manager
+              exported_namespace: ais-mgmt
             exp_annotations:
-              summary: "Certificate renewal timestamp changed: /loki-tls"
+              summary: "Certificate renewal timestamp changed: ais-mgmt/loki-tls"
               description: "The cert-manager renewal-timestamp metric changed within the last hour.\nThis is an informational signal, not proof that every dependent workload\nhas received a new certificate. Check Certificate status, the mounted leaf\nand chain, and cert-sync delivery to edges where applicable. A renewal-time\nchange can also follow a specification change.\n"
 
   # ---------------------------------------------------------------------
