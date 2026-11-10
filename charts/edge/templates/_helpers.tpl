@@ -301,6 +301,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the xnat-ingest de-identification stage." }}
   {{- end }}
 
+  {{- /* THE ATTACH STAGE IS NOT SUPPORTED YET. accessionflow attach takes
+         INPUT_DIR OUTPUT_DIR DATATYPE GLOB ID_PATTERN; this chart has no value
+         for where the raw files are, how to match them to a session, or where
+         the output goes, so the stage has never run correctly. Refused until
+         a site needs it and the stage is built properly. */}}
+  {{- if .Values.ingest.associate.enabled }}
+    {{- fail "ingest.associate.enabled is not supported yet: the accessionflow attach stage needs inputs this chart does not provide (where the raw files are, how to match them to a session, where its output goes). Leave it false." }}
+  {{- end }}
+
   {{- /* onDeidentified retires /data/assigned at handoff, so both of these are
          configurations where the operator has asked for something the mechanism
          cannot deliver. Refusing beats accepting and quietly not doing it. */ -}}
