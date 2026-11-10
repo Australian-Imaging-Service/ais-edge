@@ -41,6 +41,9 @@
 #   k0s-ca.crt                cluster CA, for haproxy's upstream verification
 #   haproxy-server.pem        cert+key haproxy serves to in-cluster clients
 #   join-token                the worker join token — A BEARER CREDENTIAL
+#   ais-requeue               OPTIONAL. The operator command for sessions in
+#                             assigned/__invalid__, installed in /usr/local/bin.
+#                             Missing from an older stage: the join goes on.
 # =============================================================================
 set -euo pipefail
 
@@ -251,6 +254,19 @@ fi
 # /etc/k0s/join-token at 0600 where k0s needs it; the staged copy must not
 # linger in a world-readable directory.
 shred -u "${STAGE}/join-token" 2>/dev/null || rm -f "${STAGE}/join-token"
+
+# The operator command for sessions in assigned/__invalid__ (docs/components/
+# accessionflow.md, "Recovering an invalid session"): sudo ais-requeue list. It
+# runs the tool that the edge chart ships into the label container through k0s,
+# so this machine needs no kubectl and no repository. Root-owned, so a container
+# cannot change what root runs. A failure here does not undo the join.
+if [ -f "${STAGE}/ais-requeue" ]; then
+    if $SUDO install -o root -g root -m 0755 "${STAGE}/ais-requeue" /usr/local/bin/ais-requeue; then
+        echo "  installed /usr/local/bin/ais-requeue (sudo ais-requeue list)"
+    else
+        warn "could not install /usr/local/bin/ais-requeue; the join is not affected"
+    fi
+fi
 
 echo
 echo "  JOINED — ${EDGE_NAME:-this edge} is a k0s worker."

@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Requeue a session that the label stage saved in assigned/__invalid__.
 
-Runs INSIDE the edge's label (assign) pod, which mounts the pipeline at /data;
-scripts/requeue-invalid.sh sends it there with kubectl exec. It can also run on
-a copy of the tree (--root) for tests.
+Runs INSIDE the edge's label (assign) pod, which mounts the pipeline at /data.
+The chart ships it there: ConfigMap <release>-requeue-tool, mounted read-only at
+/opt/ais-edge. An operator needs only kubectl access to the edge, no copy of the
+repository:
+
+    kubectl -n xnat-ingest exec deploy/<release>-assign -c assign -- \
+        python3 /opt/ais-edge/requeue-invalid.py list
+
+scripts/requeue-invalid.sh in the repository runs the same commands. It can also
+run on a copy of the tree (--root) for tests.
 
     requeue-invalid.py [--root /data] list
     requeue-invalid.py [--root /data] show <folder>
