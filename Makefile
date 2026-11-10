@@ -126,7 +126,7 @@ reclaimer: $(RENDER_DEP)
 
 # scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
 # error as "no cleanup Job runs", and never resume without a wrapped writer.
-# scripts/requeue-invalid.py on fixture trees, then the pinned image loads the
+# charts/edge/files/requeue-invalid.py on fixture trees, then the pinned image loads the
 # requeued folder (docker; CI_REQUIRE_REQUEUE_IMAGE=1 makes a missing image fail).
 requeue-invalid:
 	@tests/requeue-invalid/run-tests.sh

@@ -224,6 +224,17 @@ if step "3/3  helm: the pipeline (Orthanc, de-id, group, assign, direct upload)"
         --wait --timeout 10m
 fi
 
+# The operator command for sessions in assigned/__invalid__ (docs/components/
+# accessionflow.md, "Recovering an invalid session"): sudo ais-requeue list. It
+# runs the tool that the chart ships into the label container, through k0s, so
+# no kubectl and no repository are needed later. Root-owned, so a container
+# cannot change what root runs. -n: never wait for a password here.
+if sudo -n install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue 2>/dev/null; then
+    REQUEUE_CMD="installed"
+else
+    REQUEUE_CMD="NOT installed: sudo install -o root -g root -m 0755 ${SCRIPT_DIR}/scripts/files/ais-requeue /usr/local/bin/ais-requeue"
+fi
+
 echo
 echo "============================================"
 echo " Installed"
@@ -236,6 +247,7 @@ echo "  Grafana        : http://${NODE_IP}:${GRAFANA_PORT}"
 fi
 echo
 echo "  Prove it works : scripts/verify-live.sh ${SITE}"
+echo "  Invalid sessions: sudo ais-requeue list   (${REQUEUE_CMD})"
 echo
 # Say what the site file sets. Chart defaults: enabled false, dryRun true.
 DP_ENABLED="$(cfg dataPolicy.enabled false | tr '[:upper:]' '[:lower:]')"

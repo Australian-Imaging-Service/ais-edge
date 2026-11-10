@@ -24,11 +24,15 @@
 #      writes an audit line (LOGS/requeue-audit.jsonl on the edge).
 #   5. Watch the uploader log for the session, then check it in XNAT.
 #
-# It runs scripts/requeue-invalid.py inside the label (assign) pod, which
-# mounts the pipeline at /data. Nothing is edited: not the metadata, not the
-# DICOM headers. The labels come from the folder name.
+# It runs the tool that the chart ships into the label (assign) pod
+# (/opt/ais-edge/requeue-invalid.py, from charts/edge/files), where the
+# pipeline is mounted at /data. Without this repository, run the same tool
+# with kubectl only:
+#   kubectl -n <ns> exec deploy/<release>-assign -c assign -- \
+#     python3 /opt/ais-edge/requeue-invalid.py --operator <you> list
+# Nothing is edited: not the metadata, not the DICOM headers. The labels come
+# from the folder name.
 set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KUBECTL=(kubectl)
 NS=xnat-ingest
 while [ $# -gt 0 ]; do
@@ -47,6 +51,10 @@ if [ -z "$pod" ]; then
     echo "requeue-invalid: no running label (assign) pod in namespace $NS. Check the kubeconfig and the namespace." >&2
     exit 2
 fi
+if ! "${KUBECTL[@]}" -n "$NS" exec "$pod" -c assign -- test -f /opt/ais-edge/requeue-invalid.py 2>/dev/null; then
+    echo "requeue-invalid: $pod has no /opt/ais-edge/requeue-invalid.py. The edge chart is older than the tool: upgrade the edge release." >&2
+    exit 2
+fi
 operator="${USER:-unknown}@$(hostname 2>/dev/null || echo unknown)"
-exec "${KUBECTL[@]}" -n "$NS" exec -i "$pod" -c assign -- \
-    python3 - --root /data --operator "$operator" "$@" < "$HERE/requeue-invalid.py"
+exec "${KUBECTL[@]}" -n "$NS" exec "$pod" -c assign -- \
+    python3 /opt/ais-edge/requeue-invalid.py --root /data --operator "$operator" "$@"

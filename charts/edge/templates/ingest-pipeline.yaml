@@ -223,6 +223,22 @@ spec:
 ---
 {{- end }}
 {{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
+# THE REQUEUE TOOL for sessions in /data/assigned/__invalid__, in the label pod
+# (docs/components/accessionflow.md, "Recovering an invalid session"). It ships
+# with the chart so that an operator needs only kubectl, not this repository:
+#   kubectl -n <ns> exec deploy/<release>-assign -c assign -- \
+#     python3 /opt/ais-edge/requeue-invalid.py list | show <folder> | requeue ...
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-requeue-tool
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  requeue-invalid.py: |-
+{{ .Files.Get "files/requeue-invalid.py" | indent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -320,8 +336,16 @@ spec:
             {{- include "edge.logEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            # The requeue tool, read-only. A directory mount (no subPath), so a
+            # new chart version updates the file without restarting the stage.
+            - name: requeue-tool
+              mountPath: /opt/ais-edge
+              readOnly: true
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        - name: requeue-tool
+          configMap:
+            name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
 ---

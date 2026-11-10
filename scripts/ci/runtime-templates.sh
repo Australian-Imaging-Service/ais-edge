@@ -1013,7 +1013,10 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init["image"] == container["image"], case
                     assert init["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
-                    assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    assert init["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    # The requeue tool (charts/edge/files/requeue-invalid.py), read-only.
+                    assert container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"},
+                        {"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], case
                 if name == "deidentify":
                     init = doc["spec"]["template"]["spec"]["initContainers"]
                     assert len(init) == 1 and init[0]["name"] == "init-assigned-dir", case
@@ -1037,6 +1040,43 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
 print("stage defaults, site merge, key and map removal, and assign initialization verified, including file-drop without Orthanc")
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
+
+# The requeue tool ships with the chart, so an operator needs only kubectl:
+# the ConfigMap holds the file byte for byte and the label pod mounts it.
+ci_heading "requeue tool in the label pod"
+requeue_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/files/requeue-invalid.py" 2>&1 <<'PY_REQUEUE'
+from pathlib import Path
+import sys, yaml
+root, src = Path(sys.argv[1]), Path(sys.argv[2]).read_text().rstrip("\n")
+checked = 0
+for f in sorted(root.glob("edge-*.yaml")):
+    docs = [d for d in yaml.safe_load_all(f.read_text()) if d]
+    deps = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-assign")]
+    if not deps:
+        continue
+    cms = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
+    spec = deps[0]["spec"]["template"]["spec"]
+    vol = [v for v in spec["volumes"] if v["name"] == "requeue-tool"]
+    assert len(vol) == 1, (f.name, "no requeue-tool volume")
+    name = vol[0]["configMap"]["name"]
+    assert name in cms, (f.name, "ConfigMap missing", name)
+    assert cms[name]["data"]["requeue-invalid.py"] == src, (f.name, "the ConfigMap is not the file")
+    mounts = [m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "requeue-tool"]
+    assert mounts == [{"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], (f.name, mounts)
+    checked += 1
+assert checked >= 3, f"only {checked} rendered edge cases have a label pod"
+print(f"{checked} edge renders: the label pod mounts the requeue tool read-only, identical to the file")
+PY_REQUEUE
+)" && ci_pass "requeue tool: $requeue_out" || ci_fail "requeue tool: $requeue_out"
+
+# Tier-1 has no edge join: install.sh installs the edge command on the node.
+ci_heading "install.sh installs ais-requeue"
+if grep -qF 'install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue' "$REPO_ROOT/install.sh" \
+   && [ -x "$REPO_ROOT/scripts/files/ais-requeue" ]; then
+    ci_pass "install.sh installs scripts/files/ais-requeue root-owned in /usr/local/bin"
+else
+    ci_fail "install.sh does not install scripts/files/ais-requeue (or the file is not executable)"
+fi
 
 ci_heading "upload input and temporary parent exist before startup"
 upload_startup_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_UPLOAD'

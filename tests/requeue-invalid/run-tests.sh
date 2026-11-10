@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/requeue-invalid.py against fixture trees, then the pinned image.
+# charts/edge/files/requeue-invalid.py (the chart ships it into the label pod)
+# against fixture trees, then the pinned image.
 # =============================================================================
 # The folder names have the real shape the 0.19.0 label stage writes
 # (<project>.<subject>.INVALID_MISSING_<TAG>_<8 letters or digits>, seen live
@@ -13,7 +14,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/ci/lib.sh
 . "$HERE/../../scripts/ci/lib.sh"
-PY="$REPO_ROOT/scripts/requeue-invalid.py"
+PY="$REPO_ROOT/charts/edge/files/requeue-invalid.py"
 ci_heading "requeue-invalid"
 
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
@@ -74,6 +75,58 @@ else
     ci_fail "no audit line in LOGS/requeue-audit.jsonl"
 fi
 expect "the files moved untouched" 0 "$(cmp -s "$R/assigned/test_project.MRN1.ACC1/1.localizer/DICOM/a.dcm" <(echo dicom); echo $?)" ""
+
+# THE EDGE COMMAND (scripts/files/ais-requeue): no kubectl, no repository. It finds the
+# running label container through k0s ctr and runs the chart's copy of the tool in it.
+# A fake k0s on PATH emulates ctr: it lists containers only for the asked namespace,
+# reports task states, and runs the real tool on the fixture tree for "tasks exec".
+FAKE="$W/fakebin"; mkdir -p "$FAKE"
+cat > "$FAKE/k0s" <<'K0S'
+#!/bin/sh
+[ "$1 $2 $3" = "ctr -n k8s.io" ] || { echo "fake k0s: unexpected $*" >&2; exit 9; }
+shift 3
+case "$1 $2" in
+  "containers ls")
+    case "$4" in *"io.kubernetes.container.name\"==assign,labels.\"io.kubernetes.pod.namespace\"==${FAKE_NS:-xnat-ingest}") ;; *) exit 0 ;; esac
+    for c in $FAKE_RUNNING $FAKE_STOPPED; do echo "$c"; done ;;
+  "tasks ls")
+    echo "TASK PID STATUS"
+    for c in $FAKE_RUNNING; do echo "$c 101 RUNNING"; done
+    for c in $FAKE_STOPPED; do echo "$c 0 STOPPED"; done ;;
+  "tasks exec")
+    shift 2; [ "$1" = "--exec-id" ] && shift 2
+    echo "$1" >> "$FAKE_LOG"; shift
+    if [ "$1" = test ]; then [ -z "${FAKE_NO_TOOL:-}" ]; exit $?; fi
+    [ "$1 $2" = "python3 /opt/ais-edge/requeue-invalid.py" ] || { echo "fake k0s: unexpected exec $*" >&2; exit 9; }
+    shift 2; [ "$1 $2" = "--root /data" ] && shift 2
+    exec python3 "$FAKE_TOOL" --root "$FAKE_ROOT" "$@" ;;
+  *) echo "fake k0s: unexpected $*" >&2; exit 9 ;;
+esac
+K0S
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo "${FAKE_UID:-0}"; exit 0; }\nexec /usr/bin/id "$@"\n' > "$FAKE/id"
+chmod +x "$FAKE/k0s" "$FAKE/id"
+CMD="$REPO_ROOT/scripts/files/ais-requeue"
+R="$W/e"; fixture "$R"
+edge() { PATH="$FAKE:$PATH" FAKE_ROOT="$R" FAKE_TOOL="$PY" FAKE_LOG="$W/exec.log" sh "$CMD" "$@" > "$W/out" 2>&1; echo $?; }
+: > "$W/exec.log"
+expect "edge command: list runs the chart's tool in the running container" 0 \
+  "$(FAKE_RUNNING=c-new FAKE_STOPPED=c-old edge list)" "session=ACCESSIONNUMBER"
+grep -qx c-new "$W/exec.log" && ! grep -qx c-old "$W/exec.log" \
+  && ci_pass "edge command: the stopped container of an earlier pod is never used" \
+  || ci_fail "edge command: exec went to $(sort -u "$W/exec.log" | tr '\n' ' ')"
+expect "edge command: AIS_NAMESPACE selects another namespace" 0 \
+  "$(AIS_NAMESPACE=site-a FAKE_NS=site-a FAKE_RUNNING=c-a edge list)" "session=ACCESSIONNUMBER"
+expect "edge command: no running label container is a clear refusal" 2 \
+  "$(FAKE_RUNNING= FAKE_STOPPED=c-old edge list)" "no running label (assign) container"
+expect "edge command: a chart without the tool says to upgrade" 2 \
+  "$(FAKE_NO_TOOL=1 FAKE_RUNNING=c-new edge list)" "Upgrade the edge release"
+expect "edge command: the tool's exit code comes through (3, not found)" 3 \
+  "$(FAKE_RUNNING=c-new edge requeue test_project.MRN9.INVALID_MISSING_ACCESSIONNUMBER_zzzzzzzz --session ACC1)" "no folder"
+expect "edge command: refuses without sudo" 2 \
+  "$(FAKE_UID=1000 FAKE_RUNNING=c-new edge list)" "run it with sudo"
+expect "edge command: requeue moves the folder" 0 \
+  "$(FAKE_RUNNING=c-new edge requeue "$BAD" --session ACC2)" '"to": "test_project.MRN1.ACC2"' "assigned/test_project.MRN1.ACC2" "assigned/__invalid__/$BAD"
+R="$W/t"
 
 # THE REAL TOOL reads the new labels from the folder name.
 IMAGE="$(python3 -c "import yaml, sys; i = yaml.safe_load(open(sys.argv[1]))['ingest']['image']; print(i['repository'] + ':' + i['tag'])" "$REPO_ROOT/charts/edge/values.yaml")"
