@@ -1,7 +1,9 @@
 # Recovering an invalid session
 
-The label stage (`assign`) names each session from three DICOM tags: the
-project, the subject and the session ID. When a tag is empty, the stage cannot
+The label stage (`assign`) gives each session three IDs: the project, the
+subject and the session. It reads each ID from the DICOM tag that
+`ingest.assign.tagMapping` names. `ingest.assign.constantProjectId` can set the
+project instead. When a tag that the stage reads is empty, the stage cannot
 name the session. It moves the session to `/data/assigned/__invalid__/` on the
 edge and does not upload it. This page tells you how to move the session back
 after a person finds the missing value.
@@ -12,14 +14,19 @@ grouped and backup copies) is in
 
 ## What you see
 
-- The alert `InvalidSessionAssigned` fires. It counts log lines, not sessions,
-  and it clears after 10 minutes. A clear alert does not mean that the session
-  was recovered.
+- The alert `InvalidSessionAssigned` fires. It counts log lines, not sessions.
+  It clears when no new line of this type came in the last 10 minutes, so more
+  invalid sessions keep it on. A clear alert does not mean that the session was
+  recovered.
 - The folder name shows the missing ID:
   `<project>.<subject>.INVALID_MISSING_<FIELD>_<suffix>`, for example
   `test_project.MRN1.INVALID_MISSING_ACCESSIONNUMBER_ognMmX8R`.
-- Nothing removes the folder. Do not delete it to clear the alert. When the
-  facility backup is off, it can be the only copy of the study.
+- Nothing removes the folder. Do not delete it to clear the alert. It can be
+  the only copy of the study. The facility backup keeps only the instances that
+  came in by DICOM, and a backup write can fail.
+- More data for the study can come later, for example a late series. The
+  assign log then says `already saved as invalid` on each pass. See
+  [More data for the same study](#more-data-for-the-same-study).
 
 ## Who does what
 
@@ -129,8 +136,11 @@ own password. Add `NOPASSWD:` before the path if the site does not want that.
 This rule is safe for this command. The edge command sets the pipeline folder
 (`--root`) and the operator name (`--operator`) itself. The first word must be
 `list`, `show` or `requeue`. So no option can come before it. The tool refuses
-an option that it does not know. So the operator cannot point the tool at
-another folder. The audit line always names the real user (from `SUDO_USER`).
+an option that it does not know. The folder must be a name as `list` prints it.
+The tool refuses a path (a `/`), `.`, `..` and a symbolic link, and it checks
+that the real path is in `__invalid__/`. So the operator cannot point the tool
+at another folder. The audit line always names the real user (from
+`SUDO_USER`).
 
 ## Method 3: kubectl
 
@@ -192,15 +202,23 @@ have taken the moved folder. Never repeat the move blindly.
 
 `requeue` refuses, and moves nothing, when:
 
+- the folder is not a name as `list` prints it: a path (a `/`), `.` or `..`,
+  or a symbolic link. `show` refuses these too;
+- a part of the folder name has a character that is not a letter, a digit,
+  `_` or `-`. The new name keeps the parts that are not missing, so they must
+  be legal labels. Use [method 5](#method-5-by-hand-the-fallback) for this
+  folder;
 - a value is not a legal label: use letters, digits, `_` and `-` only;
 - you give a value for an ID that is not missing, or you do not give a missing
   one;
 - `assigned/<new name>` or `deidentified/<new name>` already exists. If the
   session in `deidentified/` is the same study (more data for it), add
   `--allow-existing`. A folder that waits in `assigned/` is never merged. Wait
-  until deidentify takes it, then run the command again;
-- a `grouped/` copy of the same study is still there. assign would put that
-  copy in `__invalid__/` again. Wait for it to clear, or remove it first.
+  until that session moves on, then run the command again.
+
+`requeue` does not refuse when a `grouped/` copy of the same study waits. It
+moves the folder and prints a `NOTE`. See
+[More data for the same study](#more-data-for-the-same-study).
 
 It moves the folder under the label stage's lock
 (`/data/.locks/assigned.lock`), so a label pass cannot run at the same time.
@@ -230,6 +248,29 @@ their proof.
 
 Do not send the study again to correct it. Orthanc keeps the instances that it
 already has, and it ignores a copy with the same SOPInstanceUID.
+
+## More data for the same study
+
+More data for a study can come while the study is in `__invalid__/`, for
+example a late series. collate puts it in `/data/grouped/_.<study UID>`. For a
+study from Orthanc, that copy holds the whole study again.
+
+The label stage does not take this copy while the study is in `__invalid__/`.
+On each pass, its log says `already saved as invalid`. So the copy does not
+clear by itself. Do not remove it: it can hold instances that are not in
+`__invalid__/`.
+
+1. Requeue the folder in `__invalid__/` as usual. `requeue` moves it and
+   prints a `NOTE` that names the `grouped/` copy. The audit line names the
+   copy in `grouped_waiting`.
+2. On its next pass, the label stage puts the `grouped/` copy in a new folder
+   in `__invalid__/`. `InvalidSessionAssigned` fires again.
+3. Run `list`. Requeue the new folder with the same values:
+   - When `assigned/<new name>` is still there, the command refuses: a folder
+     cannot be merged into it. Run the command again after that session moves
+     on (deidentify takes it, or the data policy removes it after the upload).
+   - When `deidentified/<new name>` is there, add `--allow-existing`.
+4. The new data goes to the same session in XNAT, as a late series does.
 
 ## How the tool reaches the edge
 
