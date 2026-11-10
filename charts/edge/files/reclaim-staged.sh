@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # S3 staging reclaimer — the ONLY component that deletes from s3://<bucket>/staged
 # =============================================================================
-# GUIDING: xnat-ingest upload has no S3 retention of its own — it relists the
+# GUIDING: accessionflow store xnat has no S3 retention of its own; it relists the
 # staging prefix every loop and never removes what it sent, so a delivered
-# session gets re-uploaded and re-alerted forever without this job. Full
+# session remains in staging without this job. In 0.19.0 a complete session
+# is skipped before the success line; the old repeated alerts are history. Full
 # design write-up: docs/TOUR.md, docs/components/seaweedfs.md.
 #
 # -----------------------------------------------------------------------------
@@ -109,7 +111,7 @@ FILES_HELPER="${FILES_HELPER:-$(dirname "$0")/reclaim-files.py}"
 
 # Where the two-consecutive-runs markers live. DELIBERATELY OUTSIDE S3_PREFIX.
 #
-# `xnat-ingest upload` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
+# `accessionflow store xnat` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
 # it finds as a session. A state directory under staged/ would therefore be
 # picked up as a session, "uploaded" with zero resources, and would re-fire
 # XNATUploadSuccess every loop — recreating precisely the bug this reclaimer
@@ -635,7 +637,7 @@ staged_totals() {
     # or ERR, or "UNDECLARED <message>".
     #
     # Sidecars are excluded on purpose and on both sides: ImagingResource.load()
-    # in xnat-ingest drops __MANIFEST__.json, MANIFEST.json and
+    # in accessionflow drops __MANIFEST__.json, MANIFEST.json and
     # __METADATA__.json from the fileset, so they are never uploaded and never
     # appear in a manifest's checksums. Counting them here would guarantee a
     # mismatch against XNAT for every session.
@@ -739,7 +741,7 @@ xnat_totals() {
     # So the listing IS populated immediately after upload and is empty on every
     # older session, while the resource stats are correct at every age. Also
     # measured empty on the older ones: /files, /scans/{id}/files, and
-    # /scans/{id}/resources/{label}/files, the last being the one xnat-ingest
+    # /scans/{id}/resources/{label}/files, the last being the one accessionflow
     # itself reads (it works around the same emptiness by POSTing
     # /data/services/refresh/catalog when a scan reports no files).
     #

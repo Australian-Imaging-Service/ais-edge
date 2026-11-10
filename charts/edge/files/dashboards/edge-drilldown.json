@@ -117,7 +117,7 @@
     {
       "type": "stat",
       "title": "Assign errors (last 1h, cluster=$cluster / node=$node)",
-      "description": "Count of ERROR-level log lines from the xnat-ingest assign pod in the last hour. Loki-derived because mgmt Prometheus cannot scrape edge clusters (no metrics path across the konnectivity boundary). A non-zero value typically indicates DICOM validation failures or staging errors.",
+      "description": "Count of ERROR messages beginning Could not resolve the labels of from accessionflow label xnat for the selected cluster and node in the last hour. Other assign errors and cycle summaries are excluded. Repeated attempts can count the same session again. Check log delivery and the InvalidSessionAssigned alert before treating zero as healthy.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -321,7 +321,7 @@
     },
     {
       "type": "logs",
-      "title": "Live log tail \u2014 xnat-ingest pods on $cluster / $node",
+      "title": "Live log tail; accessionflow pods on $cluster / $node",
       "description": "",
       "gridPos": {
         "h": 12,

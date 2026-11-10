@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # EXAMPLE TIER-1 SITE; one machine, non-secret configuration
 # =============================================================================
@@ -31,7 +32,7 @@
 clusterLabel: tier1-example
 
 # The de-identification engine. One key; the chart derives the Lua hook,
-# the xnat-ingest stage, the group label and the reclaim condition from it.
+# the accessionflow stage, the group label and the reclaim condition from it.
 deid:
   # Use ingest for new sites. Its recipe runs after assign and before upload.
   # Orthanc remains the receiver. Its enabled Lua backup callback copies the
@@ -157,7 +158,7 @@ ingest:
   deidentify:
     # THE RECIPE. The chart turns this map into a ConfigMap and mounts it at
     # SPEC_DIR; the KEY is the path under SPEC_DIR, so it must be the one
-    # xnat-ingest looks for: __default__/<category>/<format>.
+    # accessionflow looks for: __default__/<category>/<format>.
     #
     # THIS IS THE POLICY. Nothing downstream re-checks what was removed, so read
     # it before you install. deid.policyReviewed above is the gate that makes
@@ -176,7 +177,7 @@ ingest:
         # Example de-identification recipe for medimage/dicom-series.
         #
         # This is a pydicom `deid` RECIPE, not JSON, and the path is the format name.
-        # xnat-ingest's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
+        # accessionflow's load_recipe_files walks <spec-dir>/<category>/<format>, so the DIRECTORY
         # is the category and the FILE is the format: medimage/dicom-series. It skips
         # anything at the top level that is not a directory, so a flat file named
         # `medimage@dicom-series.json` is never read and every session fails with
@@ -485,7 +486,7 @@ dataPolicy:
     # kept whatever you set.
     stagedReclaimer:
       # Hourly. Under direct upload this CronJob is the ONLY deleter of the
-      # terminal tree: xnat-ingest upload never deletes what it sent.
+      # terminal tree: accessionflow store xnat never deletes what it sent.
       schedule: "17 * * * *"
       # OPTION: raise on a slow link. A session still uploading is protected by the
       # XNAT check regardless, so this is about noise, not safety.

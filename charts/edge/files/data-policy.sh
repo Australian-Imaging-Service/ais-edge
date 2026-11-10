@@ -1,4 +1,5 @@
 #!/bin/sh
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Edge data-policy engine — reports on every declared dataPolicy stage
 # =============================================================================
@@ -6,14 +7,14 @@
 #
 # dataPolicy declares a data lifecycle, but its rules used to be implemented
 # inside whichever component happened to be nearby: an `rm -rf` in the S3
-# uploader, a `--unlink-source` flag on xnat-ingest, a CronJob on the management
+# uploader, a `--unlink-source` flag on accessionflow, a CronJob on the management
 # side. Three stages, three mechanisms, each welded to one tool. That is why
 # most of the block was never implemented — adding a rule meant writing a new
 # program — and why replacing a component silently deletes the policy with it.
 #
 # This walks STAGES instead. Each stage is a location plus rules, declared in
 # values.yaml and rendered into /etc/data-policy/stages.tsv. Nothing here knows
-# what Orthanc is, or xnat-ingest, or DICOM. Swap the de-identifier, or add
+# what Orthanc is, or accessionflow, or DICOM. Swap the de-identifier, or add
 # Prefect handling non-DICOM drops, and the new store declares a stage and gets
 # reporting and retention with no new code.
 #
@@ -85,7 +86,7 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 # The uploader's fingerprint state dir. A file here named after a session is
 # the uploader's own record that it finished pushing that session to S3 — the
 # observable signal `onUploaded` is derived from, needing no change to
-# xnat-ingest and no new marker protocol.
+# accessionflow and no new marker protocol.
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
@@ -228,7 +229,7 @@ report_age() {
 # -----------------------------------------------------------------------------
 # CONDITIONS — "has this session moved on far enough that its copy here is
 # reconstructible?" Answered from OBSERVABLE FILESYSTEM STATE, never from a
-# marker protocol we would have to persuade xnat-ingest to adopt.
+# marker protocol we would have to persuade accessionflow to adopt.
 #
 # Returns non-zero on ANY doubt, and every caller treats that as KEEP. An
 # unknown condition word is a keep, not a delete: a typo in values.yaml must not
@@ -311,7 +312,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # rather than silently unknown. This condition is satisfied by the
             # deidentify STAGE, which unlinks each session's input once it has
             # written a complete de-identified copy. That happens inside
-            # xnat-ingest and leaves no artefact this engine can observe, so the
+            # accessionflow and leaves no artefact this engine can observe, so the
             # engine reports the tree and never acts on it. A session still
             # present under this word is one the stage has not finished with,
             # and keeping it is the correct answer.
@@ -698,7 +699,7 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         # instance ids, one per line, sorted. The same digest is computed from the
         # list read above, so only a study whose instances are exactly the staged
         # ones is deleted. No label, two labels, or another digest: export state
-        # unknown, kept, and said so. An older xnat-ingest writes no label.
+        # unknown, kept, and said so. An older accessionflow writes no label.
         o_sorted=$(printf '%s\n' $o_inst | LC_ALL=C sort)
         o_dlen=$(( 64 - ${#ORTHANC_PROCESSED_LABEL} - ${#last} - 2 )); [ "$o_dlen" -gt 24 ] && o_dlen=24
         o_hash=$(printf '%s\n' $o_sorted | sha256sum | cut -c1-"$o_dlen")

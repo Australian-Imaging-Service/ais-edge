@@ -1,12 +1,14 @@
 # Orthanc
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
 open-source DICOM server. In this tier-1 single-node appliance it acts as the
 **DICOM receiver** for local modalities. Under the default ingest engine it
 stores original instances. The enabled backup callback writes a separate copy;
-xnat-ingest de-identifies later, after assignment.
+accessionflow de-identifies later, after assignment.
 
 We use the [`jodogne/orthanc-plugins`](https://hub.docker.com/r/jodogne/orthanc-plugins)
 image, pinned in `orthanc.image.tag` (currently `1.12.11`). It must stay
@@ -62,7 +64,7 @@ Do not treat a successful C-STORE response as proof that a separate backup copy
 exists, that a study was assigned, or that de-identification succeeded.
 
 The group stage uses processed state to avoid exporting unchanged input on every
-pass. The pinned `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` image includes
+pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.19.0` image includes
 snapshot support. It writes a label of the form
 `xnat-ingest-processed-<LastUpdate>-<digest>`. A processed study whose update
 state changed can be staged again. This is important when a later series arrives
@@ -112,7 +114,7 @@ and installed by step 3 of `./install.sh <site>`.
 
 REST API exposed as a ClusterIP Service
 `<release>-orthanc.xnat-ingest.svc.cluster.local:8042` (this is how
-`xnat-ingest group-orthanc` REST-pulls; `<release>` is the site name unless
+`accessionflow collate-orthanc` REST-pulls; `<release>` is the site name unless
 `AIS_RELEASE` overrides it). DICOM port 4242 is exposed via `hostPort` directly
 on the node's IP so modalities can reach it without an in-cluster Service —
 `orthanc.expose.dicom` can be switched to `nodePort` or `both` instead.

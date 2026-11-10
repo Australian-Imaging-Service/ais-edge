@@ -1,5 +1,7 @@
 # Grafana dashboards — what every panel measures
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Grafana exists on tier-1 only when `observability.stack.enabled: true` in
 `sites/<site>/values.yaml`. It comes from the kube-prometheus-stack subchart
 vendored at `charts/edge/charts/kube-prometheus-stack-87.19.2.tgz`, and it is
@@ -13,7 +15,7 @@ parent key used to exist and was deleted for being dead — Helm cannot template
 subchart's values, so no template in this chart can read a parent key and push it
 down into a subchart; the subchart reads its own block or nothing. It was
 measured before removal: `--set observability.stack.grafana.nodePort=31234` left
-the Service on 30030. `charts/edge/values.yaml:646-663` records that removal and
+the Service on 30030. `charts/edge/values.yaml:1011-1030` records that removal and
 maps every deleted key to the subchart key that replaced it, which is the table
 to consult before inventing a parent key. `charts/edge/templates/_helpers.tpl`
 validates the real key at render time and fails the install if the port falls
@@ -97,11 +99,11 @@ stages apart, and it is copied straight from the pod label the chart sets.
 | `component` | pod | rendered when |
 |---|---|---|
 | `dicom-receiver` | Orthanc | always |
-| `group` | `xnat-ingest group-orthanc` | `ingest.orthancGroup.enabled` |
-| `group-fs` | `xnat-ingest group` over the watched directory | `ingest.fileDrop.enabled` (off) |
-| `assign` | `xnat-ingest assign` | either ingest path enabled |
+| `group` | `accessionflow collate-orthanc` | `ingest.orthancGroup.enabled` |
+| `group-fs` | `accessionflow collate` over the watched directory | `ingest.fileDrop.enabled` (off) |
+| `assign` | `accessionflow label xnat` | either ingest path enabled |
 | `associate` | Siemens side-file attach | `ingest.associate.enabled` (off) |
-| `upload` | `xnat-ingest upload` → XNAT | `upload.mode: direct` |
+| `upload` | `accessionflow store xnat` → XNAT | `upload.mode: direct` |
 | `data-policy` | the retention reporter | `dataPolicy.reporter.enabled` |
 
 The pipeline pods run with `AIS_LOG_FORMAT=json` (`edge.logEnv` in
@@ -113,11 +115,12 @@ payload), so it is a stream label. `{…,level="ERROR"}` in the selector is the
 cheap form; `| json | level="ERROR"` also works, because a label filter reads
 stream labels as well as extracted ones.
 
-**There is no `event` field on tier-1, and no panel may depend on one.**
+**The direct uploader does not emit the S3 uploader event names.**
+accessionflow 0.19.0 does emit selected events, including
+`xnat_identity_adoption` and `xnat_repair_completed`.
 `event=upload_started|upload_completed|upload_failed` is the convention of
 `charts/edge/files/s3-uploader.sh`, which only runs under `upload.mode: s3`.
-With `upload.mode: direct` the uploader *is* `xnat-ingest upload`, and its one
-terminal success signal is the message line:
+With `upload.mode: direct` the uploader *is* `accessionflow store xnat`, and the existing session counter matches this message line:
 
 ```
 Successfully uploaded all files in '<PROJECT>.<SUBJECT>.<SESSION>'
@@ -128,7 +131,8 @@ so the counters anchor on that text instead. A panel counting
 indistinguishable from a quiet site — which is the failure this whole document
 exists to prevent.
 
-One terminal line = one session finished. Where a multi-site deployment splits
+One matching terminal line = one completed pass for a session. A later pass
+can count that session again; this is not a distinct-session total. Where a multi-site deployment splits
 `dicoms` vs `files` (the s3-uploader's per-object counters), tier-1 counts
 **sessions**.
 
@@ -142,7 +146,7 @@ Single-node view over every pipeline log line pushed to Loki.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Sessions uploaded (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "Successfully uploaded all files in" [1h])) or vector(0)` | One count per session `xnat-ingest upload` confirmed into XNAT in the last hour. Match the string exactly; it is the only terminal signal the uploader emits, so a reworded regex silently reports a dead pipeline. |
+| **Sessions uploaded (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "Successfully uploaded all files in" [1h])) or vector(0)` | One count per session `accessionflow store xnat` confirmed into XNAT in the last hour. Match the string exactly; this panel matches that terminal signal. A repair can also emit it. Other success paths, including session-only resources, have different messages. |
 | **Upload errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="upload"} \|~ "(?i)error\|failed\|exception\|traceback" [1h])) or vector(0)` | A LINE count, not a session count — one Python traceback contributes several. Deliberately over-sensitive: the value matters as 0 vs not-0, not as a magnitude. The `or vector(0)` tail is what stops an idle hour reading "No data" where the operator expects a failure count. |
 
 **Why every stat query ends in `or vector(0)`.** LogQL returns an *empty vector*,
@@ -161,8 +165,8 @@ cannot reach.
 
 | Panel | Query | What it measures |
 |---|---|---|
-| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Invalid IDs found.*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. This older matcher does not cover the current assignment-error prefix. A zero count can miss failures. Read the assign logs and `InvalidSessionAssigned` alert; see the correction note below. |
-| **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "(?s)^Staging completed with.*" [1h])) or vector(0)` | Per-cycle counter: each `assign` loop that ended with ≥1 error logs a single summary line. Counting that line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The `(?s)` flag makes `.` match the newlines that follow the colon in the multi-line summary. |
+| **Invalid sessions (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| level="ERROR" \| message =~ "^Could not resolve the labels of .*" [1h])) or vector(0)` | Sessions `assign` routed to `__invalid__/` under its output directory because the DICOM metadata is missing a required field; under ingest these are the configured source tags, with derived defaults StudyID, PatientID and AccessionNumber. The labels are selected before the recipe runs. The current matcher selects the 0.19.0 assignment-error prefix and excludes the separate cycle summary. Repeated attempts can count the same session again. Read the assign logs and `InvalidSessionAssigned` alert; see the validation note below. |
+| **Assign cycles with errors (last 1h)** | `sum(count_over_time({namespace="xnat-ingest",component="assign"} \| json \| message =~ "^Label completed with [0-9]+ errors" [1h])) or vector(0)` | The query matches the current `Label completed with N errors` message and a numeric error count. The 0.19.0 summary is one line. Each matching line counts one failed cycle, regardless of how many sessions were rejected within it. It is not a distinct-session count or a sum of the error counts. Inspect the per-session ERROR messages to identify which sessions need review. A quiet cycle or a missing log stream contributes nothing, so confirm collection separately. |
 | **Pipeline liveness** | `(count_over_time({namespace="xnat-ingest",component="assign"}[1h]) > bool 0) or vector(0)` | `1` while the assign loop is logging = the pipeline is alive. `0` means assign has stopped emitting (pod down, crash-looping, or Vector not shipping). |
 
 The `bool` modifier is load-bearing and easy to drop. A bare `> 0` is a *filter*:
@@ -175,20 +179,20 @@ comparison has nothing to rewrite.
 
 ### Logs panel — Recent invalid sessions
 
-LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | message =~ "^Invalid IDs found.*" | line_format "{{.cluster}} — {{.message}}"`
+LogQL: `{namespace="xnat-ingest",component="assign"} | json | level="ERROR" | message =~ "^Could not resolve the labels of .*" | line_format "{{.cluster}} — {{.message}}"`
 
 `line_format` is a Go template: `{{.cluster}}`, not `{cluster}`. The single-brace
 form is not LogQL and renders literally, which looks like a data problem rather
 than a query one.
 
 The query still uses the older error prefix. The current alert uses
-`Could not resolve project/subject/session IDs for ...`, so a blank panel can
+`Could not resolve the labels of ...`, so a blank panel can
 miss a real assignment failure. Inspect the assign logs and
 `InvalidSessionAssigned` alert as well.
 
 Held input is under `<storage.pipeline.hostPath>/assigned/__invalid__/`. It has
 not passed de-identification. Use the guarded recovery procedure in
-[the xnat-ingest reference](components/xnat-ingest.md). It protects the worker
+[the accessionflow reference](components/accessionflow.md). It protects the worker
 lock, updates the manifest labels and checks for destination conflicts. A
 directory rename alone is not sufficient. With ingest, recovered assigned
 input must pass deidentify before upload reads it from `/data/deidentified`.
@@ -201,7 +205,7 @@ input must pass deidentify before upload reads it from `/data/deidentified`.
 
 There is deliberately **no failure-rate percentage**. The s3-uploader emitted
 `upload_started` / `upload_completed` / `upload_failed` triples, so a ratio had a
-denominator counted in the same unit as its numerator. `xnat-ingest upload`
+denominator counted in the same unit as its numerator. `accessionflow store xnat`
 emits one terminal line per success and unstructured error text on the way, so
 any such percentage would divide log lines by sessions and read as a precise
 number that means nothing. Two series on one graph, read together, is the honest
@@ -267,14 +271,16 @@ Query: `{namespace="xnat-ingest"} |= "$session" | json | line_format "{{.cluster
 nothing promotes `session` to a stream label: the name appears in the message
 text of every stage that touches it.
 
-`{{.event}}` in that template is the one surviving reference to the `event` field
-anywhere in the shipped dashboards, and on tier-1 it renders **empty** — a
-cosmetic double separator between the component and the message, not a broken
-panel. `event` is the s3-uploader's convention (`upload.mode: s3`), which this
-tier does not run; see the rule stated further up this document. Printing a field
-that may be absent is safe in a `line_format`, because Go templates render a
-missing key as the empty string. *Counting* one is not, which is why no panel
-does.
+`{{.event}}` can be empty on a normal store success line. Current 0.19.0
+also emits structured events, such as `deid_failed`, `xnat_repair_completed`
+and `xnat_identity_adoption`, so the field is not always empty on tier-1.
+The data-policy and Orthanc backup hooks have their own event fields too.
+Printing an optional field in `line_format` does not create a new query
+filter. The template still selects lines by the entered session text;
+a structured event that omits that text will not be found by this query.
+Current tool records use logger `accessionflow`. The Kubernetes `app` label
+remains `xnat-ingest`; changing that selector to the logger name would hide
+the stage logs.
 
 The name to paste is `PROJECT.SUBJECT.SESSION` as assignment resolved it from
 `ingest.assign.tagMapping` or the optional constant project. Ingest defaults to
@@ -288,12 +294,13 @@ information. Review access and sharing accordingly. A missing result is also
 not proof that the session never existed: the query can be narrower than the
 current log schema or outside its time window.
 
-The shipped invalid-session panels still match `^Invalid IDs found.*`. The
-current `InvalidSessionAssigned` alert instead matches
-`Could not resolve project/subject/session IDs for ...`. A zero panel count is
-therefore not a reliable check for that newer error. Read the assign logs and
-the alert when investigating missing labels. This documentation update does not
-change the dashboard queries; their matcher needs a separate correction.
+The invalid-session panels and `InvalidSessionAssigned` alert now match the
+0.19.0 prefix `Could not resolve the labels of`. The cycle-summary panel
+separately matches `Label completed with [0-9]+ errors`. Older dashboards
+used `Invalid IDs found` and `Staging completed`; those expressions missed
+the new messages. Update the dashboard source with the migration. Even with
+the corrected matchers, zero is not proof of healthy collection. Confirm the
+selected labels, time range and raw assign logs before dismissing a report.
 
 Sort order is Ascending so the trace reads top-to-bottom in time order.
 

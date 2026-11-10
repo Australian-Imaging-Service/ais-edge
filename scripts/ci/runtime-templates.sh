@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # 7. Runtime-template survival — the silent-breakage check
 # =============================================================================
@@ -138,7 +139,7 @@ done < <(expectations | ci_renders_present)
 # dataPolicy `location` must match where the data ACTUALLY is
 # =============================================================================
 # Each dataPolicy stage declares a location so the policy engine can walk paths
-# instead of knowing about Orthanc or xnat-ingest — that is what lets the
+# instead of knowing about Orthanc or accessionflow; that is what lets the
 # de-identifier or the ingest path be replaced without rewriting retention.
 #
 # The cost of that indirection is a NEW way to fail silently: if a template's
@@ -584,7 +585,7 @@ PY
 # =============================================================================
 # Without a manifest check, a resource without its manifest is uploaded as it
 # is, and later passes see a partial resource as already uploaded. Measured
-# 2026-10-14 on the CLI: with neither flag, xnat-ingest does not require a
+# 2026-10-14 on the CLI: with neither flag, accessionflow does not require a
 # manifest (the option default is unset), so the chart must pass
 # --require-manifest explicitly. requireManifest is true by default. This
 # fails when a default render does not pass --require-manifest, or when a site

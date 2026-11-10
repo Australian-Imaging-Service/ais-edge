@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{/* ===================================================================== */}}
 {{/* Naming                                                                */}}
 {{/* ===================================================================== */}}
@@ -154,7 +155,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          than in the helper so the message names the key and the alternatives. */ -}}
   {{- $engine := include "edge.deidEngine" . }}
   {{- if not (has $engine (list "orthanc" "ingest" "none")) }}
-    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires deid.policyReviewed=true." $engine) }}
+    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the accessionflow deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires deid.policyReviewed=true." $engine) }}
   {{- end }}
   {{- /* `eq $engine "none"`, NOT "neither of the two I know". The broad form
          meant a TYPO satisfied it: deid.engine=ingset failed with a message
@@ -175,11 +176,11 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          CreateContainerConfigError on an edge nobody is watching. */ -}}
   {{- /* specFiles is what puts the '@' and the per-project directory on disk. A
        ConfigMap key cannot contain '@' and a ConfigMap mounts flat, so without
-       the mapping the recipes land as bare keys in one directory, xnat-ingest
+       the mapping the recipes land as bare keys in one directory, accessionflow
        matches none of them, and every session is skipped as "no applicable
        spec" — logged, but easy to read as "nothing to do". */ -}}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specConfigMap (not .Values.ingest.deidentify.specFiles) }}
-  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap mounts its keys flat in one directory, but xnat-ingest's load_specs walks <spec-dir>/<category>/<format> and SKIPS anything at the top level that is not a directory, so flat keys match nothing and every session fails with 'No deidentification specs found'. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series: \"__default__/medimage/dicom-series\"}." }}
+  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap mounts its keys flat in one directory, but accessionflow's load_recipe_files walks <spec-dir>/<category>/<format> and SKIPS anything at the top level that is not a directory, so flat keys match nothing and every session fails with 'No deidentification recipe files found'. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series: \"__default__/medimage/dicom-series\"}." }}
 {{- end }}
 
 {{- if and (eq (include "edge.deidEngine" .) "ingest") (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
@@ -209,7 +210,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- if .Values.ingest.deidentify.specConfigMap }}{{- $supplied = append $supplied "specConfigMap" }}{{- end }}
   {{- if .Values.ingest.deidentify.specFiles }}{{- $supplied = append $supplied "specFiles" }}{{- end }}
   {{- if $supplied }}
-    {{- fail (printf "ingest.deidentify.%s is set, but deid.engine=%s. Those recipes belong to the xnat-ingest de-identification stage, which only renders under deid.engine=ingest, so nothing would mount them and no deidentify pod would exist: the chart would install cleanly and your recipe would never run. De-identification would still happen, via the Orthanc Lua profile in orthanc.deid.profile, which is a DIFFERENT recipe. Either set deid.engine=ingest to use what you have written here, or edit orthanc.deid.profile instead, which is what the selected engine reads." (join ", ingest.deidentify." $supplied) (include "edge.deidEngine" .)) }}
+    {{- fail (printf "ingest.deidentify.%s is set, but deid.engine=%s. Those recipes belong to the accessionflow de-identification stage, which only renders under deid.engine=ingest, so nothing would mount them and no deidentify pod would exist: the chart would install cleanly and your recipe would never run. De-identification would still happen, via the Orthanc Lua profile in orthanc.deid.profile, which is a DIFFERENT recipe. Either set deid.engine=ingest to use what you have written here, or edit orthanc.deid.profile instead, which is what the selected engine reads." (join ", ingest.deidentify." $supplied) (include "edge.deidEngine" .)) }}
   {{- end }}
 {{- end }}
 
@@ -242,22 +243,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
-        {{- /* group-orthanc IMPLEMENTS only one copy mode: xnat-ingest raises
-               outright. api/group_api.py:261 refuses any copy_mode other than
+        {{- /* group-orthanc IMPLEMENTS only one copy mode: accessionflow raises
+               outright. api/collate_api.py:263-269 refuses any copy_mode other than
                hardlink_or_copy for the Orthanc path:
 
                  NotImplementedError: 'unlink_source', copy_mode' and 'raise_errors'
-                 are not yet implemented for Orthanc grouping.
+                 are not yet implemented for Orthanc collation.
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against the pinned 0.16.2 (api/group_api.py:268, the file is
-               unchanged since 0.16.1); the
-               same raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
+               it. RE-VERIFIED against accessionflow 0.19.0 (api/collate_api.py:263-269).
+               The same historical raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
         {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
-          {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
+          {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. accessionflow's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
         {{- end }}
 
         {{- /* PREREQUISITES FOR orthanc.auth.enabled=true, ASSERTED AT RENDER.
@@ -301,10 +301,10 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          to agree with each other and with the label and the tag mapping. Setting
          them now does nothing, so they must fail rather than be ignored. */ -}}
   {{- if hasKey .Values.orthanc.deid "enabled" }}
-    {{- fail "orthanc.deid.enabled has been replaced by the single key deid.engine. Set deid.engine=orthanc for the Lua hook, or deid.engine=ingest for the xnat-ingest stage; the chart derives the hook, the stage, the group label and the reclaim condition from it, which is what stops them disagreeing." }}
+    {{- fail "orthanc.deid.enabled has been replaced by the single key deid.engine. Set deid.engine=orthanc for the Lua hook, or deid.engine=ingest for the accessionflow stage; the chart derives the hook, the stage, the group label and the reclaim condition from it, which is what stops them disagreeing." }}
   {{- end }}
   {{- if hasKey .Values.ingest.deidentify "enabled" }}
-    {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the xnat-ingest de-identification stage." }}
+    {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the accessionflow de-identification stage." }}
   {{- end }}
 
   {{- /* THE ATTACH STAGE IS NOT SUPPORTED YET. accessionflow attach takes
@@ -873,7 +873,7 @@ ever reclaimed, and the only symptom is staging that quietly stops draining.
 {{/*
 The directory upload reads from.
 
-assign writes /data/assigned. When the xnat-ingest deidentify stage is on it
+assign writes /data/assigned. When the accessionflow deidentify stage is on it
 sits between the two, reading /data/assigned and writing /data/deidentified,
 so upload has to follow it — otherwise it would keep uploading the
 pre-deidentification copy and the stage would be silently pointless.
@@ -1042,7 +1042,7 @@ installs for the running Python, so the pod passes its own image in.
      whole life. The deleter deletes only while it cannot take it: then a wrapped
      writer runs now, and Recreate means no older writer without the lock runs.
      CAUTION: this guards an upgrade, not a rollback to a writer without the lock
-     (see docs/components/xnat-ingest.md). */}}
+     (see docs/components/accessionflow.md). */}}
 {{- define "edge.uploadTreeAlive" -}}
 /data/.locks/{{ include "edge.uploadTreeKey" . }}.alive
 {{- end }}

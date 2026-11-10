@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 Orthanc configuration, split across TWO ConfigMaps mounted at TWO paths.
 
@@ -141,7 +142,7 @@ data:
       "Defaults": {
         "DeidentificationProfileFile": "/etc/ais-edge/deidentification-profile.json",
         "FacilityBackupDir": "/facility-backup",
-        "_DeidEnabledREADME": "False under ingest. The enabled callback writes the facility backup, then returns before AET routing, quarantine and header modification. De-identification runs in xnat-ingest after assignment.",
+        "_DeidEnabledREADME": "False under ingest. The enabled callback writes the facility backup, then returns before AET routing, quarantine and header modification. De-identification runs in accessionflow after assignment.",
         "DeidEnabled": {{ eq (include "edge.deidEngine" .) "orthanc" }},
         "_LabelsREADME": "Stable-study callback settings. When the script is loaded, OnStableStudy can apply ReadyLabel and clear ProcessedLabel under ingest too. The chart clears the ingest group ready-label filter. These labels do not prove that de-identification ran.",
         "ReadyLabel": {{ .Values.ingest.orthancGroup.toProcessLabel | default "" | toJson }},

@@ -1,5 +1,7 @@
 # AIS Edge (Tier-1) — Component Documentation
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Per-component reference. The top-level [`README.md`](../README.md) covers the
 **system as a whole** (single-node architecture, install, network, security
 model). The files in this folder are deeper dives into individual components:
@@ -12,7 +14,7 @@ structure (Overview → Role → Access → How it runs → Configuration →
 Operations → Risks → Replacements / Future).
 
 This is the **tier-1, single-node** deployment: one k0s cluster runs the whole
-pipeline (Orthanc + xnat-ingest + optional observability). There is no k0smotron,
+pipeline (Orthanc + accessionflow + optional observability). There is no k0smotron,
 no child cluster, no SeaweedFS/S3, no nginx-ingress, and no cert-manager.
 
 Every component below is installed by **one chart**, `charts/edge`, and
@@ -29,7 +31,7 @@ env-var-shaped configuration to keep in step with it.
 
 - [`orthanc.md`](components/orthanc.md): the DICOM network receiver and original
   backup callback. Under ingest, it does not modify headers or route by AET.
-- [`xnat-ingest.md`](components/xnat-ingest.md): group-orthanc, assign, deidentify
+- [`accessionflow.md`](components/accessionflow.md): group-orthanc, assign, deidentify
   and direct upload, plus optional file-drop, associate and package stages.
 - [`deidentification.md`](components/deidentification.md): the default ingest
   recipe, source-label review and reid-map encryption. It also holds the single

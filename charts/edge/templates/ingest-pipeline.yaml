@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 The ingest pipeline: group -> assign.
 
@@ -328,7 +329,7 @@ spec:
   The de-identification recipes, from the site file.
 
   A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
-  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  accessionflow needs in the path cannot be stored as a key. Each path is
   sanitised into a legal key here and mapped back to the real path with
   items[].path on the volume below, so the operator writes real paths and never
   sees the restriction.
@@ -429,10 +430,10 @@ spec:
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #
             # Drop each assigned session once this stage has produced a
-            # COMPLETE de-identified copy of it. xnat-ingest counts the data
-            # files on both sides and refuses the unlink when they disagree, so
-            # a run that produced a short output leaves its input in place to be
-            # retried.
+            # de-identified output. With --unlink-source all, 0.18.0+ removes
+            # the input snapshot after success, including unprocessed files.
+            # Do not add files to staging session folders by hand. The stage
+            # does not check the separate facility backup before unlinking.
             #
             # Without this, /data/assigned is never emptied by anything: the
             # data-policy engine's `onUploaded` condition looks for a marker the
@@ -522,7 +523,7 @@ spec:
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
       {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
       # The package stage can start before deidentify creates its output
-      # directory, and `xnat-ingest package` refuses an input that is not there.
+      # directory, and `accessionflow package` refuses an input that is not there.
       initContainers:
         - name: init-deidentified-dir
           image: {{ $pkgImage }}

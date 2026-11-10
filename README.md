@@ -1,5 +1,7 @@
 # Tier-1 Single-Node Edge Medical Imaging Ingest
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 A single-node appliance that receives DICOM from local modalities, de-identifies
 it on-node, and uploads it to XNAT. Part of
 [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
@@ -187,7 +189,7 @@ Modalities C-STORE to Orthanc on the node's IP at port 4242. Orthanc stores the
 original instances and, when enabled, writes a separate facility-backup copy.
 It does not modify headers or apply AET routing under the default ingest mode.
 
-Use **`deid.engine: ingest` for every new site**. xnat-ingest groups the input,
+Use **`deid.engine: ingest` for every new site**. accessionflow groups the input,
 assigns the XNAT labels, applies the site's recipe, and uploads the output.
 Assignment precedes de-identification. The label values therefore need review
 independently of the DICOM recipe. A recipe cannot change an already assigned
@@ -391,7 +393,7 @@ k0s-k0smotron-mvp/
 │   ├── files/                             ← loaded with .Files.Get, never templated
 │   │   ├── deidentify-and-forward.lua     ← facility-backup callback under ingest
 │   │   ├── deidentification-profile.example.json  ← deprecated-engine reference profile
-│   │   ├── deid-specs.example/               ← recipes for the xnat-ingest deidentify stage
+│   │   ├── deid-specs.example/               ← recipes for the accessionflow deidentify stage
 │   │   ├── data-policy.sh                 ← the retention/reporting engine
 │   │   ├── vector-local.yaml              ← tier-1 Vector config (in-cluster Loki, no TLS)
 │   │   └── vector.yaml                    ← tier-2 variant (mTLS to a management Loki)
@@ -477,14 +479,14 @@ Before ingesting data, ensure:
 1. **The XNAT project exists** — create it in the XNAT web UI first. Its ID must
    match the project selected by `ingest.assign.tagMapping.project` or
    `ingest.assign.constantProjectId`. Assignment does not create the project. Use IDs in
-   `[A-Za-z0-9_]` only — xnat-ingest normalises other characters (e.g. a hyphen)
+   `[A-Za-z0-9_-]` only; accessionflow normalises other characters (e.g. a period)
    to `_`, so `test-project` would become `test_project`.
 2. **The XNAT user is a local account** — not AAF/OIDC. Create via
    Administer → Users.
 3. **The XNAT user has project permissions** — at least Member or Collaborator on
    the target project.
 
-`xnat-ingest` authenticates via `POST /data/JSESSION` with username/password and
+`accessionflow` authenticates via `POST /data/JSESSION` with username/password and
 uses the session token for subsequent REST calls. If your XNAT presents a private
 or self-signed certificate, set `upload.direct.verifySsl: false`; the upload pod
 then runs with `--dont-verify-ssl`.
@@ -497,7 +499,7 @@ then runs with `--dont-verify-ssl`.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| xnat-ingest | image tag `0.16.2.post1` | `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`, the pinned fork image. Includes the default deidentify stage, local upload and grouping snapshot support. The inspected image reports package version `0.16.3.dev49+ais.20261021.r13.g3182cc6`; record the deployed digest as well. |
+| accessionflow | image tag `0.19.0` | `ghcr.io/australian-imaging-service/accessionflow:0.19.0`, the upstream image. Includes default deidentify, local upload and grouping snapshot support. The inspected package reports `0.19.0`; record the deployed digest too. The old fork reported `0.16.3.dev49+ais.20261021.r13.g3182cc6`, which is retained here only as migration history. |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |
@@ -585,11 +587,11 @@ curl -sk <XNAT_URL>                                             # should return 
 | Node reboots | k0s auto-starts; pods resume; assigned files are safe on the local disk | Nothing — the pipeline picks up where it left off |
 | Orthanc pod restarts | In-flight receive interrupted | Modality re-sends, or the study completes on the next stable cycle |
 | XNAT is down | Uploads fail; sessions accumulate in `/data/deidentified` (or `/data/packaged`) | XNAT returns; the upload loop clears the backlog |
-| DICOM missing AccessionNumber | `assign` logs `Could not resolve project/subject/session IDs` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Rename and move the session, as in "Recovering an invalid session" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Check each modality; a field can be absent or empty |
+| DICOM missing AccessionNumber | `assign` logs `Could not resolve the labels of` at ERROR, the session goes to `/data/assigned/__invalid__/`, and `InvalidSessionAssigned` fires. Nothing removes that folder | Rename and move the session, as in "Recovering an invalid session" in [docs/components/accessionflow.md](docs/components/accessionflow.md). Check each modality; a field can be absent or empty |
 | `/data` disk fills | Nothing is deleted while `dataPolicy.enabled` is false, so both volumes grow unbounded. The data-policy DaemonSet reports free disk and what it *would* reclaim | Expand the disk, or turn on `dataPolicy` (read a week of `dryRun` decisions first — this node holds the only copy of the facility backup) |
 | `helm upgrade` refuses to render | One of the render-time guards fired (see Repository Structure) | The failure text names the values path and why it matters — fix the site file, do not bypass |
 | DICOM missing `SeriesDescription` or `SeriesNumber` | `group-orthanc` stages the series with a fallback name and logs a WARNING with `event: series_metadata_fallback` and the Orthanc series ID. A missing description gives the scan type `Series_<scan-id>`. A missing number gives the `SeriesInstanceUID` with its dots changed to underscores, as XNAT's header importer does | Nothing. Correct the tag at the modality if the scan needs a readable name |
-| One study that cannot be staged | `group-orthanc` logs `Skipping Orthanc study '<id>': <reason>` at ERROR, removes the study's scratch folders and stages the other studies. The study stays in Orthanc without the processed label and is tried again on every pass, so `IngestStageError` keeps firing. Two series with one `SeriesNumber` are refused on purpose, so that no series is merged or dropped. Before the 0.16.2.post1 image, one such study stopped the stage for every study | Read the reason, then follow "A study that group-orthanc refuses" in [docs/components/xnat-ingest.md](docs/components/xnat-ingest.md). Do not delete the study from Orthanc |
+| One study that cannot be staged | `group-orthanc` logs `Skipping Orthanc study '<id>': <reason>` at ERROR, removes the study's scratch folders and stages the other studies. The study stays in Orthanc without the processed label and is tried again on every pass, so `IngestStageError` keeps firing. Two series with one `SeriesNumber` are refused on purpose, so that no series is merged or dropped. Before the 0.16.2.post1 image, one such study stopped the stage for every study | Read the reason, then follow "A study that group-orthanc refuses" in [docs/components/accessionflow.md](docs/components/accessionflow.md). Do not delete the study from Orthanc |
 | XNAT presents an untrusted certificate | The upload pod `CrashLoopBackOff`s with `SSLCertVerificationError ... self-signed certificate`, and no session is ever delivered | `openssl s_client -connect <xnat>:443` to confirm (`Verify return code: 18`). Set `upload.direct.verifySsl: false` for that site, and revert it when XNAT gets a real certificate |
 | Existing XNAT resource has different checksums | The ERROR means missing, extra or changed content; the empty-digest false ERROR was fixed in 0.15.3. `XNATResourceIncompleteAndStuck` reports repeated conflicts | Compare staged and remote files. A later upload-success line does not prove that content matches. Preserve the source and resolve the conflict before deleting anything. |
 | `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT has no checksum for one or more files, so those bytes were not compared | Ask the XNAT administrator to configure and compute catalog checksums. A matching filename is not a content proof. The warning can recur on each upload attempt. |

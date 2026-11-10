@@ -1,7 +1,9 @@
 # De-identification engines: two architectures
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Use **`deid.engine: ingest` for every new site**. This is the chart default.
-Orthanc receives DICOM. xnat-ingest groups the instances, assigns the XNAT
+Orthanc receives DICOM. accessionflow groups the instances, assigns the XNAT
 labels, applies the site's recipe, and uploads the result. The two arrival
 patterns below both use this pipeline. They differ in the labels the modality
 provides, not in the engine a site must select.
@@ -91,7 +93,7 @@ values in tags that the chart supports. Select those tags in
 `ingest.assign.tagMapping`. The data still needs a recipe: research labels do
 not prove that the remaining headers, private fields or pixels are safe.
 
-The same xnat-ingest pipeline applies:
+The same accessionflow pipeline applies:
 
 | Step | What happens |
 |---|---|
@@ -104,7 +106,7 @@ The same xnat-ingest pipeline applies:
 **Requires:** valid source labels, recipes in `ingest.deidentify.specs`, and
 review of both the labels and the resulting data. Recipe keys have the form
 `<PROJECT_ID or __default__>/medimage/dicom-series`. The value is a pydicom
-`deid` recipe, not JSON. The chart mounts it at the path xnat-ingest expects.
+`deid` recipe, not JSON. The chart mounts it at the path accessionflow expects.
 
 **Properties**
 
@@ -143,7 +145,7 @@ Use this sequence for each modality and project:
 
 A field can be present but empty. Such a field does not provide a usable label.
 If assignment fails, use the guarded recovery procedure in
-[components/xnat-ingest.md](components/xnat-ingest.md#recovering-an-invalid-session).
+[components/accessionflow.md](components/accessionflow.md#recovering-an-invalid-session).
 Do not flatten directories or move a session into an existing target by hand.
 The invalid input may still be needed to correct the site's source mapping.
 
@@ -165,9 +167,10 @@ The invalid input may still be needed to correct the site's source mapping.
 ## Upstream caveats affecting Architecture B
 
 The pinned chart image is
-`ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`. Treat the image reference and
+`ghcr.io/australian-imaging-service/accessionflow:0.19.0`. Treat the image reference and
 its installed Python version as separate identifiers. The locally inspected
-image reports `0.16.3.dev49+ais.20261021.r13.g3182cc6` as its package version.
+image reports `0.19.0` as its package version. The previous fork reported
+`0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
 Record the deployed image digest when comparing behavior across installations.
 
 [#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144)
@@ -193,12 +196,12 @@ installation instructions require; do not treat that as ingest pseudonymisation.
 ## Where the data enters
 
 Orthanc is the DICOM network receiver in this stack. A modality sends C-STORE
-to the configured called AE title at `<nodeIP>:4242`. xnat-ingest processes
+to the configured called AE title at `<nodeIP>:4242`. accessionflow processes
 files and the Orthanc REST API; the chart does not expose a second DICOM receiver.
 Network restrictions must enforce the intended sender boundary because the
 shipped Orthanc configuration accepts any calling AE title.
 
-`ingest.fileDrop` is the other entry path. It runs `xnat-ingest group` over a
+`ingest.fileDrop` is the other entry path. It runs `accessionflow collate` over a
 filesystem glob, for example an approved share or vendor export. It bypasses
 Orthanc and its facility-backup callback. Keep the input files as originals;
 `dataPolicy.originals.fileDrop.reclaim: never` is the default. A file-drop age
@@ -209,4 +212,4 @@ same ingest recipe, so test label resolution for each source format.
 
 * [components/deidentification.md](components/deidentification.md): recipes, labels, mapping encryption and the single deprecated-engine reference.
 * [components/orthanc.md](components/orthanc.md): receiver configuration and the original-data backup.
-* [components/xnat-ingest.md](components/xnat-ingest.md): stage paths, invalid-session recovery and cleanup controls.
+* [components/accessionflow.md](components/accessionflow.md): stage paths, invalid-session recovery and cleanup controls.

@@ -1,5 +1,7 @@
 # Observability integration & swap guide
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 **Ground truth:** branch `tier-1-solution`. The emitted log schemas were verified against the live single-node deployment (2026-07-08) and re-checked against the code that emits them; everything about the stack itself is verified against `charts/edge` as it renders today (§7 has the render command).
 
 This page used to pin a commit hash here. It no longer does, deliberately: the pin went stale while the alert rules, the Alertmanager config and the observability template all moved underneath it, and a stale hash reads as a *stronger* guarantee than no hash at all — it tells you the page was checked, without telling you it was checked against something that no longer exists. The §7 render command is the guarantee instead. Re-run it and compare rather than trusting this sentence.
@@ -109,17 +111,31 @@ operator can distinguish receiver errors from recipe-stage errors. Use
 synthetic fixtures when testing a query; do not copy patient identifiers into
 an alert example or a shared dashboard export.
 
-**xnat-ingest group-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`) — upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (it also emits the `Invalid IDs found` lines):
+**accessionflow collate-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (0.19.0 logs `Could not resolve the labels of` for invalid sessions).
+The following synthetic record shows the current 0.19.0 cycle summary.
+Its timestamp is an example, not a captured production event:
 ```json
-{"ts":"2026-07-08T01:49:01+0000","level":"INFO","logger":"xnat-ingest","message":"Staged and labelled study '08c0…' -> 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
+{"ts": "2026-11-10T00:00:00+0000", "level": "INFO", "logger": "accessionflow", "message": "Label completed successfully"}
 ```
-Fields: `ts, level, logger, message`. **No top-level `session`/`event` JSON key** — the session name is *inside* `message`. (`level` is present on most lines, absent on a few.)
+This current record contains `ts`, `level`, `logger` and `message`. The
+older logger name was `xnat-ingest`; it is not the 0.19.0 logger name.
+Current 0.19.0 records use logger `accessionflow`. The JSON formatter always
+adds those four fields and passes through any structured fields supplied by
+the call site. Native output or uncaught tracebacks can still be plain text.
+The ordinary label-completion message is `Label completed successfully`;
+it has no per-session `session` or `event` key and counts a cycle, not a study.
 
-**xnat-ingest upload** (`app=xnat-ingest`, `component=upload`):
+**accessionflow store xnat** (`app=xnat-ingest`, `component=upload`):
 ```json
-{"ts":"…","level":"INFO","logger":"xnat-ingest","message":"Successfully uploaded all files in 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
+{"ts": "…", "level": "INFO", "logger": "accessionflow", "message": "Successfully uploaded all files in 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
 ```
-Fields: `ts, level, logger, message` (some progress lines carry only `message`). The **terminal-success signal** is the message text `Successfully uploaded all files in '<session>'`. Session name is *inside* `message`.
+This synthetic 0.19.0 example has `ts`, `level`, `logger` and `message`. The
+**terminal-success signal** is `Successfully uploaded all files in '<session>'`.
+Extract the session from that message. A complete session skipped on a later
+pass emits no new success message. Other store records can carry structured
+fields: a successful repair has `event="xnat_repair_completed"`, `session`
+and `resources`; legacy identity adoption has `event="xnat_identity_adoption"`.
+These events do not form an upload-start/upload-complete pair.
 
 **data-policy reporter** (`app=data-policy`, `component=data-policy`) — the DaemonSet from [`charts/edge/files/data-policy.sh`](../charts/edge/files/data-policy.sh). It runs even with `dataPolicy.enabled: false` (report-only: the volumes are mounted read-only, so it *cannot* delete), walks each declared storage stage every `dataPolicy.reporter.interval` seconds (default 300) and reports. **This is the only disk-headroom signal on the node** — see §3.
 
@@ -135,21 +151,53 @@ Fields: `ts, component, edge, event, stage, message` on every line; `stage_repor
 
 | Signal | Where | Match |
 |---|---|---|
-| De-id happened (per instance) | orthanc | `\| json \| event="instance_deidentified"` (has `session`, `project`, `calledAet`) |
+| De-identification cycle completed | deidentify | `Deidentification completed successfully`; a cycle-level signal. Verify output files and recipe tags for a particular session. |
 | Study ready | orthanc | `\| json \| event="study_labeled_ready"` |
 | **Upload success** (terminal) | upload | message `=~ "Successfully uploaded all files in"` |
 | Upload error | upload | message `=~ "(?i)error\|failed\|exception\|traceback"` |
 | XNAT auth failure | upload | message `=~ "(?i)\b(401\|403\|unauthorized\|forbidden)\b"` |
-| Invalid DICOM (`__invalid__`) | assign | message `=~ "(?i)invalid\|validation.*fail"` |
+| Invalid labels (`__invalid__`) | assign | ERROR message starts with `Could not resolve the labels of`; this is a routing-label failure, not proof of invalid pixel data. |
 | Orthanc backlog | data-policy | `\| json \| event="stage_report", stage="derived.orthancStorage"` → `oldest_age_s` (StageBacklogAgeing) |
+| Instance archived to facility backup | orthanc | `\| json \| event="instance_archived"` from the Lua backup hook. This proves an archive write, not backlog size or recipe success. |
 | **Disk headroom** (per stage) | data-policy | `\| json \| event="stage_report"` → `free_pct` vs `min_free_pct` |
 | Retained legacy quarantine data (not created by ingest) | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
 
-> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages).
->
-> **Three bundled rules are broken by this, not merely approximate.** `SessionUploadStalled` and `XNATUploadFailingForAllSessions` (`charts/edge/files/loki-ruler-rules.yaml`) still select `{namespace="xnat-ingest", component="s3-uploader"} | json | event="upload_started"/"upload_completed"/"upload_failed"`. That component belonged to the S3 hop, which tier-1 does not have: `charts/edge/templates/upload.yaml` renders `component: s3-uploader` only under `upload.mode: s3`, and tier-1 is `upload.mode: direct`, which labels the pod `component: upload` and emits no `event` key at all. Neither the label nor those JSON fields ever exist here, so both rules select nothing and can never fire — and `XNATUploadFailingForAllSessions`' remediation text still tells the operator to run `logs -l component=s3-uploader`, a selector that matches no pod. `XNATBacklogGrowing` fails for the neighbouring reason: it counts `{component="assign"} | json | session != ""`, but assign emits only `ts, level, logger, message` (above), so `| json` extracts no `session` and the staged term is always zero — `0 − uploaded > 3` cannot become true either.
->
-> Retarget all three onto `{component="upload"}` and the message text `Successfully uploaded all files in '<session>'`, recovering the session with `| regexp "Successfully uploaded all files in '(?P<session>[^']+)'"` — the pattern `XNATUploadSuccess` already uses — before relying on them. Until then, per-session correlation should anchor on the Orthanc de-id event, which is the only place `session` is a first-class field.
+**Session correlation and current limits.** The normal label and upload
+messages put the name inside `message`. Extract it from the relevant message
+format; do not require `| json | session != ""` for every stage. Some 0.19.0
+records do have a structured `session`, including `deid_failed` and
+`xnat_repair_completed`, but the key is optional at the call site. Orthanc's
+legacy `instance_deidentified` event is absent under the ingest engine and
+must not be the required correlation anchor for this pipeline. Preserve the
+source UID, stage name and folder-derived XNAT labels when comparing records.
+
+**Two old selector defects have been fixed.** `SessionUploadStalled` and
+`XNATUploadFailingForAllSessions` now select `component="upload"` in
+`charts/edge/files/loki-ruler-rules.yaml`. Earlier rules selected the absent
+S3 uploader and required its `upload_started`/`upload_completed` events.
+Tier-1 stores directly to XNAT and has no such S3 hop. The current rules use
+store messages, with success recognized by `Successfully uploaded all files in`.
+The stalled-session rule extracts each name with `| regexp` on both sides.
+Its start message is conditional on non-empty `upload.direct.alwaysInclude`:
+clearing that value also removes the signal this rule needs. A very large
+session can remain in progress without being broken, so inspect the logs
+before treating a stalled notification as a failed delivery.
+
+**The backlog rule still has a separate limitation.** `XNATBacklogGrowing`
+subtracts upload messages from assign records with a top-level `session` key.
+Normal label-completion messages do not provide that key. The result is not
+a measured count of pending sessions and must not be used as proof that the
+queue is empty. Structured warnings, when present, are not successful staging
+events either. Use data-policy age and count reports, the assigned and terminal
+trees, and per-session upload results to investigate the backlog. A fix to the
+query needs a defined staging signal and is separate from this documentation.
+
+**Compare events at the correct boundary.** A successful label pass does not
+prove de-identification. A de-identification cycle summary does not prove
+that a particular session was uploaded. The successful store message does
+not establish that a downstream XNAT pipeline completed. Follow the same
+session through each boundary and verify the stored inventory when completeness
+matters. Do not substitute an Orthanc ready label for any of these checks.
 
 ### 2d. Swapping the log path
 
@@ -204,17 +252,17 @@ The table below is the **inventory** — read it as the set of signals worth ale
 
 | Alert | Sev | Engine | Fires when (the underlying signal) |
 |---|---|---|---|
-| `XNATUploadFailingForAllSessions` | critical | Loki | `event="upload_failed"` present **and** no `event="upload_completed"` over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
-| `XNATUploadRetryStorm` | warning | Loki | >5 error/failed/exception/traceback lines from `component="upload"` in 10m |
-| `SessionUploadStalled` | warning | Loki | `event="upload_started"` with no matching `event="upload_completed"` per session over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
-| `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m. **Cannot fire** — the staged term is `{component="assign"} \| json \| session != ""` and assign emits no `session` key, so it is always zero, §2c |
+| `XNATUploadFailingForAllSessions` | critical | Loki | More than 2 traceback headers or ERROR records from `component="upload"` in 15m, with no per-session upload success in that window; held for 15m. |
+| `XNATUploadRetryStorm` | warning | Loki | More than 2 traceback headers or ERROR records in 10m from `component="upload"`, excluding different-checksums conflicts; held for 10m. |
+| `SessionUploadStalled` | warning | Loki | An `Including ... scans/files in upload from` message in 15m with no success for the same session in 15m; held for 5m. Requires non-empty `upload.direct.alwaysInclude`, as explained in §2c. |
+| `XNATBacklogGrowing` | warning | Loki | The current query subtracts upload-success messages from assign records with `session != ""` over 30m and tests >3 for 30m. Normal label-completion records have no such key. This is not a reliable pending-session count; see §2c. |
 | `InvalidSessionAssigned` | warning | Loki | One assign ERROR for missing routing IDs in 10m, held for 1m. Check `assigned/__invalid__` and retain the files for review; alert expiry does not prove recovery. |
 | `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation-fail lines from assign in 1h |
 | `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
-| `XNATRepairAttempted` | warning | Loki | xnat-ingest's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
+| `XNATRepairAttempted` | warning | Loki | accessionflow's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from Orthanc in 10m; under ingest inspect backup/startup failures, while recipe errors come from deidentify |
-| `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
+| `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m; the counterpart for the accessionflow engine, so a de-identification failure is visible whichever engine runs |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (retained legacy input; ingest does not create unknown-AET quarantine entries) |
 | `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |

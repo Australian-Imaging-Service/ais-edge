@@ -12,7 +12,7 @@
     {
       "type": "stat",
       "title": "Sessions uploaded (last 1h)",
-      "description": "One count per session that `xnat-ingest upload` finished, matched on its terminal log line \"Successfully uploaded all files in\". Sessions, not files or DICOM instances \u2014 tier-1 uploads straight to XNAT and emits no per-object counters.",
+      "description": "Count of successful session passes from `accessionflow store xnat`, matched on \"Successfully uploaded all files in\". Sessions, not files or DICOM instances; tier-1 uploads straight to XNAT and emits no per-object counters.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -96,7 +96,7 @@
     {
       "type": "stat",
       "title": "Invalid sessions (last 1h)",
-      "description": "Sessions rejected by xnat-ingest assign because of missing/invalid DICOM headers (e.g. AccessionNumber). These land in /data/staging/__invalid__/ on the edge VM and require a human to rename and re-stage. Each session counts once: we anchor on the per-session error message and ignore the secondary 'Staging completed with N errors' summary line that repeats the same content.",
+      "description": "Count of ERROR messages beginning Could not resolve the labels of from accessionflow label xnat in the last hour. These sessions need routing-label review in assigned/__invalid__. The separate Label completed with N errors summary is excluded. A repeated attempt can report the same session again; this is not a distinct-session count.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -143,7 +143,7 @@
     {
       "type": "stat",
       "title": "Assign cycles with errors (last 1h)",
-      "description": "Each xnat-ingest assign cycle that ended with at least one error logs a 'Staging completed with N errors' summary. Counting that summary line gives one tick per failed cycle, regardless of how many sessions were rejected within it. The regex uses (?s) so `.` matches the newlines that follow the colon in the multi-line summary.",
+      "description": "Count of accessionflow label xnat messages beginning Label completed with N errors in the last hour. The summary is one line and records a failed cycle, regardless of how many sessions failed in it. It is not a distinct-session count. The query matches the 0.19.0 summary prefix and a numeric error count.",
       "gridPos": {
         "h": 4,
         "w": 6,
@@ -231,7 +231,7 @@
     {
       "type": "logs",
       "title": "Recent invalid sessions (last 1h)",
-      "description": "Each line is a session that xnat-ingest assign routed to /data/staging/__invalid__/. Site-admin action: rename the dir to PROJECT.SUBJECT.VISIT and move it back to /data/staging/.",
+      "description": "ERROR messages beginning Could not resolve the labels of from accessionflow label xnat. Inspect the stated missing fields and assigned/__invalid__ before correcting routing labels and retrying. A session can appear more than once. The panel uses a one-hour relative time override.",
       "gridPos": {
         "h": 9,
         "w": 24,

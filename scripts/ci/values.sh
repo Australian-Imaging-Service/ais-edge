@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # The values matrix — the single definition of every case CI renders.
 # =============================================================================
@@ -843,7 +844,7 @@ printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-emp
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
 
 # Two de-identification engines at once. The Lua hook strips on arrival, so
-# xnat-ingest would then de-identify already-pseudonymous data and record the
+# accessionflow would then de-identify already-pseudonymous data and record the
 # pseudonyms in the reid mapping as if they were the originals.
 printf 'deid:\n  engine: ingset\n' >"$V/neg-edge-deid-bad-engine.yaml"
 
@@ -854,7 +855,7 @@ printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: S
 # Neither engine, unacknowledged: identifiable data would reach XNAT unchanged.
 printf 'deid:\n  engine: none\n  policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
 
-# A spec ConfigMap with no key->path mapping: the recipes mount flat, xnat-ingest
+# A spec ConfigMap with no key->path mapping: the recipes mount flat, accessionflow
 # matches none of them, and every session is skipped.
 printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
@@ -1030,7 +1031,7 @@ orthanc:
     existingSecret: ""
 EOF
 
-# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# accessionflow's Orthanc grouping accepts ONLY hardlink_or_copy and raises
 # NotImplementedError at RUN TIME for anything else, so without this guard the
 # pod renders, starts and then CrashLoops with a message that never names the
 # setting that caused it.

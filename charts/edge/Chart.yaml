@@ -1,15 +1,16 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 apiVersion: v2
 name: ais-edge
 description: >-
-  AIS Edge site: Orthanc DICOM receiver with de-identification, the
-  xnat-ingest group/assign pipeline, and upload straight to XNAT (tier-1).
+  AIS Edge site: Orthanc DICOM receiver, the accessionflow
+  collate/label/deidentify pipeline, and upload straight to XNAT (tier-1).
   The tier-2 variant, through a central S3 staging bucket, is on main.
 type: application
 
 # Chart version. Bump on every change to the templates or default values.
 version: 0.7.0
 
-# Version of xnat-ingest this chart's pipeline arguments are written against.
+# Version of accessionflow this chart's pipeline arguments are written against.
 # The CLI changed shape at 0.12 (sort -> group-orthanc + assign), so this is
 # not a cosmetic field.
 appVersion: "0.19.0"

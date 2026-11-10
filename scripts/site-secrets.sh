@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Site secret management with SOPS + age.
 # =============================================================================
@@ -114,7 +115,7 @@ new)
     else
         ROLE_USAGE="usage: $0 new <name> single
 
-  single   selects sites/example-single: Orthanc receive, xnat-ingest assign
+  single   selects sites/example-single: Orthanc receive, accessionflow label xnat
            and deidentify, then direct upload to XNAT. Use ingest for new sites.
            Tier-1 is one box, so this is the only role and one file is the
            whole configuration. Use a lowercase site name with letters,

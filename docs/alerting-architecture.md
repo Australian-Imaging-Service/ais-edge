@@ -1,5 +1,7 @@
 # Alerting architecture — Loki ruler for pipeline events, Prometheus for K8s state
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## TL;DR
 
 Pipeline-event alerts (upload failures, stalled sessions, XNAT backlog, DICOM
@@ -24,8 +26,8 @@ natural source of truth for each alert**, not about network topology.
 
 Two kinds of signal, two natural homes:
 
-1. **Pipeline events are JSON log lines.** `xnat-ingest group-orthanc`,
-   `xnat-ingest assign`, the `xnat-ingest upload` pod and the data-policy
+1. **Pipeline events are JSON log lines.** `accessionflow collate-orthanc`,
+   `accessionflow label xnat`, the `accessionflow store xnat` pod and the data-policy
    reporter emit structured events (`{event: "upload_failed", session: "...",
    ...}`). The source of truth for "did an upload fail?" is the event itself, not
    a synthesised counter. Counting events in LogQL with `count_over_time` is the
@@ -41,8 +43,8 @@ Two kinds of signal, two natural homes:
    reason to route these through logs — a `PrometheusRule` is the right tool.
 
 Because everything is on one node, Prometheus *could* in principle scrape a
-metrics endpoint if xnat-ingest exposed one. It doesn't today (see the future
-enhancements in [`components/xnat-ingest.md`](components/xnat-ingest.md)), and
+metrics endpoint if accessionflow exposed one. It doesn't today (see the future
+enhancements in [`components/accessionflow.md`](components/accessionflow.md)), and
 even if it did, the JSON event is a richer, more direct source for
 pipeline-event alerts. So we keep pipeline alerts in the Loki ruler.
 
@@ -85,13 +87,13 @@ with `.Files.Get` and Helm never templates it.
 | Upload failing / retry storm | Loki ruler | Derived from `event="upload_failed"` vs `event="upload_completed"` JSON events on the upload pod (`{component="upload"}`). |
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
-| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
+| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Could not resolve the labels of` in 0.19.0), `{component="assign"}`. |
 | `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
-| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for a retained `__unmapped_aet__` subtree. Ingest creates no unknown-AET quarantine entries. Preserve historical content and consult the deprecated-engine reference before resolving it. |
 | `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. Rendered only while `dataPolicy.reporter.enabled` is true. |
-| `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. xnat-ingest logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
+| `XNATRepairAttempted` | Loki ruler | accessionflow's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. accessionflow logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
 | `ReclaimerRunUnavailable` | Loki ruler | The staged-reclaimer's run-level `reclaim_unavailable` with no `reclaim_finished` since, for 75m, `{component="s3-reclaimer"}`. Shared with tier-2; it needs the CronJob's pod labels, which CI checks. |
 | `SessionStagedNotConfirmedInXNAT` | Loki ruler | A session the reclaimer saw 48 to 72h ago and has never confirmed in XNAT since. Shared with tier-2. |
 | `KubeNodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
@@ -99,7 +101,7 @@ with `.Files.Get` and Helm never templates it.
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
 | `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
-| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's accessionflow store xnat container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
 | `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage raises one alert rather than two (a firing mail and its resolve, one pair per logged reason). |
 | `CPUThrottlingHigh` | Prometheus | kube-prometheus-stack's rule, unmodified. The data-policy reporter carries no CPU limit (`dataPolicy.reporter.resources`), so it has no CFS quota, cAdvisor exports no `container_cpu_cfs_*` series for it, and the rule cannot see it. Under the old 1-core limit its sub-second, multi-process sweep was throttled in about 61% of the few CFS periods it ran in, at 0.0014 cores average, and the rule fired and cleared several times a day, each re-fire a new mail. Every container with a CPU limit is still covered. The reporter's real failure, going quiet, is `DataPolicyReporterSilent`. `scripts/ci/runtime-templates.sh` fails if the reporter renders a CPU limit again. |

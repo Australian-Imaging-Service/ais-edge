@@ -1,5 +1,7 @@
 # De-identification
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Use `deid.engine: ingest` for new sites. See
 [choosing-a-deid-engine.md](../choosing-a-deid-engine.md) for the source-data
 checks. This page explains the default pipeline and its configuration.
@@ -12,7 +14,7 @@ enabled, its Lua callback also copies each original to that backup. The callback
 then returns before the AET lookup. It neither routes by AE title nor quarantines
 an unknown AET in this mode.
 
-xnat-ingest performs de-identification after assignment and before upload:
+accessionflow performs de-identification after assignment and before upload:
 
 | Stage | Input | Output and purpose |
 |---|---|---|
@@ -77,7 +79,7 @@ at that point. Its original patient information remains on disk. No later stage
 processes this holding directory automatically. The `InvalidSessionAssigned`
 alert reports the assignment error when the observability stack is enabled.
 Use the guarded recovery procedure in
-[xnat-ingest.md](xnat-ingest.md#recovering-an-invalid-session), then correct the
+[accessionflow.md](accessionflow.md#recovering-an-invalid-session), then correct the
 source mapping so the next study does not fail in the same way.
 
 **AE titles do not choose the project.** Under ingest, Orthanc does not consult
@@ -125,7 +127,7 @@ harder for a reader without the secret, but the transform, input space, secret
 handling and collision policy all matter. Do not describe a value as one-way
 only because it looks random or has a fixed number of hexadecimal characters.
 
-The pinned xnat-ingest CLI documents two recipe sidecars:
+The pinned accessionflow CLI documents two recipe sidecars:
 
 ```
 MYPROJECT/medimage/dicom-series
@@ -362,7 +364,7 @@ not proof that every instance is safe. It depends on the hook and its profile.
 The ingest pipeline omits this filter and performs de-identification later.
 Do not copy this mode's label requirement into an ingest deployment.
 
-## Configuration: xnat-ingest deidentify
+## Configuration: accessionflow deidentify
 
 ### 1. Write the recipes
 
@@ -387,7 +389,7 @@ The installed `load_recipe_files` function walks
 `<spec-dir>/<category>/<format>` and skips anything at the top level that is not
 a directory, so a flat file named `medimage@dicom-series.json` is never read.
 If no project or fallback recipes are found, the stage raises an error. The
-message starts with "No deidentification recipe files found for project".
+message starts with "No deidentification recipe files found for".
 The input remains in `/data/assigned` for investigation.
 
 **The file is a pydicom `deid` recipe, not JSON. It needs no extension:**
@@ -597,7 +599,7 @@ Two other differences, if you also run the tier-2 (cloud) deployment from the
   (`charts/mgmt/files/loki-ruler-rules.yaml`), because tier-2 runs Loki centrally
   and edges ship to it. On this branch they are in
   `charts/edge/files/loki-ruler-rules.yaml`, since a single node runs everything.
-* `xnat-ingest` is pinned in **both** charts there — `charts/edge` for the
+* `accessionflow` is pinned in **both** charts there; `charts/edge` for the
   pipeline stages and `charts/mgmt` for the S3 -> XNAT uploader, and both must
   move together because the CLI contract is shared. On this branch there is one
   chart and one pin.
@@ -667,10 +669,18 @@ input until the intended destination has been checked.
 
 ## Version notes
 
-This branch pins `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`.
+The package namespace is `accessionflow`. Current CLI examples use
+`accessionflow label xnat` and `accessionflow deidentify`. The source-retirement
+and sidecar behavior described in the [component guide](accessionflow.md#source-retirement-and-metadata-in-0190)
+also applies here. Under `--unlink-source all`, unprocessed files in the input
+snapshot can be removed after success; keep session folders pipeline-managed.
+The facility backup remains separate from this cleanup.
+
+This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.19.0`.
 The locally inspected image has image ID
-`sha256:f5df17d3b05774fbad5c319adfe726a4e3b9333512fa495bb9fbfa6d68e5058c`
-and reports package version `0.16.3.dev49+ais.20261021.r13.g3182cc6`.
+`sha256:a83355455edba6b7fa9f64da7fb7096d577998c1b54bde1ce1b7257b1ebc64e9`
+and reports package version `0.19.0`. The former fork image reported
+`0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
 The registry tag and installed package version are different identifiers.
 Record the deployed digest when checking a site; do not infer a live version
 from this documentation alone.

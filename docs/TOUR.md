@@ -1,5 +1,7 @@
 # A guided tour of this repository (tier-1, single node)
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 This is for the person who has been handed one Ubuntu machine and told to make
 medical images arrive in XNAT. It assumes you know Linux and can read YAML. It
 does **not** assume you know Kubernetes, Helm, Orthanc or DICOM, and it explains
@@ -23,7 +25,7 @@ identifiable patient data to a research archive.
 
 A modality (a scanner, or a PACS forwarding on its behalf) sends DICOM over the
 network to this machine, using the DICOM protocol's own transfer verb, C-STORE.
-Orthanc receives and stores the input. xnat-ingest then groups the instances,
+Orthanc receives and stores the input. accessionflow then groups the instances,
 assigns the XNAT project, subject and session labels, and applies the site
 de-identification recipe. Only the resulting output is sent to XNAT over HTTPS.
 Assignment happens before de-identification, so source labels need their own
@@ -207,7 +209,7 @@ Use **`deid.engine: ingest` for every new site**. It is already the default.
 Orthanc remains the DICOM receiver on port 4242. With the facility backup
 enabled, its Lua callback writes the original and returns before the AET lookup.
 It does not route by AE title, quarantine unknown AETs or modify the instance.
-The xnat-ingest `deidentify` stage cleans the data after `assign`.
+The accessionflow `deidentify` stage cleans the data after `assign`.
 
 `deid.engine: orthanc` is deprecated. Existing-engine reference material is in
 [Deprecated Orthanc Lua engine](components/deidentification.md#deprecated-orthanc-lua-engine).
@@ -256,7 +258,7 @@ dcmdump file.dcm | grep -E '(StudyID|PatientID|AccessionNumber)'
 An absent or empty required label causes assignment to put the session under
 `assigned/__invalid__`. This input is still identifiable. Later stages do not
 process the invalid holding directory automatically. Correct the source mapping
-and use the guarded recovery instructions in the xnat-ingest component guide.
+and use the guarded recovery instructions in the accessionflow component guide.
 The chart rejects tagMapping values that start with `ClinicalTrial` in ingest
 mode. It cannot inspect the values that a supported source tag will contain.
 
@@ -376,7 +378,7 @@ Two consequences worth knowing before you change anything here:
   holds `/data/.locks/<tree>.lock` for each pass, and the CronJob takes the same
   lock to delete. The first upgrade to this check, and any rollback to a release
   without the lock, need the drain in
-  [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
+  [accessionflow.md, "Upgrade or roll back while the cleanup can delete"](components/accessionflow.md).
 
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
 minimum age (counted from when the newest file reached the tree), whether it
@@ -778,9 +780,9 @@ matter. The exit code is the number of failures.
 | Pod in `CreateContainerConfigError` | A Secret name or namespace does not match. Section 3. |
 | Grouping fails per study, EXDEV in the logs | Pipeline stage directories are on different filesystems or the copy mode cannot link them. A separate backup disk is allowed. Section 2.1. |
 | Studies stall at assign, "missing metadata fields" | A source tag selected by `ingest.assign.tagMapping` is absent or empty. Check the actual input tags and the project constant. Section 2.3. |
-| Sessions land in `assigned/__invalid__` | Assignment could not resolve a required label. The input still contains patient information. Inspect the selected tags in Orthanc through a controlled port-forward, then use the guarded invalid-session recovery procedure in `docs/components/xnat-ingest.md`. Correct the source mapping for future studies. A failed grouping is separate: it is built privately and published only when complete. |
+| Sessions land in `assigned/__invalid__` | Assignment could not resolve a required label. The input still contains patient information. Inspect the selected tags in Orthanc through a controlled port-forward, then use the guarded invalid-session recovery procedure in `docs/components/accessionflow.md`. Correct the source mapping for future studies. A failed grouping is separate: it is built privately and published only when complete. |
 
-| `IngestStageError` for `group`, with `Skipping Orthanc study '<id>'` | One study cannot be staged, and the other studies go on. See "A study that group-orthanc refuses" in `docs/components/xnat-ingest.md`. |
+| `IngestStageError` for `group`, with `Skipping Orthanc study '<id>'` | One study cannot be staged, and the other studies go on. See "A study that group-orthanc refuses" in `docs/components/accessionflow.md`. |
 | Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` — `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Set `upload.direct.verifySsl: false` for the site, and set it back the moment XNAT gets a real one. |
 | `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | The empty-digest false ERROR was fixed in 0.15.3. This now indicates a real resource conflict. Compare staged and remote files; a later success line does not prove content equality. Preserve the source while resolving the conflict. |
 | `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT lists one or more files without computed checksums. Their names match, but their content was not compared. Ask the administrator to configure and compute catalog checksums. This warning can recur on each upload attempt. |
@@ -923,7 +925,7 @@ the rule has no series to read for it. The ones specific to this tier are:
   re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
-- **`DeidentifyStageError`** reports failures from the default xnat-ingest
+- **`DeidentifyStageError`** reports failures from the default accessionflow
   deidentify stage. Inspect its recipe, input and output.
 - **`OrthancDeidLuaError`** matches receiver Lua error logs. Under ingest, check
   backup writes and script startup requirements; header de-identification runs

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # 3. promtool check rules + promtool test rules
 # =============================================================================
@@ -805,20 +806,27 @@ FORCED = {
     "XNATRepairAttempted": "scoped to component=upload, for the same reason as XNATUploadSuccess: it matches the uploader's own log text, and a bare namespace selector would also match Loki logging this rule's query. The description also names each tier's own failure alert (XNATUploadRetryStorm here, SessionStagedNotConfirmedInXNAT on tier-2).",
     "SessionStagedNotConfirmedInXNAT": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim (its namespace regex already covers xnat-ingest). The steps name each tier's own objects: S3 staging and deploy/mgmt-upload-<edge> on tier-2, the upload tree and component=upload here.",
     "ReclaimerRunUnavailable": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim. The reason list differs: tier-2's filer and bucket reasons cannot occur with STORAGE=filesystem, and the kubectl step names this tier's namespace.",
-    "XNATUploadFailingForAllSessions": "different uploader, not drift — tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count xnat-ingest's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
-    "SessionUploadStalled": "different uploader, not drift — the tier-2 rule selects component=\"s3-uploader\" and matches event=\"upload_started\"/\"upload_completed\", which that script emits. install.sh forces upload.mode=direct on tier-1, so no s3-uploader is rendered AND those event fields are never written: xnat-ingest emits eight event names and neither of those is among them. Measured on a live tier-1 install: 0 pods carry component=s3-uploader and 0 upload log lines carry an event field. The tier-1 rule therefore selects component=upload and matches the binary's own log text. Re-pointing the selector alone would have left it just as dead.",
+    "XNATUploadFailingForAllSessions": "different uploader, not drift: tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count accessionflow's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
+    "SessionUploadStalled": "different uploader, not drift; the tier-2 rule selects component=\"s3-uploader\" and matches event=\"upload_started\"/\"upload_completed\", which that script emits. install.sh forces upload.mode=direct on tier-1, so no s3-uploader is rendered AND those event fields are never written: accessionflow 0.19.0 emits other structured events, but not this pair. Historical live tier-1 measurement: 0 pods carry component=s3-uploader and 0 upload log lines carry an event field. The tier-1 rule therefore selects component=upload and matches the binary's own log text. Re-pointing the selector alone would have left it just as dead.",
     "XNATResourceIncompleteAndStuck": "ANNOTATION ONLY, and only the remediation steps. expr, for, labels and summary are identical modulo the namespace, and the line breaks in expr were aligned to tier-2's so this exemption covers nothing but the description. The steps cannot be shared: they name the workload to read logs from and restart, which is deploy/edge-upload in one namespace here and deploy/mgmt-upload-<edge> in xnat-upload on tier-2, and tier-2's copy also carries the measurements from the incident that produced the rule. An operator following tier-2's steps on tier-1 would address a workload that does not exist.",
     "DataPolicyReporterSilent": "different by design, not drift. Tier-1 runs ONE reporter, the site itself, so the rule is absent_over_time on its own clusterLabel. Tier-2 watches many edges from the management Loki, so it starts from the configured edge inventory and drops each edge that reported; absent_over_time there could not name which edge went quiet. Same labels, severity and `for`. The window differs too: max(30m, 3 x dataPolicy.reporter.interval) here, dataPolicy.reporterSilentAfter there.",
     "IngestStageError": "wider selector while tier-1 alone has the optional package stage (chart 0.6.12): component=~\"group|group-fs|assign|package\" here, without package on tier-2. The rule is the tier-2 rule otherwise. Remove this entry when the package stage is ported to main and both tiers select package.",
     "DICOMRejectedUnmappedAET": "single-namespace collapse plus a different rules file — tier-2 defines this in charts/mgmt/files/loki-ruler-rules.yaml against its own namespace layout; tier-1 has no mgmt chart, so it is defined in charts/edge and selects app=\"orthanc\" in the one namespace. The expression and the regexp are otherwise the tier-2 rule verbatim. It was ABSENT from tier-1 entirely until now, while alertmanager-config.yaml already routed it by name and deidentify-and-forward.lua preserved its log wording for it.",
 }
+ANNOTATION_ONLY = {
+    "XNATUploadRetryStorm": "ANNOTATION ONLY. The remediation text names the single-node direct uploader here and the management uploader on tier-2. Every other field must match modulo namespace.",
+}
+def comparable(name, rule):
+    if name in ANNOTATION_ONLY:
+        return {key: value for key, value in rule.items() if key != "annotations"}
+    return rule
 bad = [n for n in sorted(set(t1) & set(t2))
-       if n not in FORCED and norm(t1[n]) != norm(t2[n])]
+       if n not in FORCED and norm(comparable(n, t1[n])) != norm(comparable(n, t2[n]))]
 # To STDERR: stdout is the verdict this check is parsed from, and a NOTE on it
 # made the caller read "NOTE ..." as the result instead of PASS.
-for n in sorted(FORCED):
+for n, reason in sorted({**FORCED, **ANNOTATION_ONLY}.items()):
     if n in t1:
-        print(f"    note: {n} — {FORCED[n]}", file=sys.stderr)
+        print(f"    note: {n}: {reason}", file=sys.stderr)
 shared = len(set(t1) & set(t2))
 if bad:
     print("FAIL " + ", ".join(bad))
