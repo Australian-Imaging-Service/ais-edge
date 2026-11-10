@@ -149,11 +149,11 @@ that content comes from:
   its own release, so it would load none of these — silently, with nothing to
   see in any log.
 - **The Loki ruler ships with a rule set.**
-  `charts/edge/files/loki-ruler-rules.yaml` holds 20 LogQL alerts in four groups
+  `charts/edge/files/loki-ruler-rules.yaml` holds 21 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
   `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError`,
-  `OrthancStorageGrowing` and the other rules of those groups, which ship but
+  and the other rules of those groups, which ship but
   are not tabulated.
   `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
   `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled

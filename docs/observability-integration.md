@@ -141,7 +141,7 @@ Fields: `ts, component, edge, event, stage, message` on every line; `stage_repor
 | Upload error | upload | message `=~ "(?i)error\|failed\|exception\|traceback"` |
 | XNAT auth failure | upload | message `=~ "(?i)\b(401\|403\|unauthorized\|forbidden)\b"` |
 | Invalid DICOM (`__invalid__`) | assign | message `=~ "(?i)invalid\|validation.*fail"` |
-| Orthanc backlog | orthanc | native log `=~ "new stored instance"` |
+| Orthanc backlog | data-policy | `\| json \| event="stage_report", stage="derived.orthancStorage"` → `oldest_age_s` (StageBacklogAgeing) |
 | **Disk headroom** (per stage) | data-policy | `\| json \| event="stage_report"` → `free_pct` vs `min_free_pct` |
 | Retained legacy quarantine data (not created by ingest) | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
 
@@ -215,7 +215,6 @@ The table below is the **inventory** — read it as the set of signals worth ale
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from Orthanc in 10m; under ingest inspect backup/startup failures, while recipe errors come from deidentify |
 | `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
-| `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
 | `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
 | `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (retained legacy input; ingest does not create unknown-AET quarantine entries) |
 | `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |

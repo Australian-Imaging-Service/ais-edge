@@ -659,22 +659,10 @@ groups:
         cover the formats being received. The time window can expire before
         the cause is fixed. This alert does not establish data loss or recovery,
         and cannot detect a process killed without a log.
-  - alert: OrthancStorageGrowing
-    expr: "sum by (cluster) (count_over_time(\n  {namespace=\"xnat-ingest\", app=\"orthanc\"}\n  |~ \"(?i)new stored instance\" [1h])) > 1000\n"
-    for: 5m
-    labels:
-      severity: warning
-      source: loki-ruler
-      category: orthanc-backlog
-    annotations:
-      summary: Orthanc received >1k instances on {{ $labels.cluster }} in the last hour
-      description: 'Either a real ingest spike (legitimate, may need to scale
-
-        edge storage) or group-orthanc isn''t draining Orthanc. Check the
-
-        group-orthanc pod''s REST-pull loop and Orthanc''s storage PVC size.
-
-        '
+  # OrthancStorageGrowing WAS REMOVED (2026-11-10). It counted "new stored instance",
+  # a line Orthanc writes only with --verbose (and worded "New instance stored"), so
+  # it could never fire. main removed it earlier (docs/TOUR.md there). Disk space is
+  # EdgeDiskLow; data stuck in Orthanc is StageBacklogAgeing (derived.orthancStorage).
 - name: ais-edge-data-policy
   interval: 5m
   rules:
