@@ -1,8 +1,10 @@
 # Observability integration & swap guide
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 **Ground truth:** branch `tier-1-solution`. The emitted log schemas were verified against the live single-node deployment (2026-07-08) and re-checked against the code that emits them; everything about the stack itself is verified against `charts/edge` as it renders today (§7 has the render command).
 
-This page used to pin a commit hash here. It no longer does, deliberately: the pin went stale while the alert rules, the Alertmanager config and the observability template all moved underneath it, and a stale hash reads as a *stronger* guarantee than no hash at all — it tells you the page was checked, without telling you it was checked against something that no longer exists. The §7 render command is the guarantee instead. Re-run it and compare rather than trusting this sentence.
+This page used to pin a commit hash here. It no longer does, deliberately: the pin went stale while the alert rules, the Alertmanager config and the observability template all moved underneath it, and a stale hash reads as a *stronger* guarantee than no hash at all ; it tells you the page was checked, without telling you it was checked against something that no longer exists. The §7 render command is a repeatable configuration check, not a guarantee of runtime behavior or delivery. Re-run it and compare rather than trusting this sentence.
 
 This note is for a platform/monitoring team who want to **replace the bundled observability stack with their own** (Splunk, Elastic/OpenSearch, Datadog, an institutional Prometheus/Grafana, etc.). The bundled stack — Loki + Prometheus + Grafana + Alertmanager + Vector — is a **reference default, not a hard dependency**. The DICOM→XNAT pipeline is instrumented in a vendor-neutral way; this document is the contract you build against.
 
@@ -26,7 +28,7 @@ They are orthogonal **on purpose**. `observability.enabled` decides whether a co
 
 > **Caution:** the key must *exist and be false*, not be absent. A Helm dependency whose condition path does not resolve is treated as ENABLED.
 
-The pipeline (Orthanc → group-orthanc → assign → upload → XNAT) installs and runs **completely independently** of this stack — verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
+The pipeline (Orthanc receiver → collate orthanc → label xnat → deidentify → optional package → store xnat → XNAT) installs and runs **completely independently** of this stack ; verified: the drop test's DICOM→XNAT flow ran and was confirmed before observability was ever deployed.
 
 So integration has three postures:
 1. **Leave it off** and run only your own tooling.
@@ -39,7 +41,7 @@ So integration has three postures:
 |---|---|
 | `observability.enabled` | Vector DaemonSet on/off ([`charts/edge/templates/vector.yaml`](../charts/edge/templates/vector.yaml)) |
 | `observability.stack.enabled` | both subcharts on/off |
-| `observability.stack.grafana.nodePort` | **display only.** `install.sh` reads it to print `http://<nodeIP>:<port>` at the end of the run (default 30030). It does **not** open the port — see the caution below |
+| `kube-prometheus-stack.grafana.service.nodePort` | The Grafana Service NodePort and the port in the installer's printed URL. `install.sh` (`GRAFANA_PORT`) reads the site override, or the chart default of 30030. The removed `observability.stack.grafana.nodePort` key has no effect. |
 | `observability.stack.alerting.{emailTo,emailFrom,smtpHost,smtpPort,smtpUsername,requireTLS,existingSecret}` | alert mail routing — genuinely consumed, substituted into the Alertmanager config by `templates/observability.yaml`; SMTP password is the `alertmanager-smtp` Secret |
 | retention (logs / metrics) | **not a site-level `observability` key.** There was an `observability.stack.retentionDays`; it did nothing and was deleted. Set `loki.loki.limits_config.retention_period` and `kube-prometheus-stack.prometheus.prometheusSpec.retention` in the subchart blocks instead — see the caution below |
 | `nodeIP` | the address Grafana is reached on |
@@ -48,7 +50,7 @@ Grafana's admin login is the `grafana-admin-credentials` Secret and the SMTP pas
 
 > **Read this before you tune retention or the NodePort:** the *only* values that enforce anything are the subchart blocks at the bottom of [`charts/edge/values.yaml`](../charts/edge/values.yaml) — `loki.loki.limits_config.retention_period` (logs), `kube-prometheus-stack.prometheus.prometheusSpec.retention` (metrics), `kube-prometheus-stack.grafana.service.nodePort` (the port that actually opens, default 30030). Helm cannot template subchart values: no template in `charts/edge` can read a parent key and push it down into a subchart. A friendly parent key here would be read, trusted, and silently ignored, so the friendly parent keys that used to sit under `observability.stack` — `retentionDays`, `grafana.nodePort`, `lokiStorage` — were **removed from the chart** rather than left as decoration. `charts/edge/values.yaml` records the measurement that settled it: `--set observability.stack.grafana.nodePort=31234` left the Service on 30030.
 >
-> One residue survives, and it is the trap: `install.sh` still reads `observability.stack.grafana.nodePort` from the site file to build the URL it prints. That is its whole effect. Move the port in the subchart block and the printed link points at a closed port unless you set the site-level key to the same number; set only the site-level key and you have changed nothing but the link.
+> The installer now follows the same subchart key as the Service: `install.sh` (`GRAFANA_PORT`) reads `kube-prometheus-stack.grafana.service.nodePort` from the site file, falling back to `charts/edge/values.yaml` (default 30030). The old parent key no longer controls the display. Apply the site file to change the deployed port; editing it alone does not change a running Service. Check that Service or `helm get notes` after the upgrade to confirm the live address.
 
 ---
 
@@ -58,7 +60,7 @@ Grafana's admin login is the `grafana-admin-credentials` Secret and the SMTP pas
 |---|---|---|---|
 | **Logs** (the *primary* pipeline signal) | Every pod's **stdout**, structured JSON where the app emits it | Vector DaemonSet → Loki (`ais-loki`) | any log agent → your log store |
 | **Metrics** (cluster only) | kube-state-metrics, kubelet/cAdvisor, apiserver | Prometheus (`ais-kps-prometheus`) | any Prometheus-compatible scraper |
-| **Alerts** | LogQL rules (Loki ruler) + PromQL rules (Prometheus) | Alertmanager (`ais-kps-alertmanager`) → email/Slack | re-express rules in your platform |
+| **Alerts** | LogQL rules (Loki ruler) + PromQL rules (Prometheus) | Alertmanager (`ais-kps-alertmanager`) → configured email receivers | re-express rules in your platform |
 
 **Names you will need.** The subcharts are installed with `fullnameOverride`, so the objects are *not* `<release>-…`: kube-prometheus-stack is **`ais-kps`** (`ais-kps-prometheus`, `ais-kps-alertmanager`, `ais-kps-operator`) and Loki is **`ais-loki`** (Service and StatefulSet). Grafana is the exception — it keeps the release name, `<release>-grafana`. The Loki name is pinned deliberately: `charts/edge/files/vector-local.yaml` names that Service *literally* (a `.Files.Get` file is never templated), so if it followed the release name, Vector would push at an address that never resolves — and logs that silently never arrive look exactly like a quiet site.
 
@@ -70,14 +72,15 @@ Grafana's admin login is the `grafana-admin-credentials` Secret and the SMTP pas
 
 ### 2a. Two kinds of "labels" — don't conflate them
 
-- **Loki stream labels** — attached by Vector from Kubernetes pod metadata (not from the log text). These are what you filter streams by:
+- **Loki stream labels**: Vector combines Kubernetes metadata, configured site identity and parsed message severity. These are what you filter streams by:
 
   | label | source | example values |
   |---|---|---|
   | `namespace` | pod namespace | `xnat-ingest` (the whole release), `kube-system`, `local-path-storage` |
   | `app` | pod label `app` | `orthanc`, `xnat-ingest`, `data-policy`, `vector` |
   | `component` | pod label `component` | `dicom-receiver`, `group`, `assign`, `upload`, `data-policy` |
-  | `pod`, `container`, `node`, `cluster`, `level` | pod metadata | `cluster` is the site's `clusterLabel` |
+  | `pod`, `container`, `node` | Kubernetes metadata | source workload and node |
+  | `cluster`, `level` | configured identity; parsed JSON severity or `unknown` fallback | `cluster` is the site's `clusterLabel`; level is not a pod label |
 
   The label set is defined in [`charts/edge/files/vector-local.yaml`](../charts/edge/files/vector-local.yaml) (tier-1) and is load-bearing: every rule and dashboard panel selects on these names.
 
@@ -109,19 +112,33 @@ operator can distinguish receiver errors from recipe-stage errors. Use
 synthetic fixtures when testing a query; do not copy patient identifiers into
 an alert example or a shared dashboard export.
 
-**xnat-ingest group-orthanc / assign** (`app=xnat-ingest`, `component=group` and `component=assign`) — upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` REST-pulls from Orthanc and labels each study; `assign` derives the project/subject/session IDs and stages the session (it also emits the `Invalid IDs found` lines):
+**accessionflow collate orthanc / label xnat** (`app=xnat-ingest`, `component=group` and `component=assign`); upstream ≥0.12 split the old `sort` command into two stages that log in the same shape. `group-orthanc` queries Orthanc metadata over REST, hardlinks its local DICOM files and labels each staged study; `assign` derives the project/subject/session IDs and stages the session (0.20.0 logs `Could not resolve the labels of` for invalid sessions).
+The following synthetic record shows the current 0.20.0 cycle summary.
+Its timestamp is an example, not a captured production event:
 ```json
-{"ts":"2026-07-08T01:49:01+0000","level":"INFO","logger":"xnat-ingest","message":"Staged and labelled study '08c0…' -> 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
+{"ts": "2026-11-10T00:00:00+0000", "level": "INFO", "logger": "accessionflow", "message": "Label completed successfully"}
 ```
-Fields: `ts, level, logger, message`. **No top-level `session`/`event` JSON key** — the session name is *inside* `message`. (`level` is present on most lines, absent on a few.)
+This current record contains `ts`, `level`, `logger` and `message`. The
+older logger name was `xnat-ingest`; it is not the 0.20.0 logger name.
+Current 0.20.0 records use logger `accessionflow`. The JSON formatter always
+adds those four fields and passes through any structured fields supplied by
+the call site. Native output or uncaught tracebacks can still be plain text.
+The ordinary label-completion message is `Label completed successfully`;
+it has no per-session `session` or `event` key and counts a cycle, not a study.
 
-**xnat-ingest upload** (`app=xnat-ingest`, `component=upload`):
+**accessionflow store xnat** (`app=xnat-ingest`, `component=upload`):
 ```json
-{"ts":"…","level":"INFO","logger":"xnat-ingest","message":"Successfully uploaded all files in 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
+{"ts": "…", "level": "INFO", "logger": "accessionflow", "message": "Successfully uploaded all files in 'test-project.test_project_90001C64992C.BB6AAD071A7A'"}
 ```
-Fields: `ts, level, logger, message` (some progress lines carry only `message`). The **terminal-success signal** is the message text `Successfully uploaded all files in '<session>'`. Session name is *inside* `message`.
+This synthetic 0.20.0 example has `ts`, `level`, `logger` and `message`. The
+**terminal-success signal** is `Successfully uploaded all files in '<session>'`.
+Extract the session from that message. A complete session skipped on a later
+pass emits no new success message. Other store records can carry structured
+fields: a successful repair has `event="xnat_repair_completed"`, `session`
+and `resources`; legacy identity adoption has `event="xnat_identity_adoption"`.
+These events do not form an upload-start/upload-complete pair.
 
-**data-policy reporter** (`app=data-policy`, `component=data-policy`) — the DaemonSet from [`charts/edge/files/data-policy.sh`](../charts/edge/files/data-policy.sh). It runs even with `dataPolicy.enabled: false` (report-only: the volumes are mounted read-only, so it *cannot* delete), walks each declared storage stage every `dataPolicy.reporter.interval` seconds (default 300) and reports. **This is the only disk-headroom signal on the node** — see §3.
+**data-policy reporter** (`app=data-policy`, `component=data-policy`) ; the DaemonSet from [`charts/edge/files/data-policy.sh`](../charts/edge/files/data-policy.sh). It runs even with `dataPolicy.enabled: false` (report-only: the volumes are mounted read-only, so it *cannot* delete), walks each declared storage stage every `dataPolicy.reporter.interval` seconds (default 300) and reports. **This covers the pipeline hostPath stages; measurable PVCs also have kubelet volume metrics** ; see §3.
 
 ```json
 {"ts":"2026-08-10T02:00:00+00:00","component":"data-policy","edge":"tier1-example",
@@ -129,42 +146,74 @@ Fields: `ts, level, logger, message` (some progress lines carry only `message`).
  "location":"/facility-backup","kind":"original","free_pct":41,"size_kb":524288000,"avail_kb":214958080,
  "entries":918,"oldest_age_s":63204,"min_free_pct":10,"policy":"forever"}
 ```
-Fields: `ts, component, edge, event, stage, message` on every line; `stage_report` adds `location, kind, free_pct, size_kb, avail_kb, entries, oldest_age_s` and echoes that stage's **own** thresholds (`min_free_pct`, `alert_after_s`) so a rule compares against the stage's limit rather than one hardcoded fleet-wide. Stage names as rendered: `originals.facilityBackup`, `originals.quarantine`, `derived.orthancStorage`, `derived.grouped`, `derived.assigned`. `event` and the numeric fields are real JSON keys — the script's header calls this schema a public interface, because renaming a field disables its alert silently.
+Fields: `ts, component, edge, event, stage, message` on every line; `stage_report` adds `location, kind, free_pct, size_kb, avail_kb, entries, oldest_age_s` and echoes that stage's **own** thresholds (`min_free_pct`, `alert_after_s`) for inspection. Current rules substitute policy thresholds at Helm render time; LogQL does not directly compare two extracted numeric fields in these expressions. Stage names as rendered: `originals.facilityBackup`, `originals.quarantine`, `derived.orthancStorage`, `derived.grouped`, `derived.assigned`, plus `derived.deidentified` under ingest and `derived.packaged` when packaging is enabled. `event` and the numeric fields are real JSON keys ; the script's header calls this schema a public interface, because renaming a field disables its alert silently.
 
 ### 2c. Reliable signals to build on
 
 | Signal | Where | Match |
 |---|---|---|
-| De-id happened (per instance) | orthanc | `\| json \| event="instance_deidentified"` (has `session`, `project`, `calledAet`) |
+| De-identification cycle completed | deidentify | `Deidentification completed successfully`; a cycle-level signal. Verify output files and recipe tags for a particular session. |
 | Study ready | orthanc | `\| json \| event="study_labeled_ready"` |
 | **Upload success** (terminal) | upload | message `=~ "Successfully uploaded all files in"` |
 | Upload error | upload | message `=~ "(?i)error\|failed\|exception\|traceback"` |
 | XNAT auth failure | upload | message `=~ "(?i)\b(401\|403\|unauthorized\|forbidden)\b"` |
-| Invalid DICOM (`__invalid__`) | assign | message `=~ "(?i)invalid\|validation.*fail"` |
-| Orthanc backlog | orthanc | native log `=~ "new stored instance"` |
+| Invalid labels (`__invalid__`) | assign | ERROR message starts with `Could not resolve the labels of`; this is a routing-label failure, not proof of invalid pixel data. |
+| Orthanc backlog | data-policy | `\| json \| event="stage_report", stage="derived.orthancStorage"` → `oldest_age_s` (StageBacklogAgeing) |
+| Instance archived to facility backup | orthanc | `\| json \| event="instance_archived"` from the Lua backup hook. This proves an archive write, not backlog size or recipe success. |
 | **Disk headroom** (per stage) | data-policy | `\| json \| event="stage_report"` → `free_pct` vs `min_free_pct` |
 | Retained legacy quarantine data (not created by ingest) | data-policy | `\| json \| event="stage_report", stage="originals.quarantine"` → `oldest_age_s` vs `alert_after_s` |
 
-> **Honest caveat (ground truth):** the `session` field is a **real JSON key only in the Orthanc de-id events**. For assign/upload it lives in the message text, so per-session correlation should anchor on the **Orthanc de-id event** (or regex-extract the session from assign/upload messages).
->
-> **Three bundled rules are broken by this, not merely approximate.** `SessionUploadStalled` and `XNATUploadFailingForAllSessions` (`charts/edge/files/loki-ruler-rules.yaml`) still select `{namespace="xnat-ingest", component="s3-uploader"} | json | event="upload_started"/"upload_completed"/"upload_failed"`. That component belonged to the S3 hop, which tier-1 does not have: `charts/edge/templates/upload.yaml` renders `component: s3-uploader` only under `upload.mode: s3`, and tier-1 is `upload.mode: direct`, which labels the pod `component: upload` and emits no `event` key at all. Neither the label nor those JSON fields ever exist here, so both rules select nothing and can never fire — and `XNATUploadFailingForAllSessions`' remediation text still tells the operator to run `logs -l component=s3-uploader`, a selector that matches no pod. `XNATBacklogGrowing` fails for the neighbouring reason: it counts `{component="assign"} | json | session != ""`, but assign emits only `ts, level, logger, message` (above), so `| json` extracts no `session` and the staged term is always zero — `0 − uploaded > 3` cannot become true either.
->
-> Retarget all three onto `{component="upload"}` and the message text `Successfully uploaded all files in '<session>'`, recovering the session with `| regexp "Successfully uploaded all files in '(?P<session>[^']+)'"` — the pattern `XNATUploadSuccess` already uses — before relying on them. Until then, per-session correlation should anchor on the Orthanc de-id event, which is the only place `session` is a first-class field.
+**Session correlation and current limits.** The normal label and upload
+messages put the name inside `message`. Extract it from the relevant message
+format; do not require `| json | session != ""` for every stage. Some 0.20.0
+records do have a structured `session`, including `deid_failed` and
+`xnat_repair_completed`, but the key is optional at the call site. Orthanc's
+legacy `instance_deidentified` event is absent under the ingest engine and
+must not be the required correlation anchor for this pipeline. Preserve the
+source UID, stage name and folder-derived XNAT labels when comparing records.
+
+**Two old selector defects have been fixed.** `SessionUploadStalled` and
+`XNATUploadFailingForAllSessions` now select `component="upload"` in
+`charts/edge/files/loki-ruler-rules.yaml`. Earlier rules selected the absent
+S3 uploader and required its `upload_started`/`upload_completed` events.
+Tier-1 stores directly to XNAT and has no such S3 hop. The current rules use
+store messages, with success recognized by `Successfully uploaded all files in`.
+The stalled-session rule extracts each name with `| regexp` on both sides.
+Its start message is conditional on non-empty `upload.direct.alwaysInclude`:
+clearing that value also removes the signal this rule needs. A very large
+session can remain in progress without being broken, so inspect the logs
+before treating a stalled notification as a failed delivery.
+
+**The backlog rule still has a separate limitation.** `XNATBacklogGrowing`
+subtracts upload messages from assign records with a top-level `session` key.
+Normal label-completion messages do not provide that key. The result is not
+a measured count of pending sessions and must not be used as proof that the
+queue is empty. Structured warnings, when present, are not successful staging
+events either. Use data-policy age and count reports, the assigned and terminal
+trees, and per-session upload results to investigate the backlog. A fix to the
+query needs a defined staging signal and is separate from this documentation.
+
+**Compare events at the correct boundary.** A successful label pass does not
+prove de-identification. A de-identification cycle summary does not prove
+that a particular session was uploaded. The successful store message does
+not establish that a downstream XNAT pipeline completed. Follow the same
+session through each boundary and verify the stored inventory when completeness
+matters. Do not substitute an Orthanc ready label for any of these checks.
 
 ### 2d. Swapping the log path
 
 Point any agent at the kubelet log files and ship to your backend — nothing here is Loki-specific:
 - **Source:** `/var/log/pods` and `/var/log/containers`, both mounted **read-only** on the Vector DaemonSet.
-- **Agents that work unchanged:** Fluent Bit, Fluentd, Splunk OTel/Universal Forwarder, Elastic Filebeat/Elastic Agent, Datadog Agent, Grafana Alloy, or your own Vector.
+- **Candidate replacements, not verified (2026-11-10) as drop-in integrations:** Fluent Bit, Fluentd, Splunk OTel/Universal Forwarder, Elastic Filebeat/Elastic Agent, Datadog Agent, Grafana Alloy, or your own Vector.
 - **Parsing:** JSON-decode the `message` where present; carry `namespace/app/component/pod/node` as index fields/labels.
 - **Turning ours off:** `observability.enabled: false` removes the DaemonSet, its ServiceAccount and its RBAC. Nothing else in the chart references it.
 
-**If you keep Vector but repoint it.** It is a **hand-written DaemonSet** ([`charts/edge/templates/vector.yaml`](../charts/edge/templates/vector.yaml)), not the Vector subchart — that avoids the subchart's `tpl`-over-`customConfig` behaviour, where Helm evaluates Vector's own `{{ }}` syntax and renders every stream label as an empty string, silently breaking every rule and panel that selects on one. The config is a plain file mounted verbatim, in two variants:
+**If you keep Vector but repoint it.** It is a **hand-written DaemonSet** ([`charts/edge/templates/vector.yaml`](../charts/edge/templates/vector.yaml)), not the Vector subchart ; that avoids the subchart's `tpl`-over-`customConfig` behaviour, where unescaped Vector `{{ }}` expressions can fail Helm evaluation or produce incorrect labels. Preserve those expressions until Vector evaluates them. The config is a plain file mounted verbatim, in two variants:
 
 | File | Used when | Difference |
 |---|---|---|
 | `charts/edge/files/vector.yaml` | `stack.enabled: false` — pushing off-box | has the sink `tls:` block (client cert + CA for a remote Loki) |
-| `charts/edge/files/vector-local.yaml` | `stack.enabled: true` — tier-1 | **exactly that `tls:` block removed**, nothing else |
+| `charts/edge/files/vector-local.yaml` | `stack.enabled: true` ; tier-1 | local plain-HTTP sink and corresponding endpoint/environment wiring; compare the two files before making shared changes |
 
 Two files rather than one conditional, because Helm must never evaluate either. Tier-1's Loki is in-cluster over plain `http` with no client certificate; leaving the `tls:` block in would point Vector at `/etc/ssl/loki-client/tls.crt`, which does not exist here, and every push would fail at the handshake. Anything site-specific arrives as an env var instead — `CLUSTER_LABEL` and `LOKI_ENDPOINT`, the latter derived to `http://ais-loki.<namespace>.svc.cluster.local:3100` when the local stack is on, or to `observability.loki.endpoint` when you set one. **Keep the two files in step:** any non-TLS change to one belongs in the other.
 
@@ -179,11 +228,11 @@ There are **no bespoke pipeline metrics**. What the bundled Prometheus scrapes i
 - **apiserver** — `up{job="apiserver"}`
 - **the stack watching itself** — Prometheus, Alertmanager, Grafana, the operator, CoreDNS
 
-**Deliberately disabled** in `charts/edge/values.yaml`: `nodeExporter`, `kubeControllerManager`, `kubeScheduler`, `kubeProxy`, `kubeEtcd`. On a single k0s node those scrape targets do not exist as separately-addressable endpoints, and left on they produce permanently-firing "target down" alerts — which trains operators to ignore Alertmanager, which is worse than having no alerts.
+**Deliberately disabled** in `charts/edge/values.yaml`: `nodeExporter`, `kubeControllerManager`, `kubeScheduler`, `kubeProxy`, `kubeEtcd`. This chart does not configure usable scrape endpoints for those components; their disabled monitors do not mean the control-plane components are absent, and left on they produce permanently-firing "target down" alerts ; which trains operators to ignore Alertmanager, which is worse than having no alerts.
 
 > **Consequence, and it matters:** there are **no `node_*` host metrics**, so `node_filesystem_avail_bytes` is not available for "is `/data` filling up?". On tier-1 that question is answered from **logs** — the data-policy `stage_report` events in §2b carry `free_pct`/`avail_kb` per storage stage, measured at the directory that actually holds the data. If your platform wants disk as a metric, extract it from those fields, or scrape a node-exporter you run yourself.
 
-The bundled metric alerts only depend on a handful: `up{job="apiserver"}`, `kube_node_status_condition{condition="Ready"}`, `kube_pod_container_status_restarts_total`, `kube_node_info`.
+Custom metric alerts also depend on CronJob success/creation timestamps, Job failure state, container memory/limits, start times and last termination reasons. Uploader rules first derive recording series from Kubernetes labels. Inspect all four `prometheus-rules/*.yaml` files and the upstream default rules before replacing the scrape path.
 
 **Swap:** these are standard metric names — scrape the same endpoints with your own Prometheus, VictoriaMetrics, Grafana Alloy, or Datadog. If you want pipeline *rates* as metrics (uploads/min, failures/min) rather than logs, derive them from the log signals in §2c via your log platform's metric-extraction (e.g. Loki `count_over_time`, Splunk `timechart`, Datadog log-based metrics).
 
@@ -191,33 +240,46 @@ The bundled metric alerts only depend on a handful: `up{job="apiserver"}`, `kube
 
 ## 4. Alert inventory (current definitions)
 
+Additional current inventory rows omitted from the older table:
+
+| Alert | Engine | Current signal |
+|---|---|---|
+| `XNATResourceIncompleteAndStuck` | Loki | Per-session different-checksum conflicts over 60m exceed a threshold derived from uploader timing; held 15m. |
+| `IngestStageError` | Loki | ERROR/CRITICAL or decoded traceback in group/group-fs/assign/package, with missing-ID duplicates excluded; 10m lookback, 1m hold. |
+| `StageBacklogAgeing` | Loki | Oldest reported entry exceeds the rendered stageAgeAlertAfter threshold; forever-retained stages excluded. |
+| `PipelineSessionStuck` | Loki | Reporter emits `stage_stuck` for a session whose reclaim condition remains unsatisfied. |
+| `DICOMRejectedUnmappedAET` | Loki | Legacy Orthanc-engine rejection phrase; default ingest does not generate it. |
+| `XNATUploaderRestarted` | Prometheus | Uploader restart-counter increase in 15m; includes available last termination reason, not a retained reason alone. |
+| `XNATUploaderMemoryGrowing` | Prometheus | Sustained RSS trends, runtime and configured memory-limit conditions; a symptom, not proof of a leak. |
+
+Review caveat: inherited Alertmanager retention is 120h while several routes repeat at 720h. Do not promise month-long deduplication from those routes alone. Source inspection does not prove live firing, resolution or external notification delivery.
+
 Two engines, one Alertmanager.
 
 - **Log alerts** — LogQL over the §2 streams, evaluated by **Loki's own ruler**, configured under `loki.loki.rulerConfig` in [`charts/edge/values.yaml`](../charts/edge/values.yaml): local rule storage, `enable_alertmanager_v2`, and `alertmanager_url: http://ais-kps-alertmanager.<namespace>.svc.cluster.local:9093`. That URL is the detail to check after any rename — it must match the Service the kube-prometheus-stack subchart creates under `fullnameOverride: ais-kps`. It was wrong once, inherited as `<release>-kube-prometheus-stack-alertmanager`: Loki stayed healthy, rules loaded, dashboards fine, and every pipeline alert silently never fired.
-- **Metric alerts** — PromQL as `PrometheusRule` objects, evaluated by `ais-kps-prometheus`. `ruleSelectorNilUsesHelmValues: false`, so it picks up every rule in the namespace rather than only those carrying the subchart's own release label.
+- **Metric alerts** ; PromQL as `PrometheusRule` objects, evaluated by `ais-kps-prometheus`. `ruleSelectorNilUsesHelmValues: false`, so it picks up every rule across selected namespaces (empty namespace selector here), rather than requiring the subchart's own release label.
 
 Mail routing is stated in `observability.stack.alerting.*`, with the password in the `alertmanager-smtp` Secret.
 
-> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources; **and the rule bodies below, which are shipped, not left to you**. `charts/edge/templates/observability.yaml` reads `files/loki-ruler-rules.yaml` with `.Files.Get` (hard-`fail`ing the render if it is missing or empty) into ConfigMap `<release>-loki-rules` labelled `loki_rule: "true"`, substituting `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` from `dataPolicy.originals`; and it globs `files/prometheus-rules/*.yaml` into the PrometheusRules `ais-edge-critical` / `-warning` / `-info` / `-uploader`. Both are gated on `observability.stack.enabled`. Three things follow: (1) the ruler path and the sidecar path already agree; `/rules` and `/rules/fake`, the tenant sub-directory, set together in `charts/edge/values.yaml`; adding a rule means applying an *additional* ConfigMap with the `loki_rule` label, not repointing anything; (2) Alertmanager runs the chart's own config, rendered from `files/alertmanager-config.yaml` into the Secret `alertmanager-aisedge-config` and pinned via `alertmanagerSpec.configSecret`, with a real `email-primary` root receiver; `kube-prometheus-stack.alertmanager.config` is inert once that pin is set; (3) what you must still supply is the **mail destination**: `observability.stack.alerting.*` ships empty, so a fresh site renders a valid config that addresses nowhere. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
+> **What the chart actually ships today (check before you rely on it).** `stack.enabled: true` installs kube-prometheus-stack's **own** recording/alert rules and stock dashboards, and Prometheus + Alertmanager as Grafana datasources; **and the rule bodies below, which are shipped, not left to you**. `charts/edge/templates/observability.yaml` reads `files/loki-ruler-rules.yaml` with `.Files.Get` (hard-`fail`ing the render if it is missing or empty) into ConfigMap `<release>-loki-rules` labelled `loki_rule: "true"`, substituting `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` from `dataPolicy.originals`; and it globs `files/prometheus-rules/*.yaml` into the PrometheusRules `ais-edge-critical` / `-warning` / `-info` / `-uploader`. Both are gated on `observability.stack.enabled`. Three things follow: (1) the ruler path and the sidecar path already agree; `/rules` and `/rules/fake`, the tenant sub-directory, set together in `charts/edge/values.yaml`; adding a rule means applying an *additional* ConfigMap with the `loki_rule` label, not repointing anything; (2) Alertmanager runs the chart's own config, rendered from `files/alertmanager-config.yaml` into the Secret `alertmanager-aisedge-config` and pinned via `alertmanagerSpec.configSecret`, with a real `email-primary` root receiver; `kube-prometheus-stack.alertmanager.config` is inert once that pin is set; (3) what you must still supply is the **mail destination**: `observability.stack.alerting.*` ships empty, so the presence guard rejects empty emailTo/smtpHost when both observability switches are true. Stack-only rendering bypasses that guard, so verify the effective configuration and delivery explicitly. [`alerting-architecture.md`](alerting-architecture.md) has the full wiring; [`alerting-diy.md`](alerting-diy.md) covers writing the expressions.
 
-The table below is the **inventory** — read it as the set of signals worth alerting on, in whichever engine you use.
+The tables below describe the 21 custom Loki alerts and eight custom Prometheus alerts, plus the upstream CPUThrottlingHigh example. Six custom recording rules support the uploader alerts. Other upstream default rules also load; source files and the live rules API are authoritative for the configured installation.
 
 | Alert | Sev | Engine | Fires when (the underlying signal) |
 |---|---|---|---|
-| `XNATUploadFailingForAllSessions` | critical | Loki | `event="upload_failed"` present **and** no `event="upload_completed"` over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
-| `XNATUploadRetryStorm` | warning | Loki | >5 error/failed/exception/traceback lines from `component="upload"` in 10m |
-| `SessionUploadStalled` | warning | Loki | `event="upload_started"` with no matching `event="upload_completed"` per session over 15m. **Does not fire on tier-1** — still selects `component="s3-uploader"`, §2c |
-| `XNATBacklogGrowing` | warning | Loki | staged-count − upload-success-count > 3 over 30m. **Cannot fire** — the staged term is `{component="assign"} \| json \| session != ""` and assign emits no `session` key, so it is always zero, §2c |
+| `XNATUploadFailingForAllSessions` | critical | Loki | More than 2 traceback headers or ERROR records from `component="upload"` in 15m, with no per-session upload success in that window; held for 15m. |
+| `XNATUploadRetryStorm` | warning | Loki | More than 2 traceback headers or ERROR records in 10m from `component="upload"`, excluding different-checksums conflicts; held for 10m. |
+| `SessionUploadStalled` | warning | Loki | An `Including ... scans/files in upload from` message in 15m with no success for the same session in 15m; held for 5m. Requires non-empty `upload.direct.alwaysInclude`, as explained in §2c. |
+| `XNATBacklogGrowing` | warning | Loki | The current query subtracts upload-success messages from assign records with `session != ""` over 30m and tests >3 for 30m. Normal label-completion records have no such key. This is not a reliable pending-session count; see §2c. |
 | `InvalidSessionAssigned` | warning | Loki | One assign ERROR for missing routing IDs in 10m, held for 1m. Check `assigned/__invalid__` and retain the files for review; alert expiry does not prove recovery. |
-| `DICOMValidationFailureSpike` | warning | Loki | >10 `invalid`/validation-fail lines from assign in 1h |
-| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (audit/heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window — a `[1m]` range flapped against the uploader's ~62s loop and was widened. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
-| `XNATRepairAttempted` | warning | Loki | xnat-ingest's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
+| `DICOMValidationFailureSpike` | warning | Loki | >10 lines matching the older `invalid\|validation.*fail` text filter in 1h, held for 5m. This is not a distinct-session count; `InvalidSessionAssigned` covers the 0.20.0 missing-ID diagnostic. |
+| `XNATUploadSuccess` | info | Loki | any `Successfully uploaded all files in` from `component="upload"` in **10m** (completion-line notification, not a heartbeat). The group's `interval: 30s` is the evaluation cadence, not the window ; a `[1m]` range flapped against an older emitter's ~62s loop and was widened. Current complete-session skips are quiet. Sessions with a `Repaired` line in the last **20m** are left out: those are `XNATRepairAttempted` |
+| `XNATRepairAttempted` | warning | Loki | accessionflow's `Repaired N incomplete resource(s)` line from `component="upload"` in 10m: XNAT already held the session with files missing, and the uploader tried to re-send them. Logged whether or not that worked, so it claims only the attempt. Value is the number of resources |
 | `XNATAuthFailure` | warning | Loki | **>3** 401/403/unauthorized/forbidden lines from `component="upload"` in **15m** — above the routine session-cookie expiry the uploader recovers from by itself |
 | `OrthancDeidLuaError` | warning | Loki | Lua error/traceback from Orthanc in 10m; under ingest inspect backup/startup failures, while recipe errors come from deidentify |
-| `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m — the counterpart for the xnat-ingest engine, so a de-identification failure is visible whichever engine runs |
-| `OrthancStorageGrowing` | warning | Loki | >1000 `new stored instance` in 1h |
-| `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below its own `min_free_pct` |
-| `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past its `alert_after_s` (retained legacy input; ingest does not create unknown-AET quarantine entries) |
+| `DeidentifyStageError` | warning | Loki | error/traceback from `component="deidentify"` in 10m; the counterpart for the accessionflow engine, so a de-identification failure is visible whichever engine runs |
+| `EdgeDiskLow` | warning | Loki | a stage's `stage_report.free_pct` below the rendered facility-backup minimum threshold; inspect the rule for exact scope |
+| `QuarantinedDataUnresolved` | warning | Loki | `originals.quarantine` `oldest_age_s` past the rendered quarantine alertAfter threshold (retained legacy input; ingest does not create unknown-AET quarantine entries) |
 | `DataPolicyReporterSilent` | warning | Loki | no `stage_report` from this site's data-policy reporter (`cluster` pinned to `clusterLabel`) in max(30m, 3 × `dataPolicy.reporter.interval`). `EdgeDiskLow` and the two rows above read only those lines, so they are blind while this fires. Not rendered when `dataPolicy.reporter.enabled` is false |
 | `KubernetesAPIServerDown` | critical | Prom | `up{job="apiserver"}==0` for 5m |
 | `NodeNotReady` | critical | Prom | node `Ready` condition != true for 5m (inhibited while `KubernetesAPIServerDown` fires — readiness is read THROUGH the API server) |
@@ -242,10 +304,10 @@ Two alertnames were once routed in the shipped Alertmanager config with **no rul
 | **Vector** | hand-written DaemonSet, `observability.enabled` | Fluent Bit, Fluentd, Splunk fwd, Filebeat, Datadog, Alloy | collector config (source `/var/log/pods`, keep `namespace/app/component` labels) |
 | **Loki** | `ais-loki`, SingleBinary, **filesystem** storage on a PVC | Splunk, Elastic/OpenSearch, Datadog Logs, your Loki | the LogQL rules in §4 → your query language |
 | **Prometheus** | `ais-kps-prometheus`, PVC-backed | your Prometheus, VictoriaMetrics, Alloy, Datadog | nothing (standard scrape targets); PromQL rules port 1:1 to another Prometheus |
-| **Alertmanager** | `ais-kps-alertmanager`; both engines push here. It runs `charts/edge/files/alertmanager-config.yaml`, rendered into Secret `alertmanager-aisedge-config` and pinned by `alertmanagerSpec.configSecret` | your Alertmanager, PagerDuty, Opsgenie, Datadog monitors | the routes and receivers in that file — root `email-primary`, plus `email-no-resolved` / `email-upload-success` / `info-email` and a deliberately empty `null-meta` for the subchart's own always-firing meta-alerts. Port the *severity → destination* mapping, not the YAML |
+| **Alertmanager** | `ais-kps-alertmanager`; both engines push here. It runs `charts/edge/files/alertmanager-config.yaml`, rendered into Secret `alertmanager-aisedge-config` and pinned by `alertmanagerSpec.configSecret` | your Alertmanager, PagerDuty, or Datadog monitors; legacy Opsgenie needs migration planning | the routes and receivers in that file ; root `email-primary`, plus `email-no-resolved` / `email-upload-success` / `info-email` and a deliberately empty `null-meta` for Watchdog (continuous) and InfoInhibitor (conditional). Port the *severity → destination* mapping, not the YAML |
 | **Grafana** | `<release>-grafana`, **NodePort** at `http://<nodeIP>:<kube-prometheus-stack.grafana.service.nodePort>`, default 30030 | your Grafana | add a **Loki datasource** — only Prometheus and Alertmanager are provisioned (`ais-kps-grafana-datasource`), while all three pipeline dashboards reference datasource uid `loki`, so they render empty until you add `http://ais-loki.<ns>.svc.cluster.local:3100` with `uid: loki`. The dashboards themselves (`pipeline-overview`, `session-timeline`, `edge-drilldown`) are **already shipped** — `charts/edge/templates/observability.yaml` renders `files/dashboards/*.json` as one ConfigMap each, `<release>-dashboard-<name>`, labelled `grafana_dashboard: "1"`. In your own tool you re-implement their LogQL over §2; in your own Grafana you can apply the same ConfigMaps unchanged |
 
-**Why Loki uses the filesystem and not S3:** there is no object store on a single node. This is the one place tier-1's observability genuinely diverges from a fleet deployment rather than just being wired differently — chunks, the index and the ruler's rules all land on a local-path PVC, which means retention is bounded by this node's disk and nothing spills anywhere.
+**Why Loki uses the filesystem and not S3:** this branch does not deploy an object store. A single node can host one, but that is not this chart's storage topology. This is the one place tier-1's observability genuinely diverges from a fleet deployment rather than just being wired differently ; chunks and indexes use a local-path PVC; sidecar-delivered rule files live in the shared `/rules` emptyDir and are reconstructed from ConfigMaps, which means retention is bounded by this node's disk and nothing spills anywhere.
 
 ---
 
@@ -263,15 +325,17 @@ Then deploy your own log-agent DaemonSet reading `/var/log/pods` (JSON-decode `m
 
 **Keep our Vector, but push to your Loki instead of hosting one:** `observability.enabled: true`, `observability.stack.enabled: false`, and set `observability.loki.endpoint` (with `observability.loki.clientCertSecret`/`caBundleSecret` if the endpoint is mTLS — that path is the tier-2 wiring and it is what `charts/edge/files/vector.yaml`, the file with the `tls:` block, exists for).
 
-**Keep metrics in your Prometheus:** scrape kube-state-metrics/kubelet/apiserver; re-express the four metric alerts in §4 as `PrometheusRule` objects (or their equivalent) there. Remember there is no node-exporter here — see §3.
+**Keep metrics in your Prometheus:** scrape kube-state-metrics/kubelet/apiserver; port the eight custom metric alerts, six recording rules and needed upstream defaults in §4 as `PrometheusRule` objects (or their equivalent) there. Remember there is no node-exporter here ; see §3.
 
 **Recreate the two must-have signals anywhere:**
-- *Pipeline delivering?* — count of `Successfully uploaded all files in` per interval (should be non-zero when studies arrive).
+- *Pipeline delivering?* ; count of `Successfully uploaded all files in` per interval (inspect new work and repair semantics; an idle or already-complete session can remain quiet).
 - *Pipeline broken?* — upload-error lines rising while that success count is zero.
 
 ---
 
 ## 7. Ground-truth appendix
+
+Local source review date: 2026-11-10. The 2026-07-08 live observations above are historical; no live revalidation was done in this sweep. The pinned CLI and rendered source were compared independently. Replacement collectors and hosted backends listed here require an integration test of labels, parsing, buffering, credentials and outage behavior; they have not been certified as unchanged drop-in replacements.
 
 Reproduce the stack half of this document without installing anything:
 

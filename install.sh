@@ -87,7 +87,11 @@ NODE_IP="$(cfg nodeIP)"
 INSTALL_MODE="$(cfg installMode fresh)"
 UPLOAD_MODE="$(cfg upload.mode direct)"
 OBS_STACK="$(cfg observability.stack.enabled false)"
-GRAFANA_PORT="$(cfg observability.stack.grafana.nodePort 30030)"
+# The Service's real NodePort: the site's kube-prometheus-stack block, else the
+# chart default. Not observability.stack.grafana.nodePort: that key was removed,
+# and nothing reads it (a site that changed the real port got a wrong URL here).
+GRAFANA_PORT="$(cfg kube-prometheus-stack.grafana.service.nodePort)"
+[ -n "$GRAFANA_PORT" ] || GRAFANA_PORT="$(VALUES="${SCRIPT_DIR}/charts/edge/values.yaml" cfg kube-prometheus-stack.grafana.service.nodePort 30030)"
 RELEASE="${AIS_RELEASE:-$SITE}"
 
 # TIER-1 IS upload.mode=direct BY DEFINITION. s3 needs a SeaweedFS and a
@@ -224,6 +228,17 @@ if step "3/3  helm: the pipeline (Orthanc, de-id, group, assign, direct upload)"
         --wait --timeout 10m
 fi
 
+# The operator command for sessions in assigned/__invalid__
+# (docs/recovering-invalid-sessions.md): sudo ais-requeue list. It
+# runs the tool that the chart ships into the label container, through k0s, so
+# no kubectl and no repository are needed later. Root-owned, so a container
+# cannot change what root runs. -n: never wait for a password here.
+if sudo -n install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue 2>/dev/null; then
+    REQUEUE_CMD="installed"
+else
+    REQUEUE_CMD="NOT installed: sudo install -o root -g root -m 0755 ${SCRIPT_DIR}/scripts/files/ais-requeue /usr/local/bin/ais-requeue"
+fi
+
 echo
 echo "============================================"
 echo " Installed"
@@ -236,6 +251,7 @@ echo "  Grafana        : http://${NODE_IP}:${GRAFANA_PORT}"
 fi
 echo
 echo "  Prove it works : scripts/verify-live.sh ${SITE}"
+echo "  Invalid sessions: sudo ais-requeue list   (${REQUEUE_CMD})"
 echo
 # Say what the site file sets. Chart defaults: enabled false, dryRun true.
 DP_ENABLED="$(cfg dataPolicy.enabled false | tr '[:upper:]' '[:lower:]')"

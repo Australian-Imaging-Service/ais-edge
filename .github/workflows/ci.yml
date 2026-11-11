@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # CI
 # =============================================================================
@@ -168,15 +169,30 @@ jobs:
           CI_REQUIRE_LOG_PHRASES: "1"
         run: make log-phrases
 
+      # The image is pinned by tag, so upstream can change the CLI under us:
+      # renamed commands and variables, moved options. This parses every
+      # rendered argv inside the pinned image and checks every ACFLOW_* name.
+      - name: Chart argv and env parse against the pinned image
+        if: ${{ !cancelled() }}
+        run: make cli-contract RENDER_DEP=
+
       # The staged-reclaimer deletes the upload tree. Its tests ran only in
       # `make ci`, never here. They copy the uploader's label rule out of the
-      # pinned xnat-ingest image (docker); without docker they would skip, so
+      # pinned accessionflow image (docker); without docker they would skip, so
       # CI_REQUIRE_RECLAIMER_IMAGE=1 makes that a failure.
       - name: Reclaimer tests (what survived, against a fake XNAT over HTTP)
         if: ${{ !cancelled() }}
         env:
           CI_REQUIRE_RECLAIMER_IMAGE: "1"
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
+
+      # Requeue of an __invalid__ session: refusals, the lock, the audit line,
+      # and the pinned image reading the new labels from the folder name.
+      - name: Requeue helper for __invalid__ sessions
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_REQUEUE_IMAGE: "1"
+        run: make requeue-invalid
 
       - name: Reclaimer fence (drain and resume fail closed)
         if: ${{ !cancelled() }}

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # The values matrix — the single definition of every case CI renders.
 # =============================================================================
@@ -350,6 +351,17 @@ ingest:
         FORMAT dicom
   package:
     enabled: false
+EOF
+
+# THE RE-IDENTIFICATION MAP KEY. deidentify must get it as
+# ACFLOW_REID_ENCRYPT_KEY (accessionflow 0.18.0 and later), read from the
+# Secret key XINGEST_REID_ENCRYPT_KEY, so a site's existing Secret keeps
+# working. A wrong variable name is SILENT: the maps are then written in plain
+# text. cli-contract checks the name; runtime-templates checks the Secret key.
+cat >"$V/edge-reid-key.yaml" <<'EOF'
+ingest:
+  deidentify:
+    reidEncryptKeySecret: reid-key
 EOF
 
 # THE PACKAGE STAGE ON, as it is by default under deid.engine=ingest. The
@@ -832,7 +844,7 @@ printf 'orthanc:\n  deid:\n    aetMap: null\n'            >"$V/neg-edge-deid-emp
 printf 'orthanc:\n  deid:\n    profile: null\n'           >"$V/neg-edge-deid-empty-profile.yaml"
 
 # Two de-identification engines at once. The Lua hook strips on arrival, so
-# xnat-ingest would then de-identify already-pseudonymous data and record the
+# accessionflow would then de-identify already-pseudonymous data and record the
 # pseudonyms in the reid mapping as if they were the originals.
 printf 'deid:\n  engine: ingset\n' >"$V/neg-edge-deid-bad-engine.yaml"
 
@@ -843,7 +855,7 @@ printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: S
 # Neither engine, unacknowledged: identifiable data would reach XNAT unchanged.
 printf 'deid:\n  engine: none\n  policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
 
-# A spec ConfigMap with no key->path mapping: the recipes mount flat, xnat-ingest
+# A spec ConfigMap with no key->path mapping: the recipes mount flat, accessionflow
 # matches none of them, and every session is skipped.
 printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
@@ -852,6 +864,8 @@ printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-
 # execute exactly once each, in anger. Nothing had ever run them.
 printf 'orthanc:\n  deid:\n    enabled: true\n'      >"$V/neg-edge-deid-legacy-orthanc-key.yaml"
 printf 'ingest:\n  deidentify:\n    enabled: true\n' >"$V/neg-edge-deid-legacy-ingest-key.yaml"
+# The attach stage is refused until it is built properly.
+printf 'ingest:\n  associate:\n    enabled: true\n' >"$V/neg-edge-associate-enabled.yaml"
 
 # onDeidentified is satisfied by the deidentify stage unlinking its own input,
 # so it is meaningless when that stage does not render.
@@ -1017,7 +1031,7 @@ orthanc:
     existingSecret: ""
 EOF
 
-# xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises
+# accessionflow's Orthanc grouping accepts ONLY hardlink_or_copy and raises
 # NotImplementedError at RUN TIME for anything else, so without this guard the
 # pod renders, starts and then CrashLoops with a message that never names the
 # setting that caused it.
@@ -1224,7 +1238,7 @@ namespace: upload-custom
 EOF
 
 # Distinct stage settings catch values wired to the wrong container. Partial
-# requests/limits must also pass through without chart-supplied additions.
+# settings MERGE with the chart defaults: only the keys a site names change.
 cat >"$V/edge-stage-resources.yaml" <<'EOF'
 ingest:
   orthancGroup:
@@ -1243,6 +1257,17 @@ ingest:
     resources:
       limits: {cpu: 888m}
 EOF
+# `null` on one key removes only that default key; the other defaults stay.
+cat >"$V/edge-stage-resources-keynull.yaml" <<'EOF'
+ingest:
+  orthancGroup:
+    resources:
+      limits: {memory: null}
+  assign:
+    resources:
+      requests: null
+EOF
+# `resources: null` removes every default of that stage.
 cat >"$V/edge-stage-resources-null.yaml" <<'EOF'
 ingest:
   orthancGroup:
@@ -1297,6 +1322,7 @@ edge-upload-direct	charts/edge	edge-base.yaml edge-upload-direct.yaml
 edge-upload-temp-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-custom.yaml
 edge-upload-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-temp-default.yaml
 edge-upload-ingest-temp-default	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-upload-temp-default.yaml
+edge-deid-ingest-reid-key	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-deid-ingest.yaml edge-reid-key.yaml
 edge-upload-direct-no-manifest	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-upload-direct-no-manifest.yaml
 edge-upload-alerts	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml
 edge-upload-alerts-custom	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-obsstack-on.yaml edge-deid-ingest.yaml edge-upload-custom.yaml
@@ -1315,6 +1341,7 @@ edge-direct-datapolicy	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-d
 edge-direct-ingest-reclaim	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml
 edge-stage-resources	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources.yaml
 edge-stage-resources-null	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-null.yaml
+edge-stage-resources-keynull	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-stage-resources-keynull.yaml
 edge-direct-tree-minage	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml
 edge-direct-ingest-package	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
 edge-s3-ingest-package	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-deid-ingest-package.yaml
@@ -1404,6 +1431,7 @@ neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profi
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
+neg-edge-associate-enabled	charts/edge	edge-base.yaml neg-edge-associate-enabled.yaml	is not supported yet
 neg-edge-reclaim-ondeid-no-stage	charts/edge	edge-base.yaml neg-edge-reclaim-ondeid-no-stage.yaml	is not ingest
 neg-edge-reclaim-onassigned-on-assigned	charts/edge	edge-base.yaml neg-edge-reclaim-onassigned-on-assigned.yaml	is not a word this stage accepts
 neg-edge-reclaim-onuploaded-on-grouped	charts/edge	edge-base.yaml neg-edge-reclaim-onuploaded-on-grouped.yaml	is not a word this stage accepts

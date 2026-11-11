@@ -1,3 +1,14 @@
+# Review 2026-11-10. Undated incident counts below are historical; their
+# dates and current reproducibility are not verified (2026-11-10).
+# An alert notification reports its rule condition, not a guarantee of data
+# integrity, pipeline completeness or exactly-once delivery.
+# TIER-1 CURRENT CONFIGURATION: email receivers are used by the template.
+# The inherited Slack discussion below is historical tier-2 rationale, not
+# an implemented optional Slack integration on this branch. Its CA examples
+# likewise refer to tier-2 history, not local tier-1 certificate rules.
+# The stack retains Alertmanager notification state for 120h by default.
+# A 720h repeat interval cannot guarantee monthly spacing beyond that state
+# retention. Re-fire and state loss can also send another notification.
 # =============================================================================
 # Alertmanager configuration  —  email primary, optional Slack secondary
 # =============================================================================
@@ -8,9 +19,9 @@
 # Alertmanager at notification time. Helm's own delimiters are identical. If
 # this file were pasted into templates/observability.yaml, Helm would evaluate
 # those expressions against the CHART's context, find no `.CommonLabels`, and
-# render them as empty strings — every alert email would arrive with a blank
-# subject line and every Slack message with an empty body, with no error
-# anywhere. .Files.Get returns the bytes untouched, which is the whole reason
+# fail or evaluate them in the wrong context. This can break rendering or
+# corrupt notification text. Preserve the literal notification templates;
+# do not assume that incorrect Helm evaluation always fails silently. .Files.Get returns the bytes untouched, which is the whole reason
 # this is a file.
 #
 # For the same reason this file CANNOT be a Helm template, the values the
@@ -23,7 +34,7 @@
 # (`smtp_auth_password_file`, `api_url_file`). The prometheus-operator mounts
 # every Secret named in alertmanagerSpec.secrets at
 #   /etc/alertmanager/secrets/<secret-name>/<key>
-# so the credential never passes through Helm, never lands in a rendered
+# so these file-read credentials are not embedded in the rendered
 # manifest, and stays SOPS-encryptable in its own Secret.
 #
 # Routing tree:
@@ -99,9 +110,13 @@ route:
   # group_interval (5m), indefinitely. That is what the duplicate
   # "XNAT upload completed" mail actually was at the notification layer.
   #
+  # Historical explanation; current disposition follows (2026-11-10).
   # With `session` in the key, each session is its own group: a new session
   # notifies once, and an already-notified session stays silent until
   # repeat_interval. One email per session.
+  # Current: A continuously firing unchanged group waits for repeat_interval, subject to
+  # retained notification state. Resolve/re-fire, lost state or changed group membership
+  # can produce another message. This is not an exactly-once notification contract.
   #
   # Alerts without a `session` label (node, certificate, capacity) simply
   # group under the empty value, which is the pre-existing behaviour.
@@ -112,6 +127,7 @@ route:
   # nothing about an alert that RESOLVES and then FIRES AGAIN, because each
   # re-fire is a new alert instance and Alertmanager is right to notify on it.
   #
+  # Historical explanation; current disposition follows (2026-11-10).
   # That is what was really happening: XNATUploadSuccess matched a log line the
   # uploader re-emits every ~62s on its polling loop, against a [1m] range, so
   # the series went empty between passes and the alert flapped once a minute.
@@ -119,6 +135,9 @@ route:
   # three. The other half is in files/loki-ruler-rules.yaml, where that rule's
   # range now comfortably exceeds the uploader's loop period so the series
   # stays continuous; scripts/ci/promtool.sh keeps it that way.
+  # Current: The pinned 0.20.0 store skips complete sessions without repeating the
+  # success line. The old approximately 62-second emitter period is historical. The
+  # retained range and grouping still govern observed events, not exactly-once delivery.
   #
   # Keep both. This grouping means the NEXT chatty rule cannot flood the inbox,
   # and the range floor means a looping emitter cannot flap in the first place.
@@ -132,10 +151,11 @@ route:
     # delivers nothing. FIRST, so they can never fall through to the tree
     # below.
     #
-    # Both fire PERMANENTLY and by design:
+    # Watchdog is continuous; InfoInhibitor is conditional by design:
     #   Watchdog       always-firing heartbeat, the thing you point a
     #                  dead-man's-switch at to prove the alert path works.
-    #   InfoInhibitor  a dummy that exists only to be an inhibition source.
+    #   InfoInhibitor  an inhibition source while the upstream info-only
+    #                  condition holds; it is not permanently firing.
     # Neither describes anything about this site.
     #
     # They carry severity="none", which matched NO route below, so both fell
@@ -163,6 +183,7 @@ route:
       group_interval: 30m
       repeat_interval: 24h
       continue: false
+    # Historical explanation; current disposition follows (2026-11-10).
     # Per-alert override: XNATUploadSuccess is severity=info (so the
     # default routing tree below would send it to Slack), but operators
     # want an email confirmation for every successful XNAT push for
@@ -176,6 +197,10 @@ route:
     # would be false reassurance. (Resolving on "quarantine directory is
     # empty" would need a component that reports that state; Alertmanager and
     # the Loki ruler only ever see logs, never the filesystem.)
+    # Current: A rejection-window expiry does not prove recovery. Verify actual
+    # quarantine and later XNAT delivery; the callback may fail to copy and a later
+    # replay may already have succeeded. The Lua routing path is deprecated for new
+    # sites.
     - matchers:
         - alertname = "DICOMRejectedUnmappedAET"
       receiver: email-no-resolved
@@ -183,11 +208,15 @@ route:
     - matchers:
         - alertname = "XNATUploadSuccess"
       receiver: email-upload-success
+      # Historical explanation; current disposition follows (2026-11-10).
       # Group by session so each session that lands in XNAT is its own
       # notification group: a new session emails straight away, while the
       # same session — which the uploader keeps re-logging every --loop pass
       # while it remains in the S3 staging prefix — is held off by
       # repeat_interval instead of emailing every cycle.
+      # Current: Current complete-session skips do not repeat the success line. A new
+      # upload or repair can emit another event; grouping and retention do not guarantee
+      # exactly one email over the session lifetime.
       group_by: ["alertname", "cluster", "session"]
       group_wait: 10s          # land in the inbox promptly after the upload
       group_interval: 5m
@@ -195,6 +224,7 @@ route:
       # SUCCESS notification tells the operator nothing they were not told the
       # first time.
       #
+      # Historical explanation; current disposition follows (2026-11-10).
       # This alert fires continuously rather than once: the uploader re-asserts
       # "Successfully uploaded all files in '<session>'" on every --loop pass
       # for as long as the session sits in S3 staging, so the alert stays firing
@@ -202,6 +232,10 @@ route:
       # false and nothing is ever reclaimed). Any repeat_interval short enough
       # to be a "reminder" is therefore just recurring mail about an upload that
       # already worked.
+      # Current: This was older emitter behavior. In 0.20.0, a complete-session skip is
+      # quiet. A retained session is scanned again but not re-sent merely because it
+      # remains staged. The 720-hour repeat interval is retained policy, not an infinite
+      # suppression guarantee.
       #
       # It was 24h, which happened to equal dataPolicy.derived.s3Staged.minAge
       # (1d). That is a race, not a design: the session becomes eligible for
@@ -215,8 +249,12 @@ route:
       # files/loki-ruler-rules.yaml, which is gated on minAge and exists for
       # exactly that case. Repetition here would be a worse duplicate of it.
       #
+      # Historical explanation; current disposition follows (2026-11-10).
       # 720h rather than 30d: Alertmanager's duration parser accepts `d` only in
       # newer builds, and hours are unambiguous across all of them.
+      # Current: The 720h value is valid. The old claim that days are supported only by
+      # newer parsers is not verified (2026-11-10) and is not a requirement of this
+      # configuration.
       repeat_interval: 720h
       continue: false
     # XNAT was missing files and the uploader tried to re-send them. Firing
@@ -261,6 +299,7 @@ route:
     # MUST PRECEDE the severity=critical route below: this alert IS critical,
     # and Alertmanager takes the first matching route.
     #
+    # Historical explanation; current disposition follows (2026-11-10).
     # Send the firing mail, never a "[RESOLVED]" one — the same reasoning as
     # DICOMRejectedUnmappedAET above, which this file already applies and this
     # alert was missed by. Its expression is
@@ -271,6 +310,9 @@ route:
     # session was, and remains, absent from XNAT — it had been hand-deleted from
     # staging. "Resolved" there meant "the window slid", not "the data arrived",
     # which is the exact opposite of what the operator reads.
+    # Current: The 2026-08-09 observation is historical. The current contents of that
+    # exact session are not verified (2026-11-10). A resolved bounded-window alert still
+    # does not establish delivery.
     - matchers:
         - alertname = "SessionStagedNotConfirmedInXNAT"
       receiver: email-no-resolved
@@ -313,12 +355,16 @@ receivers:
       - to: "__ALERT_EMAIL_TO__"
         send_resolved: true
 
+  # Historical explanation; current disposition follows (2026-11-10).
   # Upload-success is an EVENT ("this session landed in XNAT"), not a
   # condition that clears. send_resolved: false stops the pointless
   # "[RESOLVED]" follow-up ~5 min later (resolve_timeout) — the operator
   # only wants the single "upload completed" mail.
   # Firing-only email. For alerts whose "resolved" state would be misleading
   # (see the DICOMRejectedUnmappedAET route above).
+  # Current: Resolution timing depends on the rule window and evaluator updates, not
+  # simply global resolve_timeout. Firing-only receivers intentionally omit that
+  # notification; omission does not prove ongoing success.
   - name: email-no-resolved
     email_configs:
       - to: "__ALERT_EMAIL_TO__"

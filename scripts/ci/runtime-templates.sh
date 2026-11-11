@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # 7. Runtime-template survival — the silent-breakage check
 # =============================================================================
@@ -138,7 +139,7 @@ done < <(expectations | ci_renders_present)
 # dataPolicy `location` must match where the data ACTUALLY is
 # =============================================================================
 # Each dataPolicy stage declares a location so the policy engine can walk paths
-# instead of knowing about Orthanc or xnat-ingest — that is what lets the
+# instead of knowing about Orthanc or accessionflow; that is what lets the
 # de-identifier or the ingest path be replaced without rewriting retention.
 #
 # The cost of that indirection is a NEW way to fail silently: if a template's
@@ -584,7 +585,7 @@ PY
 # =============================================================================
 # Without a manifest check, a resource without its manifest is uploaded as it
 # is, and later passes see a partial resource as already uploaded. Measured
-# 2026-10-14 on the CLI: with neither flag, xnat-ingest does not require a
+# 2026-10-14 on the CLI: with neither flag, accessionflow does not require a
 # manifest (the option default is unset), so the chart must pass
 # --require-manifest explicitly. requireManifest is true by default. This
 # fails when a default render does not pass --require-manifest, or when a site
@@ -606,12 +607,12 @@ for doc in yaml.safe_load_all(open(path)):
     if not doc or doc.get("kind") != "Deployment":
         continue
     for c in doc["spec"]["template"]["spec"].get("containers", []):
-        if (c.get("command") or [])[:2] == ["xnat-ingest", "upload"]:
+        if (c.get("command") or [])[:3] == ["accessionflow", "store", "xnat"]:
             args = c.get("args") or []
             found.append((doc["metadata"]["name"],
                           [f for f in ("--require-manifest", "--dont-require-manifest") if f in args]))
 if not found:
-    raise SystemExit("no 'xnat-ingest upload' container in the render")
+    raise SystemExit("no 'accessionflow store xnat' container in the render")
 wrong = [(name, flags) for name, flags in found if flags != [expect]]
 if wrong:
     raise SystemExit(f"expected exactly {expect}, got {wrong}")
@@ -645,6 +646,10 @@ while IFS=$'\t' read -r case_name locked plain serialised; do
 import re, sys, yaml
 
 path, locked, plain, serialised = sys.argv[1:5]
+# The same map as edge.stageCommand in _helpers.tpl.
+ARGV = {"group": ["collate", "folder"], "group-orthanc": ["collate", "orthanc"], "assign": ["label", "xnat"],
+        "deidentify": ["deidentify"], "package": ["package"]}
+tool = lambda stage: ["accessionflow"] + ARGV[stage]
 tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
 # A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
 # pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
@@ -664,7 +669,7 @@ for doc in yaml.safe_load_all(open(path)):
             strategy[c["name"]] = (doc["spec"].get("strategy") or {}).get("type")
 
 cmd, args = stages.get(locked, ([], []))
-if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
+if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(locked):
     raise SystemExit(f"{locked} is not wrapped: command={cmd}")
 lock, alive = f"/data/.locks/{tree[locked]}.lock", f"/data/.locks/{tree[locked]}.alive"
 if f"flock {lock} " not in cmd[2]:
@@ -681,7 +686,7 @@ if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
-    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", plain] or "--loop" in args:
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(plain) or "--loop" in args:
         raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
     if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
         raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
@@ -695,7 +700,7 @@ if serialised != "-":
     if f"flock {inner} flock {lock} " not in wcmd[2]:
         raise SystemExit(f"{locked} does not take {inner} before {lock} for each pass: {wcmd[2]}")
     scmd, sargs = stages.get(serialised, ([], []))
-    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != ["xnat-ingest", serialised]:
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != tool(serialised):
         raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
     if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
         raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
@@ -760,11 +765,12 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
             if c["name"] in ("group", "group-fs", "assign"):
                 expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
                 tree = "assigned" if expected == "assign" else "grouped"
-                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", expected]:
+                argv = {"group-orthanc": ["collate", "orthanc"], "group": ["collate", "folder"], "assign": ["label", "xnat"]}[expected]
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["accessionflow"] + argv:
                     raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
                 if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
                     raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
-            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["xnat-ingest"]:
+            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["accessionflow"]:
                 wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
 # serialised (one lock), locked (.alive + one lock), locked with the outer lock
 shapes = {("flock -s 9" in s, s.count("flock /data/.locks/")) for s in wrappers}
@@ -865,7 +871,7 @@ def run(script, case):
     with tempfile.TemporaryDirectory(prefix="stage-stop-") as tmp:
         body = script.replace("/data/.locks", os.path.join(tmp, "locks"))
         locks = re.findall(r"\S+\.lock", body)
-        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "xnat-ingest")
+        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "accessionflow")
         with open(fake, "w") as f:
             f.write(FAKE)
         os.chmod(fake, 0o755)
@@ -936,29 +942,66 @@ PY_STOP
 fi
 
 # Per-stage resource settings must reach their own application container.
+# The chart ships measured defaults (charts/edge/values.yaml). Helm deep-merges
+# maps, so a site setting changes only the keys it names, `null` on a key removes
+# that key, and `resources: null` removes them all. No default may set a CPU limit;
+# deidentify has no default memory limit (pydicom/deid#301, see the values comment).
 ci_heading "ingest stage resource settings"
-resource_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_RESOURCES'
+resource_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/values.yaml" 2>&1 <<'PY_RESOURCES'
 from pathlib import Path
-import sys, yaml
+import copy, sys, yaml
 
 root = Path(sys.argv[1])
-expected = {
-    "group": {"requests": {"cpu": "101m", "memory": "301Mi"},
-              "limits": {"cpu": "901m", "memory": "1301Mi"}},
-    "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"},
-                 "limits": {"cpu": "902m", "memory": "1302Mi"}},
-    "assign": {"requests": {"memory": "444Mi"}},
-    "deidentify": {"limits": {"cpu": "888m"}},
+ingest = yaml.safe_load(Path(sys.argv[2]).read_text())["ingest"]
+defaults = {"group": ingest["orthancGroup"]["resources"], "group-fs": ingest["fileDrop"]["resources"],
+            "assign": ingest["assign"]["resources"], "deidentify": ingest["deidentify"]["resources"]}
+for name, res in defaults.items():
+    assert isinstance(res, dict) and res, f"{name}: no default resources"
+    assert res.get("requests", {}).get("cpu") and res.get("requests", {}).get("memory"), f"{name}: default needs cpu and memory requests"
+    assert "cpu" not in res.get("limits", {}), f"{name}: default sets a CPU limit (throttles the stage)"
+    if name == "deidentify":
+        # deid 0.4.13 keeps every parsed file until the pass ends (pydicom/deid#301), so a
+        # fixed default would stop any larger session on every pass. Change this with the docs.
+        assert "memory" not in res.get("limits", {}), "deidentify: a default memory limit stops large sessions (deid#301)"
+    else:
+        assert res.get("limits", {}).get("memory"), f"{name}: default needs a memory limit"
+
+
+def merged(base, override):
+    """Helm's coalesce for these maps: the site key wins, null deletes the key."""
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if value is None:
+            out.pop(key, None)
+        elif isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merged(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+# The site settings in scripts/ci/values.sh for each case.
+site = {
+    "edge-stage-resources": {
+        "group": {"requests": {"cpu": "101m", "memory": "301Mi"}, "limits": {"cpu": "901m", "memory": "1301Mi"}},
+        "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"}, "limits": {"cpu": "902m", "memory": "1302Mi"}},
+        "assign": {"requests": {"memory": "444Mi"}},
+        "deidentify": {"limits": {"cpu": "888m"}},
+    },
+    "edge-stage-resources-keynull": {
+        "group": {"limits": {"memory": None}},
+        "assign": {"requests": None},
+    },
 }
 for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null",
-             "edge-assign-filedrop-only"):
+             "edge-stage-resources-keynull", "edge-assign-filedrop-only"):
     found = {}
     for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
         if not doc or doc.get("kind") != "Deployment":
             continue
         for container in doc["spec"]["template"]["spec"].get("containers", []):
             name = container["name"]
-            if name in expected:
+            if name in defaults:
                 if name in found:
                     raise SystemExit(f"{case}: duplicate stage container {name}")
                 found[name] = container.get("resources")
@@ -970,7 +1013,10 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init["image"] == container["image"], case
                     assert init["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
-                    assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    assert init["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    # The requeue tool (charts/edge/files/requeue-invalid.py), read-only.
+                    assert container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"},
+                        {"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], case
                 if name == "deidentify":
                     init = doc["spec"]["template"]["spec"]["initContainers"]
                     assert len(init) == 1 and init[0]["name"] == "init-assigned-dir", case
@@ -978,19 +1024,59 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init[0]["image"] == container["image"], case
                     assert init[0]["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init[0]["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
-    names = set(expected)
-    if case == "edge-direct-ingest-reclaim":
+    names = set(defaults)
+    if case in ("edge-direct-ingest-reclaim", "edge-stage-resources-keynull"):
         names.remove("group-fs")
     elif case == "edge-assign-filedrop-only":
         names.remove("group")
     if set(found) != names:
         raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
-    wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
+    if case == "edge-stage-resources-null":
+        wanted = dict.fromkeys(names)
+    else:
+        wanted = {n: merged(defaults[n], site.get(case, {}).get(n, {})) for n in names}
     if found != wanted:
         raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
-print("stage resources and assign initialization verified, including file-drop without Orthanc")
+print("stage defaults, site merge, key and map removal, and assign initialization verified, including file-drop without Orthanc")
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
+
+# The requeue tool ships with the chart, so an operator needs only kubectl:
+# the ConfigMap holds the file byte for byte and the label pod mounts it.
+ci_heading "requeue tool in the label pod"
+requeue_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/files/requeue-invalid.py" 2>&1 <<'PY_REQUEUE'
+from pathlib import Path
+import sys, yaml
+root, src = Path(sys.argv[1]), Path(sys.argv[2]).read_text().rstrip("\n")
+checked = 0
+for f in sorted(root.glob("edge-*.yaml")):
+    docs = [d for d in yaml.safe_load_all(f.read_text()) if d]
+    deps = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-assign")]
+    if not deps:
+        continue
+    cms = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
+    spec = deps[0]["spec"]["template"]["spec"]
+    vol = [v for v in spec["volumes"] if v["name"] == "requeue-tool"]
+    assert len(vol) == 1, (f.name, "no requeue-tool volume")
+    name = vol[0]["configMap"]["name"]
+    assert name in cms, (f.name, "ConfigMap missing", name)
+    assert cms[name]["data"]["requeue-invalid.py"] == src, (f.name, "the ConfigMap is not the file")
+    mounts = [m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "requeue-tool"]
+    assert mounts == [{"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], (f.name, mounts)
+    checked += 1
+assert checked >= 3, f"only {checked} rendered edge cases have a label pod"
+print(f"{checked} edge renders: the label pod mounts the requeue tool read-only, identical to the file")
+PY_REQUEUE
+)" && ci_pass "requeue tool: $requeue_out" || ci_fail "requeue tool: $requeue_out"
+
+# Tier-1 has no edge join: install.sh installs the edge command on the node.
+ci_heading "install.sh installs ais-requeue"
+if grep -qF 'install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue' "$REPO_ROOT/install.sh" \
+   && [ -x "$REPO_ROOT/scripts/files/ais-requeue" ]; then
+    ci_pass "install.sh installs scripts/files/ais-requeue root-owned in /usr/local/bin"
+else
+    ci_fail "install.sh does not install scripts/files/ais-requeue (or the file is not executable)"
+fi
 
 ci_heading "upload input and temporary parent exist before startup"
 upload_startup_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_UPLOAD'
@@ -1080,5 +1166,29 @@ for case, want in (("edge-datapolicy-on", True), ("edge-backup-off", False), ("e
 print("backup on, volume off, and policy off rows match")
 PYBACKUP
 )"; then ci_pass "$out"; else ci_fail "$out"; fi
+
+# THE RE-IDENTIFICATION KEY reaches deidentify under the name the tool reads
+# (ACFLOW_REID_ENCRYPT_KEY), from the Secret key sites already have
+# (XINGEST_REID_ENCRYPT_KEY). A wrong name is silent: plain-text maps.
+if out="$(python3 - "$CI_RENDER_DIR/edge-deid-ingest-reid-key.yaml" 2>&1 <<'PY_REID'
+import sys, yaml
+for doc in yaml.safe_load_all(open(sys.argv[1])):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if c["name"] != "deidentify":
+            continue
+        env = {e["name"]: e for e in c.get("env", [])}
+        e = env.get("ACFLOW_REID_ENCRYPT_KEY")
+        if not e:
+            raise SystemExit(f"deidentify has no ACFLOW_REID_ENCRYPT_KEY: {sorted(env)}")
+        ref = e.get("valueFrom", {}).get("secretKeyRef", {})
+        if (ref.get("name"), ref.get("key")) != ("reid-key", "XINGEST_REID_ENCRYPT_KEY"):
+            raise SystemExit(f"ACFLOW_REID_ENCRYPT_KEY reads {ref}, not reid-key / XINGEST_REID_ENCRYPT_KEY")
+        print("deidentify reads ACFLOW_REID_ENCRYPT_KEY from Secret reid-key, key XINGEST_REID_ENCRYPT_KEY")
+        raise SystemExit(0)
+raise SystemExit("no deidentify container in the render")
+PY_REID
+)"; then ci_pass "$out"; else ci_fail "reid key: $out"; fi
 
 ci_summary "runtime-templates"

@@ -1,3 +1,12 @@
+# Reviewed 2026-11-10 against this branch. This file retains its existing
+# site settings; it is not evidence of a current live deployment. Historical
+# measurements without a run date are not verified (2026-11-10).
+# This retained configuration selects the deprecated Lua engine. Do not
+# copy that choice for a new site; start from the current ingest example.
+# Historical tier-2 edge scaffold retained on this branch. Use
+# sites/example-single for a supported new tier-1 installation. Its S3,
+# management and cert-sync settings below are legacy reference only.
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # EXAMPLE EDGE SITE — what is LOCAL to one edge
 # =============================================================================
@@ -36,27 +45,30 @@
 # =============================================================================
 
 # This edge's own short name. Becomes the `cluster` label on its logs and
-# metrics, and is the commonName of the client certificate it authenticates to
-# the Loki push endpoint with — so it must match the `edges[].name` entry in
+# selected metrics, and is the commonName of the client certificate it authenticates to
+# the Loki push endpoint with ; so it must match the `edges[].name` entry in
 # the management values file, which is what that certificate is issued from and
 # what the push Ingress pins the CN to.
 clusterLabel: example-edge
 
-# The de-identification engine. One key; the chart derives the Lua hook,
-# the xnat-ingest stage, the group label and the reclaim condition from it.
+# Select the engine for this retained site configuration. The chart derives
+# the stage, labels and reclaim condition from it. New sites use ingest:
+# Orthanc receives DICOM and accessionflow performs de-identification.
+# The orthanc/Lua engine is deprecated and retained only for existing sites.
 deid:
   engine: orthanc
 
-  # THE GATE. The chart refuses to render while this is false. Set it only once
-  # you have read the recipe the engine above selects and agree it is this
-  # site's policy. Not a formality: nothing downstream re-checks what was
-  # removed.
+  # THE REVIEW GATE. deid.policyReviewed must be true before the chart renders.
+  # Read the selected recipe and source-label mapping first. This flag records
+  # operator review; it does not test de-identification quality or guarantee
+  # that identifiers in headers, pixels, paths and logs have been removed.
   policyReviewed: false
 
 namespace: xnat-ingest
 
-# onprem  hostPath storage on this node, no cloud load balancer.
-# cloud   parked, not ported to the charts yet.
+# onprem uses management host entries for generated names.
+# cloud uses real DNS and the configured management ingress or manual
+# load-balancer route. Both still use the edge hostPath pipeline volume.
 topology: onprem
 
 storage:
@@ -67,9 +79,10 @@ storage:
   pipeline:
     hostPath: /data/xnat-ingest
     capacity: 500Gi
-  # THE ARCHIVE OF RECORD. Originals land here before anything else touches
-  # them, and before de-identification. dataPolicy.originals.facilityBackup in
-  # the management file governs how long they stay.
+  # FACILITY BACKUP. The DicomProtocol callback writes an original byte copy
+  # before the selected de-identification path. Other origins bypass it and
+  # callback writes can fail. Verify the actual backup, not just this flag.
+  # dataPolicy.originals.facilityBackup governs its retention policy.
   facilityBackup:
     enabled: true
     hostPath: /data/facility-backup
@@ -79,21 +92,24 @@ orthanc:
   # The AE title THIS Orthanc answers to. Modalities are configured to send here.
   aet: AISEDGE
   auth:
-    # true requires the orthanc-credentials Secret. Leave false only where the
-    # DICOM network is already isolated.
+    # true requires the orthanc-credentials Secret for HTTP access.
+    # This is HTTP authentication, not DICOM sender authentication.
+    # Restrict the DICOM and HTTP listeners at the network boundary.
     enabled: false
   deid:
     existingSaltSecret: orthanc-deid-salt
 
-    # WHICH CALLING AE TITLE MAPS TO WHICH XNAT PROJECT.
-    # This is the most site-specific thing in the whole deployment and the main
-    # reason each edge has its own file. A study whose calling AE is not listed
-    # here is QUARANTINED, not dropped — map the AET and re-send it.
+    # DEPRECATED LUA ROUTING ONLY: the map is looked up by called AE title
+    # (the key name CallingAET in older prose was misleading). An unmapped
+    # instance may be quarantined by that legacy callback; verify the file
+    # before a controlled recovery. New ingest sites use ingest.assign tags
+    # and recipes, not this map. The map does not authenticate a scanner.
     aetMap:
       AISEDGE:
         project: example_project
 
-    # The de-identification profile applied to every incoming study.
+    # Legacy Lua profile only. It applies only with deid.engine=orthanc,
+    # which is deprecated. New sites review ingest.deidentify.specs instead.
     profile:
       DeidMode: modify
       Force: true
@@ -109,10 +125,11 @@ orthanc:
         PatientIdentityRemoved: 'YES'
         DeidentificationMethod: AIS-Edge research-default v1; Retain UIDs Option
         PatientName: ANONYMOUS
-        # ${SubjectHash} and ${SessionHash} are HMACs keyed by the salt in the
-        # orthanc-deid-salt Secret. Rotating that salt gives the same patient a
-        # different pseudonym, so they appear in XNAT as two subjects — see the
-        # warning on that Secret before you touch it.
+        # Legacy SubjectHash and SessionHash are salted djb2 hashes, not HMACs.
+        # They do not provide cryptographic collision resistance. Changing the
+        # legacy salt changes pseudonyms and can split identities across uploads.
+        # Preserve the existing salt for a retained legacy installation and use
+        # the current ingest recipe/label policy for a new site.
         PatientID: ${ProjectCode}-${SubjectHash}
         PatientBirthDate: ${BirthYearOnly}0101
         AccessionNumber: ${SessionHash}
@@ -137,7 +154,10 @@ orthanc:
         StudyDescription: ''
 
 ingest:
-  # Pulls studies Orthanc has labelled as ready, and clears the label after.
+  # The grouper selects eligible quiet studies. The chart uses a ready label
+  # only for the deprecated Lua path. Ingest does not require that label.
+  # Processed-label and receipt behavior depends on the pinned collator;
+  # late instances can make a study eligible again. It is not exactly once.
   orthancGroup:
     enabled: true
     interval: 60
@@ -153,8 +173,7 @@ ingest:
   # the image and library versions, "Turn it on" the steps.
   # package:
   #   enabled: true
-  # The DICOM sample datatype, installed by pip in an init container at every
-  # pod start of the package pod and of the upload pod. The node needs access
+  # The DICOM sample datatype, installed by pip in an init container at each new pod initialization of the package pod and of the upload pod. The node needs access
   # to github.com, or to a mirror of the package.
   # extraPipPackages:
   #   - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
@@ -164,16 +183,16 @@ upload:
   # s3      this edge pushes to the central staging bucket and the MANAGEMENT
   #         uploader moves it into XNAT. The edge holds no XNAT credential and
   #         never contacts XNAT. One XNAT account for the whole fleet.
-  # direct  this edge talks to XNAT itself (single-site tier-1 only). Needs an
-  #         xnat-credentials Secret here.
+  # direct  this edge talks to XNAT itself (single-site tier-1 only). Needs the Secret selected by upload.direct.existingSecret here.
   mode: s3
   s3:
     # endpoint and bucket are DERIVED from the management file's domain,
     # hostnames and bucketPrefix. Do not set them here.
     existingSecret: s3-edge-credentials
-    # An https endpoint with NO CA bundle is refused: an empty AWS_CA_BUNDLE
-    # disables TLS verification entirely rather than falling back to the system
-    # trust store. cert-sync populates this Secret.
+    # This chart validates the CA bundle for the configured HTTPS S3 endpoint.
+    # The current client is rclone, using RCLONE_CA_CERT for custom trust.
+    # An unset custom bundle does not inherently disable verification.
+    # cert-sync supplies the selected Secret in this topology.
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
     interval: 60
@@ -191,10 +210,10 @@ observability:
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
 
-# dataPolicy is DELIBERATELY ABSENT — it is set ONCE in the management site
+# dataPolicy is DELIBERATELY ABSENT ; it is set ONCE in the management site
 # file, which is passed to this release first, so the whole fleet's retention
-# rules are inherited and cannot say one thing on the management node and
-# another here.
+# rules are inherited. Later overrides can change the edge behavior, so
+# compare the rendered policy on both sides.
 #
 # Setting it here would silently override the shared policy FOR THIS EDGE ONLY.
 # Because the management chart never reads this file, the two would then be

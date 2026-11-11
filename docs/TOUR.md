@@ -1,5 +1,7 @@
 # A guided tour of this repository (tier-1, single node)
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 This is for the person who has been handed one Ubuntu machine and told to make
 medical images arrive in XNAT. It assumes you know Linux and can read YAML. It
 does **not** assume you know Kubernetes, Helm, Orthanc or DICOM, and it explains
@@ -23,13 +25,15 @@ identifiable patient data to a research archive.
 
 A modality (a scanner, or a PACS forwarding on its behalf) sends DICOM over the
 network to this machine, using the DICOM protocol's own transfer verb, C-STORE.
-Orthanc receives and stores the input. xnat-ingest then groups the instances,
+Orthanc receives and stores the input. accessionflow then groups the instances,
 assigns the XNAT project, subject and session labels, and applies the site
 de-identification recipe. Only the resulting output is sent to XNAT over HTTPS.
 Assignment happens before de-identification, so source labels need their own
 review. A recipe cannot remove an identifier already copied into an XNAT label. The
 original, still-identifiable copy is written once to a *facility backup*
-directory on this machine and never leaves it. Everything runs as containers on
+directory on this machine when facility backup is enabled. The chart does not
+ship that directory to XNAT. Any separate backup replication or export remains
+a site responsibility; verify its destination and access controls. Everything runs as containers on
 a single-node Kubernetes cluster (k0s) that the installer sets up for you, and
 the whole configuration lives in one YAML file that you write.
 
@@ -168,8 +172,8 @@ it for you.
 ### 2.2 The node, and how modalities reach it
 
 ```yaml
-clusterLabel: tier1-example       # appears on every log line, metric and alert
-namespace: xnat-ingest            # all workloads live here
+clusterLabel: tier1-example       # identifies collected logs and chart-scoped alerts
+namespace: xnat-ingest            # release workloads; system components use their own namespaces
 topology: onprem
 installMode: fresh                # or `existing` if k0s already runs here
 nodeIP: "10.0.0.1"                # this machine's address
@@ -184,9 +188,10 @@ actually reach.
 Modalities C-STORE to **`<nodeIP>:4242`** with the AE title you set in
 `orthanc.aet` (default `AISEDGE`). Whatever sits in front of this machine —
 firewall, VLAN, hospital network team — needs to allow that port from the
-scanners and nothing else. `topology: onprem` means the machine resolves XNAT by
-its real DNS name through the node's normal resolver; there are no management
-hostnames to pin, so no `/etc/hosts` entries and no `hostAliases`.
+scanners and nothing else. Use resolvable XNAT DNS names. The tier-1 example has no management endpoint
+to pin. If a custom site adds management host aliases, review the rendered
+pod aliases too; the shared chart can still render `edge.hostAliases`.
+`topology: onprem` alone is not a guarantee that no pod hostname is overridden.
 
 Choose a site directory name with lowercase letters, digits and hyphens,
 starting with a letter and ending with a letter or digit. The installer uses it
@@ -207,7 +212,7 @@ Use **`deid.engine: ingest` for every new site**. It is already the default.
 Orthanc remains the DICOM receiver on port 4242. With the facility backup
 enabled, its Lua callback writes the original and returns before the AET lookup.
 It does not route by AE title, quarantine unknown AETs or modify the instance.
-The xnat-ingest `deidentify` stage cleans the data after `assign`.
+The accessionflow `deidentify` stage cleans the data after `assign`.
 
 `deid.engine: orthanc` is deprecated. Existing-engine reference material is in
 [Deprecated Orthanc Lua engine](components/deidentification.md#deprecated-orthanc-lua-engine).
@@ -256,7 +261,7 @@ dcmdump file.dcm | grep -E '(StudyID|PatientID|AccessionNumber)'
 An absent or empty required label causes assignment to put the session under
 `assigned/__invalid__`. This input is still identifiable. Later stages do not
 process the invalid holding directory automatically. Correct the source mapping
-and use the guarded recovery instructions in the xnat-ingest component guide.
+and use the guarded recovery instructions in the accessionflow component guide.
 The chart rejects tagMapping values that start with `ClinicalTrial` in ingest
 mode. It cannot inspect the values that a supported source tag will contain.
 
@@ -320,7 +325,10 @@ dataPolicy:
   dryRun: true
 ```
 
-**Nothing expires on a fresh install, and that is the right default.** Run with
+**The data-policy reporter does not expire data on a fresh install.**
+Pipeline stages still retire successful input snapshots when their rendered
+`--unlink-source all` flag is enabled. This includes input files not represented
+in the output session; do not add manual files to those stage inputs. Run with
 `enabled: false` for a week. Then set `enabled: true` with `dryRun: true`, which
 makes the policy engine log every decision it *would* take without taking any,
 and read those logs. Only then turn `dryRun` off.
@@ -351,9 +359,10 @@ node. Retiring it is the data policy's job, and the condition it waits for is
 
 On tier-2 that condition is satisfied by the s3-uploader's marker. **This tier
 has no s3-uploader**, so nothing would ever write it, and for a long time nothing
-did: the condition could not come true, the tree was kept for ever, and the
-uploader re-sent the same session every loop while XNAT answered *"already exists
-with different checksums"*. A `staged-reclaimer` CronJob now closes that. It runs
+did. In that historical implementation, the tree was retained and repeated
+upload attempts could emit checksum messages. This is not the behavior of
+0.20.0, which skips sessions whose current file listing is complete. The
+`staged-reclaimer` CronJob supplies the missing cleanup proof. It runs
 hourly. For each resource of a session it finds every local file in XNAT's file
 listing and checks it with a HEAD request: present, with the same size (no
 download, so content is not compared). It removes only the files it proved, inside
@@ -370,13 +379,13 @@ Two consequences worth knowing before you change anything here:
   though it were cleaning something.
 - **`dataPolicy.enabled: false` leaves it inert.** The CronJob still renders, but
   with `DRY_RUN` set: it reports what it would remove and removes nothing. A site
-  that never turns the data policy on will fill up, and the alert for it fires
-  long after the uploader has started looping.
+  that never turns the data policy on will fill up, unless another operator-managed cleanup policy exists. Alert timing depends
+on disk use, thresholds, and whether log collection is healthy.
 - **It deletes only inside the writer lock.** The stage that writes the tree
   holds `/data/.locks/<tree>.lock` for each pass, and the CronJob takes the same
   lock to delete. The first upgrade to this check, and any rollback to a release
   without the lock, need the drain in
-  [xnat-ingest.md, "Upgrade or roll back while the cleanup can delete"](components/xnat-ingest.md).
+  [accessionflow.md, "Upgrade or roll back while the cleanup can delete"](components/accessionflow.md).
 
 `dataPolicy.derived.stagedReclaimer` in the site file controls its schedule, its
 minimum age (counted from when the newest file reached the tree), whether it
@@ -394,9 +403,10 @@ get paged. That wiring is checked by the test suite.
 Four Secrets, one encrypted file, and one key you must not lose.
 
 The charts never contain credentials — they reference Secrets *by name*. So the
-entire integration is: create the Secrets in the cluster, then run Helm. There
-is no helm-secrets plugin, no decrypt-to-tempfile, and plaintext never touches
-disk during an install.
+entire integration is: create the Secrets in the cluster, then run Helm. The apply path
+uses no helm-secrets plugin and streams decrypted YAML to kubectl. It does not
+create a plaintext manifest in the checkout. This is not a guarantee about
+editor swap files, operating-system swap, logs or Kubernetes storage.
 
 Encryption is [SOPS](https://github.com/getsops/sops) with
 [age](https://github.com/FiloSottile/age) keys. SOPS encrypts *values* and
@@ -480,9 +490,11 @@ than writing a plaintext manifest into the repository.
 
 ### Rotating a secret, and what must be restarted afterwards
 
-Kubernetes does not restart a pod when a Secret changes, and neither Orthanc nor
-the uploader re-reads one at runtime. Rotation is two steps, and skipping the
-second leaves you running on the old value while the file says otherwise:
+Kubernetes does not restart a workload just because a referenced Secret
+changes. The uploader receives credentials through environment variables;
+Orthanc and group-orthanc also need their consumers restarted after rotation.
+The reclaimer reads the current Secret when a new Job starts. Apply the new
+value, then restart each long-running consumer and verify its connection:
 
 ```bash
 scripts/site-secrets.sh edit my-hospital
@@ -504,7 +516,7 @@ recipient of that file:
 
 ```bash
 cd ~/ais-edge
-scripts/site-secrets.sh edit <site>           # sops: decrypts into $EDITOR only
+scripts/site-secrets.sh edit <site>           # SOPS opens your editor; secure its temp/swap files
 ```
 
 Change the three values of the `xnat-credentials` document and save:
@@ -523,9 +535,11 @@ stringData:
 
 The `username` and `password` can also be an XNAT alias token: put the alias in
 `username` and its secret in `password`. XNAT accepts the pair as a login, and
-the uploader and the reclaimer send it unchanged. An alias token expires, by
-default two days after creation; the uploader then gets 401 on every pass and
-`XNATAuthFailure` fires. Use a token with a long life, or plan the rotation.
+the uploader and the reclaimer send it unchanged. The token lifetime is controlled by the XNAT server. The earlier two-day
+default claim is **not verified (2026-11-10)** for your server. Record its
+expiry and plan rotation. Repeated authentication failures can trigger
+`XNATAuthFailure` after its threshold; a single 401 does not prove that the
+alert will fire.
 
 SOPS re-encrypts the site file on save. The editor can still use temporary files.
 If nothing changed,
@@ -547,34 +561,38 @@ kubectl -n xnat-ingest logs deploy/<release>-upload --tail=50
 scripts/verify-live.sh <site>
 ```
 
-A wrong URL or password shows as 401 or a connection error in the first pass,
-and `XNATAuthFailure` fires. For an XNAT with a certificate the node does not
-trust, set `upload.direct.verifySsl: false` in the site values and upgrade the
-release.
+A wrong URL can cause DNS, TLS, connection or HTTP errors; a wrong password
+can cause authentication failures. `XNATAuthFailure` covers matching auth
+messages above its threshold, not every connection failure. Keep the direct
+uploader's default `upload.direct.verifySsl: true`. Arrange a trusted
+certificate chain in its environment when the server uses a private CA, then
+verify the connection. Disabling TLS verification does not fix the trust chain.
 
 Two cautions:
 
 - Commit and push the re-encrypted `secrets.enc.yaml` from that checkout. The
   encrypted file is meant to be in git; `.gitignore` blocks only the plaintext
   variants.
-- Sessions already in the upload tree carry no XNAT identity. After the switch
-  the uploader delivers them to the new XNAT. To hold them back, scale the
-  uploader to zero before the switch and back to one when the new XNAT is ready.
+- Sessions in the upload tree can carry a grouping `__uid__` and routing
+  labels; they do not bind themselves to an XNAT server URL. A server switch
+  can send them to the new destination, subject to identity checks. Pause the
+  uploader and coordinate the reclaimer during migration. Retain staged input
+  until the new server and remote inventory are verified.
 
 ### Turning on Orthanc's REST API authentication
 
-The shipped site sets `orthanc.auth.enabled: false`. Orthanc's REST API is
-`ClusterIP`-only, so nothing outside the cluster can reach it — but that is an
-accident of network placement, not a control. Anything running *inside* the
-cluster can call that API, and it can **delete studies**. Turn it on for any
-deployment where that matters.
+The chart default is `orthanc.auth.enabled: true`; the example site overrides
+it to `false`. Check the merged values. `ClusterIP` limits normal external
+Service exposure but is not an authorization boundary. In-cluster clients and
+users with port-forward access can still reach the API, including its delete
+operations. Enable authentication and supply the matching Secret keys below.
 
 Three keys, all required, because three different things read this Secret:
 
 | Key | Read by | If it is wrong |
 | --- | --- | --- |
 | `users.json` | Orthanc itself. It is mounted INTO the config directory at `/etc/orthanc/users.json` and must be a config fragment, `{"RegisteredUsers":{"admin":"<password>"}}` | Orthanc starts, registers NO users, and with authentication on refuses EVERY request including correct credentials. There is no `RegisteredUsersFile` option in Orthanc; the config used to name one and Orthanc ignored it in silence |
-| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401: `group-orthanc` crash-loops with data sitting in Orthanc, and the data policy cannot reclaim the Orthanc store |
+| `orthanc-user` | `group-orthanc` and the data-policy engine, which call the REST API | Orthanc answers 401. Grouping cannot export studies and can retry or exit depending on where the error occurs; the policy adapter logs `backend_unavailable` and keeps the store |
 | `orthanc-password` | `group-orthanc` and the data-policy engine | as above |
 
 `orthanc-user` / `orthanc-password` **must match** the user and password inside
@@ -629,10 +647,12 @@ scripts/site-secrets.sh apply <site>
 ./install.sh <site>
 kubectl -n xnat-ingest rollout restart deploy/<release>-orthanc
 kubectl -n xnat-ingest rollout restart deploy/<release>-group-orthanc
+kubectl -n xnat-ingest rollout restart ds/<release>-data-policy
 ```
 
-Both restarts are needed: Kubernetes does not restart a pod when a Secret
-changes, and neither Orthanc nor `group-orthanc` re-reads one at runtime.
+Restart all three consumers when they are enabled. Orthanc loads its users
+configuration at startup; grouping and data-policy read credentials from
+environment variables. A Secret change alone does not replace those processes.
 
 **4. Verify.**
 
@@ -647,9 +667,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8042/studies
 curl -s -o /dev/null -w '%{http_code}\n' -u admin:<password> http://localhost:8042/studies
 ```
 
-Then confirm the pipeline still moves: `group-orthanc`'s log should keep
-reporting `Found N studies`, not 401s. If it 401s, `orthanc-user` /
-`orthanc-password` disagree with `users.json`.
+Then confirm that a synthetic study moves through grouping and assignment.
+A `Found N studies` line alone does not prove an export succeeded. On a 401,
+compare `orthanc-user` and `orthanc-password` with `users.json`, check that
+each consumer was restarted, and inspect the receiver authentication config.
 
 > **Do not expose port 8042 to the host or a NodePort just because auth is now
 > on.** `orthanc.expose.http` stays `ClusterIP`. Authentication is a second
@@ -739,7 +760,8 @@ Tier-1 is one machine:
    this is an appliance handed to a hospital, and two installs a fortnight apart
    landing on different k0s minors is a support problem nobody can reproduce.
 2. **Secrets** — decrypts `secrets.enc.yaml` with SOPS and applies it straight
-   into the cluster. Plaintext never reaches disk.
+   into the cluster without a plaintext manifest in the checkout. The
+   destination cluster and operator environment still need secret protection.
 3. **The chart** — `helm upgrade --install` with `upload.mode: direct`.
 
 There is no join step, no cert-sync, no S3 identity to distribute and no second
@@ -768,7 +790,10 @@ probe is not working), checks each pipeline stage by its component label,
 verifies the de-identification salt is not still the placeholder, and reaches
 XNAT *from inside the upload pod* — which is the only place the answer means
 anything, since that is the pod whose DNS, routing and TLS trust actually
-matter. The exit code is the number of failures.
+matter. The normal completion exit code is the failure count, capped at 250; early
+usage/setup failures can exit 2. A zero with `NOT CHECKED` entries still leaves
+those probes unverified. This is a health check, not proof that a complete
+synthetic study reached XNAT.
 
 ### What can go wrong
 
@@ -778,10 +803,9 @@ matter. The exit code is the number of failures.
 | Pod in `CreateContainerConfigError` | A Secret name or namespace does not match. Section 3. |
 | Grouping fails per study, EXDEV in the logs | Pipeline stage directories are on different filesystems or the copy mode cannot link them. A separate backup disk is allowed. Section 2.1. |
 | Studies stall at assign, "missing metadata fields" | A source tag selected by `ingest.assign.tagMapping` is absent or empty. Check the actual input tags and the project constant. Section 2.3. |
-| Sessions land in `assigned/__invalid__` | Assignment could not resolve a required label. The input still contains patient information. Inspect the selected tags in Orthanc through a controlled port-forward, then use the guarded invalid-session recovery procedure in `docs/components/xnat-ingest.md`. Correct the source mapping for future studies. A failed grouping is separate: it is built privately and published only when complete. |
-
-| `IngestStageError` for `group`, with `Skipping Orthanc study '<id>'` | One study cannot be staged, and the other studies go on. See "A study that group-orthanc refuses" in `docs/components/xnat-ingest.md`. |
-| Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` — `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Set `upload.direct.verifySsl: false` for the site, and set it back the moment XNAT gets a real one. |
+| Sessions land in `assigned/__invalid__` | Assignment could not resolve a required label. The input still contains patient information. Inspect the selected tags in Orthanc through a controlled port-forward, then use the guarded invalid-session recovery procedure in `docs/components/accessionflow.md`. Correct the source mapping for future studies. A failed grouping is separate: it is built privately and published only when complete. |
+| `IngestStageError` for `group`, with `Skipping Orthanc study '<id>'` | One study cannot be staged, and the other studies go on. See "A study that group-orthanc refuses" in `docs/components/accessionflow.md`. |
+| Upload pod `CrashLoopBackOff`, `SSLCertVerificationError ... self-signed certificate` | Your XNAT presents a certificate this node does not trust. Check with `openssl s_client -connect <xnat-host>:443` ; `Verify return code: 18` means self-signed, and a subject of `Kubernetes Ingress Controller Fake Certificate` means that XNAT's ingress has no real certificate at all. Configure a trusted server certificate and CA chain for the uploader. Keep `upload.direct.verifySsl: true`; disabling verification does not repair the trust chain. |
 | `'DICOM' resource ... already exists on XNAT with different checksums` at ERROR level | The empty-digest false ERROR was fixed in 0.15.3. This now indicates a real resource conflict. Compare staged and remote files; a later success line does not prove content equality. Preserve the source while resolving the conflict. |
 | `compared by file name only` WARNING (xnat-ingest PR #227) | XNAT lists one or more files without computed checksums. Their names match, but their content was not compared. Ask the administrator to configure and compute catalog checksums. This warning can recur on each upload attempt. |
 | Nothing arrives at all | Check the firewall, node address, configured called AE title, and receiver readiness on port 4242. Under ingest an AET map does not route or quarantine the study. If Orthanc holds it, inspect group and assign next. |
@@ -872,11 +896,12 @@ a PVC, *not* S3 — there is no object store), Prometheus, Alertmanager, and
 Grafana on a NodePort at **30030**, since there is no ingress. Log in with the
 credentials from `grafana-admin-credentials`.
 
-**Alerts are not mailed anywhere until you say where.** `observability.stack.alerting`
-ships empty, and that is a deliberate default rather than an oversight: the
-stack installs, the dashboards work, and nothing is sent. Every alert below is
-then visible only in Grafana, which nobody is watching at 3am. On a real
-deployment fill in three keys:
+**Set mail routing before installing the complete local stack.** The
+`observability.stack.alerting` destinations ship empty, but the chart rejects
+empty `emailTo` or `smtpHost` when both Vector and the local stack are enabled.
+A stack without Vector bypasses that particular guard, so inspect its route
+as well. Configure the following mail settings and test a synthetic alert; a
+valid render does not prove the relay delivered mail:
 
 ```yaml
 observability:
@@ -898,7 +923,7 @@ mounted into Alertmanager whether or not SMTP is configured (§3). Unused is not
 the same as absent.
 
 Dashboards and alert rules ship with the chart. At this revision it defines
-**30 alerts**: 22 log rules in `files/loki-ruler-rules.yaml`, and eight metric
+**29 alerts**: 21 log rules in `files/loki-ruler-rules.yaml`, and eight metric
 rules in `files/prometheus-rules/{critical,warning,info,uploader}.yaml`. The
 metric rules cover the API server, node readiness, ingest crash loops, failed
 Jobs, reclaimer success, node count and two uploader conditions. They come on top of
@@ -923,7 +948,7 @@ the rule has no series to read for it. The ones specific to this tier are:
   re-send worked; the mail says how to check. If the session had uploaded completely before, check XNAT.
 - **`XNATAuthFailure`**, **`XNATUploadFailingForAllSessions`**,
   **`XNATUploadRetryStorm`**, **`SessionUploadStalled`** — the upload path.
-- **`DeidentifyStageError`** reports failures from the default xnat-ingest
+- **`DeidentifyStageError`** reports failures from the default accessionflow
   deidentify stage. Inspect its recipe, input and output.
 - **`OrthancDeidLuaError`** matches receiver Lua error logs. Under ingest, check
   backup writes and script startup requirements; header de-identification runs
@@ -992,7 +1017,8 @@ sudo iptables -t nat -L -n | grep -c 'KUBE-'    # ~34 on a torn-down box
 
 They reference service VIPs and pod IPs that no longer exist. A fresh install's
 kube-proxy reconciles the chains it owns, so this is usually harmless — a
-tier-1 install on this exact box succeeded with them still present. Reboot when
+historical tier-1 install succeeded with them still present (measurement date
+not recorded). That result does not verify networking after your own reinstall. Reboot when
 you can; if networking misbehaves after a reinstall, this is the first thing to
 rule out.
 

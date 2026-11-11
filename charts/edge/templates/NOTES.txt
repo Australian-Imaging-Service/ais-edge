@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 AIS Edge — {{ .Values.clusterLabel }}  (release {{ .Release.Name }}, namespace {{ .Values.namespace }})
 
 INGEST
@@ -26,8 +27,10 @@ DE-IDENTIFICATION
   is written to /facility-backup/__unmapped_aet__/<AET>/... and only then
   removed from Orthanc. Add the AET above and re-send to ingest it.
 {{- else if (eq (include "edge.deidEngine" .) "ingest") }}
-  Enabled. The xnat-ingest deidentify stage runs between assign and upload,
-  and the uploader reads only its output, {{ include "edge.uploadSourceDir" . }}.
+  Enabled. The accessionflow deidentify stage runs between assign and upload,
+  and upload reads {{ include "edge.uploadSourceDir" . }} (packaged output when enabled).
+  Recipe selection alone does not prove anonymization: review identifiers,
+  private tags, pixels and session labels before authorizing export.
   {{- if .Values.ingest.deidentify.specs }}
   {{ len .Values.ingest.deidentify.specs }} recipe(s):
     {{- range $path, $_ := .Values.ingest.deidentify.specs }}
@@ -49,9 +52,10 @@ UPLOAD
 
 DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun }}DRY RUN{{ else }}ENFORCING{{ end }}{{ else }}NOT ENFORCED{{ end }}
 {{- if not .Values.dataPolicy.enabled }}
-  dataPolicy.enabled is false, so nothing expires and nothing is reclaimed.
-  Disk will grow without bound. Set it once you have decided the retention
-  rules for this site.
+  dataPolicy.enabled is false: policy-driven expiry and reclaim are off.
+  Upstream stage source cleanup still follows its own configured options; this
+  switch is not a global no-delete control. Retained data can fill the disk.
+  Choose and verify retention rules and original-copy coverage for this site.
 {{- else if .Values.dataPolicy.dryRun }}
   dryRun is true: reclaim decisions are logged but not acted on. Watch a few
   days of logs, confirm they match your expectations, then set dryRun: false.
@@ -60,17 +64,20 @@ DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun 
   dataPolicy.enabled and dryRun govern the data policy and the reclaimers
   only. assign still removes /data/grouped/<session> after it writes the
   session to /data/assigned, because grouped is onAssigned. That moves data
-  along the pipeline. It does not remove the last copy.
+  along the pipeline. A successful assignment retains output, but other stage cleanup and later
+  retention determine whether original source bytes remain; check those too.
 {{- end }}
 {{- if not .Values.storage.facilityBackup.enabled }}
 
   ⚠  FACILITY BACKUP IS OFF
-    No original is kept outside the pipeline, so Orthanc and the pipeline
-    folders hold the only copy of each study.
+    This chart does not keep a facility-backup copy. Orthanc and pipeline
+    folders may hold the only local copies; external source archives are
+    outside this chart. Even when enabled, the backup callback covers successful
+    DICOM-network arrivals, not arbitrary REST or file-drop input.
 {{- if eq .Values.dataPolicy.derived.orthancStorage.reclaim "onGrouped" }}
     derived.orthancStorage.reclaim is onGrouped, so an armed data policy
     deletes the Orthanc copy of a staged study after its minAge. A session in
-    assigned/__invalid__/ is then the only copy.
+    assigned/__invalid__/ may then hold the only remaining local input copy.
 {{- end }}
     Turn the backup on unless the site keeps its originals somewhere else.
 {{- end }}
@@ -78,13 +85,15 @@ DATA POLICY  {{ if .Values.dataPolicy.enabled }}{{ if .Values.dataPolicy.dryRun 
   derived     orthanc {{ .Values.dataPolicy.derived.orthancStorage.reclaim }} (min age {{ .Values.dataPolicy.derived.orthancStorage.minAge }}) | grouped {{ .Values.dataPolicy.derived.grouped.reclaim }} | assigned {{ .Values.dataPolicy.derived.assigned.reclaim }}
 {{- if eq .Values.dataPolicy.derived.grouped.reclaim "never" }}
 
-  NOTE: grouped.reclaim = never. `assign --loop` rebuilds its work list from
-  a live listing of /data/grouped every cycle, so the same sessions will be
-  re-assigned indefinitely — /data/assigned is repopulated, the uploader
-  re-stages, and the upload-success alert re-fires. /data/grouped holds
-  hardlinks, and the bytes also live in Orthanc storage and the facility
-  backup, so onAssigned deletes no data. Prefer onAssigned unless you have a
-  specific reason.
+  NOTE: grouped.reclaim = never. The assign wrapper runs one CLI pass per
+  cycle, retaining grouped input. Later passes can revisit the session; whether
+  they rewrite output depends on the current manifest and stage behavior.
+  In accessionflow 0.20.0 a complete XNAT session is skipped without another
+  success line. Historical repeated-success incidents do not establish that
+  every retained input produces another notification now. Hardlinks preserve
+  bytes only while another link still exists; an enabled backup is not proof
+  that this input was archived. Prefer onAssigned only after reviewing source
+  retention and the recovery procedure for invalid or rejected input.
 {{- end }}
 
 SECRETS THIS RELEASE EXPECTS TO ALREADY EXIST in namespace {{ .Values.namespace }}
@@ -118,8 +127,9 @@ CHECK IT IS WORKING
   upload pod with the site's own credentials, and confirms the alert rules
   actually loaded. Its exit code is the number of failures.
 
-  It cannot see DICOM port {{ .Values.orthanc.dicomPort }} — that is a hostPort,
-  invisible from inside the cluster — so it reports that one as SKIP. Prove it
+  It does not perform a modality-to-receiver C-STORE check for DICOM port
+  {{ .Values.orthanc.dicomPort }}. SKIP means that network leg remains unverified;
+  hostPort is not inherently unreachable from every cluster network. Prove it
   with a real C-STORE, below.
 
   By hand:
@@ -133,8 +143,9 @@ CHECK IT IS WORKING
 
 NOT REMOVED BY `helm uninstall`
   The namespace, the PersistentVolumes and their claims carry
-  helm.sh/resource-policy: keep and Retain. Uninstalling this release leaves
-  every received study, and the Secrets above, in place. Removing data is a
+  helm.sh/resource-policy: keep and Retain. The chart-managed pipeline storage and externally managed Secrets are
+  retained, but this is not a backup or a promise that previously reclaimed
+  studies remain. Subchart PVC retention has its own configuration. Removing data is a
   separate deliberate act.
 {{- if .Values.storage.storageClass.create }}
   The cluster-scoped StorageClass {{ .Values.storage.storageClass.name }} is kept too. A release
@@ -146,10 +157,10 @@ NOT REMOVED BY `helm uninstall`
 {{- if and .Values.observability.enabled (not .Values.observability.stack.alerting.emailTo) }}
 
   ⚠  NO ALERT CAN BE DELIVERED FROM THIS SITE
-    observability.stack.alerting.emailTo is empty, so Alertmanager renders with
-    receiver "null". Every rule still evaluates and every alert still fires;
-    none of them reach anyone. That includes the ones that tell you studies have
-    stopped arriving in XNAT.
+    observability.stack.alerting.emailTo is empty. With both observability
+    switches enabled, validation rejects this configuration before deployment.
+    With the stack disabled there is no local Alertmanager to deliver mail.
+    Shipper-only operation does not itself provide a notification receiver.
 
     Filling in the alertmanager-smtp Secret is NOT enough on its own. That is
     the credential for talking to the relay. These four say who gets the mail
@@ -163,6 +174,7 @@ NOT REMOVED BY `helm uninstall`
             smtpHost: smtp.example.org
             smtpUsername: ""       # must match `username` in alertmanager-smtp
 
-    If this site is deliberately without email, ignore this: nothing else
-    depends on it.
+    If this site deliberately uses shipper-only observability, configure and
+    test its external evaluator and receiver. A local enabled stack requires
+    the mail facts above; an empty inbox does not demonstrate health.
 {{- end }}

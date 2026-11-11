@@ -1,3 +1,9 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
+# Review 2026-11-10: values and consumers checked locally. Historical measured
+# incidents below explain retained safeguards; undated measurements are not
+# verified (2026-11-10) as current fleet behavior. Image pins are reproducibility
+# choices, not claims that every current security advisory has been addressed.
 # =============================================================================
 # AIS Edge — edge-site chart
 # =============================================================================
@@ -9,8 +15,8 @@
 # HOW TO READ THIS FILE
 #   1. dataPolicy    — what is kept and for how long. Read this first.
 #   2. storage       — where the bytes physically land.
-#   3. orthanc       — the DICOM receiver and de-identification.
-#   4. ingest        — group -> assign, and the optional file-drop path.
+#   3. orthanc       - DICOM receiver and optional facility backup.
+#   4. ingest        - group -> assign -> deidentify, optional package/file drop.
 #   5. upload        — how sessions reach XNAT (via S3, or directly).
 #   6. samba         — optional SMB drop-box.
 #   7. observability — optional log shipping to the management cluster.
@@ -43,12 +49,13 @@ topology: onprem
 #   orthanc   the Orthanc Lua hook strips each instance as it ARRIVES, and also
 #             writes the ClinicalTrial* routing tags from the AE-title map and
 #             applies the label group-orthanc filters on. Everything downstream
-#             only ever sees stripped data. One-way: no crosswalk is kept.
+#             follows that profile; this is not a guarantee that pixels,
+#             private tags or routing labels are anonymous. No crosswalk is kept.
 #
-#   ingest    the xnat-ingest `deidentify` stage runs between assign and upload.
-#             REVERSIBLE by design — it writes a per-session re-identification
-#             map recording the original value of every field it changed, which
-#             is why it exists. Costs: identifiable data passes through Orthanc,
+#   ingest    the accessionflow `deidentify` stage runs between assign and upload.
+#             Writes a per-session re-identification map for supported changed
+#             fields. This is not a full backup or a guarantee of byte-for-byte
+#             reversal of every transformation; retain source data as required. Costs: identifiable data passes through Orthanc,
 #             group and assign before it is cleaned, there is no AE-title
 #             routing, and ingest.assign.tagMapping must name tags this site's
 #             modalities actually populate.
@@ -66,7 +73,7 @@ deid:
   # Use ingest for new sites. Orthanc receives and stores original DICOM.
   # With facility backup enabled, its Lua callback copies the original and
   # returns before AET routing. There is no unknown-AET quarantine in this mode.
-  # xnat-ingest assign selects labels before the deidentify recipe runs.
+  # accessionflow label xnat selects labels before the deidentify recipe runs.
   # Review both the source labels and the recipe before enabling upload.
   #
   # deid.engine: orthanc is deprecated. Its reference is in
@@ -101,7 +108,7 @@ hostnames:
   seaweedfs: ""
   grafana: ""
   loki: ""
-# Free-text label attached to every log line and metric from this site. It is
+# Site identity on Vector log streams; not automatically attached to all metrics. It is
 # what Grafana's `cluster` variable filters on, so it must be unique per site.
 clusterLabel: ""
 
@@ -110,23 +117,25 @@ clusterLabel: ""
 # 1. dataPolicy — THE one place that decides what is kept, where, how long
 # =============================================================================
 # originals: irreplaceable, removed here means gone for good — defaults to
-# forever, change only against a records-retention obligation, never to free
-# disk. derived: reconstructible from an original — safe to reclaim.
+# forever. Review the site retention policy before changing it; low disk is not
+# a proof that data is disposable. Derived output is reconstructible only while
+# its source and transformation inputs remain available and verified.
 #
 # CAUTION: every derived rule is (condition AND minAge), both required. A
 # pure age rule would delete a session that never reached XNAT because a
 # credential was wrong; a pure condition rule frees nothing the moment the
 # confirmation signal breaks. Worst case with both: disk fills and you get an
-# alert. Never: data quietly disappears.
+# alert. These controls reduce risk; they do not establish end-to-end archival
+# completeness or protect against every storage, source-cleanup or operator error.
 #
 # Same block passed to charts/mgmt — one copy in sites/<site>/values.yaml,
 # each chart acts only on the stores it owns.
 dataPolicy:
 
-  # Master switch. While false, NOTHING in this chart deletes or expires
-  # anything, whatever the rules below say. A fresh install therefore cannot
-  # surprise you. Turn it on deliberately, after dryRun has shown you a week
-  # of what it would have done.
+  # Master switch for policy-driven reclaim, not all source cleanup. Upstream
+  # label/deidentify/package options can unlink their input after success even
+  # while this is false. Review those handoffs and original-copy coverage too.
+  # Arm retention only after dryRun decisions match the site policy and evidence.
   enabled: false
 
   # Log every reclaim decision and then do nothing. Leave true until the log
@@ -139,9 +148,12 @@ dataPolicy:
   # It runs as its own DaemonSet attached to the VOLUMES, never as a sidecar on
   # Orthanc: retention is a storage concern, and hanging it off the
   # de-identifier means swapping that component silently ends edge disk
-  # monitoring. Report-only today; it deletes nothing.
+  # monitoring. It reports by default and can reclaim permitted stages when
+  # enabled, dryRun and originals.allowExpiry allow the relevant operation.
   #
-  # enabled: false stops the reporting, NOT the policy — no alert can fire on
+  # reporter.enabled: false removes this reporter/enforcer pod, so its policy
+  # actions stop too; independent staged reclaimers are configured separately.
+  # Log-derived alerts cannot evaluate fresh disk facts from
   # data nobody is measuring, so turning this off makes minFreeDiskPercent and
   # quarantine.alertAfter inert.
   reporter:
@@ -174,7 +186,7 @@ dataPolicy:
     # WHAT IT CANNOT SEE. The age measured is the newest mtime in the tree, so
     # this detects a stage that has gone QUIET without progressing. A session
     # being rewritten on every cycle never accumulates age and is invisible to
-    # it. That case is confined to the deidentified stage running an xnat-ingest
+    # it. That case is confined to the deidentified stage running an accessionflow
     # without the metadata write-if-changed fix, where the output's
     # __METADATA__.json was rewritten every pass; with that fix the tree goes
     # quiet and this sees it.
@@ -185,7 +197,7 @@ dataPolicy:
     # stuckAfter above is per SESSION and fires only on one whose reclaim
     # condition keeps failing. A stage whose reclaim is `never` returns before
     # that check is reached, so nothing there can ever be reported by it -- and
-    # `never` is the DEFAULT for the deidentified tree, which is the one that
+    # `never` can be selected for the deidentified tree, which is the one that
     # grows when de-identification moves into the pipeline.
     #
     # This is the coarser question the engine can always answer from
@@ -202,7 +214,8 @@ dataPolicy:
       tag: "8.11.1"
       pullPolicy: IfNotPresent
     # 10001 matches Orthanc's, which owns the pipeline tree. The mounts are
-    # read-only, so this is about being able to READ every stage, not write.
+    # read-only by default; armed retention changes the relevant mounts to
+    # writable. Matching UID/GID is needed for both reads and permitted cleanup.
     podSecurityContext:
       runAsNonRoot: true
       runAsUser: 10001
@@ -230,20 +243,20 @@ dataPolicy:
   # ---------------------------------------------------------------------
   originals:
 
-    # THE THIRD SWITCH. Originals are the only identifiable copy, so expiring
+    # THE THIRD SWITCH. Originals may be the only retained source copy, so expiring
     # them needs its own deliberate act on top of enabled + dryRun. While this
     # is false the engine skips every `kind: original` stage AND the chart
-    # mounts the facility backup read-only, so nothing can remove an original
-    # even if the logic above were wrong.
+    # mounts that backup read-only in the reporter. This protects that mount,
+    # not every pod or host process and not upstream stage source cleanup.
     #
     # Turn it on only against a records-retention obligation, never to free
     # disk — minFreeDiskPercent exists to tell you about disk.
     allowExpiry: false
 
     # Identifiable DICOM exactly as it arrived off the wire. The Orthanc Lua
-    # hook writes this BEFORE de-identification and only removes the instance
-    # from Orthanc once the write has succeeded, so this is the archive of
-    # record for the site.
+    # DicomProtocol-only callback writes this before de-identification. Under
+    # ingest, a failed backup does not stop later grouping, and REST/file drops
+    # do not enter this callback archive. Verify archival coverage explicitly.
     facilityBackup:
       enabled: true
       # WHERE THIS STAGE LIVES, as seen inside the pods. Every location below
@@ -252,7 +265,7 @@ dataPolicy:
       # component that writes it.
       #
       # These exist so the policy engine needs no knowledge of Orthanc or
-      # xnat-ingest: it walks declared paths. Replace the de-identifier (or
+      # accessionflow: it walks declared paths. Replace the de-identifier (or
       # the ingest path) and the retention rules keep working — point the
       # location at the new store instead of rewriting a reclaimer.
       location: /facility-backup
@@ -261,7 +274,7 @@ dataPolicy:
       # WHAT A DURATION ACTUALLY DELETES — read this before setting one.
       #
       # The unit is the TOP-LEVEL ENTRY under location, which here is one
-      # PATIENT (the tree is <PatientID>/<StudyUID>/<SOPUID>.dcm), and the age
+      # PATIENT (the tree is <PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm), and the age
       # used is the NEWEST file anywhere beneath it. So `retain: 30d` means:
       #
       #   A patient directory whose most recent file is older than 30 days is
@@ -294,8 +307,8 @@ dataPolicy:
       alertAfter: 24h
 
     # Operator file drops. Only exists when ingest.fileDrop.enabled is true.
-    # NOTHING else holds a copy of these — there is no Orthanc copy and no
-    # facility backup on this path.
+    # This path has no automatic Orthanc copy or facility backup. External
+    # source retention and later pipeline copies must be verified separately.
     fileDrop:
       # Root of ingest.fileDrop.inputGlob. Only read when that path is enabled.
       location: /data/incoming
@@ -316,9 +329,10 @@ dataPolicy:
     # Receiver copy held until group-orthanc has exported it. Under ingest
     # this is original, identifiable DICOM. onGrouped keys off the processed label that group-orthanc already
     # applies, so this needs no new signal.
-    # CAUTION: needs an xnat-ingest that writes the export snapshot label
+    # CAUTION: needs an accessionflow that writes the export snapshot label
     # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
-    # The default image, our fork build 0.16.2.post1, writes it. With an older
+    # The default upstream image, accessionflow 0.20.0, writes it
+    # (sources/orthanc/staging.py:156-167). With an older
     # image this backend keeps every study and logs export_state_unknown.
     orthancStorage:
       # = Orthanc's StorageDirectory. Used for REPORTING disk usage; reclaim
@@ -337,40 +351,47 @@ dataPolicy:
       # digest of the instance list read now. Then exactly that list is
       # deleted. Anything else is kept and logged as reclaim_kept with reason
       # export_state_unknown: a series that arrived late, a study staged by an
-      # xnat-ingest that writes no snapshot label, an unreadable reply.
+      # accessionflow that writes no snapshot label, an unreadable reply.
       backend: orthanc-rest      # filesystem | orthanc-rest
       reclaim: onGrouped         # never | onGrouped
       minAge: 7d
       # Orthanc's own recycler, independent of the rules above. 0 disables
-      # it. Leave it off so this dataPolicy block is the only thing in the
-      # system that removes anything.
+      # it. Leave it off to avoid an independent receiver-storage recycler;
+      # stage --unlink-source cleanup is still separate from dataPolicy.
       maximumStorageSizeMB: 0
       maximumPatientCount: 0
 
     # Hardlinks into Orthanc storage; reclaiming one leaves the bytes intact
     # while any other link survives.
-    # CAUTION: `assign --loop` rebuilds its work list from a live directory
-    # listing every pass — reclaim: never with no marker means it re-assigns
-    # the same sessions forever. onAssigned uses a processed-marker state
-    # dir, so 'never' stays genuinely usable.
+    # The chart wrapper runs one label-xnat pass per cycle, under the writer
+    # lock; it does not invoke a nested --loop. Retained input can be revisited
+    # on subsequent passes. onAssigned enables CLI source cleanup after success;
+    # do not infer deduplication solely from a retained directory or marker.
     grouped:
       location: /data/grouped
-      # NO minAge HERE, deliberately. `assign --unlink-source all` deletes each
-      # grouped tree at assign time, so a window measured from assign can never
-      # elapse — there is nothing left to wait on. What reaches the engine is
-      # only an ORPHAN: a tree assign copied but failed to unlink (crash, OOM,
-      # eviction). Those are cleaned up immediately; delaying an orphan buys
-      # nothing, since its bytes are still in Orthanc storage and the facility
-      # backup. Setting minAge here is rejected at render rather than ignored.
-      reclaim: onAssigned        # never | onAssigned (orphan cleanup)
+      # No minAge is accepted here: onAssigned enables the label stage's
+      # --unlink-source all after a successful save. Already-invalid skips
+      # bypass that cleanup, and crashes can leave grouped input behind.
+      # The policy engine does not currently recover normal grouped orphans:
+      # condition_met in charts/edge/files/data-policy.sh checks the unchanged
+      # grouped basename (_.<uid>) against assigned/ and upload markers named
+      # <project>.<subject>.<session>. Those names do not match in this chart.
+      # A retained grouped copy may contain late data; do not remove it merely
+      # because an assigned session or marker has the same study UID. Inspect
+      # the files and use docs/recovering-invalid-sessions.md for invalid input.
+      # Other hardlinks or originals may already be gone, so retention here
+      # is not proof of an independent backup. The reporter still counts these
+      # entries; StageBacklogAgeing uses dataPolicy.reporter.stageAgeAlertAfter.
+      # Inspect retained orphans before removal. minAge is rejected at render.
+      reclaim: onAssigned        # never | onAssigned (label-stage source cleanup)
 
     # Output of assign; input to deidentify under the default ingest engine.
     assigned:
       location: /data/assigned
       # never | onUploaded | onDeidentified
       #
-      # onUploaded    the data-policy engine removes this tree once the uploader
-      #               has written its marker for the session. Correct when the
+      # onUploaded    the staged-reclaimer proves the terminal tree against
+      #               XNAT before deletion; an upload log/marker is insufficient. Correct when the
       #               uploader READS this tree, i.e. de-identification is done in
       #               Orthanc.
       # onDeidentified  the deidentify STAGE removes each session itself, as soon
@@ -393,23 +414,32 @@ dataPolicy:
       minAge: 0
 
 
-    # Where the xnat-ingest deidentify stage writes, and what `upload` reads when
-    # ingest.deidentify.enabled. Rendered as a stage ONLY when that is on.
+    # With --unlink-source all, label and deidentify in 0.18.0+ retire every
+    # path in the input snapshot after success, including unprocessed files.
+    # Do not place files in staging session folders by hand. The separate
+    # facility backup follows the site retention policy; these stages do not
+    # verify it before they unlink input.
+    #
+    # Where the accessionflow deidentify stage writes, and what `upload` reads when
+    # deid.engine is ingest. Rendered only under that engine.
     #
     # WHY: without a row this tree is invisible to the engine, so it is absent
     # from stage_report and therefore from EdgeDiskLow, the only disk-exhaustion
     # alert on this tier. It is the tree that grows once de-identification is on,
     # so it was exactly the one the disk alert could not see.
     #
-    # CAUTION: report only by default. onUploaded cannot be satisfied in
-    # upload.mode=direct, because nothing writes the uploader's state dir, so
-    # setting it here would keep this tree forever while looking like a policy.
+    # With dataPolicy disabled, that engine reports without deleting. This
+    # stagedReclaimer block configures a separate proof-based cleanup job.
+    # The deidentified stage's auto condition resolves to onUploaded, or to
+    # onPackaged when packaging is enabled; no uploader marker is required.
     stagedReclaimer:
-      # Hourly. Under direct upload this CronJob is the ONLY deleter of the
-      # terminal tree: xnat-ingest upload never deletes what it sent.
+      # Hourly. This job performs the configured direct-upload terminal reclaim.
+      # The shipped store command does not unlink its input. Other customized
+      # cleanup paths still need separate review; this is not a global fence.
       schedule: "17 * * * *"
-      # OPTION: raise on a slow link. A session still uploading is protected by
-      # the XNAT check regardless, so this is about noise, not safety.
+      # Minimum retention is a recovery and capacity decision. XNAT proof is
+      # required, but a successful check does not remove every concurrent-write
+      # or source-completeness risk. Check actual session and reclaim timing.
       # GUIDING: the CronJob waits for the LONGER of this and the minAge of the
       # tree it reclaims (assigned or deidentified, by deid engine). Set the
       # recovery window there; it is logged as the deciding key when it wins.
@@ -467,7 +497,7 @@ dataPolicy:
     # Central S3 staging prefix. Owned by charts/mgmt (it lives in SeaweedFS,
     # not on this node) but configured here so a site has ONE data policy.
     #
-    # NOTE: onXnatConfirmed is not something xnat-ingest does for us — it has
+    # NOTE: onXnatConfirmed is not something accessionflow does for us; it has
     # no S3 retention at all, which is why staged sessions accumulate and are
     # re-listed every loop. charts/mgmt implements the reclaimer.
     s3Staged:
@@ -478,7 +508,8 @@ dataPolicy:
       verifyAgainstXnat: true
 
   # ---------------------------------------------------------------------
-  # TELEMETRY — contains no patient data. Tune freely for disk.
+  # TELEMETRY - session labels and messages can contain identifying data.
+  # Set retention and access according to the site logging policy and disk needs.
   # ---------------------------------------------------------------------
   telemetry:
     # LOKI AND PROMETHEUS RETENTION ARE NOT SET HERE. They live in their own
@@ -499,9 +530,9 @@ dataPolicy:
     # Setting loki/prometheus under telemetry is rejected at render, so the
     # mistake cannot be silent again.
     #
-    # podLogFiles stays: it has no counterpart anywhere. Nothing implements it
-    # yet — on-node pod log rotation is a kubelet setting and would be wired in
-    # scripts/06-join-edge-worker.sh.
+    # podLogFiles is implemented as kubelet size/count rotation at worker join.
+    # It is not a time-based retention promise, and changing values alone does
+    # not reconfigure an existing worker. Inspect its effective kubelet config.
     # ON-NODE POD LOG ROTATION, enforced by the kubelet on each edge worker.
     #
     # NOT a duration, and that is the kubelet's constraint rather than a choice.
@@ -512,7 +543,8 @@ dataPolicy:
     # This key used to read `retain: 14d`, which nothing implemented and nothing
     # could: it promised a time window the kubelet cannot express. Stating the
     # bound the kubelet actually enforces is the honest version — total on-disk
-    # log per container is maxSize x maxFiles, so 10Mi x 5 = 50Mi.
+    # nominal rotated-log budget is maxSize x maxFiles, so 10Mi x 5 = 50Mi.
+    # Rotation is asynchronous; this is not a strict instantaneous disk quota.
     #
     # Applied by scripts/06-join-edge-worker.sh via --kubelet-extra-args when the
     # worker is installed. CAUTION: it is a JOIN-TIME setting, so changing it
@@ -543,8 +575,9 @@ storage:
     capacity: 1500Gi
 
   # The archive of record, deliberately a SEPARATE volume from the pipeline
-  # one: a wedged or full pipeline volume must not be able to take the
-  # originals with it, and the two have completely different retention.
+  # one, with separate retention. Separate hostPath directories can still share
+  # one filesystem and fill together; independent failure capacity requires
+  # distinct backing storage, verified by the site operator.
   facilityBackup:
     enabled: true
     hostPath: /data/facility-backup
@@ -586,8 +619,9 @@ orthanc:
     nodePorts:
       dicom: 30042
       http: 30842
-    # ClusterIP keeps the REST API in-cluster only. Do not expose it without
-    # auth.enabled.
+    # Intended REST exposure. The current shared Service becomes NodePort if
+    # DICOM uses nodePort/both, exposing its HTTP port too. Check the rendered
+    # Service rather than relying on this value alone; keep authentication on.
     http: ClusterIP
 
   auth:
@@ -682,11 +716,17 @@ orthanc:
 # =============================================================================
 ingest:
   image:
-    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-    # repository when an upstream release contains them.
-    repository: ghcr.io/akshitbeniwal/xnat-ingest
-    tag: "0.16.2.post1"
+    # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+    # release replaces the fork build 0.16.2.post1. Validate each required fix;
+    # its version number alone does not prove behavioral equivalence.
+    # CAUTION: 0.18.0 renamed group-orthanc to collate-orthanc, group to
+    # collate, assign to label xnat, and XINGEST_* variables to ACFLOW_*.
+    # Version 0.19.0 renamed upload to store. Version 0.20.0 made collate a
+    # group: collate orthanc and collate folder, with no aliases for the old
+    # names (upstream MIGRATING.md). The templates follow this version:
+    # move the tag only together with them.
+    repository: ghcr.io/australian-imaging-service/accessionflow
+    tag: "0.20.0"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -714,14 +754,21 @@ ingest:
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2"
   #     - "git+https://github.com/Australian-Imaging-Service/fileformats-vendor-australianimagingservice.git@v0.1.2#subdirectory=extras"
   extraPipPackages: []
-  # Per-stage Kubernetes CPU/memory requests and limits. Empty resources leave
-  # these stages without chart-set reservations or limits, as before. Set each
-  # stage for the site's workload; do not infer production limits from a small
-  # test. See docs/components/xnat-ingest.md, Ingest stage CPU and memory.
+  # Per-stage Kubernetes CPU/memory requests and limits. MEASURED DEFAULTS
+  # (2026-11-10, accessionflow 0.19.0, 4 vCPU edge, one study of 12,098
+  # instances): docs/components/accessionflow.md, Ingest stage CPU and memory.
+  # A site key replaces only that key (Helm merges maps). null removes one key;
+  # `resources: null` removes them all.
+  # NO CPU LIMIT, on purpose: a CPU limit throttles the stage. The request is
+  # its share of the CPU when the node is busy.
 
   # Pull labelled studies out of Orthanc and group them into sessions.
   orthancGroup:
-    resources: {}
+    # Memory grows with the instances of a study: the files are hard-linked
+    # from Orthanc's storage, not read. Measured: 201 MiB for 12,098.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     enabled: true
     interval: 60
     # The configured ready label for the Lua stable-study callback. Under
@@ -737,7 +784,11 @@ ingest:
   # OFF by default — see dataPolicy.originals.fileDrop for why this path
   # deserves more care than the Orthanc one.
   fileDrop:
-    resources: {}
+    # Memory grows with ALL the files of one pass: it reads every header first.
+    # Measured: 340 MiB for 12,098 files.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     enabled: false
     interval: 300
     # Files in subfolders are read too: group runs with --recursive.
@@ -750,7 +801,11 @@ ingest:
   # AET routing is not used under ingest. constantProjectId can supply one
   # destination project for every session at a single-project site.
   assign:
-    resources: {}
+    # Memory grows with the instances of the largest session, not with the
+    # backlog. Measured: 310 MiB for 12,098.
+    resources:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 2Gi}
     interval: 60
     copyMode: hardlink_or_copy
     # OPTION: file every session under this one XNAT project, whatever the
@@ -770,7 +825,7 @@ ingest:
     # identifiers at the source. A project constant changes only the project.
     # Missing or empty required labels go to assigned/__invalid__; that input
     # still contains patient information and is not processed automatically.
-    # Use the guarded recovery procedure in docs/components/xnat-ingest.md.
+    # Use the guarded recovery procedure in docs/components/accessionflow.md.
     #
     # A mapping change can change destination placement without any recipe
     # change. Check the resulting labels and output headers on synthetic input
@@ -780,7 +835,7 @@ ingest:
 
     tagMapping: {}
 
-  # DEFAULT DE-IDENTIFICATION: xnat-ingest, between assign and upload.
+  # DEFAULT DE-IDENTIFICATION: accessionflow, between assign and upload.
   # Recipes are in specs below or an external ConfigMap with specFiles.
   # Under ingest, Orthanc receives original data and writes the enabled backup.
   # It does not route by AET, quarantine unknown AETs or modify the headers.
@@ -800,14 +855,20 @@ ingest:
   # backup script's startup prerequisite under ingest; it is not this salt.
 
   deidentify:
-    resources: {}
+    # NO DEFAULT MEMORY LIMIT, on purpose. deid 0.4.13 (in accessionflow 0.19.0 and 0.20.0)
+    # keeps every file it parses in memory until the pass ends (pydicom/deid#301):
+    # about 200 MiB + the bytes of the sessions in one pass. Measured: 1.6 GiB
+    # for one 0.9 GB study. A fixed limit stops a larger session on every pass.
+    # OPTION: limits: {memory: <size>} if the node runs other work (see the docs).
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
     interval: 60
     copyMode: hardlink_or_copy
     # THE RECIPES. Write the complete site policy here. The chart builds the
     # ConfigMap and mounts it at the required project/format paths, so a
     # fresh install needs no kubectl and no pre-existing namespace.
     #
-    # Key is the path under SPEC_DIR, value is the recipe:
+    # Key is the path under RECIPE_DIR, value is the recipe:
     #
     #   specs:
     #     "__default__/medimage/dicom-series": |
@@ -827,7 +888,7 @@ ingest:
     # ALTERNATIVE, for a ConfigMap you manage yourself (sealed-secrets, an
     # external pipeline, recipes too large to sit in the site file). Set both,
     # and specs above must be empty. specFiles maps <ConfigMap key> -> <path
-    # under SPEC_DIR>, doing by hand what specs does automatically.
+    # under RECIPE_DIR>, doing by hand what specs does automatically.
     specConfigMap: ""
 
     # KUBERNETES CANNOT STORE THESE FILENAMES DIRECTLY. A ConfigMap key is
@@ -850,7 +911,7 @@ ingest:
     # reidentification maps; existing plaintext is not migrated automatically.
     reidEncryptKeySecret: ""       # key: XINGEST_REID_ENCRYPT_KEY
 
-  # Repackage each de-identified session for XNAT. Runs `xnat-ingest package`
+  # Repackage each de-identified session for XNAT. Runs `accessionflow package`
   # between deidentify and upload: reads /data/deidentified, writes
   # /data/packaged, and the uploader follows it to /data/packaged.
   #
@@ -865,14 +926,14 @@ ingest:
   # output, which exists only under that engine. Under any other engine this
   # block is ignored and the uploader reads /data/assigned as before.
   #
-  # A session without a sourceDatatype scan resource is skipped at INFO and
-  # stays in /data/deidentified. xnat-ingest PR #217 passes it through.
+  # A session without a sourceDatatype scan resource passes through unchanged
+  # in 0.20.0 (api/package_api.py:144). This support came from xnat-ingest PR #217.
   # An empty input directory is normal while waiting for new work.
   package:
     enabled: false
-    # Runs on ingest.image.tag like every stage. No released xnat-ingest
-    # runs the default spec yet: 0.16.2 stops at start. See the What it needs
-    # section in docs/package-stage.md for all required features.
+    # Runs on ingest.image.tag like every stage. The 0.20.0 image has the
+    # required library versions (the same as 0.19.0). Install the AIS vendor extra package for
+    # the default conversions. See What it needs in docs/package-stage.md.
     interval: 60
     copyMode: hardlink_or_copy
     sourceDatatype: medimage/dicom-series
@@ -893,8 +954,12 @@ ingest:
         spec: medimage/vnd.australianimagingservice.dicom-sample
 
   # Attach Siemens side files (twix / rda / puls) to an assigned session.
-  # Idle `sleep infinity` when there are none, so off unless needed.
+  # Historical placeholder only: enabled is rejected by current validation.
+  # No functional attach stage is supplied until matching CLI arguments exist.
   associate:
+    # NOT SUPPORTED YET: the chart refuses enabled: true. accessionflow attach
+    # needs the raw-file location (GLOB) and a session match (ID_PATTERN) that
+    # this chart does not provide yet.
     enabled: false
     datatypes: "medimage/vnd.siemens.syngo-mr.xa.twix;medimage/vnd.siemens.syngo-mr.xa.rda;medimage/vnd.siemens.syngo-mr.xa.puls"
     copyMode: hardlink_or_copy
@@ -914,17 +979,19 @@ upload:
   direct:
     replicas: 1
     existingSecret: xnat-credentials    # keys: server, username, password
-    # Poll interval. Every other stage in the pipeline runs at 60, so a large
-    # value here is the whole delivery latency. It is also NOT the only wait: a
-    # session touched within waitPeriod is skipped for the WHOLE next cycle, so
-    # the worst case is loop + waitPeriod, not loop. Both shipped site files
-    # use 60.
+    # Poll interval for store xnat. Each pass subtracts the time spent working
+    # before it sleeps. It is one part of delivery latency: waitPeriod also
+    # delays sessions whose source was modified recently. A skipped session
+    # waits for a later pass. Long uploads and retries can extend the delay;
+    # loop + waitPeriod is not a strict worst-case bound. Both shipped site
+    # files use 60 for this interval.
     loop: 120
     waitPeriod: 60
     # CAUTION: this also feeds an alert. The SessionUploadStalled rule detects a
     # started-but-never-finished upload by matching the uploader's log line
     #   "Including <alwaysInclude> scans/files in upload from '<session>'"
-    # and upload_api.py only emits it `if always_include`. Setting this to "" is a
+    # and stores/xnat/api/store_api.py emits it `if always_include`. Setting this
+    # to "" is a
     # legitimate choice, but it removes that signal and the stall alert then never
     # fires. Nothing else notices: no render error, no runtime error, just an alert
     # that has quietly stopped watching the delivery path.
@@ -938,10 +1005,11 @@ upload:
     tempDir: /data/tmp
     resources:
       requests: {memory: 256Mi, cpu: 100m}
-      # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
-      # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
-      # session with many large scans. Lower this only after the image
-      # writes archives to disk (xnat-ingest PR #200).
+      # CAUTION: accessionflow 0.20.0 (as 0.19.0) calls xnat 0.8.1 upload_dir. Its
+      # tar_file/tgz_file methods use a 256 MiB SpooledTemporaryFile. Up to
+      # 10 workers can hold archives at once, as in the older 0.16.2 warning.
+      # Do not assume the fork archive fix (xnat-ingest PR #200) is present.
+      # Keep this limit until memory and temporary disk use are measured.
       limits:   {memory: 4Gi,   cpu: "1"}
 
 
@@ -1026,8 +1094,9 @@ observability:
     # directly, so they are not blocked by Helm's inability to template subchart
     # values.
     alerting:
-      # Empty is allowed: the stack installs and the dashboards work, nothing is
-      # mailed. Set it to start receiving alerts.
+      # Required by the presence guard when BOTH observability.enabled and
+      # stack.enabled are true. Stack-only rendering bypasses that guard; an
+      # empty mail destination must not be interpreted as working alert delivery.
       emailTo: ""
       emailFrom: ""
       smtpHost: ""
@@ -1110,6 +1179,10 @@ loki:
   # would leave Vector retrying an address that never resolves — with logs
   # silently never arriving, which looks exactly like a quiet site.
   fullnameOverride: ais-loki
+  # The pinned Loki subchart inherits automatic PVC deletion on StatefulSet
+  # deletion and scale-down (Delete/Delete). This differs from main's explicit
+  # Retain/Retain override. Back up logs before uninstall or storage migration;
+  # the pipeline PVC keep annotations do not cover every subchart resource.
   deploymentMode: SingleBinary
   loki:
     auth_enabled: false                   # single node, no tenants, no ingress
@@ -1123,7 +1196,7 @@ loki:
     storage:
       type: filesystem                    # NO bucketNames, NO credentials
     limits_config:
-      retention_period: 30d               # kept in step with stack.retentionDays
+      retention_period: 30d               # authoritative; no parent retentionDays key
       reject_old_samples: true
       reject_old_samples_max_age: 168h
       max_global_streams_per_user: 10000
@@ -1149,8 +1222,8 @@ loki:
         #   error initialising module: ruler-storage
         # and Loki CRASHLOOPED — no log storage, and because every pipeline
         # alert on this tier is Loki-sourced, no alerts at all. No render check
-        # could have caught it: the path is only wrong relative to where the
-        # SUBCHART mounts things, which is invisible to `helm template`.
+        # exercised startup, but a targeted rendered-manifest check can compare
+        # writable mounts and security context. Runtime validation remains useful.
         local: {directory: /rules}
       rule_path: /var/loki/rules-runtime
       # MUST MATCH the Alertmanager Service the kube-prometheus-stack subchart
@@ -1223,9 +1296,9 @@ kube-prometheus-stack:
   prometheus:
     prometheusSpec:
       retention: 30d
-      # SELECT EVERYTHING IN THIS RELEASE. The subchart defaults to selecting
-      # only rules carrying its own release label; the chart's own
-      # PrometheusRules set it explicitly instead.
+      # Select all rules across namespaces with the resulting empty selectors.
+      # The custom PrometheusRules intentionally carry no release label; false
+      # prevents the subchart from requiring its own release label implicitly.
       ruleSelectorNilUsesHelmValues: false
       serviceMonitorSelectorNilUsesHelmValues: false
       storageSpec:
@@ -1236,6 +1309,10 @@ kube-prometheus-stack:
             resources: {requests: {storage: 20Gi}}
   alertmanager:
     alertmanagerSpec:
+
+      # Review 2026-11-10: inherited retention is 120h, shorter than 720h
+      # repeat routes. Notification history may expire before the repeat
+      # interval; month-long suppression is not guaranteed by this config.
       # BOTH OF THESE ARE LOAD-BEARING, and templates/observability.yaml fails
       # the render without them.
       #
@@ -1255,7 +1332,8 @@ kube-prometheus-stack:
             storageClassName: local-path
             accessModes: ["ReadWriteOnce"]
             resources: {requests: {storage: 5Gi}}
-  # Scrape targets that do not exist on a single k0s node. Left on, they produce
+  # Scrape endpoints not configured for this installation; controllers exist
+  # even where their expected upstream monitor endpoint is unavailable. Left on, they produce
   # permanently-firing "target down" noise that trains operators to ignore
   # Alertmanager.
   kubeControllerManager: {enabled: false}

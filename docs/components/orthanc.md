@@ -1,12 +1,14 @@
 # Orthanc
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## Overview
 
 [Orthanc](https://www.orthanc-server.com/) is a lightweight,
 open-source DICOM server. In this tier-1 single-node appliance it acts as the
 **DICOM receiver** for local modalities. Under the default ingest engine it
 stores original instances. The enabled backup callback writes a separate copy;
-xnat-ingest de-identifies later, after assignment.
+accessionflow de-identifies later, after assignment.
 
 We use the [`jodogne/orthanc-plugins`](https://hub.docker.com/r/jodogne/orthanc-plugins)
 image, pinned in `orthanc.image.tag` (currently `1.12.11`). It must stay
@@ -14,6 +16,13 @@ at or above 1.12.0 for the **study-level labels** used by grouping and cleanup.
 Labels record processing state; they are not a de-identification certificate.
 
 ## Role in this stack
+
+The backup callback immediately returns unless `origin.RequestOrigin` is
+`DicomProtocol`. A REST POST to Orthanc can test storage and downstream stages,
+but it does **not** test facility-backup creation. File drops also bypass that
+callback. Use a synthetic C-STORE send and inspect the archived file when
+validating the backup path. A successful receive does not prove the backup,
+assignment or de-identification succeeded.
 
 Three jobs apply to the default ingest pipeline:
 
@@ -62,7 +71,7 @@ Do not treat a successful C-STORE response as proof that a separate backup copy
 exists, that a study was assigned, or that de-identification succeeded.
 
 The group stage uses processed state to avoid exporting unchanged input on every
-pass. The pinned `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` image includes
+pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.20.0` image includes
 snapshot support. It writes a label of the form
 `xnat-ingest-processed-<LastUpdate>-<digest>`. A processed study whose update
 state changed can be staged again. This is important when a later series arrives
@@ -84,6 +93,16 @@ image, data policy and current source state together before interpreting a
 cleanup log. The filesystem path is useful for capacity reporting, but deleting
 UUID-named files directly would bypass Orthanc's index and the export checks.
 
+The delete is one `POST /tools/bulk-delete` with the instance ids of the study.
+The engine sends that body from a file, so the size of the study does not
+matter. The time limit of the delete is 30 s (the engine's `HTTP_TIMEOUT`) +
+1 s per 100 instances: Orthanc took 34 s for 12,098 instances on the test edge
+(2026-11-10). A delete that Orthanc does not confirm logs `reclaim_failed` with
+`curl_exit`: 22 means that Orthanc answered 400 or more, 28 that it did not
+answer in time. Before 2026-11-10 the body went on curl's command line, which
+holds at most 128 KiB, so a study of more than about 2,780 instances was never
+deleted (logged as `Orthanc refused the delete`).
+
 The deprecated Lua de-identification mode is documented only in
 [Deprecated Orthanc Lua engine](deidentification.md#deprecated-orthanc-lua-engine).
 Its project map, hash and quarantine path do not run in the ingest
@@ -94,13 +113,13 @@ the script is loaded. Keep ingest for new sites.
 
 | Resource | Why |
 |---|---|
-| Node port 4242 (`hostPort`, from `orthanc.expose.dicom`) | Modality C-STORE inbound from local facility LAN. Binding the real port pins the pod to the node — which is why the Deployment strategy is `Recreate` |
-| PVC `<release>-pipeline` mounted at `/data` | Backed by a hostPath PV at `storage.pipeline.hostPath` (`/data/xnat-ingest`). Holds `orthanc-storage/`, `grouped/`, `assigned/`. **One filesystem for all stages** so hardlinks work (cross-fs hardlink fails with EXDEV) |
-| PVC `<release>-facility-backup` mounted at `/facility-backup` | Backed by hostPath `storage.facilityBackup.hostPath`. Canonical local copy of every received original DICOM, written as `<PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm`. Site-controlled retention. Independent of AIS lifecycle |
+| Node port 4242 (`hostPort`, from `orthanc.expose.dicom`) | Modality C-STORE inbound from local facility LAN. The port can be bound only once per node; scheduling and PV placement choose the node, while Recreate avoids overlapping receiver pods |
+| PVC `<release>-pipeline` mounted at `/data` | Backed by a hostPath PV at `storage.pipeline.hostPath` (`/data/xnat-ingest`). Holds `orthanc-storage/`, `grouped/`, `assigned/`. **One pipeline PVC for all stages** so hardlinks work (cross-fs hardlink fails with EXDEV) |
+| PVC `<release>-facility-backup` mounted at `/facility-backup` | Backed by hostPath `storage.facilityBackup.hostPath`. Byte copy of successfully archived DICOM-protocol input, written as `<PatientID>/<StudyUID>/<SeriesUID>/<SOPUID>.dcm`. Site-controlled retention. Kept by default; the original-expiry policy can remove patient directories only when its explicit enable/expiry gates are armed. |
 | Three ConfigMaps at TWO paths | `<release>-orthanc-config` → `/etc/orthanc/orthanc.json`, `<release>-orthanc-scripts` → `/etc/orthanc/scripts/`, `<release>-orthanc-routing` → `/etc/ais-edge/` (routing.json + deidentification-profile.json). See Configuration for why the second path exists |
 | One Secret env var | `AIS_DEID_HMAC_SALT` from `orthanc.deid.existingSaltSecret` (`orthanc-deid-salt`); required when the backup script loads; its value is unused for ingest labels or recipe output |
-| Optionally Secret `orthanc-credentials` | Only when `orthanc.auth.enabled` is true; mounted as `/etc/orthanc/users.json`. The tier-1 example site leaves auth off because the REST API is ClusterIP-only **Enabling it: see the step-by-step in [TOUR.md](../TOUR.md) (section 3) or the README's *Orthanc REST API Authentication* section; the Secret needs THREE keys (`users.json`, `orthanc-user`, `orthanc-password`), and a Secret with only the last two installs cleanly and then stops Orthanc from starting.** |
-| No outbound network | Doesn't talk to XNAT, doesn't talk to other AIS pods. Traffic is inbound only: `group-orthanc` REST-pulls over the in-cluster Service, and the data-policy reporter queries it when `dataPolicy.derived.orthancStorage.backend` is `orthanc-rest` |
+| Optionally Secret `orthanc-credentials` | Only when `orthanc.auth.enabled` is true; mounted as `/etc/orthanc/users.json`. The tier-1 example leaves auth off; ClusterIP does not authenticate callers. **Enabling it: see the step-by-step in [TOUR.md](../TOUR.md) (section 3) or the README's *Orthanc REST API Authentication* section; the Secret needs THREE keys (`users.json`, `orthanc-user`, `orthanc-password`), and a Secret with only the last two installs cleanly and then stops Orthanc from starting.** |
+| No application forwarding configured | Orthanc is the receiver; downstream stages call its REST API. The chart does not enforce an egress NetworkPolicy, so this is not a network isolation guarantee. |
 
 ## Where it runs
 
@@ -112,8 +131,9 @@ and installed by step 3 of `./install.sh <site>`.
 
 REST API exposed as a ClusterIP Service
 `<release>-orthanc.xnat-ingest.svc.cluster.local:8042` (this is how
-`xnat-ingest group-orthanc` REST-pulls; `<release>` is the site name unless
-`AIS_RELEASE` overrides it). DICOM port 4242 is exposed via `hostPort` directly
+`accessionflow collate orthanc` queries metadata and updates labels; it reads
+DICOM bytes from the shared local store). `<release>` is the site name unless
+`AIS_RELEASE` overrides it. DICOM port 4242 is exposed via `hostPort` directly
 on the node's IP so modalities can reach it without an in-cluster Service —
 `orthanc.expose.dicom` can be switched to `nodePort` or `both` instead.
 
@@ -137,16 +157,17 @@ from the site values. The table separates these responsibilities.
 
 The Lua hook itself,
 [`charts/edge/files/deidentify-and-forward.lua`](../../charts/edge/files/deidentify-and-forward.lua),
-is **identical across all AIS-Edge deployments** — no site-specific bits. It is
+is **shared chart source across sites using this chart revision** ; no site-specific bits. It is
 loaded with `.Files.Get` rather than inlined so it stays lintable and diffable.
 
 **Why routing.json and the profile are NOT under `/etc/orthanc`.** Orthanc is
 started with a directory argument and reads *every* `*.json` in it as server
-configuration — verified on a running edge, it happily read `routing.json` and
-`deidentification-profile.json` as settings. Nothing collides today, but the
+configuration. A historical live observation, date not recorded, showed
+`routing.json` and `deidentification-profile.json` being read as settings. That
+observation was not replayed on 2026-11-10. Even if no key currently collides, the
 scan order is filesystem order, so a future key that does collide would silently
 reconfigure the server. So `/etc/orthanc/` holds only `orthanc.json` and
-`scripts/`, and the hook reads its own inputs from `/etc/ais-edge/` via
+`scripts/`, plus optional `users.json` when authentication is enabled. The hook reads its own inputs from `/etc/ais-edge/` via
 `AIS_ROUTING_FILE`.
 
 **The pod rolls itself when the config changes.** The Deployment carries a
@@ -200,6 +221,17 @@ storescu -aec AISEDGE -aet TEST_MOD <nodeIP> 4242 /path/to/study/*.dcm
 ```
 
 ## Known limitations
+
+- **The Service exposure switches share one Service.** If either DICOM or
+  HTTP selects `nodePort`, the Service type becomes NodePort for both ports.
+  Kubernetes can allocate an HTTP node port even when `.http` is `ClusterIP`,
+  because that value merely omits an explicit nodePort number in this template.
+  Inspect the rendered and live Service and restrict access; do not use the
+  HTTP selector alone as proof that port 8042 is internal.
+- **One receiver Deployment per release.** It has one replica and uses Recreate.
+  A hostPort prevents two pods using the same host port on one node, but does
+  not itself bind the pod to a named node or create one receiver per worker.
+  Review scheduling rules and the node-local PV placement on multi-node edges.
 
 - **Original data remains in Orthanc.** Ingest de-identifies downstream. Treat
   the receiver store, grouped and assigned trees as identifying data. The

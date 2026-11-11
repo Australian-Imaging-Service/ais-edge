@@ -1,18 +1,28 @@
 # De-identification
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Use `deid.engine: ingest` for new sites. See
 [choosing-a-deid-engine.md](../choosing-a-deid-engine.md) for the source-data
 checks. This page explains the default pipeline and its configuration.
 
 ## Overview
 
+**Review date: 2026-11-10.** This page describes the pinned accessionflow
+0.20.0 implementation. The facility-backup write in `OnStoredInstance` is
+limited to `RequestOrigin == "DicomProtocol"`. REST uploads and file-drop
+input do not get that backup copy. Verify the retained originals separately
+from recipe output. Orthanc/Lua de-identification was deprecated on 2026-11-02;
+that decision does not deprecate Orthanc as the DICOM receiver.
+
 Orthanc receives network DICOM on port 4242. With the default
 `deid.engine: ingest`, it stores the input unchanged. If the facility backup is
-enabled, its Lua callback also copies each original to that backup. The callback
+enabled, its Lua callback attempts a backup for each DICOM-protocol
+instance. REST input returns before that write. The callback
 then returns before the AET lookup. It neither routes by AE title nor quarantines
 an unknown AET in this mode.
 
-xnat-ingest performs de-identification after assignment and before upload:
+accessionflow performs de-identification after assignment and before upload:
 
 | Stage | Input | Output and purpose |
 |---|---|---|
@@ -77,7 +87,7 @@ at that point. Its original patient information remains on disk. No later stage
 processes this holding directory automatically. The `InvalidSessionAssigned`
 alert reports the assignment error when the observability stack is enabled.
 Use the guarded recovery procedure in
-[xnat-ingest.md](xnat-ingest.md#recovering-an-invalid-session), then correct the
+[accessionflow.md](accessionflow.md#recovering-an-invalid-session), then correct the
 source mapping so the next study does not fail in the same way.
 
 **AE titles do not choose the project.** Under ingest, Orthanc does not consult
@@ -87,9 +97,10 @@ entry. Use the network boundary to restrict senders. Use source tags or the
 constant project to select XNAT placement.
 
 **A recipe cannot change an assigned label.** `assign` takes values from the
-source metadata. `ImagingSession.new_empty()` preserves `project_id`,
-`subject_id` and `session_id` while deidentify builds a new session. The saved
-directory and the uploader use those IDs. Changing PatientID in the output
+configured metadata mappings or constants. `Accession.new_empty()` preserves
+the `uid`, `labels`, `store_type` and `run_uid` while deidentify builds a new
+accession. It also copies custom `fields`. The saved directory and
+`accessionflow store xnat` use those labels. Changing PatientID in the output
 DICOM therefore does not change the subject label already stored in the session.
 
 With `subject: PatientID`, a raw MRN becomes an XNAT label even when the recipe
@@ -125,7 +136,7 @@ harder for a reader without the secret, but the transform, input space, secret
 handling and collision policy all matter. Do not describe a value as one-way
 only because it looks random or has a fixed number of hexadecimal characters.
 
-The pinned xnat-ingest CLI documents two recipe sidecars:
+The pinned accessionflow CLI documents two recipe sidecars:
 
 ```
 MYPROJECT/medimage/dicom-series
@@ -148,7 +159,8 @@ output. Changing it does not re-pseudonymise ingest sessions. Do not use this
 variable as evidence that the ingest recipe performs salted hashing.
 
 The older [issue #143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143)
-concerns the `ais_deid` package in the 0.13.1 image and remains open. The current
+concerns the `ais_deid` package in the historical 0.13.1 image and remains
+open as checked on 2026-11-10. The current
 image's recipe/sidecar interface must be assessed separately. Its existence
 does not justify assuming that a current recipe hashes PatientID, or that a
 `DEID_SALT` environment variable is connected to the chart.
@@ -267,8 +279,9 @@ Lua de-identification mode is deprecated.
 
 The Lua engine combines several jobs in one callback. It selects a project,
 constructs subject/session codes, modifies headers, and applies a ready label.
-These jobs are absent from the callback under ingest. The backup copy still
-runs when `storage.facilityBackup.enabled` loads the script.
+Routing and modification are absent under ingest. The separate stable-study
+callback can still label studies. The backup write runs only for
+DICOM-protocol arrivals when the backup feature loads the script.
 
 **Existing configuration.** The old `orthanc.deid.enabled` key is not the
 engine selector. The current selector is the top-level `deid.engine`. For
@@ -291,7 +304,8 @@ profile, AET map, named salt Secret and enabled facility backup for this engine.
 It also requires `deid.policyReviewed: true`. The profile is passed to Orthanc
 `/modify`; its syntax is different from the ingest recipe syntax.
 
-**Routing uses the called AET.** The script looks up
+**Routing uses the called AET for DICOM-protocol arrivals.** REST input
+bypasses this path. The script looks up
 `routing.AETMap[origin.CalledAet]`, the title that the sender addressed. It does
 not look up the scanner's calling title. A missed entry writes the original
 under `/facility-backup/__unmapped_aet__/<AET>/...` before deleting the instance
@@ -362,7 +376,7 @@ not proof that every instance is safe. It depends on the hook and its profile.
 The ingest pipeline omits this filter and performs de-identification later.
 Do not copy this mode's label requirement into an ingest deployment.
 
-## Configuration: xnat-ingest deidentify
+## Configuration: accessionflow deidentify
 
 ### 1. Write the recipes
 
@@ -384,10 +398,10 @@ identifier becomes a PATH rather than a filename: `medimage/dicom-series` is a
 directory `medimage` holding a file `dicom-series`.
 
 The installed `load_recipe_files` function walks
-`<spec-dir>/<category>/<format>` and skips anything at the top level that is not
+`<project-or-default-recipe-dir>/<category>/<format>` and skips anything at the top level that is not
 a directory, so a flat file named `medimage@dicom-series.json` is never read.
 If no project or fallback recipes are found, the stage raises an error. The
-message starts with "No deidentification recipe files found for project".
+message starts with "No deidentification recipe files found for".
 The input remains in `/data/assigned` for investigation.
 
 **The file is a pydicom `deid` recipe, not JSON. It needs no extension:**
@@ -458,7 +472,7 @@ ingest:
         REMOVE PatientID
 ```
 
-The key is the path under `SPEC_DIR`; the value is the recipe. Changing a
+The key is the path under `RECIPE_DIR`; the value is the recipe. Changing a
 policy later is a `helm upgrade` with the edited site file — still no
 `kubectl`.
 
@@ -575,14 +589,15 @@ On this branch (tier-1) the node uploads straight to XNAT, so `deidentify` sits 
 uploader moves it on to XNAT, so the chain is longer:
 
 ```
-tier-1   orthanc -> group -> assign -> deidentify -> upload ------------> XNAT
-tier-2   orthanc -> group -> assign -> deidentify -> rclone -> S3 -> mgmt xnat-upload -> XNAT
+tier-1   orthanc -> group -> assign -> deidentify -> [package] -> upload ------------> XNAT
+tier-2   orthanc -> group -> assign -> deidentify -> [package] -> rclone -> S3 -> mgmt xnat-upload -> XNAT
 ```
 
 The placement is the same either way — immediately before whatever carries data
 off the node — and the chart handles it with one helper, so no extra
 configuration is needed. `upload` and the rclone S3 uploader both read
-`edge.uploadSourceDir`, which becomes `/data/deidentified` when the stage is on.
+`edge.uploadSourceDir`. It selects `/data/deidentified` for ingest, or
+`/data/packaged` when the optional package stage is enabled.
 
 This ordering matters on tier-2: the default data path runs the recipe before
 S3 upload. The recipe and source labels still determine what leaves the site.
@@ -597,7 +612,7 @@ Two other differences, if you also run the tier-2 (cloud) deployment from the
   (`charts/mgmt/files/loki-ruler-rules.yaml`), because tier-2 runs Loki centrally
   and edges ship to it. On this branch they are in
   `charts/edge/files/loki-ruler-rules.yaml`, since a single node runs everything.
-* `xnat-ingest` is pinned in **both** charts there — `charts/edge` for the
+* `accessionflow` is pinned in **both** charts there; `charts/edge` for the
   pipeline stages and `charts/mgmt` for the S3 -> XNAT uploader, and both must
   move together because the CLI contract is shared. On this branch there is one
   chart and one pin.
@@ -648,7 +663,8 @@ resource manifests and upload results before changing paths or cleanup rules.
 
 The old output-layout blocker in
 [#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144)
-was reported for 0.13.1 and is closed. The pinned image publishes sessions at
+was reported for 0.13.1 and closed on 2026-08-31; upstream status was
+checked on 2026-11-10. The pinned image publishes sessions at
 `/data/deidentified/<project>.<subject>.<session>/`, with the scan and resource
 directories below that session. Upload reads that root directly. There is no
 need to flatten an extra session directory by hand, and doing so can damage
@@ -667,10 +683,21 @@ input until the intended destination has been checked.
 
 ## Version notes
 
-This branch pins `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`.
+The package namespace is `accessionflow`. Current CLI examples use
+`accessionflow label xnat` and `accessionflow deidentify`. The source-retirement
+and sidecar behavior described in the [component guide](accessionflow.md#source-retirement-and-metadata-in-0190)
+also applies here. Under `--unlink-source all`, unprocessed files in the input
+snapshot can be removed after success; keep session folders pipeline-managed.
+The facility backup remains separate from this cleanup. It is written only
+for DICOM-protocol input when the callback succeeds, and its own retention
+policy may remove copies later. `--unlink-source all` does not prove that
+an original or encrypted mapping remains recoverable.
+
+This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.20.0`.
 The locally inspected image has image ID
-`sha256:f5df17d3b05774fbad5c319adfe726a4e3b9333512fa495bb9fbfa6d68e5058c`
-and reports package version `0.16.3.dev49+ais.20261021.r13.g3182cc6`.
+`sha256:8da884b0ea8cd8804e06b9c2a76fa0a8e78ff3c70c93c3a828c9c04777f319ac`
+and reports package version `0.20.0`. The former fork image reported
+`0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
 The registry tag and installed package version are different identifiers.
 Record the deployed digest when checking a site; do not infer a live version
 from this documentation alone.

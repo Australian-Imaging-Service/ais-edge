@@ -1,5 +1,7 @@
 # Alerting architecture — Loki ruler for pipeline events, Prometheus for K8s state
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 ## TL;DR
 
 Pipeline-event alerts (upload failures, stalled sessions, XNAT backlog, DICOM
@@ -24,8 +26,8 @@ natural source of truth for each alert**, not about network topology.
 
 Two kinds of signal, two natural homes:
 
-1. **Pipeline events are JSON log lines.** `xnat-ingest group-orthanc`,
-   `xnat-ingest assign`, the `xnat-ingest upload` pod and the data-policy
+1. **Pipeline events are JSON log lines.** `accessionflow collate orthanc`,
+   `accessionflow label xnat`, the `accessionflow store xnat` pod and the data-policy
    reporter emit structured events (`{event: "upload_failed", session: "...",
    ...}`). The source of truth for "did an upload fail?" is the event itself, not
    a synthesised counter. Counting events in LogQL with `count_over_time` is the
@@ -41,8 +43,8 @@ Two kinds of signal, two natural homes:
    reason to route these through logs — a `PrometheusRule` is the right tool.
 
 Because everything is on one node, Prometheus *could* in principle scrape a
-metrics endpoint if xnat-ingest exposed one. It doesn't today (see the future
-enhancements in [`components/xnat-ingest.md`](components/xnat-ingest.md)), and
+metrics endpoint if accessionflow exposed one. It doesn't today (see the future
+enhancements in [`components/accessionflow.md`](components/accessionflow.md)), and
 even if it did, the JSON event is a richer, more direct source for
 pipeline-event alerts. So we keep pipeline alerts in the Loki ruler.
 
@@ -65,8 +67,7 @@ alertmanager_url: http://ais-kps-alertmanager.{{ .Release.Namespace }}.svc.clust
 ```
 
 The `{{ .Release.Namespace }}` resolves because the Loki chart renders its whole
-config through `tpl`; the Service name cannot, which is exactly why it is pinned
-rather than derived.
+config through `tpl`; this chart supplies a fixed Service name in that URL. A different name could be templated deliberately, but renaming the dependency alone does not update this literal.
 
 **This coupling fails silently.** Point the ruler at a name that does not
 resolve — which is what happens by default, since the un-overridden name would
@@ -85,13 +86,13 @@ with `.Files.Get` and Helm never templates it.
 | Upload failing / retry storm | Loki ruler | Derived from `event="upload_failed"` vs `event="upload_completed"` JSON events on the upload pod (`{component="upload"}`). |
 | Session upload stalled | Loki ruler | `event="upload_started"` without a matching `event="upload_completed"` per session. |
 | XNAT backlog growing | Loki ruler | Completed-upload rate drops while assign keeps producing — sessions piling up in `/data/assigned`. |
-| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Invalid IDs found`), `{component="assign"}`. |
-| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. Missing-ID diagnostics remain with `DICOMValidationFailureSpike`; redundant assign summaries are suppressed. |
-| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for xnat-ingest de-identification. |
+| DICOM validation failure spike | Loki ruler | Pattern match on assign-pod `ERROR` lines (`Could not resolve the labels of` in 0.20.0), `{component="assign"}`. |
+| `IngestStageError` | Loki ruler | ERROR/CRITICAL stream severity or a decoded Python traceback from `group`, `group-fs`, `assign`, or `package`, grouped by edge and stage. The 0.20.0 missing-ID diagnostic is covered by `InvalidSessionAssigned`; the older `DICOMValidationFailureSpike` text filter is not equivalent; redundant assign summaries are suppressed. |
+| `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `EdgeDiskLow` | Loki ruler | `stage_report.free_pct` from the data-policy DaemonSet, `{component="data-policy"}`. It is the only disk-exhaustion signal for the pipeline volumes. |
 | `QuarantinedDataUnresolved` | Loki ruler | `stage_report.oldest_age_s` for a retained `__unmapped_aet__` subtree. Ingest creates no unknown-AET quarantine entries. Preserve historical content and consult the deprecated-engine reference before resolving it. |
 | `DataPolicyReporterSilent` | Loki ruler | No `stage_report` at all from `{component="data-policy"}` for this site's `clusterLabel` in max(30m, 3 × `dataPolicy.reporter.interval`). The three rows above read only those lines, so this is what says they have gone blind. Rendered only while `dataPolicy.reporter.enabled` is true. |
-| `XNATRepairAttempted` | Loki ruler | xnat-ingest's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. xnat-ingest logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
+| `XNATRepairAttempted` | Loki ruler | accessionflow's `Repaired N incomplete resource(s)` line on `{component="upload"}`: XNAT already held the session with files missing, and the uploader tried to re-send them. accessionflow logs that line whether or not the re-send worked, so the alert claims only the attempt; a repair that keeps failing raises `XNATUploadRetryStorm`. `XNATUploadSuccess` leaves those sessions out for 20m, so a repair is not normally mailed as "upload completed"; a new pass for the same session inside those 20m is not mailed either. |
 | `ReclaimerRunUnavailable` | Loki ruler | The staged-reclaimer's run-level `reclaim_unavailable` with no `reclaim_finished` since, for 75m, `{component="s3-reclaimer"}`. Shared with tier-2; it needs the CronJob's pod labels, which CI checks. |
 | `SessionStagedNotConfirmedInXNAT` | Loki ruler | A session the reclaimer saw 48 to 72h ago and has never confirmed in XNAT since. Shared with tier-2. |
 | `KubeNodeNotReady` | Prometheus | `kube_node_status_condition` from kube-state-metrics. |
@@ -99,14 +100,13 @@ with `.Files.Get` and Helm never templates it.
 | `KubePodNotReady` | Prometheus | Covers Orthanc and the ingest Deployments; readiness is already a metric. |
 | `KubePersistentVolumeFillingUp` | Prometheus | `kubelet_volume_stats_*` for the observability PVCs. |
 | `KubeJobFailed` | Prometheus | The upstream rule is switched off and re-added in `ais-edge-warning` without this release's own staged-reclaimer Jobs. A failed Job is kept, so one self-healing reclaimer failure used to keep this firing for days; `ReclaimerNotSucceeding` and `ReclaimerRunUnavailable` cover those instead. |
-| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's xnat-ingest upload container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
+| `XNATUploaderRestarted` | Prometheus | A restart-counter increase in 15 minutes for this release's accessionflow store xnat container. Reports the last termination reason, including `OOMKilled`, and still fires after recovery. A retained reason alone cannot keep it firing. Uses firing-only email and separate groups per uploader. |
 | `XNATUploaderMemoryGrowing` | Prometheus | RSS grows faster than 32 MiB per six hours across both six-hour and fifteen-minute trends, exceeds 25% of its configured memory limit, and the container has run for six hours. Held for one more hour. Excludes filesystem cache and brief upload peaks; growth merits investigation but does not prove a leak. Missing or unlimited memory limits do not trigger this rule. |
 | `ReclaimerNotSucceeding` | Prometheus | `kube_cronjob_status_last_successful_time` for this release's staged-reclaimer CronJob: no successful run for `dataPolicy.derived.stagedReclaimer.alertAfter` (3h), or since creation if it never has. It sees the failures that log nothing (deadline kill, OOM, crash, image pull, never scheduled), which `ReclaimerRunUnavailable` cannot, and clears on the next good run. An inhibit rule holds it back while `ReclaimerRunUnavailable` fires, so one outage raises one alert rather than two (a firing mail and its resolve, one pair per logged reason). |
 | `CPUThrottlingHigh` | Prometheus | kube-prometheus-stack's rule, unmodified. The data-policy reporter carries no CPU limit (`dataPolicy.reporter.resources`), so it has no CFS quota, cAdvisor exports no `container_cpu_cfs_*` series for it, and the rule cannot see it. Under the old 1-core limit its sub-second, multi-process sweep was throttled in about 61% of the few CFS periods it ran in, at 0.0014 cores average, and the rule fired and cleared several times a day, each re-fire a new mail. Every container with a CPU limit is still covered. The reporter's real failure, going quiet, is `DataPolicyReporterSilent`. `scripts/ci/runtime-templates.sh` fails if the reporter renders a CPU limit again. |
 
 The stream labels those LogQL selectors use — `cluster`, `namespace`, `pod`,
-`component`, `level` — are built by Vector from **pod labels**, not from the
-fields inside the JSON line (`charts/edge/files/vector-local.yaml`). A pod that
+`component`, `level` have different origins: Kubernetes metadata supplies the cluster, namespace and pod; the `component` pod label selects the component; parsed event severity supplies `level`. They are not all copied from pod labels (`charts/edge/files/vector-local.yaml`). A pod that
 emits `"component":"data-policy"` in every line but carries no `component` pod
 label produces a stream with an empty label, and every rule selecting on it
 matches nothing and can never fire. That is not hypothetical: it is why
@@ -128,6 +128,8 @@ No new exporter, scrape, or permissions are needed for this log-based change.
 
 ## What the chart installs, and what it does not
 
+Review status (2026-11-10): the four custom PrometheusRule files contain eight alerts and six recording rules, in addition to upstream defaults. The 21 Loki alerts are source-controlled; rendered gates can remove disabled reporter-dependent rules. Alert delivery has not been exercised live in this review. Alertmanager retention is currently 120h despite some 720h repeat intervals; that mismatch prevents relying on the configured month-long suppression. The mail-presence guard in `_helpers.tpl` requires both observability switches to be true, so stack-only rendering does not receive that same guard.
+
 With `observability.stack.enabled: true` the release contains both rule
 **engines** and rule **content** for both. What differs between them is where
 that content comes from:
@@ -137,7 +139,7 @@ that content comes from:
   `KubeletDown` families above all come from there — *plus* four
   `PrometheusRule`s that `charts/edge` renders itself.
   `charts/edge/templates/observability.yaml` globs
-  `files/prometheus-rules/*.yaml` and emits one object per severity file:
+  `files/prometheus-rules/*.yaml` and emits one object per rule file:
   `ais-edge-critical` (`KubernetesAPIServerDown`, `NodeNotReady`),
   `ais-edge-warning` (`IngestPodCrashLoop`, `ReclaimerNotSucceeding`, and
   `KubeJobFailed` in place of the upstream copy), `ais-edge-uploader`
@@ -149,11 +151,11 @@ that content comes from:
   its own release, so it would load none of these — silently, with nothing to
   see in any log.
 - **The Loki ruler ships with a rule set.**
-  `charts/edge/files/loki-ruler-rules.yaml` holds 20 LogQL alerts in four groups
+  `charts/edge/files/loki-ruler-rules.yaml` holds 21 LogQL alerts in four groups
   (`ais-edge-pipeline-critical` / `-warning` / `-info` / `ais-edge-data-policy`)
   — every Loki-ruler row in the table above, plus `XNATUploadSuccess`,
   `XNATAuthFailure`, `OrthancDeidLuaError`, `DeidentifyStageError`,
-  `OrthancStorageGrowing` and the other rules of those groups, which ship but
+  and the other rules of those groups, which ship but
   are not tabulated.
   `charts/edge/templates/observability.yaml` renders the file into the ConfigMap
   `<release>-loki-rules` under the key `ais-edge-rules.yaml`, labelled
@@ -184,7 +186,7 @@ that content comes from:
   substituted into it as `__SENTINEL__` tokens — a plain `replace`, never `tpl`,
   because that file is full of Alertmanager's own `{{ }}` notification
   templates, which Helm would evaluate against the *chart* context and render as
-  empty strings. The SMTP **password** is not in the manifest at all: the config
+  incorrect values or a template error. The SMTP **password** is not in the manifest at all: the config
   carries an `smtp_auth_password_file` pointing at
   `/etc/alertmanager/secrets/<observability.stack.alerting.existingSecret>/password`
   (default `alertmanager-smtp`), which the operator mounts from
@@ -197,8 +199,8 @@ that content comes from:
   `observability.stack.alerting.*` in the site file; to change routes or
   receivers, edit `charts/edge/files/alertmanager-config.yaml`.
 
-Scrape targets that do not exist on a single k0s node are switched off
-deliberately — `nodeExporter`, `kubeControllerManager`, `kubeScheduler`,
+Scrape targets not configured for this k0s installation are switched off
+deliberately; this does not mean the scheduler or controller manager is absent ; `nodeExporter`, `kubeControllerManager`, `kubeScheduler`,
 `kubeProxy`, `kubeEtcd`. Left on, each contributes a permanently-firing
 "target down" alert, and an Alertmanager that is always red trains operators to
 ignore it. The cost is that the `Node*` rules from node-exporter's mixin are
@@ -240,7 +242,7 @@ error initialising module: ruler-storage
 and a CrashLoop — no log storage, and, since every *pipeline* alert on this tier
 is Loki-sourced, no pipeline alerts either. No render check could have caught
 it: the path is wrong only relative to where the **subchart** mounts things,
-which is invisible to `helm template`.
+which requires comparing the rendered security context, writable volumes and mount paths. Template rendering alone does not exercise startup, but a targeted rendered-manifest check can detect that mismatch.
 
 Two mechanisms exist in the Loki chart and only one of them applies here:
 
@@ -262,14 +264,17 @@ one. `scripts/ci/promtool.sh` guards the neighbouring silent failure under its
 "Loki ruler file matches rulefmt.RuleGroup" heading — a rule indented out of its
 group is still valid YAML, but Loki then rejects the **entire** file
 (`error parsing /rules/fake/ais-edge-rules.yaml: field alert not found in type
-rulefmt.RuleGroup`) and all 12 alerts disappear together, not just the one that
-was mis-indented.
+rulefmt.RuleGroup`) and all rules in the rejected file disappear together, not just the one that
+was mis-indented. The historical example had 12 alerts; the current file has 21.
 
 [`alerting-diy.md`](alerting-diy.md) covers writing the rule expression itself.
 
-If we ever need a pipeline-event metric *as a metric* (e.g. for a Grafana panel
-that needs sliding windows LogQL can't deliver), the right path is a
-`recording_rules` block in the ruler's rule set — that produces a
-Prometheus-format metric from a LogQL query and exposes it on Loki's
-`/prometheus/api/v1/...` endpoint. Loki then serves as both the log store and the
-metrics engine for log-derived signals.
+If a log-derived metric needs precomputation, add a recording rule to a
+ruler rule group and configure its remote-write client to a Prometheus-compatible
+metrics backend. Loki's rule-management APIs are not a time-series storage
+backend for those samples. The destination, authentication, ruler WAL storage,
+and delivery monitoring need their own configuration and validation. This is
+an unimplemented extension, not a hidden capability already enabled here.
+See [Loki recording rules](https://grafana.com/docs/loki/latest/operations/recording-rules/).
+LogQL already supports sliding-window metric queries; precomputation is a cost
+and reuse decision rather than a requirement for ordinary dashboard windows.

@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases cli-contract requeue-invalid
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -119,11 +119,18 @@ pvc-retention: $(RENDER_DEP)
 # looking SKIP for the ONE component on this tier that permanently removes
 # patient imaging, so a regression that kept everything, or deleted a session
 # XNAT had not confirmed, would have passed CI in silence.
-reclaimer:
+# deid-sidecar.sh reads the rendered deidentify argv ($(CI_RENDER_DIR)).
+reclaimer: $(RENDER_DEP)
 	@tests/reclaimer/run-tests.sh
+	@tests/reclaimer/deid-sidecar.sh
 
 # scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
 # error as "no cleanup Job runs", and never resume without a wrapped writer.
+# charts/edge/files/requeue-invalid.py on fixture trees, then the pinned image loads the
+# requeued folder (docker; CI_REQUIRE_REQUEUE_IMAGE=1 makes a missing image fail).
+requeue-invalid:
+	@tests/requeue-invalid/run-tests.sh
+
 reclaimer-fence:
 	@tests/reclaimer-fence/run-tests.sh
 
@@ -139,6 +146,12 @@ loki-rules:
 # writes it. Fixture tests cannot see a reworded message; this can.
 log-phrases:
 	@scripts/ci/log-phrases.sh
+
+# Needs docker and the render: parses every rendered argv in the PINNED image
+# (click make_context, never the command itself), and checks that every
+# ACFLOW_* variable the charts set is one that the image declares.
+cli-contract: $(RENDER_DEP)
+	@scripts/ci/cli-contract.sh
 
 # Needs docker: runs the REAL engine under the REAL busybox image the chart
 # deploys, over real directory trees, and asserts on WHAT SURVIVED rather than

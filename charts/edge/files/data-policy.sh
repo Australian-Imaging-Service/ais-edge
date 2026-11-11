@@ -1,4 +1,5 @@
 #!/bin/sh
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Edge data-policy engine — reports on every declared dataPolicy stage
 # =============================================================================
@@ -6,14 +7,14 @@
 #
 # dataPolicy declares a data lifecycle, but its rules used to be implemented
 # inside whichever component happened to be nearby: an `rm -rf` in the S3
-# uploader, a `--unlink-source` flag on xnat-ingest, a CronJob on the management
+# uploader, a `--unlink-source` flag on accessionflow, a CronJob on the management
 # side. Three stages, three mechanisms, each welded to one tool. That is why
 # most of the block was never implemented — adding a rule meant writing a new
 # program — and why replacing a component silently deletes the policy with it.
 #
 # This walks STAGES instead. Each stage is a location plus rules, declared in
 # values.yaml and rendered into /etc/data-policy/stages.tsv. Nothing here knows
-# what Orthanc is, or xnat-ingest, or DICOM. Swap the de-identifier, or add
+# what Orthanc is, or accessionflow, or DICOM. Swap the de-identifier, or add
 # Prefect handling non-DICOM drops, and the new store declares a stage and gets
 # reporting and retention with no new code.
 #
@@ -85,7 +86,7 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 # The uploader's fingerprint state dir. A file here named after a session is
 # the uploader's own record that it finished pushing that session to S3 — the
 # observable signal `onUploaded` is derived from, needing no change to
-# xnat-ingest and no new marker protocol.
+# accessionflow and no new marker protocol.
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
@@ -196,15 +197,26 @@ report_disk() {
 # file, which makes every sweep O(files) in process spawns. Measured in this
 # image over 2000 files, 24.5s vs 1.6s under a 100m quota. busybox find
 # supports `+`; verified in curlimages/curl:8.11.1.
+# ORTHANC'S OWN DATABASE IS NOT DATA. Orthanc keeps its SQLite index (index,
+# index-wal, index-shm) in its storage folder, and an idle Orthanc does not
+# touch those files. Counted as entries, they aged past stageAgeAlertAfter and
+# StageBacklogAgeing fired on an Orthanc with no study (edge-dev, 2026-11-04).
+# They are left out for derived.orthancStorage only: attachments there have
+# UUID names, and another stage may hold a real file named "index".
 report_age() {
     path="$1"
-    ENTRIES=$(find "$path" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${2:-}" = "derived.orthancStorage" ]; then
+        set -- "$path" ! -name index ! -name 'index-*'
+    else
+        set -- "$path"
+    fi
+    ENTRIES=$(find "$@" -type f 2>/dev/null | wc -l | tr -d ' ')
     case "${ENTRIES:-}" in ''|*[!0-9]*) ENTRIES=0 ;; esac
     if [ "$ENTRIES" -eq 0 ]; then
         OLDEST_AGE_S=0
         return 0
     fi
-    oldest=$(find "$path" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n1)
+    oldest=$(find "$@" -type f -exec stat -c %Y {} + 2>/dev/null | sort -n | head -n1)
     case "${oldest:-}" in
         ''|*[!0-9]*) OLDEST_AGE_S=-1; return 1 ;;
     esac
@@ -217,7 +229,7 @@ report_age() {
 # -----------------------------------------------------------------------------
 # CONDITIONS — "has this session moved on far enough that its copy here is
 # reconstructible?" Answered from OBSERVABLE FILESYSTEM STATE, never from a
-# marker protocol we would have to persuade xnat-ingest to adopt.
+# marker protocol we would have to persuade accessionflow to adopt.
 #
 # Returns non-zero on ANY doubt, and every caller treats that as KEEP. An
 # unknown condition word is a keep, not a delete: a typo in values.yaml must not
@@ -300,7 +312,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # rather than silently unknown. This condition is satisfied by the
             # deidentify STAGE, which unlinks each session's input once it has
             # written a complete de-identified copy. That happens inside
-            # xnat-ingest and leaves no artefact this engine can observe, so the
+            # accessionflow and leaves no artefact this engine can observe, so the
             # engine reports the tree and never acts on it. A session still
             # present under this word is one the stage has not finished with,
             # and keeping it is the correct answer.
@@ -564,14 +576,28 @@ expire_original() {   # expire_original <name> <location> <retain_seconds> <poli
 # timestamp, an empty study list. The bytes also remain in the facility backup,
 # but that is a reason to be careful rather than a licence to guess.
 # -----------------------------------------------------------------------------
-orthanc_curl() {   # orthanc_curl <method> <path> [data]
+orthanc_curl() {   # orthanc_curl <method> <path> [data] [max-time seconds]
+    # THE BODY GOES THROUGH A FILE, NOT THE COMMAND LINE. One argument holds at
+    # most 128 KiB (Linux MAX_ARG_STRLEN). A bulk-delete body has 47 bytes per
+    # instance, so for a study of more than about 2,780 instances curl did not
+    # start ("Argument list too long", exit 126) and the study stayed in Orthanc
+    # on every pass. MEASURED 2026-11-10 on edge-dev: 12,098 instances, a
+    # 568,621-byte body. printf is a shell builtin, so it has no such limit.
+    oc_body=""; oc_rc=0
+    if [ -n "${3:-}" ]; then
+        oc_body=$(mktemp) || return 1
+        printf '%s' "$3" > "$oc_body" || { rm -f "$oc_body"; return 1; }
+    fi
     if [ -n "$ORTHANC_USER" ]; then
         printf 'user = "%s:%s"\n' "$ORTHANC_USER" "$ORTHANC_PASS" \
-            | curl -sS --fail --max-time "$HTTP_TIMEOUT" -K - -X "$1" \
-                   ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+            | curl -sS --fail --max-time "${4:-$HTTP_TIMEOUT}" -K - -X "$1" \
+                   ${oc_body:+--data-binary "@$oc_body"} "${ORTHANC_URL}$2" 2>/dev/null || oc_rc=$?
     else
-        curl -sS --fail --max-time "$HTTP_TIMEOUT" -X "$1" ${3:+-d "$3"} "${ORTHANC_URL}$2" 2>/dev/null
+        curl -sS --fail --max-time "${4:-$HTTP_TIMEOUT}" -X "$1" \
+             ${oc_body:+--data-binary "@$oc_body"} "${ORTHANC_URL}$2" 2>/dev/null || oc_rc=$?
     fi
+    [ -n "$oc_body" ] && rm -f "$oc_body"
+    return "$oc_rc"
 }
 
 # orthanc_flat_list <path> <item-regex>: GET a JSON array of strings and print
@@ -687,7 +713,7 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         # instance ids, one per line, sorted. The same digest is computed from the
         # list read above, so only a study whose instances are exactly the staged
         # ones is deleted. No label, two labels, or another digest: export state
-        # unknown, kept, and said so. An older xnat-ingest writes no label.
+        # unknown, kept, and said so. An older accessionflow writes no label.
         o_sorted=$(printf '%s\n' $o_inst | LC_ALL=C sort)
         o_dlen=$(( 64 - ${#ORTHANC_PROCESSED_LABEL} - ${#last} - 2 )); [ "$o_dlen" -gt 24 ] && o_dlen=24
         o_hash=$(printf '%s\n' $o_sorted | sha256sum | cut -c1-"$o_dlen")
@@ -711,12 +737,22 @@ reclaim_orthanc() {   # reclaim_orthanc <name> <policy> <min_age_seconds>
         o_list=""
         for o_i in $o_sorted; do o_list="${o_list:+$o_list,}\"${o_i}\""; done
         o_n=$(printf '%s\n' $o_sorted | grep -c .)
-        if orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" >/dev/null 2>&1; then
+        # THE DELETE TAKES TIME PER INSTANCE: 34 s for 12,098 on edge-dev
+        # (2026-11-10), more than HTTP_TIMEOUT. A timed-out delete is not a
+        # refusal, and Orthanc goes on deleting after curl gives up. So the limit
+        # grows with the study: HTTP_TIMEOUT + 1 s per 100 instances (151 s for
+        # 12,098 at the default 30).
+        o_tmo=$((HTTP_TIMEOUT + o_n / 100)); o_rc=0
+        orthanc_curl POST /tools/bulk-delete "{\"Resources\":[${o_list}]}" "$o_tmo" >/dev/null 2>&1 || o_rc=$?
+        if [ "$o_rc" = 0 ]; then
             o_removed=$((o_removed + 1))
             jlog reclaim_removed "$o_name" "deleted the ${o_n} instance(s) of study ${id} from Orthanc after ${o_age}s" \
                  ",\"study\":\"$(jsan "$id")\",\"age_s\":${age},\"instances\":${o_n}"
         else
-            jlog reclaim_failed "$o_name" "Orthanc refused the delete of study ${id}" ",\"study\":\"$(jsan "$id")\""
+            # curl exit 22 = Orthanc answered >= 400 (a refusal); 28 = no answer
+            # within ${o_tmo}s; others = local or network errors.
+            jlog reclaim_failed "$o_name" "Orthanc did not confirm the delete of study ${id} (curl exit ${o_rc}, ${o_n} instance(s), limit ${o_tmo}s)" \
+                 ",\"study\":\"$(jsan "$id")\",\"instances\":${o_n},\"curl_exit\":${o_rc}"
         fi
     done
 }
@@ -751,7 +787,7 @@ while true; do
         fi
 
         report_disk "$name" "$location" || continue
-        report_age "$location"
+        report_age "$location" "$name"
 
         extra=",\"location\":\"$(jsan "$location")\",\"kind\":\"$(jsan "$kind")\""
         extra="${extra},\"free_pct\":${FREE_PCT},\"size_kb\":${SIZE_KB},\"avail_kb\":${AVAIL_KB}"
