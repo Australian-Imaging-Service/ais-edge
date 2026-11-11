@@ -146,14 +146,50 @@ if [ -f "$SECRETS" ]; then
 ${UNFILLED}
        Fix with: scripts/site-secrets.sh edit ${SITE}"
     fi
-else
+elif [ "$INSTALL_MODE" != "existing" ]; then
     die "no sites/${SITE}/secrets.enc.yaml.
        The chart references xnat-credentials and orthanc-deid-salt BY NAME and
        creates neither, so every pipeline pod would sit in
        CreateContainerConfigError while helm --wait blocked for ten minutes.
        The old installer refused up front for exactly this reason.
          scripts/site-secrets.sh new ${SITE} single
+         scripts/site-secrets.sh encrypt ${SITE}
+       A site that keeps its Secrets in the cluster by other means: set
+       installMode: existing (the cluster must already exist)."
+else
+    # NO SECRETS FILE, installMode: existing. Go on only if every Secret that
+    # the chart refers to, and does not create, is already in the cluster: a
+    # site that keeps its Secrets another way. Step 2 then has nothing to do.
+    # A failed query is NOT "present": any error refuses.
+    for t in kubectl helm python3; do
+        command -v "$t" >/dev/null 2>&1 || die "no sites/${SITE}/secrets.enc.yaml, and ${t} is missing, so the cluster's Secrets cannot be checked."
+    done
+    # stdout only: helm warnings on stderr must not reach the YAML parser.
+    SECRETS_RENDER="$(helm template "$RELEASE" "${SCRIPT_DIR}/charts/edge" --namespace "$NAMESPACE" -f "$VALUES" 2>/dev/null)" \
+        || die "no sites/${SITE}/secrets.enc.yaml, and the chart does not render with this site file, so the Secrets it needs are unknown:
+$(helm template "$RELEASE" "${SCRIPT_DIR}/charts/edge" --namespace "$NAMESPACE" -f "$VALUES" 2>&1 >/dev/null | head -5)"
+    NEEDED_SECRETS="$(printf '%s\n' "$SECRETS_RENDER" | python3 "${SCRIPT_DIR}/scripts/required-secrets.py" "$NAMESPACE")" \
+        || die "no sites/${SITE}/secrets.enc.yaml, and the Secrets that the chart needs could not be listed."
+    [ -n "$NEEDED_SECRETS" ] || die "no sites/${SITE}/secrets.enc.yaml, and the render names no Secret. Refusing: a tier-1 release needs at least xnat-credentials."
+    ABSENT_SECRETS=""
+    for ref in $NEEDED_SECRETS; do
+        if out="$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl --namespace "${ref%%/*}" get secret "${ref#*/}" -o name 2>&1)"; then
+            :
+        elif printf '%s' "$out" | grep -q 'NotFound'; then
+            ABSENT_SECRETS="${ABSENT_SECRETS} ${ref}"
+        else
+            die "no sites/${SITE}/secrets.enc.yaml, and the cluster could not be asked for Secret ${ref}:
+       $(printf '%s' "$out" | head -2)
+       An error does not mean the Secret is there. Fix the cluster access, or
+       add the secrets file."
+        fi
+    done
+    [ -z "$ABSENT_SECRETS" ] || die "no sites/${SITE}/secrets.enc.yaml, and the cluster does not have:${ABSENT_SECRETS}
+       The chart refers to these BY NAME and does not create them. Create them
+       in the cluster, or add the secrets file:
+         scripts/site-secrets.sh new ${SITE} single
          scripts/site-secrets.sh encrypt ${SITE}"
+    info "no sites/${SITE}/secrets.enc.yaml: the cluster has every Secret that the chart needs ($(printf '%s' "$NEEDED_SECRETS" | tr '\n' ' ')). Step 2 is skipped."
 fi
 
 [ -n "${MISSING:-}" ] && [ "$INSTALL_MODE" != "fresh" ] && die "missing required tools:${MISSING}"
