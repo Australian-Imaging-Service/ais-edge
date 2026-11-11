@@ -374,6 +374,52 @@ PY
     PASS*) ci_pass "${inhibit#PASS }" ;;
     *)     ci_fail "${inhibit#FAIL }" ;;
   esac
+
+  # Alertmanager prunes its notification log after the CR's retention (the
+  # subchart default is 120h). A route whose repeat_interval is longer can
+  # mail again once the log entry is gone, so retention must cover the
+  # longest repeat_interval. Alertmanager only warns about it at startup.
+  retention="$(python3 - "$render" <<'PY'
+import re, sys, yaml
+UNIT = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+def secs(v):
+    parts = re.findall(r"(\d+)(ms|s|m|h|d|w|y)", str(v))
+    if not parts or "".join(a + b for a, b in parts) != str(v):
+        raise ValueError(v)
+    return sum(int(a) * UNIT[b] for a, b in parts)
+am, crs = None, []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d:
+        continue
+    if d.get("kind") == "Alertmanager":
+        crs.append(d)
+    if d.get("kind") == "Secret" and "alertmanager.yaml" in (d.get("stringData") or {}):
+        am = yaml.safe_load(d["stringData"]["alertmanager.yaml"])
+if am is None or not crs:
+    print("FAIL no rendered Alertmanager config or Alertmanager resource to check"); raise SystemExit
+repeats = []
+def walk(route, path):
+    if route.get("repeat_interval"):
+        repeats.append((secs(route["repeat_interval"]), route["repeat_interval"], path))
+    for i, r in enumerate(route.get("routes") or []):
+        walk(r, "%s.routes[%d]" % (path, i))
+walk(am.get("route") or {}, "route")
+longest = max(repeats) if repeats else (secs("4h"), "4h", "default")
+bad = []
+for cr in crs:
+    ret = cr["spec"].get("retention") or "120h"
+    if secs(ret) < longest[0]:
+        bad.append("%s retention %s < repeat_interval %s at %s" % (cr["metadata"]["name"], ret, longest[1], longest[2]))
+if bad:
+    print("FAIL notification log pruned before the longest repeat: " + "; ".join(bad))
+else:
+    print("PASS Alertmanager retention covers the longest repeat_interval (%s at %s)" % (longest[1], longest[2]))
+PY
+)"
+  case "$retention" in
+    PASS*) ci_pass "${retention#PASS }" ;;
+    *)     ci_fail "${retention#FAIL }" ;;
+  esac
 fi
 
 # -----------------------------------------------------------------------------

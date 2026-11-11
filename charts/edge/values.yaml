@@ -1309,10 +1309,14 @@ kube-prometheus-stack:
             resources: {requests: {storage: 20Gi}}
   alertmanager:
     alertmanagerSpec:
+      # CAUTION: must exceed the longest repeat_interval in
+      # files/alertmanager-config.yaml (720h). The subchart default is 120h:
+      # Alertmanager then prunes the notification log first, and an alert that
+      # still fires can mail again after 5 days instead of 30. Alertmanager
+      # warns at startup ("repeat_interval is greater than the data retention
+      # period"). The promtool CI stage checks it. Same value as tier-2.
+      retention: 744h
 
-      # Review 2026-11-10: inherited retention is 120h, shorter than 720h
-      # repeat routes. Notification history may expire before the repeat
-      # interval; month-long suppression is not guaranteed by this config.
       # BOTH OF THESE ARE LOAD-BEARING, and templates/observability.yaml fails
       # the render without them.
       #
