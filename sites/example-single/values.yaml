@@ -114,7 +114,11 @@ orthanc:
   # when configuring a modality; it need not be the container port.
   aet: AISEDGE
   auth:
-    enabled: false
+    # On, as in the chart default: the REST API can delete studies, and
+    # in-cluster workloads and port-forward users can reach it.
+    # The Secret is in secrets.example.yaml (three keys, one password).
+    enabled: true
+    existingSecret: orthanc-credentials
   # Legacy values below are inactive under ingest. The backup script still
   # needs existingSaltSecret. Use ingest.deidentify.specs for the active policy.
   deid:

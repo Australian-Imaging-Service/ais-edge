@@ -74,7 +74,7 @@ Nothing else needs editing.
 | File | What it holds | Scaffolded from |
 |---|---|---|
 | `sites/<site>/values.yaml` | The entire non-secret configuration: `nodeIP`, `installMode`, storage paths, `ingest.assign.tagMapping`, `ingest.deidentify.specs`, loop intervals, `upload.mode: direct`, `dataPolicy`, `observability` | `sites/example-single/values.yaml` |
-| `sites/<site>/secrets.enc.yaml` | Four Secrets, SOPS-encrypted, **all in namespace `xnat-ingest`**: `xnat-credentials` (server/username/password), `orthanc-deid-salt` (`AIS_DEID_HMAC_SALT`), `grafana-admin-credentials`, `alertmanager-smtp` | `sites/example-single/secrets.example.yaml` |
+| `sites/<site>/secrets.enc.yaml` | Five Secrets, SOPS-encrypted, **all in namespace `xnat-ingest`**: `xnat-credentials` (server/username/password), `orthanc-deid-salt` (`AIS_DEID_HMAC_SALT`), `grafana-admin-credentials`, `alertmanager-smtp`, `orthanc-credentials` (`users.json`, `orthanc-user`, `orthanc-password`) | `sites/example-single/secrets.example.yaml` |
 
 `sites/<site>/values.yaml` is safe to commit — it contains no credentials, only
 Secret *names*. `secrets.enc.yaml` is committed **encrypted**; `git diff` then
@@ -704,8 +704,9 @@ For component-by-component reference see [`docs/`](docs/README.md).
 
 ## Orthanc REST API Authentication
 
-The chart default is `orthanc.auth.enabled: true`; the example site overrides
-it to `false`. Check the merged values. `ClusterIP` limits normal external
+The chart default is `orthanc.auth.enabled: true`, and the example sites keep
+it on. A site made from an older copy of an example can still override it to
+`false`. Check the merged values. `ClusterIP` limits normal external
 Service exposure but is not an authorization boundary. In-cluster clients and
 users with port-forward access can still reach the API, including its delete
 operations. Enable authentication and supply the matching Secret keys below.
@@ -729,8 +730,9 @@ openssl rand -base64 24                       # use this as <password> below
 scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
 ```
 
-Add this document (the template is already in your `secrets.enc.yaml`, commented
-out — uncomment and fill it in):
+Add this document. A site made from the current example already has it, with
+`REPLACE_ORTHANC_PASSWORD` to fill in. In an older site it is in your
+`secrets.enc.yaml`, commented out — uncomment and fill it in:
 
 ```yaml
 ---
