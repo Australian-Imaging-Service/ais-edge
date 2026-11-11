@@ -313,6 +313,8 @@ EOF2
   2. Fill in sites/${EDGE}/secrets.enc.yaml. Replace the orthanc-deid-salt
      placeholder with the output of 'openssl rand -hex 32'. The Orthanc pod
      needs this Secret. Under deid.engine: ingest nothing uses its value.
+     Replace REPLACE_ORTHANC_PASSWORD (in orthanc-credentials, twice) with
+     one password from 'openssl rand -base64 24': the Orthanc login.
      At a production site, also add the reid key Secret from the template.
   3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':
 
