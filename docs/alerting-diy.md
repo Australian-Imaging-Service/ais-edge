@@ -1,10 +1,14 @@
 # DIY — adding your own alert rules
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 The "I want a new alert tomorrow" recipe. Assumes the mgmt chart is installed
 with `observability.enabled: true` (the default). For the *why* of the
 Prometheus/Loki split, see [`alerting-architecture.md`](alerting-architecture.md).
 
 ## TL;DR
+
+Scope of this guide: object names and namespaces below describe the default deployment. Resolve overrides from rendered manifests before applying commands. Local rendering and rule checks verify configuration shape; they do not establish that a metric exists live or that an external receiver delivered a notification. Synthetic drills should use a distinct test identity and a receiver the operator controls.
 
 | Question | Answer |
 |---|---|
@@ -25,7 +29,7 @@ Is the thing you want to alert on …
   │  cert-manager certificate expiry, etc.)
   │     → Prometheus rule.
   │
-  ├─ a JSON log line from xnat-ingest / s3-uploader / Orthanc /
+  ├─ a JSON log line from accessionflow / s3-uploader / Orthanc /
   │  kube-prometheus components?
   │     → Loki ruler rule.
   │
@@ -33,8 +37,7 @@ Is the thing you want to alert on …
         → Loki, with `|~ regex` instead of `| json | field=value`.
 ```
 
-Why the split: mgmt's Prometheus cannot scrape edge pods (the konnectivity
-tunnel is one-way), but every edge pod's logs already reach Loki via Vector.
+Why the split: management Prometheus has no configured scrape route into child-cluster pods. Konnectivity carries API-server traffic over worker-initiated tunnels; it is not general pod routing. Vector pushes selected logs to Loki, with possible loss when its memory buffers or downstream delivery fail.
 Pipeline-event alerts live in Loki; K8s-resource-state alerts live in
 Prometheus.
 
@@ -74,7 +77,7 @@ cost someone an alert that could never fire:
 
 Also absent by choice: `defaultRules: {create: false}`, so **none** of
 kube-prometheus-stack's own alert pack is installed. `KubePodCrashLooping`,
-`KubeletDown` and friends are not quietly covering you; the nine Prometheus
+`KubeletDown` and friends are not quietly covering you; the thirteen Prometheus
 alerts in `charts/mgmt/files/prometheus-rules/` are all there is.
 
 Before you trust a new expression, run `scripts/check-alert-inputs.sh` — it
@@ -142,25 +145,26 @@ is the usual way a new rule ends up permanently green:
 - **`SeaweedFS_`, capitalised.** It is the exporter's own spelling and PromQL
   is case-sensitive. Check any metric name against a live Prometheus (§2a, or
   `scripts/check-alert-inputs.sh`) before committing the rule.
-- **No `sum by (cluster)`.** *Nothing in mgmt Prometheus carries a `cluster`
-  label* — not KSM, not cert-manager, not SeaweedFS, and the rules here never
-  set one statically. `charts/mgmt/files/alertmanager-config.yaml` says so at
-  length, in the comment on the inhibit rules that used to key on it. `by
-  (cluster)` therefore collapses to a single empty-labelled series: harmless
-  here, but it silently defeats any per-site grouping you thought you were
-  getting. Grouping per site is a **Loki**-side idea — Vector sets `cluster` on
-  log streams, so the LogQL rules below can and do use it.
+- **Inspect the actual labels before grouping.** Most raw management scrape
+  series do not carry an edge `cluster` label. However, custom reclaimer and
+  uploader rules derive edge identity from Kubernetes object metadata and add
+  it to their results. Grouping a raw SeaweedFS series by a missing label does
+  not create per-edge attribution. Check the selected series and the recording
+  rule output independently; a Loki stream's cluster label is supplied by Vector,
+  not automatically shared with the Prometheus scrape path.
 
 Rendered into a `PrometheusRule` object; the operator picks it up via CRD
 watch, no restart needed. `scripts/ci/promtool.sh` globs `*.yaml` in that
 directory, runs `promtool check rules` over each, and runs any test in
 `charts/mgmt/files/prometheus-rules/tests/` — add a test alongside a new rule.
 Splitting by severity is a convention, not a requirement: `cert-sync.yaml` is a
-fourth file grouped by *subject* instead, because its two alerts
+subject-grouped file instead; reclaimer and uploader rules are also separate, because its two alerts
 (`CertSyncStale`, `CertSyncNeverSucceeded`) are one mechanism at two
 severities and are easier to reason about together.
 
 ### Loki — `charts/mgmt/files/loki-ruler-rules.yaml`
+
+The following receiver-text rule is illustrative only: the exact `new stored instance` phrase has not been verified (2026-11-10) against the pinned receiver at the configured verbosity. Capture a synthetic C-STORE event first. Its one-hour window counts matching log lines and does not detect the first receipt of a calendar day. Likewise, the SeaweedFS request-counter example above requires live verification of its metric and `code` label; capitalization alone does not prove that series exists.
 
 ```yaml
 - name: ais-edge-example
@@ -241,15 +245,16 @@ kubectl -n ais-mgmt port-forward svc/mgmt-kube-prometheus-stack-alertmanager 909
 
 ## Step 5 — Trigger + observe
 
-1. **Cause the condition** — a drop test for pipeline alerts, or drive the
-   metric directly (delete a pod, fill a disk) for K8s-level ones.
+1. **Exercise the condition in an isolated test environment.** Use synthetic
+   studies for pipeline alerts and controlled metric fixtures for Kubernetes
+   rules. Do not fill a production disk or delete production pods as a routine
+   notification test; those actions test an outage as well as alert delivery.
 2. **Watch it fire** in the Alertmanager UI (port-forward above), Alerts tab.
 3. **Confirm delivery.** If nothing arrives:
    - Alertmanager UI shows it firing? If not, the problem is upstream (rule
      never fired) — check `/rules` for its state.
    - `kubectl -n ais-mgmt logs sts/alertmanager-mgmt-kube-prometheus-stack-alertmanager -c alertmanager`
-   - SMTP: most silent failures are an App-Password issue, or
-     `smtpRequireTLS: false` against a TLS-only relay.
+   - SMTP: inspect actual authentication, TLS and receiver errors; no failure-frequency claim is established here. Verify `observability.alerting.smtpRequireTLS` and the mounted password file against the relay requirements.
 
 ### Silencing during testing
 
@@ -271,7 +276,7 @@ for: 0s
 
 **Alert when X stops happening (dead-man's switch):**
 ```yaml
-expr: absent(rate({namespace="X"} |= "heartbeat-line" [10m]))
+expr: absent_over_time({namespace="X"} |= "heartbeat-line" [10m])
 for: 5m
 ```
 
@@ -295,7 +300,7 @@ for: 1h
 The shipped `CertificateExpiringSoon` (`prometheus-rules/warning.yaml`) keeps
 this 14-day floor and adds the check that matters sooner: a certificate more
 than a day past its own renewal time (`certmanager_certificate_renewal_timestamp_seconds`),
-which means cert-manager tried and failed. It no longer uses 60 days, which is
+which means renewal is overdue; inspect controller events to distinguish failed attempts from an inactive or unavailable controller. It no longer uses 60 days, which is
 inside cert-manager's own renewal window and fired on every healthy 90-day
 certificate. Copy it rather than this snippet if you want the label and
 annotation wiring too.

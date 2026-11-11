@@ -1,10 +1,13 @@
 # Cloud topology — implementation plan
 
-Working document for the `cloud-topology` branch. Delete or fold into
-`docs/clouds/` before the final merge; until then it is the record of what is
-done, what is not, and why each decision was made.
+**Historical implementation record, original date not recorded. Reviewed
+2026-11-10.** Keep this plan to explain decisions, not as a live task queue or
+authorization to alter the named environments. The original checkboxes and
+measurements are preserved below with current dispositions. Use
+[cloud-deployment.md](cloud-deployment.md) and the site examples for current
+configuration; a checkbox alone is not a current test result.
 
-Branch: `cloud-topology`, based on `main-config-consolidation` (which carries the
+Historical branch: `cloud-topology`, based on `main-config-consolidation` (which carries the
 k0s version-skew fix — essential for any real edge join test).
 
 ---
@@ -14,15 +17,15 @@ k0s version-skew fix — essential for any real edge join test).
 **A single L4 load balancer in front of the existing ssl-passthrough + SNI
 ingress.** Not Gateway API, not per-edge load balancers, not a cloud L7 ingress.
 
-The k0s API and konnectivity are **mTLS end to end**. Mutual TLS lives inside one
-TLS session: the worker proves itself with an X.509 client certificate during the
-handshake, and nothing survives being decrypted and re-encrypted. An L7 balancer
+The design preserves TLS to the k0s API and konnectivity endpoints. API
+authentication and the exact tunnel client-auth mode must be checked
+separately; the latter is not verified here (2026-11-10). An L7 balancer
 exists in order to read HTTP, which it cannot do without terminating — so ALB,
 Application Gateway and GCP HTTPS LB all break the worker's join, and break it
 asymmetrically: the ingress and API report healthy and only the edge fails, as an
 x509 error in a journal on a machine in a hospital.
 
-`charts/mgmt/templates/edge-clusters.yaml:67` already refuses to render a
+`charts/mgmt/templates/edge-clusters.yaml` (`ingressNginx.sslPassthrough`) already refuses to render a
 terminating configuration. This work makes the *cloud* shape follow the same
 rule rather than depending on an operator hand-copying a comment.
 
@@ -36,32 +39,46 @@ currently means *"resolve by real DNS instead of hosts files"*:
 
 | Branch point | Cloud behaviour |
 |---|---|
-| `install.sh:422` | skips the management `/etc/hosts` write |
-| `scripts/05-setup-edge-cluster.sh:92` | skips the management hosts edit |
-| `scripts/06c-post-join.sh:62` | leaves child-cluster CoreDNS at chart defaults |
-| `scripts/files/edge-join.sh:100` | skips the edge `/etc/hosts` write |
-| `charts/edge/templates/_helpers.tpl:124,170` | no `hostAliases` |
-| `charts/mgmt/templates/observability.yaml:170,197` | no IP SANs on certificates |
-| `charts/mgmt/templates/seaweedfs.yaml:541` | onprem-only block skipped |
+| `install.sh` (`OBS_MARKER`, `INSTALL_TOPOLOGY`) | skips the management `/etc/hosts` write |
+| `scripts/05-setup-edge-cluster.sh` (`HOSTS_MARKER`, `INSTALL_TOPOLOGY`) | skips the management hosts edit |
+| `scripts/06c-post-join.sh` (`INSTALL_TOPOLOGY`, `CoreDNS`) | leaves child-cluster CoreDNS at chart defaults |
+| `scripts/files/edge-join.sh` (`skipped (cloud topology resolves via real DNS)`) | skips the edge `/etc/hosts` write |
+| `charts/edge/templates/_helpers.tpl` (`edge.hostAliases`, `hostAliases.enabled`) | no `hostAliases` |
+| `charts/mgmt/templates/observability.yaml` (`topology`, `ipAddresses`) | no IP SANs on certificates |
+| `charts/mgmt/templates/seaweedfs.yaml` (`topology`, `ipAddresses`) | onprem-only block skipped |
 
 The ACME / DNS-01 `ClusterIssuer` is **fully implemented** in
-`cert-issuers.yaml:265-291` with guards, and CI covers it (`mgmt-letsencrypt`).
+`charts/mgmt/templates/cert-issuers.yaml` (`certManager.acme.dns01Solver`) with guards, and CI covers it (`mgmt-letsencrypt`).
 
 ## Known-false things to delete, not preserve
+
+**Current disposition (2026-11-10):** the provider-variable and script names
+below are historical design artifacts, not supported inputs. The provider
+guides now label the 2026-05-25 result as history and distinguish it from a
+fresh chart deployment. These items no longer request deletion of that record.
 
 * `CLOUD_PROVIDER` — appears in cloud docs, referenced **nowhere** in code.
 * `scripts/01b-install-cloud-controller.sh` — documented, never existed.
 * `scripts/00a-provision-cloud.sh` — documented, never existed.
-* `docs/clouds/openstack-nectar.md:1-3` claims this path is "end-to-end tested".
+* `docs/clouds/openstack-nectar.md` (`OpenStack / Nectar Research Cloud install`) claims this path is "end-to-end tested".
   Treat as unverified until we have done it ourselves.
 
 ---
 
 ## Tasks
 
+The checkbox state below is the **historical plan state**, not a fresh audit
+result. The dated disposition at each section states what the current source
+proves. Any remaining live test requires its own environment ownership and
+authorization; this document does not grant either.
+
 Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with reason.
 
 ### 1 — Ingress shape follows topology  ·  DONE, full CI green
+
+Current disposition (2026-11-10): implemented. The cloud example supplies the
+explicit subchart override; `_helpers.tpl` checks hostNetwork, Service type
+and DNS policy. Historical full-CI success is not a newly executed result.
 
 - [x] **1.1** `charts/mgmt/values.yaml`: keep the on-prem defaults
       (`hostNetwork: true`, `dnsPolicy: ClusterFirstWithHostNet`,
@@ -83,18 +100,31 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` dropped, with rea
 
 ### 2 — The dead `loadBalancerIP` key  ·  DONE (both keys removed, 5 docs corrected)
 
-- [x] **2.1** `charts/mgmt/values.yaml:555` declares
-      `ingressNginx.loadBalancerIP: ""` and **no template consumes it**. It is
-      exactly the key an operator reaches for to pin a pre-allocated floating
-      IP, and it does nothing. Either wire it or delete it — do not leave a key
-      that reads as configured and is not.
-      Decision: **delete it**, and document the subchart path
-      (`ingress-nginx.controller.service.loadBalancerIP`) in its place, because
-      the parent cannot forward into the subchart.
-- [x] **2.2** Same audit for `ingressNginx.proxyBodySize` — flagged as possibly
-      dead by the earlier values-consumers work. Confirm and resolve.
+Current disposition (2026-11-10): the two parent keys remain absent. Provider
+address configuration is not universally `loadBalancerIP`; AWS and Azure
+corrections now appear in the provider guides. Helm forwards dependency values
+under the subchart key, but does not synthesize them from unrelated parent keys.
+
+- [x] **2.1** The old `ingressNginx.loadBalancerIP` parent key was never
+      consumed by a template. It was removed. The comment at
+      `charts/mgmt/values.yaml` (`ingressNginx`) records why an operator could set it
+      without changing the load balancer address. Use the subchart path
+      `ingress-nginx.controller.service.loadBalancerIP` in the site file.
+      A parent values key cannot forward a value into the subchart by itself;
+      the subchart must read the actual setting.
+- [x] **2.2** The same audit found `ingressNginx.proxyBodySize` unused and
+      removed it too. Set `ingress-nginx.controller.config.proxy-body-size`.
+      The chart retains only `ingressNginx.enabled` and `sslPassthrough`.
+      Keep the parent and subchart settings distinct when adding site values;
+      a successful render alone does not show that an unused key had an effect.
 
 ### 3 — Load balancer address  ·  verify-live check DONE; 3.2 still open
+
+Current disposition (2026-11-10): `domain.mgmtNodeIP` remains required and
+represents the management node, while cloud clients use DNS. `verify-live.sh`
+accepts a status hostname but compares it directly with a resolved IP, and it
+requires a LoadBalancer Service even on manual NodePort sites. These are open
+script limitations. The historical 3.2 framing mixed node and LB addresses.
 
 The chicken-and-egg: `domain.internal` must contain the address before the
 install creates the load balancer, and a `nip.io` name *embeds* it.
@@ -112,6 +142,12 @@ install creates the load balancer, and a `nip.io` name *embeds* it.
       and everything downstream times out with no explanation.
 
 ### 3b — Octavia teardown ordering (OpenStack)  ·  DONE
+
+Current disposition (2026-11-10): `uninstall.sh` contains the Service deletion
+and wait before cluster removal, plus manual guidance. Provider release is
+not proved by that code alone. Stranded balancers can retain addresses and
+quota; the provider guides now state that risk, resolving the documentation
+part of 3b.3. Current Octavia cleanup was not exercised.
 
 Deleting a load balancer is **not** a single call: Octavia refuses while a
 listener or pool is still attached. The order is pool → listener → load
@@ -135,6 +171,10 @@ IP:
 
 ### 4 — Per-edge exposure on cloud  ·  DONE (nodePort refused on cloud)
 
+Current disposition (2026-11-10): the cloud nodePort exposure guard and
+negative case exist. The old request to confirm before implementation is
+historical; it is not a pending permission request for this doc sweep.
+
 - [x] **4.1** Today `edges[].exposure` is `nodePort | sni`. Behind one cloud LB,
       `sni` maps cleanly; `nodePort` means exposing a node port of the
       *management* cluster, which needs security-group rules per edge.
@@ -143,6 +183,11 @@ IP:
 - [x] **4.2** If refused, render guard + negative case.
 
 ### 5 — Certificates
+
+Current disposition (2026-11-10): internal CA and DNS-01 ACME rendering
+exist. Provider examples have been corrected, but a fresh ACME challenge
+against a delegated zone is not verified. A Designate webhook remains an
+external dependency; do not treat an example solver shape as a working account.
 
 - [x] **5.1** `sites/example-cloud/values.yaml` ships `certManager.issuer:
       ais-edge-ca` with a comment that `nip.io` cannot satisfy DNS-01.
@@ -153,6 +198,12 @@ IP:
       only** until a real zone is pointed at it. Do not imply nip.io covers it.
 
 ### 6 — Docs
+
+Current disposition (2026-11-10): README, TOUR, the cloud overview and all
+five provider guides have been reviewed in this sweep. Stale cloud-is-parked
+claims were corrected and the historical commissioning result was retained
+with its date. This resolves the documentation intent of 6.1 through 6.5;
+Claude review and the final validation report are tracked outside this old plan.
 
 - [ ] **6.1** Rewrite `docs/clouds/README.md` against what the chart does.
 - [ ] **6.2** Per-provider: aws, azure, gcp, openstack-nectar,
@@ -165,6 +216,13 @@ IP:
 
 ### 7 — CI
 
+Current disposition (2026-11-10): `scripts/ci/values.sh` copies the shipped
+cloud management site into `mgmt-cloud` and lists negative cases for cloud
+hostNetwork, ClusterIP, DNS policy and nodePort exposure. The old
+`mgmt-cloud-letsencrypt` case name is not in the current matrix; ACME has its
+own `mgmt-letsencrypt` case. Rendering the example as both complete charts
+is not established by these case names alone.
+
 - [x] **7.1** Positive render cases: `mgmt-cloud`, `mgmt-cloud-letsencrypt`.
 - [ ] **7.2** Negative cases for every guard added above.
 - [ ] **7.3** Check the cloud site example renders both charts, as the
@@ -172,7 +230,9 @@ IP:
 
 ## The test deployment — names and machines
 
-Fixed here so nothing drifts as this is built.
+Historical planning inventory, date not recorded. Names and host assignments
+below are not verified current state (2026-11-10). The site files are examples
+of configuration, not proof of who now owns or runs those machines.
 
 | | |
 |---|---|
@@ -190,24 +250,34 @@ that collision).
 
 ## Let's Encrypt later — what it will and will not touch
 
-Confirmed against the chart, because the assumption is worth writing down:
-**cert-manager never touches the k0s join path.** It issues the *terminated*
+Current source separates cert-manager server/client ingress certificates
+from the k0smotron child CA. This does not guarantee that an issuer rollout
+cannot disrupt a shared ingress or its configuration: It issues the *terminated*
 endpoints only — SeaweedFS, Grafana and Loki ingress TLS, the Loki client CA,
 and the per-edge Loki client certificates. The k0s API and konnectivity
 certificates come from k0smotron's own cluster CA, which is exactly the mTLS
-that passes through nginx untouched. Switching issuers therefore cannot break a
-join, and moving from `ais-edge-ca` to Let's Encrypt later is `certManager.issuer`
+that passes through nginx untouched. The separate issuer does not directly replace the child CA, but verify
+worker reconnects after shared-ingress changes. Moving from `ais-edge-ca` to Let's Encrypt later is `certManager.issuer`
 plus `acme.email` and a `dns01Solver`.
 
-- [ ] **5.4** ONE KNOWN WRINKLE, not zero work: `charts/edge/templates/_helpers.tpl:63`
-      refuses an `https` S3 endpoint with an empty `upload.s3.caBundleSecret`,
-      because an empty `AWS_CA_BUNDLE` *disables* verification rather than
-      falling back to the system trust store. With a publicly-trusted
-      certificate the right answer is system trust, so that guard needs an
-      explicit "use the system store" value rather than treating empty as a
-      mistake. Same question for `observability.loki.caBundleSecret`.
+- [ ] **5.4** Public-CA support still needs an explicit chart policy. The
+      guard at `charts/edge/templates/_helpers.tpl` (`edge.validate`, `upload.s3.caBundleSecret`) refuses an HTTPS
+      S3 endpoint with an empty `upload.s3.caBundleSecret`. The original
+      reason involved an empty `AWS_CA_BUNDLE` in the old AWS CLI client.
+      The client is now rclone; the chart comment records that its empty
+      `RCLONE_CA_CERT` uses system trust. The guard remains because the
+      normal SeaweedFS endpoint uses the fleet's internal CA. A public
+      certificate does not bypass this guard: provide a CA-bundle Secret
+      with the needed trust roots until an explicit system-trust option is
+      implemented and tested. Check Vector's configured CA separately;
+      the two clients do not inherit one another's trust settings.
 
 ### 8 — Live test on OpenStack (Nectar)
+
+Current disposition (2026-11-10): the following host assignments, blocker
+and teardown tasks are historical and do not describe verified current
+ownership. No teardown or cloud deployment was run for this documentation
+review. Current live work is recorded separately; do not execute 8.2 from this plan.
 
 Blocked on the user's key. **`203.101.224.240` currently runs the verified
 tier-1 deployment — tearing it down loses the only end-to-end evidence we have.
@@ -232,6 +302,11 @@ Copy `/data/facility-backup` first if anything there matters.**
 
 ## A finding worth acting on separately
 
+Current disposition (2026-11-10): the chart default is still nodePort, and
+cloud guards still require SNI per edge. Example site values select SNI. The
+claim about every live run is historical and not verified for all deployments;
+changing the default remains a separate behavior decision.
+
 `k0smotron.exposure.default` is **`nodePort`**, but every deployment that has
 actually been run used `sni`:
 
@@ -254,6 +329,11 @@ applies.
 
 ## On-prem regression proof — run this before every cloud commit
 
+Historical comparison, original date not recorded: the 20-case result below
+applies to the old branches and is not current validation. The current CI
+matrix has changed. Re-run the requested gates on the current branch and
+report their actual counts; do not reuse this number as evidence.
+
 Both charts rendered for all 20 on-prem cases, on `main-config-consolidation`
 and on this branch, then diffed:
 
@@ -270,9 +350,19 @@ on-prem path executes exactly the lines it did before:
 | `scripts/verify-live.sh` | 1 line: read `topology`, default `onprem` | `if [ "$TOPOLOGY" = "cloud" ]` |
 | `scripts/uninstall.sh` | 1 line: read `topology`, default `onprem` | `if [ "$TOPOLOGY" = "cloud" ]` |
 
-No installer or join script has been touched at all.
+In that historical comparison, no installer or join script was changed.
+This statement does not describe all changes since the old branch was created.
 
 ## rclone + S3 mTLS — done, with two deviations from the spec
+
+Historical migration findings, original test date not recorded; measurements
+below were not replayed on 2026-11-10. Current source still uses `--copy-links`,
+a staged rclone binary and the GNU/bash wrapper. It emits `upload_completed`
+for S3 success and writes its fingerprint; it does not delete the staged tree
+in that success branch. Separate reclaimers now perform verified cleanup.
+The default S3 mTLS issue/require flags remain false, resolving the old 9.1
+default question in favor of a staged rollout. Fresh on-prem acceptance in
+9.2 must be established from its own dated evidence.
 
 Ported the edge S3 uploader from aws-cli to rclone and built mTLS on the
 SeaweedFS S3 path. Two things the spec did not anticipate, both measured:
@@ -301,8 +391,10 @@ mode worse than expected: flipping the management `require` before the edge has
 its certificate does NOT produce a clean TLS rejection. The handshake succeeds,
 nginx answers HTTP 400, and rclone reports it as an S3 XML parse failure —
 naming neither certificates nor auth, reaching the logs as `endpoint_failed`.
-The chart refuses to render either half of the pair alone, in both directions,
-so the two cannot drift apart.
+Render guards reject some inconsistent flags within one values file. They
+cannot prove that a separate edge release has received its certificate or that
+the live management and edge rollouts are synchronized. Verify delivery and
+negative/positive client authentication during each rollout.
 
 - [ ] **9.1** DECIDE: ship mTLS on by default, or keep the staged rollout?
       Recommended: keep it staged, given the opacity of the failure.
@@ -311,6 +403,11 @@ so the two cannot drift apart.
       diffs are the intended port. A fresh on-prem install must be re-run.
 
 ## Open questions for the user
+
+These are historical questions, not current user requests. Question 1 is
+resolved by the cloud exposure guard. Question 2 still needs a real DNS zone
+for a live ACME test. Question 3 concerns old host state that is not verified
+(2026-11-10); do not infer permission to copy or remove data from this list.
 
 1. **`nodePort` on cloud** (4.1) — refuse it, or keep it for a site that needs it?
 2. **A real DNS zone** — if one exists, DNS-01 becomes testable and the cloud

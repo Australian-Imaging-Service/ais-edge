@@ -1,36 +1,48 @@
 # De-identification
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 > **Which engine?** Use `deid.engine: ingest`. It is the default, and it is the
 > only engine for a new site. [choosing-a-deid-engine.md](../choosing-a-deid-engine.md)
 > gives the reasons. This page tells you how to configure it.
 
 ## Overview
 
+**Review date: 2026-11-10.** This page describes the pinned accessionflow
+0.20.0 implementation. The facility-backup write in `OnStoredInstance` is
+limited to `RequestOrigin == "DicomProtocol"`. REST uploads and file-drop
+input do not get that backup copy. Verify the retained originals separately
+from recipe output. Orthanc/Lua de-identification was deprecated on 2026-11-02;
+that decision does not deprecate Orthanc as the DICOM receiver.
+
 **Orthanc is always present.** It is the only DICOM network receiver in this
-stack, so it receives every study. It also writes the facility backup. Under the
+stack. The optional file-drop input bypasses it. Its callback attempts the
+facility backup for DICOM-protocol arrivals; REST arrivals bypass that write. Under the
 default engine it does not de-identify. What this page configures is *where
 de-identification happens*.
 
 **The default engine is `deid.engine: ingest`** (key `deid.engine` in
 `charts/edge/values.yaml`).
-It is the `deidentify` stage of xnat-ingest. It runs on the edge, between
-`assign` and the upload, so no identifiable data leaves the site.
+It is the `deidentify` stage of accessionflow. It runs on the edge, between
+`assign` and the upload. The recipe, retained fields, pixel content, and
+assigned labels determine whether identifying data can leave. The stage
+location alone does not establish that the output is anonymous.
 
 **The Orthanc Lua engine, `deid.engine: orthanc`, is deprecated.** Do not use
 it for a new site. Its reference material is in one section of this page:
 "Deprecated: Orthanc Lua engine (`deid.engine: orthanc`)".
 
-| | Orthanc Lua hook (deprecated) | xnat-ingest deidentify |
+| | Orthanc Lua hook (deprecated) | accessionflow deidentify |
 |---|---|---|
 | values key | `deid.engine: orthanc` | `deid.engine: ingest` |
 | chart default | no, deprecated | **DEFAULT** |
-| runs | inside Orthanc, per instance on arrival | own stage, between `assign` and `upload` |
+| runs | inside Orthanc, per DICOM-protocol instance on arrival | own stage, between `assign` and `upload` |
 | source of the XNAT project, subject and session | the called AE title and hashes of the patient ID | the DICOM tags that `ingest.assign.tagMapping` names, or `ingest.assign.constantProjectId` |
 | needs an AE-title map | yes | no |
-| strips PHI | yes, JSON profile via Orthanc `/modify` | yes, pydicom `deid` recipe per project |
-| pseudonymises the XNAT labels | yes (salted djb2, not an HMAC) | **no**, the labels are the tag values, verbatim. See *Routing identifiers* |
-| re-identification possible | no | yes, via the reid mapping |
-| identifiable data on the pipeline volume | no | yes, until the stage runs |
+| changes selected metadata | JSON profile via Orthanc `/modify`; only DICOM-protocol arrivals reach this callback | format-specific recipe per project or fallback; no general guarantee for pixels or unnamed fields |
+| pseudonymises the XNAT labels | yes (salted djb2, not an HMAC) | **no**, labels come from configured tags or constants, with character escaping for tag-derived values. See *Routing identifiers* |
+| re-identification evidence | originals remain in the backup if written and retained; weak hashes are not irreversible | sensitive mapping records transformed metadata; it is not a complete original archive |
+| identifiable data on the pipeline volume | can remain in Orthanc storage after a failure or REST bypass; profile output also needs review | original/intermediate data, assigned labels, and reid maps can remain after the stage runs |
 | `group-orthanc` waits for the ready label | yes | no, it takes each study that has been quiet for `waitPeriod` |
 
 > **Why ingest?** See
@@ -43,7 +55,7 @@ it for a new site. Its reference material is in one section of this page:
 `assign` files each session under three XNAT ids: project, subject and session.
 It reads each id from one DICOM tag. `ingest.assign.tagMapping` names the tags.
 Leave it empty and the chart fills it in for the engine
-(`charts/edge/templates/_helpers.tpl:850-857`). Under `ingest` the default is:
+(`charts/edge/templates/_helpers.tpl`, `edge.assignTagMapping`). Under `ingest` the default is:
 
 ```
 StudyID            -> project
@@ -53,16 +65,16 @@ AccessionNumber    -> session
 
 Set a key to another tag when your modalities put the id there. A value can also
 be a format string over several tags, for example
-`{PatientID}_{StudyDate:%Y%m%d}` (see `xnat-ingest assign --help`).
+`{PatientID}_{StudyDate:%Y%m%d}` (see `accessionflow label xnat --help`).
 
 `ingest.assign.constantProjectId` files every session under one XNAT project.
-`assign` then ignores the project tag (`charts/edge/templates/ingest-pipeline.yaml:296-300`).
+`assign` then ignores the project tag (`charts/edge/templates/ingest-pipeline.yaml`, `--constant-project-id`).
 Use it for an edge that sends to one project only.
 
 Under `ingest`, nothing writes these tags for you. Only the deprecated Lua
 engine writes the `ClinicalTrial*` tags. So under `ingest` the chart refuses a
 `tagMapping` value that starts with `ClinicalTrial`
-(`charts/edge/templates/_helpers.tpl:401-412`).
+(`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.assign.tagMapping`).
 
 If a tag is empty or absent, `assign` cannot resolve that id. It then puts the
 session in `/data/assigned/__invalid__`. The placeholder name contains the tag
@@ -72,8 +84,8 @@ that was missing, for example:
 /data/assigned/__invalid__/INVALID_MISSING_STUDYID_<8 random characters>.<subject>.<session>/
 ```
 
-(xnat-ingest 0.16.2.post1, `xnat_ingest/helpers/arg_types.py:429-447` and
-`xnat_ingest/api/assign_api.py:197`.)
+(accessionflow 0.20.0, `helpers/arg_types.py:426-447` and
+`api/label_api.py:224-230`.)
 
 Check the tags on a study that a modality actually sends:
 
@@ -85,10 +97,11 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 >
 > `assign` runs before `deidentify`. So a session that `assign` puts in
 > `/data/assigned/__invalid__` was never de-identified. No stage reads that
-> directory: xnat-ingest skips every name that starts with `__`
-> (`xnat_ingest/helpers/remotes.py:1424-1433`). The `deidentify` stage reports
+> directory: accessionflow skips every name that starts with `__`
+> (`accessionflow/helpers/remotes.py:554-562`). The `deidentify` stage reports
 > `Found 0 sessions` on each cycle while the directory fills up. Measured on a
-> test edge: 531 instances, with the patient name still in them, stayed there
+> test edge in a historical run (date not verified, reviewed 2026-11-10):
+> 531 instances, with the patient name still in them, stayed there
 > and nothing failed loudly. `InvalidSessionAssigned` now fires when `assign`
 > reports one.
 >
@@ -100,9 +113,9 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 > **CAUTION: `ingest` has no AE-title routing.**
 >
 > Orthanc accepts any calling AE title (`orthanc.json` has
-> `DicomModalities: {}`, `charts/edge/templates/orthanc-config.yaml:89`). Under
+> `DicomModalities: {}`, `charts/edge/templates/orthanc-config.yaml` (`DeidEnabled`)). Under
 > `ingest` the Lua script stops before its AE-title lookup
-> (`charts/edge/files/deidentify-and-forward.lua:167`, lookup at `:179`). So no
+> (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), lookup at `charts/edge/files/deidentify-and-forward.lua` (`routing.AETMap[calledAet]`). So no
 > study is routed by AE title, and no study is quarantined for its AE title. The
 > `deidentify` stage never sees the AE title. **You cannot get the project from
 > the machine that sent the study.**
@@ -124,28 +137,29 @@ dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 > `ingest` the default is `StudyID`, `PatientID` and `AccessionNumber`. They
 > are values, not constants. Set them to the tags that your modalities fill in.
 
-> **CAUTION: the tags that you name become the XNAT labels, verbatim and not
-> de-identified.**
+> **CAUTION: the configured tag values become XNAT labels after character
+> escaping. The DICOM recipe does not de-identify those labels.**
 >
-> `assign` reads the three tags and puts their values into the session object.
-> All later steps use the values, not the tags. `deidentify` builds its
-> output with `ImagingSession.new_empty()`, which copies `project_id`,
-> `subject_id` and `session_id` unchanged. `save()` names the directory
-> `<project>.<subject>.<session>`. `upload` creates the XNAT subject and
-> experiment from the same ids.
+> `assign` resolves each configured tag mapping or constant into the
+> accession's `labels` dictionary. Later steps use those saved values.
+> `deidentify` builds its output with `Accession.new_empty()`, which
+> copies `uid`, `labels`, `store_type` and `run_uid`. It also copies
+> custom `fields`. `save()` names an XNAT-labelled directory
+> `<project>.<subject>.<session>`. `accessionflow store xnat` creates the
+> XNAT subject and experiment from the same labels.
 >
 > **A recipe cannot change them.** The recipe changes DICOM tags. But `assign`
 > has already read the values before `deidentify` runs. So the tag that you
 > name in `subject` becomes the XNAT subject label as the modality sent it.
 > The only change: `assign` turns each run of characters other than letters,
-> digits, `_` and `-` into one `_` (`IDSpec.xnat_id_escape_re` in xnat-ingest),
+> digits, `_` and `-` into one `_` (`IDSpec.xnat_id_escape_re` in accessionflow),
 > so `SMITH^ALEX` becomes `SMITH_ALEX`. The identity stays.
 >
 > Under `ingest` no step makes a pseudonym from these values. PatientID often
 > holds a hospital medical record number. If it does and `subject` reads
-> `PatientID`, that raw number goes into the XNAT metadata. The pixel data and
-> headers are correctly stripped, so the data looks clean, but the identifier
-> is in the label. An approved research identifier in PatientID is fine.
+> `PatientID`, that raw number goes into the XNAT metadata. The DICOM
+> headers may look clean after named removals, but the identifier remains
+> in the label. The shipped header recipe does not strip burned-in pixels. An approved research identifier in PatientID is fine.
 >
 > Choose tags that are ALREADY pseudonymous at the modality, or make the
 > modality send one. Examine a real study before you enable the engine:
@@ -162,10 +176,10 @@ the tag values that `assign` reads (see the caution above). The recipe changes
 only the tags that it names. The shipped recipe removes `PatientID`,
 `PatientName` and `AccessionNumber`. It does not replace them with a code.
 
-A recipe can hash a value. xnat-ingest reads the `var:` and `func:` values of
+A recipe can hash a value. accessionflow reads the `var:` and `func:` values of
 a recipe from a `<format>.transforms.yaml` side-car file. A `<format>.salt`
-side-car file can hold a key for those hashes (`xnat-ingest deidentify --help`,
-`xnat_ingest/cli/deidentify_cli.py:41-47` in 0.16.2.post1). The chart does not
+side-car file can hold a key for those hashes (`accessionflow deidentify --help`,
+`accessionflow/cli/deidentify_cli.py`, recipe-sidecar help in 0.20.0). The chart does not
 supply a salt side-car. `ingest.deidentify.specs` writes its files into a
 ConfigMap, and a ConfigMap is not a place for a secret. Also, a hash in the
 headers does not get to the XNAT labels: `assign` reads them before
@@ -173,10 +187,10 @@ headers does not get to the XNAT labels: `assign` reads them before
 
 `AIS_DEID_HMAC_SALT` in the Secret `orthanc-deid-salt` is a different salt.
 Only the Orthanc Lua script reads it. Under `ingest` the script never uses the
-value: it stops at `deidentify-and-forward.lua:167`, before it hashes anything.
+value: it stops at `charts/edge/files/deidentify-and-forward.lua` (`OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), before it hashes anything.
 But the Orthanc pod gets the variable whenever the facility backup is on
-(`charts/edge/templates/orthanc-deployment.yaml:99-106`). The script stops at
-load if the variable is not set (`deidentify-and-forward.lua:16`). So the Secret
+(`charts/edge/templates/orthanc-deployment.yaml`, `AIS_DEID_HMAC_SALT`). The script stops at
+load if the variable is not set (`charts/edge/files/deidentify-and-forward.lua`, `AIS_DEID_HMAC_SALT`). So the Secret
 must exist, but under `ingest` its value changes nothing. You can rotate it
 without an effect on XNAT. Restart Orthanc after a rotation, because the pod
 reads the value only at start.
@@ -186,11 +200,20 @@ Orthanc Lua engine (`deid.engine: orthanc`)", below.
 
 ## What the recipe does not do
 
+**Content limits:** the example does not remove every private tag, free-text
+field, or pixel annotation. It retains PatientSex and PatientAge. Added
+`PatientIdentityRemoved` and `DeidentificationMethod` fields are assertions
+about processing, not validation of anonymity. Check headers, pixels, assigned
+XNAT labels, and the sensitive mapping together. A copied resource classified
+as not containing PHI has not had every byte inspected for identifiers.
+
 The engine applies a recipe, and **only the tags the recipe names are touched**.
-That makes the shipped example the policy. Three things about it are not clear
+The shipped example needs a site review before it is used as policy. Three
+things about it are not clear
 from the recipe text, so they are stated here.
 
-**The patient identifier.** The example previously kept `PatientID`, justified
+**Historical example defect (date not verified, reviewed 2026-11-10):**
+the example previously kept `PatientID`, justified
 by a note claiming `assign` had already rewritten it and that `upload` needed
 it. Both halves were false. `assign` reads tag values to resolve ids and then
 copies or hardlinks files unchanged — it never writes a dataset. And upload
@@ -209,12 +232,12 @@ That matters more than it looks, because upload finishes with:
 which asks XNAT to populate its own metadata **from these headers**. An
 identifier left in the header is not merely archived, it is indexed.
 
-**The upstream default transforms are not pseudonymisers.** The xnat-ingest
+**The upstream default transforms are not pseudonymisers.** The accessionflow
 package contains its own `__default__` recipe. The chart does not use it: the
 stage reads only the recipes in `ingest.deidentify.specs`. If you copy the
 upstream recipe, also read its side-car,
-`xnat_ingest/specs/__default__/medimage/dicom-series.transforms.yaml` (in
-0.16.2.post1). It sets these values:
+`accessionflow/specs/__default__/medimage/dicom-series.transforms.yaml` (in
+0.20.0). It sets these values:
 
 ```yaml
 anon_patient_name:   {tag: PatientID}
@@ -243,21 +266,22 @@ recipe changes what gets to XNAT in this field. Nothing in the move tells you.
 
 Under `ingest`, `group-orthanc` does not filter on a label. The chart gives it
 `--to-process-label` only under the deprecated `orthanc` engine
-(`charts/edge/templates/ingest-pipeline.yaml:99`). So `group-orthanc` takes each
-study that has no `processedLabel` and has been quiet for
+(`charts/edge/templates/ingest-pipeline.yaml`, `toProcessLabel`). So `group-orthanc` takes each
+study that needs processing, including a changed source snapshot despite a
+prior processed label, and has been quiet for
 `ingest.orthancGroup.waitPeriod` seconds. After it stages a study, it applies
 `processedLabel` and a snapshot label.
 
 When the facility backup is on, the chart loads the Lua script, and its
 `OnStableStudy` callback runs under `ingest` too. Under `ingest` the chart
-requires the facility backup (`_helpers.tpl:90-94`), so the script is always
+requires the facility backup (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `storage.facilityBackup.enabled`), so the script is always
 loaded there. `OnStableStudy` has no `DeidEnabled` guard. Only
-`OnStoredInstance` returns early (`deidentify-and-forward.lua:167`).
-`OnStableStudy` (`:265-309`) applies the ready label to a stable study. It
+`OnStoredInstance` returns early (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`).
+`OnStableStudy` (`charts/edge/files/deidentify-and-forward.lua`, `OnStableStudy`) applies the ready label to a stable study. It
 removes `processedLabel` when a stable study gets new instances, and logs
 `study_reopened`. The ready label is `Defaults.ReadyLabel` in `routing.json`.
 The chart takes it from the raw `ingest.orthancGroup.toProcessLabel` value,
-`xnat-ingest-ready` by default (`orthanc-config.yaml:151`). An empty value
+`xnat-ingest-ready` by default (`charts/edge/templates/orthanc-config.yaml`, `ReadyLabel`, `ProcessedLabel`). An empty value
 stops the label write.
 
 Under `ingest` no stage filters on the ready label. **So a ready label does
@@ -294,12 +318,12 @@ orthanc:
 ```
 
 Do not set `orthanc.deid.enabled`. The chart refuses that key and tells you to
-use `deid.engine` (`charts/edge/templates/_helpers.tpl:297-299`).
+use `deid.engine` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.enabled`).
 
 Under this engine the chart also refuses an empty `aetMap` and an empty
-`profile` (`_helpers.tpl:249-259`). It refuses recipes in
-`ingest.deidentify` (`_helpers.tpl:220-228`). It refuses a `tagMapping` that
-reads a tag the profile rewrites for another role (`_helpers.tpl:447-465`).
+`profile` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.aetMap`). It refuses recipes in
+`ingest.deidentify` (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `$supplied`). It refuses a `tagMapping` that
+reads a tag the profile rewrites for another role (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ClinicalTrialProtocolID`).
 
 `existingSaltSecret` is what makes the pseudonyms stable. The same patient
 always hashes to the same subject, so the second visit of a patient goes to the
@@ -310,20 +334,21 @@ the salt for the life of the site.
 ### Routing by called AE title
 
 The hook routes on the **called** AE title. That is the AE title that the
-modality sends to (`origin.CalledAet`, `deidentify-and-forward.lua:133`). It is
+modality sends to (`origin.CalledAet`, `charts/edge/files/deidentify-and-forward.lua` (`origin.CalledAet`)). It is
 not the AE title of the modality itself. Orthanc accepts any called AE title,
 so each modality can send to its own AE title, and `orthanc.deid.aetMap` maps
 that AE title to an XNAT project.
 
-For each instance, the hook does these steps:
+For each DICOM-protocol instance, the historical engine does these steps.
+REST input returns before this path and can retain original identifiers:
 
 | step | what happens |
 |---|---|
-| backup | writes the original to the facility backup (`:136-146`) |
-| project | looks up the called AE title in `routing.json` `AETMap` (`:179`) |
-| subject / session | hashes `PatientID`, and `PatientID` with `StudyInstanceUID`, with the salt (`:92-93`) |
+| backup | writes the original to the facility backup (`charts/edge/files/deidentify-and-forward.lua`, `backupPath`) |
+| project | looks up the called AE title in `routing.json` `AETMap` (`charts/edge/files/deidentify-and-forward.lua`, `routing.AETMap[calledAet]`) |
+| subject / session | hashes `PatientID`, and `PatientID` with `StudyInstanceUID`, with the salt (`charts/edge/files/deidentify-and-forward.lua`, `subjectHash`, `sessionHash`) |
 | routing tags | the profile writes those values into the three `ClinicalTrial*` tags |
-| PHI | stripped per the JSON profile through Orthanc `/modify` (`:220-243`) |
+| PHI | stripped per the JSON profile through Orthanc `/modify` (`charts/edge/files/deidentify-and-forward.lua`, `DeidentificationProfileFile`, `DeidMode`) |
 
 `assign` then reads the routing tags. Under this engine the chart sets
 `tagMapping` to them:
@@ -337,7 +362,7 @@ ClinicalTrialTimePointID   -> session
 If a study does not carry them, `assign` puts it in `__invalid__`, with names
 such as `INVALID_MISSING_CLINICALTRIALPROTOCOLID_...`.
 
-**An unmapped called AE title is quarantined, not dropped** (`:180-218`). The
+**An unmapped called AE title is quarantined, not dropped** (`charts/edge/files/deidentify-and-forward.lua`, `if mapping == nil`). The
 hook writes the original to
 `<FacilityBackupDir>/__unmapped_aet__/<AET>/<PatientID>/<StudyUID>/<SOPUID>.dcm`.
 Then it removes the instance from Orthanc. If the write fails, it keeps the
@@ -348,13 +373,13 @@ fires when quarantined data is older than
 title to `aetMap` and send them again.
 
 Under `ingest` none of this happens. The hook stops at
-`deidentify-and-forward.lua:167`, before the lookup.
+`charts/edge/files/deidentify-and-forward.lua` (`OnStoredInstance`, `routing.Defaults.DeidEnabled == false`), before the lookup.
 
 ### Pseudonyms: salted djb2, not an HMAC
 
 The subject and session codes come from a function called `hmacShort`. **It is
 not an HMAC.** The code says so on the line above it
-(`deidentify-and-forward.lua:25-27`):
+(`charts/edge/files/deidentify-and-forward.lua`, `hmacShort`):
 
 ```lua
 -- Salted djb2. NOT cryptographic; jodogne/orthanc-plugins doesn't expose
@@ -369,23 +394,29 @@ output has 48 bits.
 
 What that is good for, and what it is not good for:
 
-* **Collisions are not a concern.** With 48 bits, the birthday bound is near
-  2^24, about 16.7 million subjects. No realistic cohort gets near it.
-* **It is not one-way.** djb2 is a cheap rolling hash. Medical record numbers
-  have a small space, six to ten digits. A person with the salt can try every
-  number and invert the mapping in minutes.
+* **Collisions remain possible.** Twelve hexadecimal characters encode at
+  most 48 bits. Even an ideal uniform 48-bit output has a birthday collision
+  probability of about 0.18% after one million distinct inputs. This weak
+  non-cryptographic construction does not establish uniformity or eliminate
+  collisions; a cohort being below 16.7 million is not a no-collision proof.
+* **It is not a cryptographic one-way transform.** Small structured patient-ID
+  spaces can be enumerated, particularly by a reader with the salt. The older
+  claim that inversion took minutes was not benchmarked in this review
+  (2026-11-10), so it is retained only as an unverified historical estimate.
 
-So the guarantee is not "these pseudonyms cannot be reversed". The guarantee is
-**"the salt never leaves the edge"**. The salt is in a Kubernetes Secret
-(`orthanc-deid-salt`) on the edge cluster. It never goes to XNAT. So a person
-who reads XNAT cannot reverse the pseudonyms without access to the edge too. A
-person with read access to the edge cluster, or with the SOPS key for the site
-secrets, can reverse them.
+The salt is delivered as a Kubernetes Secret on the edge. That does not prove
+it exists nowhere else: site secrets, backups, recovery material, and authorized
+administrative access are other copies or access paths. The hook does not send
+the salt to XNAT, but a secret location is not a cryptographic guarantee about
+its pseudonyms. Preserve linkage and recovery material for existing sites.
 
-That can be acceptable for the threat model of a site. Make it a decision, not
-an assumption from a function name. If it is not acceptable, the code names
-its own remedy: change the hook to `jodogne/orthanc-python`, which has real
-digest functions.
+The source's suggestion to move this hook to a Python-enabled Orthanc image
+is historical, predating the 2026-11-02 deprecation. It is not the recommended
+new-site path. Use the ingest stage and an approved label/recipe policy. Do not
+replace an existing site's salt or algorithm without a reviewed identity
+migration, because that can split subjects and sessions already in XNAT.
+
+
 
 Because the hook writes these codes before `assign` runs, the XNAT labels are
 pseudonyms under this engine. Under `ingest` they are the raw tag values. See
@@ -394,8 +425,9 @@ pseudonyms under this engine. Under `ingest` they are the raw tag values. See
 ### What the Lua profile changes
 
 The hook replaces the identifiers with salted hashes at the front door, before
-`group`, `assign` or another stage sees them. For this one property, the Lua
-engine is the stronger of the two, in spite of its weak hash.
+`group`, `assign` or another stage sees them. That explains its historical label layout; it is not an overall security
+ranking or a reason to deploy this deprecated mode. Backup failures, REST
+bypass, collisions, and retained fields still need separate consideration.
 
 **The birth date is truncated to the year.** The shipped Orthanc profile sets:
 
@@ -404,7 +436,7 @@ PatientBirthDate: ${BirthYearOnly}0101
 ```
 
 The hook resolves `${BirthYearOnly}` from the first four characters of the
-incoming date (`deidentify-and-forward.lua:103-106`):
+incoming date (`charts/edge/files/deidentify-and-forward.lua`, `rawBirth`, `birthYear`):
 
 ```lua
 local birthYear = (rawBirth and #rawBirth >= 4) and string.sub(rawBirth, 1, 4) or "1900"
@@ -419,8 +451,9 @@ not permit the real year, remove the tag. Do not reshape it.
 A zero-length birth date was a defect here. Lua treats only `nil` and `false`
 as false, so an empty `PatientBirthDate` did not use the `or` fallback. It
 resolved to the four-character string `0101`, which is not a valid DICOM date,
-in every instance of that study. The code now examines the length. An absent,
-empty or malformed date gives `19000101`.
+in every instance of that study. The code now examines the length. An absent or shorter-than-four-character value gives `19000101`. Four or
+more characters are not calendar-validated, so a malformed prefix can still
+produce an invalid date. This is a remaining limit of the deprecated hook.
 
 The shipped `ingest` recipe makes the opposite choice: `REMOVE PatientBirthDate`.
 
@@ -429,18 +462,18 @@ The shipped `ingest` recipe makes the opposite choice: `REMOVE PatientBirthDate`
 Under this engine the hook does two jobs. It de-identifies, **and** it applies
 the `xnat-ingest-ready` label in `OnStableStudy`. The chart then gives
 `group-orthanc` `--to-process-label xnat-ingest-ready`
-(`charts/edge/templates/ingest-pipeline.yaml:99-106`). So `group-orthanc` takes
+(`charts/edge/templates/ingest-pipeline.yaml`, `--to-process-label`). So `group-orthanc` takes
 only labelled studies. The label is meant to hold a study back until the hook
 has stripped it. It is not a receipt. `OnStableStudy` does not check each
 instance. If `/modify` fails for an instance, the hook keeps the original in
-Orthanc unchanged (`deidentify-and-forward.lua:233-236`), and the stable study
+Orthanc unchanged (`charts/edge/files/deidentify-and-forward.lua`, `pcall(RestApiPost`), and the stable study
 still gets the ready label.
 
 If the hook does not apply the label, `group-orthanc` filters out every study,
 and the pipeline stops with no error. That is why the chart derives the flag
 from `deid.engine` and does not let you set it per engine.
 
-## Configuration — xnat-ingest deidentify
+## Configuration: accessionflow deidentify
 
 ### 1. Write the recipes
 
@@ -462,16 +495,16 @@ identifier becomes a PATH rather than a filename: `medimage/dicom-series` is a
 directory `medimage` holding a file `dicom-series`.
 
 That structure is load-bearing. The stage walks
-`<spec-dir>/<project>/<category>/<format>` and skips a file at the top level
+`RECIPE_DIR/<project>/<category>/<format>` and skips a file at the top level
 that is not in a directory. So a flat file named `medimage@dicom-series.json`
 is never read. The stage then finds no recipes and fails each session with
-`No deidentification recipe files found for project '<project>' and no default
-recipe files provided.` (`xnat_ingest/api/deidentify_api.py:369` in
-0.16.2.post1). The data stays in `/data/assigned`.
+`No deidentification recipe files found for '<project>' and no default
+recipe files provided.` (`accessionflow/api/deidentify_api.py:136-137` in
+0.20.0). The data stays in `/data/assigned`.
 
 **The file is a pydicom `deid` recipe, not JSON, whatever its extension.** The
 upstream default is named `dicom-series.json`. The example in this repository
-has no extension. xnat-ingest accepts both:
+has no extension. accessionflow accepts both:
 
 ```
 FORMAT dicom
@@ -486,9 +519,11 @@ REMOVE AccessionNumber
 This sample shows the syntax only. It is not a policy.
 
 **Only the tags a recipe names are removed.** Anything not listed passes
-through untouched, so the recipe *is* the policy — review it as one. A session
-whose format has no applicable recipe is skipped and logged rather than
-uploaded with identifiers still attached.
+through untouched, so the recipe *is* the policy ; review it as one. For a resource that declares it contains PHI and whose deidentify method
+accepts a recipe, the default strict check fails when the matching recipe is
+missing. Resources classified as not containing PHI are copied. That format
+classification is not an inspection of all values or pixels; verify each
+accepted resource type and the session-level resources as well.
 
 **Remove `PatientID`.** An earlier version of this page said not to, on the
 grounds that `assign` had already rewritten it to the routed subject and that
@@ -502,7 +537,8 @@ What actually happens if it is left: `upload` finishes by calling
 own metadata FROM THESE HEADERS. A real medical record number left here is not
 merely present in the pixel archive, it is pulled into XNAT's fields, while
 PatientName, birth date and institution are correctly stripped, so the result
-looks de-identified to a spot check. Measured: an instance de-identified under the
+looks de-identified to a spot check. Historical test (date not verified,
+reviewed 2026-11-10): an instance de-identified under the
 old advice reached XNAT with `PatientID` verbatim and `PatientIdentityRemoved`
 absent. The shipped recipe now ends `REMOVE PatientID`.
 
@@ -517,7 +553,7 @@ short recipe at a key replaces the complete one there:
 ```yaml
 # ingest IS THE DEFAULT ENGINE, so you need not set deid.engine. The chart
 # refuses these recipes under any other engine
-# (charts/edge/templates/_helpers.tpl:220-228). Without that guard they were
+# (charts/edge/templates/_helpers.tpl (`edge.validate`, `$supplied`)). Without that guard they were
 # discarded silently: helm succeeded, no pod was created and nothing warned.
 deid:
   engine: ingest
@@ -540,7 +576,7 @@ ingest:
         REMOVE PatientName
 ```
 
-The key is the path under `SPEC_DIR`; the value is the recipe. Changing a
+The key is the path under `RECIPE_DIR`; the value is the recipe. Changing a
 policy later is a `helm upgrade` with the edited site file — still no
 `kubectl`.
 
@@ -552,8 +588,9 @@ restriction.
 #### Managing the ConfigMap yourself
 
 For recipes that come from elsewhere — sealed-secrets, an external pipeline, or
-files too large to sit in a site file — supply the ConfigMap instead and do the
-mapping by hand. `specs` must then be empty:
+externally managed files, supply the ConfigMap and map its keys to paths.
+The same Kubernetes ConfigMap size limit still applies; this is not a route
+around it. Clear inline `specs` from every values layer:
 
 ```bash
 kubectl -n xnat-ingest create configmap deid-specs \
@@ -563,18 +600,21 @@ kubectl -n xnat-ingest create configmap deid-specs \
 ```yaml
 ingest:
   deidentify:
+    specs: null  # Clear any inline recipe map from lower values layers.
     specConfigMap: deid-specs
     specFiles:
       default-dicom-series: "__default__/medimage/dicom-series"
 ```
 
-Note this route needs the namespace to exist already, so it is a post-install
-step rather than a fresh-install one.
+Create the namespace and external ConfigMap before the workload starts.
+This can precede a fresh install or an upgrade; it is not limited to a
+post-install step. The chart only mounts the named object. Check its recipe
+content and paths, and keep secrets out of that ConfigMap.
 
 ### 3. Optionally, an encryption key for the reversal map
 
 The chart gives the stage `--reid-dir /data/reid`
-(`charts/edge/templates/ingest-pipeline.yaml:417-418`). So the stage writes the
+(`charts/edge/templates/ingest-pipeline.yaml`, `--reid-dir`). So the stage writes the
 map back to the removed identities into `/data/reid`, one file per session. On
 the host that is `/data/xnat-ingest/reid`, on the same volume as the data that
 it de-identifies. Without a key, each map is plain JSON,
@@ -607,7 +647,7 @@ kubectl -n xnat-ingest create secret generic reid-key \
 ```
 
 With the key, the stage writes each map as `<project>.<subject>.<session>.json.enc`
-(`xnat_ingest/api/deidentify_api.py:638-645` in 0.16.2.post1). You cannot read
+(`accessionflow/api/deidentify_api.py`, re-identification map encryption in 0.20.0). You cannot read
 it without the key. **Keep the key somewhere other than the volume the maps are
 on.** Together, they are just a slower way to store the identifiers.
 
@@ -644,7 +684,7 @@ pipeline with one of these out of step rendered cleanly and then did not work:
 
 | derived | what it becomes under `ingest` |
 |---|---|
-| the Lua hook's `DeidEnabled` | `false`. The hook still writes the original to the facility backup. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`deidentify-and-forward.lua:167`). `OnStableStudy` does not read this flag: it still labels stable studies |
+| the Lua hook's `DeidEnabled` | `false`. The hook still attempts the original backup for DICOM-protocol arrivals. It does not read the AE-title map, it quarantines nothing and it does not change the instance (`charts/edge/files/deidentify-and-forward.lua`, `OnStoredInstance`, `routing.Defaults.DeidEnabled == false`). `OnStableStudy` does not read this flag: it still labels stable studies |
 | `ingest.orthancGroup.toProcessLabel` | not given to `group-orthanc`, because no stage filters on the label under `ingest` |
 | `ingest.assign.tagMapping` | `StudyID`, `PatientID`, `AccessionNumber` when you leave it empty |
 | the `deidentify` stage | rendered |
@@ -654,7 +694,7 @@ pipeline with one of these out of step rendered cleanly and then did not work:
 To move an existing site:
 
 1. Add `ingest.deidentify.specs`. The chart refuses `ingest` without a recipe
-   (`_helpers.tpl:199-201`).
+   (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specs`).
 2. Set `tagMapping` to tags that your studies carry (step 4), or set
    `constantProjectId`.
 3. Read the recipe, then set `deid.policyReviewed: true`.
@@ -671,7 +711,7 @@ Decide how to link the two before you move a site.
 An earlier version of this page told you to set `orthanc.deid.enabled: false`
 and `ingest.deidentify.enabled: true` by hand. Both keys are gone. The chart
 refuses to render if you set either one and tells you to use `deid.engine`
-(`_helpers.tpl:297-302`). So that older advice fails loudly.
+(`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.enabled`). So that older advice fails loudly.
 
 **What did NOT fail loudly, and is the trap to know:** recipes in
 `ingest.deidentify.specs` while another engine is selected. When `orthanc` was
@@ -701,10 +741,10 @@ configuration is needed. `upload` and the rclone S3 uploader both read
 `/data/deidentified`, and `/data/packaged` when the optional package stage runs
 after it (see [package-stage.md](../package-stage.md)).
 
-This ordering matters on tier-2 specifically: **de-identification happens before
-anything reaches S3**, so identifiable data never leaves the facility, even into
-your own object store. The stage is on by default. It does not change where S3
-sits in the chain. It changes what is already stripped when data gets there.
+This ordering matters on tier-2 specifically: **the default path runs the recipe before S3 upload**. Retained identifiers
+in labels, private fields, pixels, or unsupported formats can still leave
+with the output. Review that content before enabling transfer. The stage is
+on by default; it changes what is sent, not S3's position in the chain.
 
 Two other tier-2 differences:
 
@@ -712,9 +752,9 @@ Two other tier-2 differences:
   (`charts/mgmt/files/loki-ruler-rules.yaml`), because tier-2 runs Loki centrally
   and edges ship to it. `DeidentifyStageError` is there, next to
   `OrthancDeidLuaError`.
-* `xnat-ingest` is pinned in **both** charts: `charts/edge` for the pipeline
-  stages and `charts/mgmt` for the S3 -> XNAT uploader. Both pin the fork build
-  `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1` (`ingest.image` in
+* `accessionflow` is pinned in **both** charts: `charts/edge` for the pipeline
+  stages and `charts/mgmt` for the S3 -> XNAT uploader. Both pin the upstream image
+  `ghcr.io/australian-imaging-service/accessionflow:0.20.0` (`ingest.image` in
   `charts/edge/values.yaml`; `xnatUpload.image` and
   `dataPolicy.derived.s3Staged.image` in `charts/mgmt/values.yaml`). Both must
   move together, because the CLI contract is shared.
@@ -724,17 +764,17 @@ Two other tier-2 differences:
 | combination | why |
 |---|---|
 | both engines at once | you cannot express it: `deid.engine` selects one engine. Under the Lua engine the hook strips first, so a reid mapping would record pseudonyms as if they were originals. It would reverse to nothing while it seemed to work |
-| an unknown `deid.engine` word | it would select no engine (`_helpers.tpl:172-174`) |
-| `ingest` with no `specs` and no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge (`_helpers.tpl:199-201`) |
-| `specConfigMap` without `specFiles` | the ConfigMap mounts flat, so no recipe matches (`_helpers.tpl:195-197`) |
-| `ingest.deidentify` recipes under another engine | nothing would mount them, so they would never run (`_helpers.tpl:220-228`) |
-| `ingest` with a `tagMapping` value that starts with `ClinicalTrial` | nothing writes those tags under `ingest`, so every session would go to `__invalid__` with its PHI (`_helpers.tpl:401-412`) |
-| `ingest` with `dataPolicy.derived.assigned.reclaim: onUploaded` | the uploader reads `/data/deidentified`, so the condition can never be true (`_helpers.tpl:355-357`) |
-| `ingest` or `orthanc` with `deid.policyReviewed: false` | a human must confirm the recipe first (`_helpers.tpl:242-246`) |
-| `none` with `policyReviewed: false` | identifiable data would reach XNAT unchanged (`_helpers.tpl:182-184`) |
-| the removed keys `orthanc.deid.enabled`, `ingest.deidentify.enabled` and `orthanc.deid.policyReviewed` | they do nothing now, so they fail and name the new key (`_helpers.tpl:165-167`, `:297-302`) |
+| an unknown `deid.engine` word | it would select no engine (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.engine must be one of`) |
+| `ingest` with no `specs` and no `specConfigMap` | the volume renders with an empty source; the pod sits in `CreateContainerConfigError` on the edge (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specs`) |
+| `specConfigMap` without `specFiles` | the ConfigMap mounts flat, so no recipe matches (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.deidentify.specFiles`) |
+| `ingest.deidentify` recipes under another engine | nothing would mount them, so they would never run (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `$supplied`) |
+| `ingest` with a `tagMapping` value that starts with `ClinicalTrial` | nothing writes those tags under `ingest`, so every session would go to `__invalid__` with its PHI (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `ingest.assign.tagMapping`) |
+| `ingest` with `dataPolicy.derived.assigned.reclaim: onUploaded` | the uploader reads `/data/deidentified`, so the condition can never be true (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `onDeidentified`) |
+| `ingest` or `orthanc` with `deid.policyReviewed: false` | a human must confirm the recipe first (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.policyReviewed`) |
+| `none` with `policyReviewed: false` | identifiable data would reach XNAT unchanged (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `deid.engine=none`) |
+| the removed keys `orthanc.deid.enabled`, `ingest.deidentify.enabled` and `orthanc.deid.policyReviewed` | they do nothing now, so they fail and name the new key (`charts/edge/templates/_helpers.tpl`, `edge.validate`, `orthanc.deid.policyReviewed has MOVED`), `charts/edge/templates/_helpers.tpl` (`edge.validate`, `orthanc.deid.enabled`) |
 | *(not caught by the chart)* | `tagMapping` names tags that the modalities of this site do not populate. The chart cannot see inside your DICOM, so this fails at runtime with every study in `__invalid__` |
-| `toProcessLabel` under `ingest` | not refused, and not needed: the chart does not give it to `group-orthanc` under `ingest` (`ingest-pipeline.yaml:99`) |
+| `toProcessLabel` under `ingest` | not refused, and not needed: the chart does not give it to `group-orthanc` under `ingest` (`charts/edge/templates/ingest-pipeline.yaml`, `toProcessLabel`) |
 
 `deid.engine: none` is allowed only with `policyReviewed: true`. Use it for a
 site whose modalities de-identify upstream, or for one that stages into a
@@ -762,19 +802,22 @@ kubectl -n xnat-ingest exec deploy/edge-deidentify -- \
 `edge` is the release name that `install.sh` gives the edge chart. A site
 installed under another release name has other object names.
 
-An empty `/data/deidentified` beside a populated `/data/assigned` means that
-the stage does not complete sessions. Read its log. A missing recipe logs
-`No deidentification recipe files found for project ...`. An input with no data
-files logs the event `deid_empty_input`. Each loop logs
+An empty `/data/deidentified` beside a populated `/data/assigned` needs
+investigation. Work may still be within its wait period, in progress, or
+already packaged/reclaimed downstream; the two directory counts alone do
+not prove failure. Read stage logs and inspect manifests and downstream output. A missing recipe logs
+`No deidentification recipe files found for ... and no default recipe files provided.`. An input with no data files
+and no session metadata raises an error. A metadata-only skeleton is skipped
+with event `deid_skeleton_skipped`. Each loop logs
 `Deidentification completed with N errors` when sessions failed
-(`xnat_ingest/api/deidentify_api.py:369`, `:472-479`, and
-`xnat_ingest/cli/deidentify_cli.py` in 0.16.2.post1).
+(`accessionflow/api/deidentify_api.py` and
+`accessionflow/cli/deidentify_cli.py` in 0.20.0).
 
 ## Current limitation
 
 The layout limit that this section described is gone. In the pinned image,
 `deidentify` writes the same layout as `assign`
-(`xnat_ingest/api/deidentify_api.py:542`):
+(`accessionflow/model/accession.py`, `staging_dirname()` and `save()`):
 
 ```
 /data/deidentified/<project>.<subject>.<session>/<scan>/...   <- what it writes
@@ -788,28 +831,47 @@ The history: xnat-ingest 0.13.1 wrote one directory level deeper
 (`/data/deidentified/<session>/<session>/<scan>/DICOM/*.dcm`). So `upload`
 reported `Found 0 sessions` and the data stopped there. That was
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144),
-closed on 2026-08-31.
+closed on 2026-08-31 (upstream status checked 2026-11-10).
 
 The limits that stay:
 
-* The XNAT labels are the tag values, verbatim. Hashing at the `assign` step is
-  a known second-pass item (the comment on `ingest.assign.tagMapping` in
-  `charts/edge/values.yaml`). Choose pseudonymous tags.
+* XNAT labels come from the configured tags or constants. Character escaping
+  of tag-derived values is not pseudonymisation. The chart does not hash those
+  labels at the `assign` step (`ingest.assign.tagMapping` in
+  `charts/edge/values.yaml`). Choose approved research identifiers.
 * The chart supplies no salt side-car for hash transforms (see *Pseudonym
   strength*).
 * No retention rule removes the maps in `/data/reid`. See
-  [xnat-ingest.md](xnat-ingest.md), "Reidentification maps at production sites".
+  [accessionflow.md](accessionflow.md), "Reidentification maps at production sites".
 
 ## Version notes
 
-Requires xnat-ingest **0.13.1** or later. 0.12.x shipped
+The package namespace is `accessionflow`. Current CLI examples use
+`accessionflow label xnat` and `accessionflow deidentify`. The source-retirement
+and sidecar behavior described in the [component guide](accessionflow.md#source-retirement-and-metadata-in-0190)
+also applies here. Under `--unlink-source all`, unprocessed files in the input
+snapshot can be removed after success; keep session folders pipeline-managed.
+The facility backup remains separate from this cleanup. It is written only
+for DICOM-protocol input when the callback succeeds, and its own retention
+policy may remove copies later. `--unlink-source all` does not prove that
+an original or encrypted mapping remains recoverable. It is written only
+for DICOM-protocol input when the callback succeeds, and its own retention
+policy may remove copies later. `--unlink-source all` does not prove that
+an original or encrypted mapping remains recoverable. It is written only
+for DICOM-protocol input when the callback succeeds, and its own retention
+policy may remove copies later. `--unlink-source all` does not prove that
+an original or encrypted mapping remains recoverable.
+
+**Historical minimum for the old interface:** xnat-ingest 0.13.1 first
+contained those fixes. It is not a supported downgrade target for this
+0.20.0 chart and its current CLI contract. 0.12.x shipped
 `dicom_deidentify` as a stub that raised `NotImplementedError`, so the engine
 did nothing; 0.13.0 implemented it but could not import at all because its
 `fileformats-medimage` floor was too low. Both are fixed in 0.13.1
 ([#138](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/138),
 [#139](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/139)).
 
-The charts pin the fork build `ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`:
-upstream 0.16.2 with the AIS fixes that upstream has not released yet
-(`ingest.image` in `charts/edge/values.yaml`). The line numbers in xnat-ingest
-cited on this page are from the tag `v0.16.2.post1`.
+The charts pin the upstream image `ghcr.io/australian-imaging-service/accessionflow:0.20.0`
+(`ingest.image` in `charts/edge/values.yaml`). Current source references on this
+page refer to 0.20.0. The former 0.16.2.post1 fork is migration history;
+its old module names and source line numbers are not the current interface.

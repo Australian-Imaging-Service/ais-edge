@@ -114,6 +114,7 @@ run_engine() {
         -e ORTHANC_URL="${ORTHANC_URL_T:-}" \
         -e ORTHANC_USER="${ORTHANC_USER_T:-}" \
         -e ORTHANC_PASS="${ORTHANC_PASS_T:-}" \
+        -e HTTP_TIMEOUT="${HTTP_TIMEOUT_T:-30}" \
         -e STUCK_AFTER_S="${STUCK_AFTER_T:-0}" \
         -e EXTERNAL_RECLAIM_STAGE="${EXTERNAL_STAGE_T:-}" \
         --entrypoint sh "$IMAGE" /s.sh > "$root/out.jsonl" 2>&1
@@ -424,6 +425,31 @@ else
 fi
 check orthanc_no_url_nodelete "$R" assigned/s1 exist "and deleted nothing while unconfigured"
 
+# 19b — the Orthanc storage census counts DATA, not Orthanc's own database.
+#       Orthanc keeps its SQLite index (index, index-wal) in the storage folder.
+#       An idle Orthanc does not touch them, so they age, and the stage report
+#       said "2 file(s), oldest 13d" with no study in Orthanc: StageBacklogAgeing
+#       fired on an empty Orthanc (edge-dev, from 2026-11-04). The control
+#       (one attachment, 2 days old) must still be counted.
+R="$WORK/c19b"; build_case "$R"; mkdir -p "$R/orthanc-storage/ab/cd"
+for f in index index-wal; do echo db > "$R/orthanc-storage/$f"; touch -d "13 days ago" "$R/orthanc-storage/$f"; done
+ORTHANC_URL_T="" run_engine "$R" "derived.orthancStorage${TAB}derived${TAB}/data/orthanc-storage${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest" true false
+rep=$(grep '"event":"stage_report"' "$R/out.jsonl" 2>/dev/null | grep '"stage":"derived.orthancStorage"' | head -1)
+if printf '%s' "$rep" | grep -q '"entries":0,"oldest_age_s":0'; then
+    pass orthanc_census_no_index "an Orthanc with only its index reports 0 entries"
+else
+    fail orthanc_census_no_index "expected entries 0 and oldest 0; got: $(printf '%s' "$rep" | grep -o '"entries":[0-9]*,"oldest_age_s":[0-9-]*')"
+fi
+echo dicom > "$R/orthanc-storage/ab/cd/0a1b2c3d-attachment"; touch -d "2 days ago" "$R/orthanc-storage/ab/cd/0a1b2c3d-attachment"
+ORTHANC_URL_T="" run_engine "$R" "derived.orthancStorage${TAB}derived${TAB}/data/orthanc-storage${TAB}-${TAB}-${TAB}onGrouped${TAB}0${TAB}orthanc-rest" true false
+rep=$(grep '"event":"stage_report"' "$R/out.jsonl" 2>/dev/null | grep '"stage":"derived.orthancStorage"' | head -1)
+age=$(printf '%s' "$rep" | sed -n 's/.*"oldest_age_s":\([0-9]*\).*/\1/p')
+if printf '%s' "$rep" | grep -q '"entries":1,' && [ "${age:-0}" -ge 172000 ] && [ "${age:-0}" -lt 260000 ]; then
+    pass orthanc_census_counts_data "an attachment is still counted, with its own age"
+else
+    fail orthanc_census_counts_data "expected entries 1 and an age near 2 days; got: $(printf '%s' "$rep" | grep -o '"entries":[0-9]*,"oldest_age_s":[0-9-]*')"
+fi
+
 # 20 — an unsatisfied condition past stuckAfter IS reported as stage_stuck.
 # The baseline for case 21: without it, 21 could pass because nothing fires at
 # all rather than because the delegation suppressed it.
@@ -592,6 +618,50 @@ print(sys.argv[1] + hashlib.sha256(("\n".join(ids) + "\n").encode()).hexdigest()
             || fail orthanc_armed_state "expected 200 200 404; got $(o_http "$SA") $(o_http "$SB") $(o_http "$SC")"
     else
         fail orthanc_dry_run_setup "could not create the test studies in Orthanc"
+    fi
+
+    # 26 - A LARGE STUDY IS RECLAIMED. The bulk-delete body has 47 bytes per
+    # instance and went to curl on the command line, where one argument holds at
+    # most 128 KiB. For more than about 2,780 instances curl did not start
+    # ("Argument list too long") and the study stayed in Orthanc on every pass.
+    # MEASURED 2026-11-10 on edge-dev: a study of 12,098 instances, never deleted.
+    # 3,000 instances make a 144,016-byte body. HTTP_TIMEOUT is 2 s here, and this
+    # Orthanc takes about 7 s to delete them, so the case also fails if the delete
+    # limit does not grow with the study.
+    o_big_study() {  # o_big_study <PatientID> <instances>: prints the study id
+        python3 - "$OU" admin:testpw123 "$2" "$1" <<'PY_BIG'
+import base64, http.client, json, sys, urllib.parse
+url, auth, n, pid = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+u = urllib.parse.urlparse(url)
+c = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+h = {"Authorization": "Basic " + base64.b64encode(auth.encode()).decode(), "Content-Type": "application/json"}
+uid = "1.2.826.0.1.3680043.10.999." + "".join(str(ord(ch)) for ch in pid)[:20]
+study = None
+for i in range(1, n + 1):
+    tags = {"PatientID": pid, "PatientName": "DP^" + pid, "Modality": "OT", "StudyInstanceUID": uid,
+            "SeriesInstanceUID": uid + ".1", "SOPInstanceUID": f"{uid}.1.{i}", "InstanceNumber": str(i)}
+    c.request("POST", "/tools/create-dicom", json.dumps({"Force": True, "Tags": tags}), h)
+    r = c.getresponse(); d = r.read()
+    if r.status != 200:
+        raise SystemExit(f"create-dicom {i}: HTTP {r.status}")
+    study = json.loads(d)["ParentStudy"]
+print(study)
+PY_BIG
+    }
+    SL=$(o_big_study DPLARGE 3000)
+    if [ -n "$SL" ]; then
+        o_label "$SL" xnat-ingest-processed
+        o_label "$SL" "$(o_snapshot "$SL")"
+        RL="$WORK/c26"; build_case "$RL"
+        HTTP_TIMEOUT_T=2 ORTHANC_URL_T="$OU" ORTHANC_USER_T=admin ORTHANC_PASS_T=testpw123 \
+            run_engine "$RL" "$STAGE" true false
+        if o_said "$RL" "$SL" '"event":"reclaim_removed".*"instances":3000' && [ "$(o_http "$SL")" = 404 ]; then
+            pass orthanc_large_study_deleted "a study of 3,000 instances is deleted (body above 128 KiB, delete longer than HTTP_TIMEOUT)"
+        else
+            fail orthanc_large_study_deleted "expected reclaim_removed with 3000 instances and HTTP 404; got HTTP $(o_http "$SL"): $(grep -F "\"study\":\"$SL\"" "$RL/out.jsonl" 2>/dev/null | grep -o '"message":"[^"]*"' | head -2 | tr '\n' ' ')"
+        fi
+    else
+        fail orthanc_large_study_setup "could not create the 3,000-instance study in Orthanc"
     fi
 
     docker kill "$OCID" >/dev/null 2>&1 || true

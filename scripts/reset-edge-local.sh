@@ -26,7 +26,9 @@
 #      filesystem. Everything is unmounted deepest-first, and the script
 #      REFUSES to delete while any mount remains.
 #   2. PROCESSES STILL HOLDING FILES. `k0s stop` returns before containerd has
-#      exited. We wait, and abort rather than delete underneath it.
+#      exited. We wait, and abort rather than delete underneath it. k0s's
+#      containerd shims, and the containers under them, survive `k0s stop` by
+#      design: the script stops them by PID (step 2).
 #   3. SILENT rm FAILURES. Every removal is re-checked; anything still present
 #      is reported and makes the script exit non-zero.
 #   4. /etc/hosts. Backed up first, and the line under the marker is matched
@@ -99,6 +101,15 @@ for f in "${HAPROXY_FILES[@]}"; do [ -e "$f" ] && { echo "  present   : $f"; FOU
 grep -qxF "$MARKER" /etc/hosts 2>/dev/null && { echo "  present   : /etc/hosts marker block"; FOUND=$((FOUND+1)); }
 MNT=$($SUDO findmnt -rno TARGET 2>/dev/null | grep -c "^${K0S_DIR}/" || true)
 echo "  mounts under ${K0S_DIR}: ${MNT:-0}"
+# THE DATA PATHS THAT ARE MOUNTS NOW: step 7 checks these, and only these. On
+# some edges /data is its own volume (prod-test); on others it is a directory
+# on the root filesystem (the tier-2 test edge), and that is not a fault.
+DATA_MOUNTS=""
+for m in /data /data_local /database; do
+    [ -d "$m" ] || continue
+    if findmnt -n "$m" >/dev/null 2>&1; then DATA_MOUNTS="$DATA_MOUNTS $m"; echo "  data mount: $m"
+    else echo "  data dir  : $m (on the root filesystem, not a mount)"; fi
+done
 [ "$FOUND" -eq 0 ] && { echo; echo "  Nothing from a previous join is present. Nothing to do."; exit 0; }
 echo
 echo "  KEEPS     : /usr/local/bin/k0s, microk8s, Docker + CTP, all /data*, iptables DOCKER chains"
@@ -116,21 +127,51 @@ hdr "2. stop k0s, and wait for it to actually exit"
 # ---------------------------------------------------------------------------
 act "k0s stop; systemctl disable --now k0sworker" -- \
     bash -c "$SUDO k0s stop 2>/dev/null; $SUDO systemctl disable --now k0sworker 2>/dev/null; true"
+# THE SHIMS SURVIVE `k0s stop`, BY DESIGN. containerd-shim-runc-v2 keeps each
+# container running across a containerd restart, so after `k0s stop` the pods'
+# containers are STILL RUNNING under k0s's shims. The old wait also matched the
+# shims ($K0S_DIR/bin/containerd is a prefix of the shim path), waited 60s for
+# them and aborted (seen on the test edge, 2026-11-10). Now: wait for containerd
+# and the worker; then stop each container that a k0s shim still runs (SIGKILL
+# to its init ends its whole PID namespace), then the shims. By PID only.
+# ONLY k0s's OWN SHIMS: the anchored path. Docker's shims (/usr/bin, the CTP
+# containers) and microk8s's are never matched.
+K0S_MAIN="^$K0S_DIR/bin/containerd( |\$)|k0s worker"
+K0S_SHIM="^$K0S_DIR/bin/containerd-shim"
 if ! $DRY; then
     for i in $(seq 1 30); do
-        pgrep -f "$K0S_DIR/bin/containerd|k0s worker" >/dev/null 2>&1 || break
-        [ "$i" = 1 ] && printf '         waiting for k0s processes to exit'
+        pgrep -f "$K0S_MAIN" >/dev/null 2>&1 || break
+        [ "$i" = 1 ] && printf '         waiting for containerd and the k0s worker to exit'
         printf '.'; sleep 2
     done
     echo
-    if pgrep -f "$K0S_DIR/bin/containerd|k0s worker" >/dev/null 2>&1; then
-        bad "k0s processes still running after 60s — NOTHING has been removed"
-        pgrep -af "$K0S_DIR/bin/containerd|k0s worker" | sed 's/^/         /' >&2
+    if pgrep -f "$K0S_MAIN" >/dev/null 2>&1; then
+        bad "containerd or the k0s worker still running after 60s — NOTHING has been removed"
+        pgrep -af "$K0S_MAIN" | sed 's/^/         /' >&2
         exit 1
     fi
-    ok "no k0s processes running"
+    ok "containerd and the k0s worker have exited"
+    shims="$(pgrep -f "$K0S_SHIM" | tr '\n' ' ')"
+    if [ -n "${shims// /}" ]; then
+        echo "         k0s shims still running, with their containers: $shims"
+        for s in $shims; do
+            for c in $(pgrep -P "$s"); do $SUDO kill -KILL "$c" 2>/dev/null; done
+        done
+        sleep 3
+        for s in $(pgrep -f "$K0S_SHIM"); do $SUDO kill -KILL "$s" 2>/dev/null; done
+        for i in $(seq 1 10); do pgrep -f "$K0S_SHIM" >/dev/null 2>&1 || break; sleep 1; done
+        if pgrep -f "$K0S_SHIM" >/dev/null 2>&1; then
+            bad "k0s shims still running after SIGKILL — NOTHING has been removed"
+            pgrep -af "$K0S_SHIM" | sed 's/^/         /' >&2
+            exit 1
+        fi
+        ok "stopped the containers that $(echo $shims | wc -w) k0s shim(s) still ran, and the shims"
+    else
+        ok "no k0s shims running"
+    fi
 else
-    would "wait for containerd/kubelet to exit, and ABORT if they do not"
+    would "wait for containerd and the k0s worker to exit, and ABORT if they do not"
+    would "then stop the containers that k0s's shims still run, and the shims (now $(pgrep -f "$K0S_SHIM" | wc -l) shims)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -335,9 +376,8 @@ DA=$($SUDO docker ps -q 2>/dev/null | wc -l || true)
     || bad "docker containers LOST: ${DOCKER_CT_BEFORE} -> ${DA}"
 KUBE=$(grep -ciE 'KUBE|CNI' "$STAMP/iptables-after.txt" 2>/dev/null || true)
 [ "${KUBE:-0}" -eq 0 ] && ok "no KUBE/CNI iptables rules remain" || note "${KUBE} KUBE/CNI lines remain — a reboot clears them"
-for m in /data /data_local /database; do
-    [ -d "$m" ] || continue
-    findmnt -n "$m" >/dev/null 2>&1 && ok "$m still mounted" || bad "$m NOT mounted"
+for m in $DATA_MOUNTS; do
+    findmnt -n "$m" >/dev/null 2>&1 && ok "$m still mounted" || bad "$m NOT mounted (it was a mount before the reset)"
 done
 
 echo

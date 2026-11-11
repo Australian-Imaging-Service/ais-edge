@@ -1,21 +1,39 @@
 # OpenStack / Nectar Research Cloud install
 
-This is the path that has been **end-to-end tested**. The mgmt cluster is
+**Review status, 2026-11-10:** the cloud topology is implemented in the current
+charts and installer. The provider provisioning commands below are retained
+from the earlier design; a complete deployment with these exact commands and
+current provider defaults is **not verified (2026-11-10)**. Do not read a
+historical commissioning result as certification of this recipe. Start from
+`sites/example-cloud/values.yaml`, supply the complete site Secrets and edge
+configuration, and use [cloud-deployment.md](../cloud-deployment.md) for the
+repository's current interface. The short snippets below are overrides, not
+complete installable site files.
+
+**Historical commissioning, 2026-05-25:** this path was reported as tested
+with the earlier installer. A current chart replay is not verified
+(2026-11-10). In that record, the management cluster was
 a single Nectar VM running k0s; the cloud LB is Octavia (amphora driver).
 DNS is a `nip.io` wildcard for dev, switchable to your own zone for prod.
 
 
 ## Before you install: the load balancer (yours to do, once)
 
-`install.sh` stops with an error if the pieces below are missing — deliberately,
-because the failure they cause is silent and surfaces much later as an edge that
-will not join. See docs/clouds/README.md for why this is the operator's job.
+`install.sh` has limited DNS or controller-name preflight checks after
+prerequisite installation. It does not validate each item below. See
+[the current preflight limits](README.md#what-the-installer-checks-before-it-starts)
+and verify the balancer and backend path independently.
 
 There is no script for this in the repo on purpose: it is OpenStack-specific,
 it needs credentials the installer should not hold, and every site's project,
 network and credential policy differ.
 
 ### Region is not availability zone
+
+**Historical provider observations, 2026-05-25.** The region/AZ values and
+catalog behavior below describe that commissioning environment. They are not
+verified (2026-11-10); inspect the current project catalog and availability
+zones before using the example values.
 
 Get this wrong and nothing works, so it is worth stating plainly:
 
@@ -59,10 +77,10 @@ openstack loadbalancer member create --address "$MGMT_IP" \
     --protocol-port 30925 --subnet-id "$SUBNET" https-pool --wait
 ```
 
-**TCP, not `TERMINATED_HTTPS`.** The k0s API and konnectivity are mTLS end to
-end: the client proves itself with a certificate during the handshake, and
-nothing survives a decrypt/re-encrypt. A terminating listener breaks edge joins
-in a way that looks like a network fault.
+**Use TCP forwarding for the shared SNI path.** Preserve the TLS session to
+the intended API or tunnel endpoint. The exact konnectivity client-auth mode
+is not verified here (2026-11-10); terminating TLS at the cloud LB changes the
+certificate and routing path expected by the worker.
 
 ### 3. Tell the cluster which ports the pool expects
 
@@ -92,7 +110,9 @@ getent hosts <domain.internal>        # resolves, and NOT to the mgmt node itsel
 openstack loadbalancer show ais-edge-mgmt -f value -c provisioning_status  # ACTIVE
 ```
 
-A balancer stuck in `PENDING_CREATE` is almost always the AZ mistake in quirk 1.
+The historical run associated PENDING_CREATE with the AZ configuration.
+Current failures can also involve quota, network access or provider control
+plane errors; inspect events before assigning that cause.
 
 ### Alternative: let a cloud controller build it
 
@@ -104,6 +124,8 @@ credentialled component in `kube-system` whose job is to create infrastructure
 for you. Choose it deliberately.
 
 ```bash
+umask 077
+# Use a protected temporary file; remove it after creating the Secret.
 cat > /tmp/cloud.conf <<EOF
 [Global]
 auth-url=https://identity.rc.nectar.org.au/v3/
@@ -123,7 +145,8 @@ EOF
 
 kubectl -n kube-system create secret generic openstack-cloud-config \
     --from-file=cloud.conf=/tmp/cloud.conf
-shred -u /tmp/cloud.conf
+rm -f /tmp/cloud.conf
+# Unlinking does not prove erasure from snapshots, journals or the storage device.
 
 helm repo add cpo https://kubernetes.github.io/cloud-provider-openstack
 helm install openstack-ccm cpo/openstack-cloud-controller-manager \
@@ -168,8 +191,7 @@ For a free floating IP instead:
 openstack floating ip list          # look for one with no Port and no Fixed IP
 ```
 
-On the `LoadBalancer` path only, pin it under the SUBCHART (a parent chart
-cannot set a subchart's values). Note quirk 2: **Nectar QLD rejects this**.
+On the `LoadBalancer` path only, pin it under the SUBCHART (Helm passes values beneath the dependency key to that subchart). Note quirk 2: **Nectar QLD rejects this**.
 
 ```yaml
 ingress-nginx:
@@ -182,7 +204,8 @@ ingress-nginx:
 ## Prerequisites
 
 1. A Nectar project with available quota for:
-   - 1 VM for the mgmt cluster (4 vCPU / 8 GB / 40 GB is plenty)
+   - 1 VM for the mgmt cluster (historical example: 4 vCPU / 8 GB / 40 GB;
+     capacity for the current workload is not verified on 2026-11-10)
    - 1 VM per edge site (2 vCPU / 4 GB / 40 GB)
    - 1 LBaaS unit (Octavia amphora)
    - 1 floating IP (only if you want a fixed public IP — see "Topology quirks" below)
@@ -195,7 +218,7 @@ ingress-nginx:
 
 Edit `sites/<site>/values.yaml`. This file is **YAML**, read by
 `yaml.safe_load` in `install.sh` and passed straight to Helm — it is never
-sourced, so shell `export` lines in it are inert. Everything the installer
+sourced, so shell `export` lines in it are invalid YAML configuration. Everything the installer
 needs is a chart key:
 
 ```yaml
@@ -228,8 +251,10 @@ Use `type: LoadBalancer` here **only** if you installed a cloud controller (see
 `install.sh` refuses to start rather than let you find out later.
 
 `certManager.issuer: ais-edge-ca` is already the default, and
-`ais-edge-ca-issuer` is **not** a valid value — the ClusterIssuer is named
-FROM this key, so a wrong name leaves every Certificate Pending.
+the issuer name is part of the chart contract. A non-ACME name is used for
+the chart's CA ClusterIssuer and certificate references; changing it also
+requires checking cert-sync source names and any external consumers. Do not
+substitute a legacy script name without rendering and inspecting those references.
 
 Run `./install.sh -y <site>`; the site argument is mandatory. Nothing in the
 install reads OpenStack credentials, so sourcing the openrc is only needed
@@ -262,8 +287,10 @@ openstack loadbalancer availabilityzone list
 
 ## Nectar-specific topology quirks
 
-The Nectar tenant networking has two oddities that bit us during commissioning
-and the codebase now handles them:
+**Historical incidents, 2026-05-25 commissioning.** These provider behaviors
+were recorded then and are not verified (2026-11-10). The application chart
+does not repair Octavia, quota, catalog or security-group configuration; the
+current operator must inspect and configure those resources separately.
 
 ### 1. Octavia defaults to `melbourne-qh2` for new LBs
 
@@ -304,16 +331,16 @@ Then update `domain.internal` (or DNS) to point at the discovered VIP.
 
 By default Nectar's `default` SG only allows `:22` and intra-SG traffic.
 The LB's amphora is in a separate Octavia-managed SG, so it can't reach
-the K8s NodePort (`30000-32767`) on the mgmt VM. You must open them:
+the selected K8s NodePort on the mgmt VM. Permit the balancer source group
+on the configured HTTPS backend port. The old whole-range public opening
+is retained only as a historical description, not a deployment instruction:
 
 ```bash
 source /path/to/openrc.sh
+# Replace placeholders with the selected mgmt SG and actual LB source SG.
 openstack security group rule create --ingress --protocol tcp \
-    --dst-port 443        --remote-ip 0.0.0.0/0 default
-openstack security group rule create --ingress --protocol tcp \
-    --dst-port 80         --remote-ip 0.0.0.0/0 default
-openstack security group rule create --ingress --protocol tcp \
-    --dst-port 30000:32767 --remote-ip 0.0.0.0/0 default
+    --dst-port 30925 --remote-group <lb-source-security-group> <mgmt-security-group>
+
 ```
 
 Or via the dashboard: Network → Security Groups → default → Add Rule.
@@ -330,7 +357,10 @@ required — there is no auto-detection to fall back on.
 
 ### 5. Stuck LBs can't be force-deleted by app-credential users
 
-If the LB ever ends up in `PENDING_CREATE` due to an AZ mismatch or
+Historical workaround, 2026-05-25; current recovery behavior is not verified
+(2026-11-10). Coordinate stuck-resource cleanup with the provider before
+changing controller identity, since the old balancer may remain allocated.
+In the recorded incident, an LB in `PENDING_CREATE` due to an AZ mismatch or
 config problem, the API rejects deletes with HTTP 409 until Octavia's
 internal timeout. App-credential users have no admin scope to force
 deletion. Workaround: redeploy OCCM with a different `--cluster-name` (the
@@ -354,7 +384,7 @@ those two. There is no OCCM step at all — see "Topology quirks" above.
 | 1/7 | k0s + kubectl/helm/local-path-provisioner on the mgmt VM (`scripts/01-install-k0s.sh`) | Skipped entirely under `installMode: existing`, which only verifies `kubectl get nodes` and warns if there is no default StorageClass |
 | 2/7 | cert-manager v1.20.3 (vendored tarball) + the k0smotron control-plane provider v2.0.3 | Same as onprem |
 | 3/7 | Site Secrets, SOPS-decrypted straight into the cluster (`scripts/site-secrets.sh`) | Only runs if the site has a `secrets.enc.yaml` |
-| 4/7 | `helm upgrade --install mgmt charts/mgmt -n ais-mgmt` — SeaweedFS, the S3→XNAT uploader, observability (Prometheus/Loki/Grafana/Alertmanager/Vector), the internal CA + issuers, cert-sync, ingress-nginx, and one k0smotron `Cluster` per edge | This is where the LB happens: override `ingress-nginx.controller` in the site file to `hostNetwork: false`, `dnsPolicy: ClusterFirst`, `service.type: LoadBalancer` so OCCM provisions an Octavia LB. Cert SANs are DNS-only in cloud mode (no IP SANs). Grafana/Loki/SeaweedFS Ingress hostnames come from `hostnames.*` over `domain.internal` |
+| 4/7 | `helm upgrade --install mgmt charts/mgmt -n ais-mgmt` ; SeaweedFS, the S3→XNAT uploader, observability (Prometheus/Loki/Grafana/Alertmanager/Vector), the internal CA + issuers, cert-sync, ingress-nginx, and one k0smotron `Cluster` per edge | This is where the LB happens: override `ingress-nginx.controller` in the site file to `hostNetwork: false`, `dnsPolicy: ClusterFirst`, `service.type: LoadBalancer` so OCCM provisions an Octavia LB. Cert SANs are DNS-only in cloud mode (no management-node IP SANs). Grafana/Loki/SeaweedFS Ingress hostnames come from `hostnames.*` over `domain.internal` |
 | 5/7 | Per edge: child kubeconfig + JoinTokenRequest (`scripts/05-setup-edge-cluster.sh`) | The `Cluster` object itself belongs to the chart now (`install.sh` sets `CLUSTER_CR_MANAGED_BY_HELM=1`). k0s API + konnectivity are SNI-passthrough Ingresses on :443. Step 5 skips the mgmt-side `/etc/hosts` writes when topology is not onprem |
 | 6/7 | Per edge: join the k0s worker — `join: ssh` (`scripts/06-join-edge-worker.sh`) or `join: bundle` (`scripts/06b-make-bootstrap.sh` + `scripts/06c-post-join.sh`) | Both paths behave identically under cloud: `scripts/files/edge-join.sh` skips the edge `/etc/hosts` writes, and `06c` skips the child-cluster CoreDNS patch, because real public DNS resolves the names |
 | 7/7 | Per edge: `helm upgrade --install edge charts/edge` into the child cluster: Orthanc (with the facility-backup Lua hook), the ingest pipeline with its deidentify stage, s3-uploader and Vector. Then a one-shot cert-sync run | Endpoints are the public LB hostnames, so no `hostAliases` block is needed. Vector's push endpoint is the public Loki hostname |
@@ -369,20 +399,26 @@ getent hosts seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io
 # Should be 203.101.x.y (the LB VIP)
 
 # TLS handshake completes + 403 from SeaweedFS S3 (which requires auth)
-curl -kv https://seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io/
-# Expect HTTP 403
+curl -v --cacert <ais-edge-ca.crt> https://seaweedfs.dev-nectar-test.<lb-ip-dashes>.nip.io/
+# Unsigned S3 requests should be denied; a client certificate is also
+# required if s3Ingress.mtls.enabled is true. This does not test an upload.
 
 # Loki readiness
-curl -kv https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/ready
-# Expect HTTP 200
+curl -v --cacert <ais-edge-ca.crt> \
+  --cert <edge-loki-client.crt> --key <edge-loki-client.key> \
+  https://loki.dev-nectar-test.<lb-ip-dashes>.nip.io/ready
+# Expect HTTP 200 only with an admitted client CN and valid server trust.
 
-# Drop test: POST a DICOM to Orthanc REST, watch the upload_completed event
+# Drop test: POST synthetic DICOM to Orthanc REST. The shell S3 uploader
+# still emits upload_completed for the edge-to-S3 hop. Verify the management
+# accessionflow file verdict and destination files separately for XNAT delivery.
 # (full procedure in the parent docs/cloud-deployment.md)
 ```
 
 ## Dev → Prod swap
 
-The dev test uses nip.io because Let's Encrypt rejects nip.io (anti-abuse).
+The historical dev test used nip.io with the internal CA. This chart's ACME
+path uses DNS-01, and the operator does not control nip.io challenge records.
 For production with your own domain:
 
 ```yaml
@@ -409,8 +445,8 @@ There is no `DNS_PROVIDER` variable: the DNS-01 provider *is* the key under
 render on purpose — a ClusterIssuer with no solver never solves a challenge,
 so every Certificate stays Pending while the Ingress quietly serves nginx's
 default self-signed cert, which reads as a browser warning rather than a
-misconfiguration. HTTP-01 is not an option here: the edge hostnames are
-ssl-passthrough, so DNS-01 only. A working example, using route53 against
+misconfiguration. The chart implements DNS-01 only. This is a chart configuration choice;
+it is not a claim that every hostname behind this ingress is passthrough. A working example, using route53 against
 the staging directory, is in `scripts/ci/values.sh`.
 
 Then create the token Secret, and re-run the installer:
@@ -428,6 +464,12 @@ rendered alongside Let's Encrypt — switching the issuer repoints the
 Certificates, it does not remove the CA path. Everything else is unchanged.
 
 ## Tested cluster topology (commissioning, 2026-05-25)
+
+**Historical environment and result.** The addresses, component names and
+`upload_completed` line below belong to the 2026-05-25 run. The current engine
+is accessionflow 0.20.0 with collate orthanc, label and store commands. The
+old bytes/DICOM/file counts are not a current acceptance test or a capacity
+claim; no fresh provider replay was performed for this documentation review.
 
 - Mgmt: 203.101.224.240 (`stream-2_AB_dev`, QRIScloud AZ)
 - LB:   203.101.228.227 (Octavia amphora, QRIScloud AZ, qld subnet)

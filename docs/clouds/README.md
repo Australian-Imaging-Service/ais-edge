@@ -1,36 +1,35 @@
 # Per-cloud install guides
 
-> ⚠️ **These five guides describe the pre-Helm imperative installer and have
-> not been ported.** The repo has since consolidated into `charts/mgmt` +
-> `charts/edge`, driven by `./install.sh <site>` reading
-> `sites/<site>/values.yaml` — `install.sh:35` records that "Steps 4 and 7
-> replace what used to be scripts 02b/02c/02d/03/04/07/07b/07c". The scripts
-> these guides call (`00a`, `01b`, `02b`, `02c`, `02d`, `07b`, `07c`) and the
-> shell variables they set (`CLOUD_PROVIDER`, `LB_PUBLIC_IP`, `CERT_ISSUER`,
-> `DNS_PROVIDER`, `CLOUD_CREDENTIALS_FILE`) no longer exist anywhere outside
-> `docs/`. `topology: cloud` survives as a chart value
-> (`charts/mgmt/values.yaml:32`) but is parked, not ported — every site under
-> `sites/` ships `topology: onprem`, annotated "cloud   parked, not ported to
-> the charts yet". Read the guides below as design records, not as an install
-> path.
+> **Review status, 2026-11-10:** cloud topology is implemented in the Helm
+> charts and `install.sh`. `sites/example-cloud/values.yaml` is the complete
+> management example; cloud sites are no longer parked. The five provider
+> guides retain older design and commissioning material, with current
+> repository corrections beside it. Provider provisioning commands, quotas,
+> capacities and a fresh end-to-end replay are not verified (2026-11-10)
+> unless a dated result explicitly says otherwise. Do not treat a past
+> OpenStack result as evidence that every provider recipe has been tested.
+>
+> The old numbered installer scripts were removed. The seven-step installer
+> reads site YAML and applies the management and edge charts; there is no
+> provider switch or automatic cloud infrastructure provisioning.
 
 The AIS-Edge codebase is **cloud-portable by design**, but the portability
 lives in the site file now rather than in a provider switch: `topology:`
-(`onprem | cloud`, `charts/mgmt/values.yaml:32`) picks the network shape, and
+(`onprem | cloud`, `charts/mgmt/values.yaml` (`topology`)) picks the network shape, and
 everything genuinely cloud-specific — the load balancer, the DNS
 zone, the pre-allocated LB address — is configured on those components
 themselves rather than consumed by this repo. There is no `CLOUD_PROVIDER`
 variable and no `provider_guard_*` function in `install.sh`; the installer
-reads the site file with `yaml.safe_load` (`install.sh:95-113`) and hands the
+reads the site file with `yaml.safe_load` (`install.sh`, `cfg()`) and hands the
 same file to Helm with `-f`.
 
 | Cloud | Doc | Status |
 |---|---|---|
-| OpenStack — private subnet + FIP (**recommended for production**) | [openstack-private-subnet.md](openstack-private-subnet.md) | 📋 Design complete, pre-Helm; mirrors AWS/GCP/Azure |
-| OpenStack — Nectar QLD shared external network (dev/test only) | [openstack-nectar.md](openstack-nectar.md) | ✅ E2E tested (2026-05-25), on the pre-Helm installer |
-| AWS (EKS) | [aws.md](aws.md) | 📋 Design complete, untested |
-| GCP (GKE) | [gcp.md](gcp.md) | 📋 Design complete, untested |
-| Azure (AKS) | [azure.md](azure.md) | 📋 Design complete, untested |
+| OpenStack private subnet + FIP (candidate production topology) | [openstack-private-subnet.md](openstack-private-subnet.md) | Historical design; chart path implemented, current provider replay not verified (2026-11-10) |
+| OpenStack ; Nectar QLD shared external network (dev/test only) | [openstack-nectar.md](openstack-nectar.md) | Historical E2E commissioning (2026-05-25); not a current chart acceptance test |
+| AWS (EKS) | [aws.md](aws.md) | Historical design; end-to-end provider recipe not verified (2026-11-10) |
+| GCP (GKE) | [gcp.md](gcp.md) | Historical design; end-to-end provider recipe not verified (2026-11-10) |
+| Azure (AKS) | [azure.md](azure.md) | Historical design; end-to-end provider recipe not verified (2026-11-10) |
 
 2026-05-25 is the commissioning record in
 [openstack-nectar.md](openstack-nectar.md) ("Tested cluster topology
@@ -40,7 +39,8 @@ same claim in that row.
 
 The on-prem path (no cloud, hostNetwork :443 on the mgmt VM) is the default
 `topology: onprem` and is documented in the top-level
-[README.md](../../README.md). It is the only path the charts install today.
+[README.md](../../README.md). Cloud mode is also implemented, with explicit
+site ingress settings, public DNS and cloud topology render guards.
 
 ## What is yours to provision, and what this installer does
 
@@ -51,7 +51,8 @@ infrastructure, on any cloud, and that boundary is deliberate:
   provider to do it;
 * it needs credentials that can create and delete resources in your project —
   credentials an application installer should not hold;
-* on managed Kubernetes (EKS, AKS, GKE) it is **already done for you**.
+* managed Kubernetes supplies some infrastructure, but load-balancer,
+  identity, storage and network prerequisites vary by provider and cluster mode.
 
 | | Who does it |
 |---|---|
@@ -68,12 +69,13 @@ Kubernetes does not know your cloud exists. When a Service asks for
 `type: LoadBalancer`, something has to translate that into API calls that create
 a real balancer, listeners, pools and members, and then write the address back.
 
-There are two ways to satisfy that, and **the default here is the first**:
+There are two supported shapes. Set one explicitly in the cloud site file;
+the chart does not translate `topology: cloud` into ingress subchart values:
 
-**1. `NodePort` — you build the balancer (default on `topology: cloud`).**
+**1. `NodePort`: you build the balancer and pin its backend ports.**
 The ingress controller is exposed on a node port, and your load balancer
-forwards 443 to it. Nothing in the cluster holds a cloud credential or calls a
-cloud API. This is the recommended shape for self-managed clusters: the pieces
+forwards 443 to it. This ingress path does not require a cloud credential in a load-balancer
+controller. Other components, such as a DNS-01 solver, may still need cloud access. This is the recommended shape for self-managed clusters: the pieces
 you provision are the ones you already provision anyway, and the cluster gains
 no privileged component. The cost is that it is static — if the node address or
 the node port changes, you update the pool yourself.
@@ -85,12 +87,12 @@ balancers on demand. Each cloud has its own implementation:
 | Cloud | Implementation | Pre-installed? |
 |---|---|---|
 | OpenStack | `openstack-cloud-controller-manager` | no — self-managed clusters must install it |
-| AWS EKS | `aws-cloud-controller-manager` | yes |
-| Azure AKS | `cloud-provider-azure` | yes |
-| GCP GKE | `cloud-provider-gcp` | yes |
+| AWS EKS | Selected AWS load-balancer implementation | Varies by EKS mode; verify rather than assume |
+| Azure AKS | Managed Azure integration | Provider-managed; not necessarily a visible CCM pod |
+| GCP GKE | Managed GCP integration | Provider-managed; not necessarily a visible CCM pod |
 
-On managed Kubernetes this is already running and `type: LoadBalancer` is the
-natural choice — use it. On a self-managed cluster it means installing a
+On managed Kubernetes a supported load-balancer integration can satisfy the
+Service request. Verify the chosen mode and controller before selecting it. On a self-managed cluster it means installing a
 credentialled controller into `kube-system` whose whole purpose is to create
 infrastructure for you, which is exactly the thing this repo declines to do on
 your behalf. Choose it deliberately, not by accident.
@@ -103,35 +105,30 @@ join, at the far end of the link.
 
 ### What the installer checks before it starts
 
-`install.sh` will not spend twenty minutes to fail at the end. On
-`topology: cloud` it checks, before doing any work:
+`install.sh` runs cloud preflight after steps 1 and 2, before applying site
+Secrets and the management chart. It may already have installed prerequisites.
+Its checks are narrower than a deployment verification:
 
-* **`domain.internal` resolves.** Edges resolve this name to find the management
-  cluster. If there is no DNS record yet, there is no point installing.
-* **it does not resolve to the management node itself.** That works, right up
-  until the node is replaced or scaled — at which point every edge loses the
-  cluster and has to be re-pointed by hand. If it is deliberate for a
-  single-node trial, override it.
-* **on the `LoadBalancer` path only:** that a cloud controller is actually
-  running, and that no node still carries
-  `node.cloudprovider.kubernetes.io/uninitialized`. A node left holding that
-  taint means the controller is running but has not adopted it — usually wrong
-  credentials for the project, or a configured region that does not match where
-  the nodes actually are.
+* For NodePort, resolve the first address of `domain.internal` and reject it
+  if empty or equal to `domain.mgmtNodeIP`. This does not prove reachability
+  from an edge or resolution of every service name.
+* For LoadBalancer, count pods whose names contain `cloud-controller-manager`
+  and check the uninitialized node taint. A matching pod need not be Ready;
+  a functioning managed service or differently named controller may be missed.
+  This branch does not perform the NodePort DNS checks.
 
-Each failure names what is missing and points here. `SKIP_CLOUD_PREFLIGHT=1`
-overrides all of them — but read the failure first, because it is describing a
-real hole.
-
+`SKIP_CLOUD_PREFLIGHT=1` bypasses these checks, not chart guards. Independently
+verify the provider controller, DNS and TCP forwarding before using that
+bypass. The heuristic does not justify a claim that all managed clouds pass.
 
 ## What's shared vs cloud-specific
 
 **Shared across all clouds (the "cloud topology"):**
-- `nginx-ingress` runs as `Service type=LoadBalancer` (the cloud LB
-  controller does the rest). On the charts that is a site-file override of the
+- `nginx-ingress` uses an explicitly selected NodePort or LoadBalancer Service.
+  The provider integration or operator-managed pool supplies TCP forwarding. On the charts that is a site-file override of the
   vendored subchart under the `ingress-nginx:` key — its in-repo default is
   on-prem, `hostNetwork: true` + `service.type: ClusterIP`
-  (`charts/mgmt/values.yaml:523-550`)
+  (`charts/mgmt/values.yaml`, `ingress-nginx.controller`)
 - Edges resolve hostnames via real public DNS (no `/etc/hosts` hacks)
 - Pod manifests don't carry `hostAliases:` blocks
 - The k0s API server is exposed through the same SNI ingress as
@@ -145,9 +142,11 @@ real hole.
 - Credentials format (openrc.sh, ~/.aws/credentials, gcloud ADC, az login)
 - DNS-01 solver for cert-manager (Cloudflare, Route53, Cloud DNS, Azure DNS)
   — `certManager.acme.dns01Solver`, a provider-specific block passed through
-  verbatim (`charts/mgmt/values.yaml:426`)
-- LB attachment to a pre-allocated public IP —
-  `ingress-nginx.controller.service.loadBalancerIP` in the site file
+  verbatim (`charts/mgmt/values.yaml`, `certManager.acme.dns01Solver`)
+- LB attachment to pre-allocated addresses uses the selected controller
+  interface under `ingress-nginx.controller.service`. It is not portable as
+  one field: AWS uses EIP allocation-ID annotations; Azure recommends IP-name
+  annotations; other providers have their own address and subnet requirements.
 
 ## Adding a new cloud
 
@@ -167,19 +166,20 @@ installer. What replaced both is a site directory plus work outside this repo:
    public IP.
 
 Everything else (chart templates, ingress config, certs, edge join flow) is
-already topology-aware via `topology` and is intended to work unchanged — but
-that path is unexercised on the charts, which is what the banner above is
-about.
+topology-aware via `topology`. Cloud render and negative cases exercise the
+chart interface, while provider-specific infrastructure and fresh end-to-end
+acceptance remain separate checks. The historical provider guides do not
+establish that a current managed-cloud deployment has passed them.
 
 ## Common workflow
 
 The five steps below apply to every cloud. The per-cloud doc gives you
-the exact commands to substitute; the keys named here are the ones the charts
-actually read, which is not what those docs still print.
+provider command examples to adapt and verify. Their review banners state
+what has not been replayed; the chart interface is the site YAML used here.
 
 1. **Provision the mgmt cluster.** Managed K8s (EKS/GKE/AKS) or a VM
    running k0s. Set `installMode: existing` for managed K8s,
-   `installMode: fresh` for a VM (`install.sh:134`). These are site-file keys,
+   `installMode: fresh` for a VM (`install.sh`, `INSTALL_MODE`). These are site-file keys,
    not env vars — `install.sh` overwrites its own variables from the file
    unconditionally, so exporting them changes nothing.
 2. **Build the load balancer and get its address.** Create the balancer, a
@@ -192,21 +192,22 @@ actually read, which is not what those docs still print.
    created, so you read it back afterwards. Nectar QLD is the second kind and
    additionally **rejects** pinning a floating IP — see that doc.
 
-   If you are on the `LoadBalancer` path instead, the address goes on
-   `ingress-nginx.controller.service.loadBalancerIP`. There is no `LB_PUBLIC_IP`,
+   For LoadBalancer, use the provider's supported Service annotation or
+   address field under `ingress-nginx.controller.service`; do not assume
+   `loadBalancerIP` configures every provider. There is no `LB_PUBLIC_IP`,
    and no top-level `ingressNginx.loadBalancerIP`: it existed, was read by no
    template, and was removed. A parent chart cannot set a subchart's values, so
    the address goes on the subchart itself.
 3. **Set DNS** to point at that IP. Use `nip.io` for dev,
-   your own zone for prod (`domain.internal`). `nip.io` cannot satisfy
-   Let's Encrypt, so dev stays on the default `certManager.issuer:
-   ais-edge-ca` internal CA.
+   your own zone for prod (`domain.internal`). this chart's DNS-01 solver cannot write challenge records for a nip.io
+   zone you do not control, so that development example uses the default
+   `certManager.issuer: ais-edge-ca` internal CA.
 4. **Edit `sites/<site>/values.yaml`** with the per-cloud values. It is YAML
    read with `yaml.safe_load` and passed straight to Helm; shell `export`
-   lines written into it are inert.
+   lines written into it are invalid configuration, not environment settings.
 5. **Run `./install.sh -y <site>`** with the credentials sourced in your
    shell. The site argument is mandatory — without it the run aborts at
-   `install.sh:80` with `usage: ./install.sh [-y] <site>`. There is no
+   `install.sh` (`SITE_DIR`) with `usage: ./install.sh [-y] <site>`. There is no
    `CLOUD_CREDENTIALS_FILE`: no install step reads cloud credentials, only the
    tools you run yourself (`az`, `aws`, `openstack`) do.
 

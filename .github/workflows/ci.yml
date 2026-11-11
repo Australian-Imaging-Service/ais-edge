@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # CI
 # =============================================================================
@@ -150,7 +151,7 @@ jobs:
       # FAST_STAGES but never invoked here, so it had never run on a push.
       - name: Reclaimer tests (the delete path)
         if: ${{ !cancelled() }}
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
 
       # promtool unit-tests the Prometheus rules only. These run the pinned Loki
       # version in docker and evaluate the REAL rule expressions against fixture
@@ -173,13 +174,21 @@ jobs:
 
       # The staged-reclaimer deletes the upload tree. Its tests ran only in
       # `make ci`, never here. They copy the uploader's label rule out of the
-      # pinned xnat-ingest image (docker); without docker they would skip, so
+      # pinned accessionflow image (docker); without docker they would skip, so
       # CI_REQUIRE_RECLAIMER_IMAGE=1 makes that a failure.
       - name: Reclaimer tests (what survived, against a fake XNAT over HTTP)
         if: ${{ !cancelled() }}
         env:
           CI_REQUIRE_RECLAIMER_IMAGE: "1"
-        run: make reclaimer
+        run: make reclaimer RENDER_DEP=
+
+      # Requeue of an __invalid__ session: refusals, the lock, the audit line,
+      # and the pinned image reading the new labels from the folder name.
+      - name: Requeue helper for __invalid__ sessions
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_REQUEUE_IMAGE: "1"
+        run: make requeue-invalid
 
       - name: Reclaimer fence (drain and resume fail closed)
         if: ${{ !cancelled() }}

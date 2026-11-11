@@ -1,5 +1,7 @@
 # AIS Edge — Component Documentation
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Per-component reference. The top-level [`README.md`](../README.md) covers the
 **system as a whole** (architecture, install, network, security model). The
 files in this folder are deeper dives into individual components: what each
@@ -16,14 +18,16 @@ Operations → Risks → Replacements / Future).
 ### Data plane
 
 - [`orthanc.md`](components/orthanc.md): DICOM SCP at the edge. It runs
-  the Lua hook that writes the facility backup before xnat-ingest sees the
+  the Lua hook that writes the facility backup before accessionflow sees the
   data
 - [`seaweedfs.md`](components/seaweedfs.md) — S3-compatible storage for
   staged DICOM files
-- [`mc.md`](components/mc.md) — MinIO client; the S3 uploader on each edge
-- [`xnat-ingest.md`](components/xnat-ingest.md): group-orthanc, assign, deidentify and upload pods
+- [`mc.md`](components/mc.md): the S3 uploader guide retains the historical
+  MinIO filename. The current edge uploader uses rclone, with copy-only
+  transfer and a separate guarded reclaimer.
+- [`accessionflow.md`](components/accessionflow.md): group-orthanc, assign, deidentify and upload pods
 - [`deidentification.md`](components/deidentification.md): how to set up the
-  default engine, the xnat-ingest `deidentify` stage (`deid.engine: ingest`),
+  default engine, the accessionflow `deidentify` stage (`deid.engine: ingest`),
   and the reference for the deprecated Orthanc Lua engine (see also
   [choosing-a-deid-engine.md](choosing-a-deid-engine.md))
 
@@ -78,12 +82,17 @@ which values file you are editing matters.
   recommendation and what it costs, plus the R1-R6 revisions that amended
   earlier calls. Broader than security alone — it also covers reclaimer
   completeness, object counting, alerting correctness, retention, cluster
-  adoption and sizing/immutable fields. Items marked *(measured)* were
-  verified against the live cluster rather than reasoned from documentation.
+  adoption and sizing/immutable fields. Items marked *(measured)* record
+  historical observations. Read each date and current disposition; they are
+  not evidence of present cluster health or a new security audit.
 - [`ca-ceremony.md`](ca-ceremony.md) — the out-of-band offline-root CA
   ceremony, required by `certManager.ca.mode: intermediate` (the chart fails
   the render and points here when that mode is set without a `secretRef`).
   Does not apply to the default `selfSigned` mode.
+- [`recovering-invalid-sessions.md`](recovering-invalid-sessions.md): how to
+  requeue a session that `assign` put in `__invalid__`, with every method (the
+  edge command, a sudo rule for this command only, kubectl, the repository
+  script, by hand)
 - [`package-stage.md`](package-stage.md) describes the optional package stage: one zip
   per DICOM series, what it needs, how a site turns it on, what to check
 - [`alerting-architecture.md`](alerting-architecture.md) — why pipeline-event

@@ -1,3 +1,6 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
 # Info alerts  —  routine informational events. Never page.
 # =============================================================================
@@ -28,15 +31,25 @@ groups:
         labels: { severity: info }
         annotations:
           summary: "Root CA ais-edge-ca expires within 1 year"
-          description: "Plan a rotation cycle. Use scripts/rotate-ca.sh --phase=1 to issue a successor and distribute the bundle."
+          description: |
+            Plan rotation of the CA that is actually in use. Verify issuer/Secret names,
+            trust bundles, leaf chains and the rollout order before applying a change.
+            The retained scripts/rotate-ca.sh uses legacy resource assumptions and is
+            not verified for this chart (2026-11-10); do not execute it from this alert.
+            A replaced CA or intermediate does not revoke an older trusted key by itself.
 
       - alert: CertificateRenewed
         expr: |
           changes(certmanager_certificate_renewal_timestamp_seconds[1h]) > 0
         labels: { severity: info }
         annotations:
-          summary: "Certificate {{ $labels.namespace }}/{{ $labels.name }} was renewed"
-          description: "cert-manager auto-renewed the certificate. No action required."
+          summary: "Certificate renewal timestamp changed: {{ $labels.exported_namespace }}/{{ $labels.name }}"
+          description: |
+            The cert-manager renewal-timestamp metric changed within the last hour.
+            This is an informational signal, not proof that every dependent workload
+            has received a new certificate. Check Certificate status, the mounted leaf
+            and chain, and cert-sync delivery to edges where applicable. A renewal-time
+            change can also follow a specification change.
 
       # -----------------------------------------------------------------------
       # REMOVED — NewEdgeJoined, `changes(kube_node_info[10m]) > 0`
@@ -64,7 +77,8 @@ groups:
       # through Loki. kube_node_info here has exactly one series and it is the
       # management node, so no expression over it can observe an edge at all.
       # The old annotation's $labels.cluster rendered empty for the same
-      # reason — nothing in this Prometheus carries that label.
+      # reason: this raw node metric has no configured edge cluster label.
+      # Other rules explicitly derive a cluster label, for example reclaimers.
       #
       # WHY IT WAS NOT REPLACED. "If this was unplanned, investigate" assumes
       # an edge can appear on its own. It cannot: a child cluster exists

@@ -97,7 +97,7 @@ REMOTE_DIR="/tmp/ais-join-$$"
 ssh ${SSH_KEY_OPT} "${EDGE_SSH}" "mkdir -p ${REMOTE_DIR} && chmod 0700 ${REMOTE_DIR}"
 scp -q ${SSH_KEY_OPT} \
     "${STAGE}/k0s-ca.crt" "${STAGE}/haproxy-server.pem" "${STAGE}/join-token" \
-    "${REPO_DIR}/scripts/files/edge-join.sh" \
+    "${REPO_DIR}/scripts/files/edge-join.sh" "${REPO_DIR}/scripts/files/ais-requeue" \
     "${EDGE_SSH}:${REMOTE_DIR}/"
 
 # EVERY VALUE GOES THROUGH printf %q. ssh does not take an argv: it joins its

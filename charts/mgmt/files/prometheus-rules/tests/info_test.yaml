@@ -44,7 +44,7 @@ tests:
               namespace: cert-manager
             exp_annotations:
               summary: "Root CA ais-edge-ca expires within 1 year"
-              description: "Plan a rotation cycle. Use scripts/rotate-ca.sh --phase=1 to issue a successor and distribute the bundle."
+              description: "Plan rotation of the CA that is actually in use. Verify issuer/Secret names,\ntrust bundles, leaf chains and the rollout order before applying a change.\nThe retained scripts/rotate-ca.sh uses legacy resource assumptions and is\nnot verified for this chart (2026-11-10); do not execute it from this alert.\nA replaced CA or intermediate does not revoke an older trusted key by itself.\n"
 
   - interval: 1m
     name: CARotationDue stays quiet with a decade of life left
@@ -75,7 +75,9 @@ tests:
     name: CertificateRenewed fires when the renewal timestamp moves
     input_series:
       # Constant for an hour, then a step: that is what a renewal looks like.
-      - series: 'certmanager_certificate_renewal_timestamp_seconds{name="loki-tls",namespace="observability"}'
+      # namespace identifies the cert-manager scrape target; exported_namespace
+      # identifies the Certificate, as in the expiration-warning fixtures.
+      - series: 'certmanager_certificate_renewal_timestamp_seconds{name="loki-tls",namespace="cert-manager",exported_namespace="ais-mgmt"}'
         values: "1000+0x60 2000+0x60"
     alert_rule_test:
       - eval_time: 30m
@@ -87,10 +89,11 @@ tests:
           - exp_labels:
               severity: info
               name: loki-tls
-              namespace: observability
+              namespace: cert-manager
+              exported_namespace: ais-mgmt
             exp_annotations:
-              summary: "Certificate observability/loki-tls was renewed"
-              description: "cert-manager auto-renewed the certificate. No action required."
+              summary: "Certificate renewal timestamp changed: ais-mgmt/loki-tls"
+              description: "The cert-manager renewal-timestamp metric changed within the last hour.\nThis is an informational signal, not proof that every dependent workload\nhas received a new certificate. Check Certificate status, the mounted leaf\nand chain, and cert-sync delivery to edges where applicable. A renewal-time\nchange can also follow a specification change.\n"
 
   # ---------------------------------------------------------------------
   # THE NewEdgeJoined CASE THAT USED TO BE HERE IS GONE WITH ITS RULE, AND IT

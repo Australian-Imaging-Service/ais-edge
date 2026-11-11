@@ -91,11 +91,14 @@ chmod 0700 "$STAGE"
 # two delivery paths cannot diverge on cert generation.
 stage_edge_join_payload "$STAGE"
 cp "$JOIN_SRC" "${STAGE}/edge-join.sh"
+# The operator command for invalid sessions; edge-join.sh installs it. The same
+# file scripts/06 copies.
+cp "${REPO_DIR}/scripts/files/ais-requeue" "${STAGE}/ais-requeue"
 
 EXPIRES_FILE="${REPO_DIR}/join-token-${CLUSTER_NAME}.expires"
 EXPIRES_AT=$(cat "$EXPIRES_FILE" 2>/dev/null || echo 0)
 
-PAYLOAD_B64="$(tar czf - -C "$STAGE" k0s-ca.crt haproxy-server.pem join-token edge-join.sh | base64 -w0)"
+PAYLOAD_B64="$(tar czf - -C "$STAGE" k0s-ca.crt haproxy-server.pem join-token edge-join.sh ais-requeue | base64 -w0)"
 PAYLOAD_SHA="$(printf '%s' "$PAYLOAD_B64" | sha256sum | cut -d' ' -f1)"
 
 # NOTE ON QUOTING: every value below is written through printf %q, because these

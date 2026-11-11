@@ -17,11 +17,11 @@ data interactively while triaging an incident.
 
 - **Prometheus** — read-only datasource at the in-cluster Service URL
 - **Loki** — read-only datasource at the in-cluster Service URL
-- **Cluster API** via its ServiceAccount (only to read its own
-  configuration ConfigMaps + the dashboard ConfigMaps with the
-  `grafana_dashboard=1` label — sidecar pattern)
+- **Cluster API** via its ServiceAccount and ClusterRole. The rendered
+  role grants `get`, `watch` and `list` on ConfigMaps and Secrets across
+  the cluster. Label filtering in a sidecar does not narrow those RBAC grants.
 - **Persistent volume (5Gi)** for its embedded SQLite database (user
-  prefs, dashboard versions, alert silences)
+  preferences and dashboard state). Alertmanager owns its own silences
 - **NO direct cluster mutation rights**
 
 ## Where it runs
@@ -52,12 +52,13 @@ a Grafana that failed to come up.
 | `sites/<site>/values.yaml` | `hostnames.grafana` |
 | `sites/<site>/secrets.enc.yaml` | the `grafana-admin-credentials` Secret — `admin-user`, `admin-password`; named by `observability.grafana.adminSecretRef` |
 
-The dashboard sidecar pattern: a tiny container watches ConfigMaps with the
-label `grafana_dashboard=1` and auto-loads/unloads them as Grafana JSON
-dashboards. `searchNamespace` is **not set** in `charts/mgmt/values.yaml`
-(only `sidecar.dashboards.label`, `labelValue` and `folderAnnotation` are), so
-the sidecar falls back to its own namespace — `ais-mgmt`. That is the whole
-scope: a labelled ConfigMap in any other namespace is invisible to it.
+The dashboard sidecar watches objects labelled `grafana_dashboard=1`. The
+parent chart does not set `searchNamespace`, but the vendored stack supplies
+`ALL`. The rendered container has `NAMESPACE=ALL` and `RESOURCE=both`, so it
+reads labelled ConfigMaps and Secrets in every namespace. The datasource
+sidecar has no `NAMESPACE` override and watches its own namespace. Both share
+the same broader ClusterRole. Verify the rendered Pod and RBAC after a chart
+upgrade instead of inferring scope from an omitted parent value.
 
 Dropping a new dashboard JSON into `charts/mgmt/files/dashboards/` and running
 `helm upgrade` picks it up; no Grafana restart needed. The chart renders one
@@ -90,7 +91,7 @@ kubectl -n ais-mgmt get secret grafana-admin-credentials \
 xdg-open https://grafana.aisedge.local
 
 # Force reload of dashboards (the sidecar normally picks up changes
-# within ~30s; restart it to short-circuit)
+# after its watch/reload completes (latency not verified 2026-11-10); restart it to short-circuit)
 kubectl -n ais-mgmt rollout restart deployment/mgmt-grafana
 ```
 
@@ -102,12 +103,16 @@ which nobody has and nothing reports.
 
 ## Benefits
 
-- **The standard** — every site admin already knows Grafana; no training cost
+- **Familiar interface** for many operators. Site staff still need an
+  introduction to these dashboards, datasource selection and alert routing.
 - **Rich dashboard ecosystem** — community dashboards for Kubernetes,
   cert-manager, nginx-ingress already exist
-- **Single UI for logs + metrics + traces** — one place for the whole
-  observability story
-- **Apache 2.0** — no licence concerns
+- **Single UI for logs and metrics.** These datasources are provisioned here;
+  the chart does not configure a trace backend. Do not expect trace panels
+  to work without a separate reviewed integration.
+- **Open-source Grafana uses AGPLv3.** The old Apache 2.0 description is
+  historical (before the 2021 licence change). Review the deployed edition
+  and [upstream licensing](https://grafana.com/licensing/) for its terms.
 
 ## Risks and failure modes
 
@@ -115,9 +120,9 @@ which nobody has and nothing reports.
 |---|---|---|
 | Browser-side: self-signed CA | Browsers warn unless ais-edge-ca.crt installed in trust store | Distribute the CA cert to operators along with the kubeconfig |
 | Default admin password unchanged | Anyone who reaches Grafana logs in as admin | Set `admin-password` to a strong value in the `grafana-admin-credentials` Secret in `sites/<site>/secrets.enc.yaml` **before install**, then `scripts/site-secrets.sh encrypt <site>` and `scripts/site-secrets.sh apply <site>`. The file is SOPS-encrypted at rest, so the strong value is safe to commit |
-| Datasource credential leak | Read-only access to Prometheus/Loki — no privilege escalation possible from there | Limited blast radius. Both datasources are provisioned by the chart, so rotation is `helm upgrade`, not a script; there is no `02d` any more |
-| Dashboard ConfigMap collision | Another team accidentally labels a CM `grafana_dashboard=1` | The sidecar watches **its own namespace only** — `searchNamespace` is unset, so it defaults to `ais-mgmt`. That is narrower than it looks: anything a workload in `ais-mgmt` labels this way is imported, and anything correctly labelled elsewhere is silently ignored |
-| PV lost | User prefs + alert silences gone, dashboards survive (they reload from ConfigMaps) | Backup PV if customisations matter |
+| Datasource or Grafana compromise | Logs and metrics can contain sensitive values. The Grafana ServiceAccount can also read Secrets cluster-wide | Inspect datasource access and the rendered ClusterRole separately. Reconcile chart-managed datasource settings with Helm; rotate any affected credentials through their owning Secrets and restart the consumers that cache them |
+| Dashboard ConfigMap collision | A labelled ConfigMap or Secret in any namespace can be loaded | The rendered dashboard sidecar watches `ALL` namespaces and both resource kinds. Control who can create these objects. Namespace placement alone does not isolate dashboard content from this Grafana instance |
+| Grafana PV lost | User preferences and locally saved dashboards can be lost. Provisioned dashboards reload from ConfigMaps; Alertmanager silences belong to its separate storage | Back up Grafana state if local customisations matter, and back up Alertmanager state separately |
 
 ## Replacements / future
 
@@ -131,8 +136,9 @@ which nobody has and nothing reports.
 
 ## Future enhancements
 
-- SSO via UQ's identity provider (OAuth/SAML) — Grafana supports both;
-  drop the local admin
+- Site identity-provider integration is a future option. Check the deployed
+  Grafana edition and its supported authentication features before choosing
+  OAuth or SAML. Keep a controlled recovery login during an SSO migration.
 - Per-team folder ACLs once multiple teams use the dashboards
 - Image renderer plugin so alerts include rendered graphs in the email body
 - Link out from PrometheusRule alerts to a deep-linked Grafana panel

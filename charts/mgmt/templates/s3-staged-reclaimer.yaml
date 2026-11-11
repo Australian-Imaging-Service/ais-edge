@@ -1,8 +1,9 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 S3 staging reclaimer — dataPolicy.derived.s3Staged.
 
 The uploader Deployment next door (xnat-upload.yaml) reads
-s3://<bucket>/<prefix> and pushes into XNAT, but `xnat-ingest upload` has no
+s3://<bucket>/<prefix> and pushes into XNAT, but `accessionflow store xnat` has no
 retention of its own: it rebuilds its work list from a live listing every
 --loop pass, so a delivered session stays in the bucket, is listed again,
 "uploaded" again and re-fires XNATUploadSuccess forever, while staging grows
@@ -37,7 +38,7 @@ the cluster that could later be resumed by accident.
   {{- fail (printf "dataPolicy.derived.s3Staged.minAge=%v is longer than 36h. The reclaimer proves a session in XNAT only after minAge, and SessionStagedNotConfirmedInXNAT counts a session unconfirmed 48h after the reclaimer first saw it, so every healthy session would page. Keep it at most 36h (and above the edge's dataPolicy.derived.stagedReclaimer.minAge: the two clocks)." .Values.dataPolicy.derived.s3Staged.minAge) }}
 {{- end }}
 
-{{- /* The xnat-ingest image, the pin the uploader already uses. The
+{{- /* The accessionflow image, the pin the uploader already uses. The
        reclaimer runs reclaim-files.py, the same deleter as the edge's
        staged-reclaimer: python3 and boto3 for the S3 listing, the conditional
        deletes and the sidecar reads, the uploader's own label rule for the

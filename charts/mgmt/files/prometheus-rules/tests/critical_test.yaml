@@ -41,7 +41,7 @@ tests:
               instance: "10.0.0.1:6443"
             exp_annotations:
               summary: "Management API server unreachable"
-              description: "kube-apiserver scrape has failed for 5+ minutes. The management cluster control plane is down or partitioned."
+              description: "The discovered kube-apiserver scrape target has reported up=0 for at least\nfive minutes. Check target errors, network access, TLS and authentication,\nas well as API-server health. This signal does not prove the entire control\nplane is down. A vanished target or unavailable Prometheus cannot produce\nthe same up=0 signal; inspect discovery and evaluator health separately.\n"
 
   # ---------------------------------------------------------------------
   # The regression test for the rename. BOTH names must fire.
@@ -59,8 +59,8 @@ tests:
               namespace: ais
               deployment: mgmt-seaweedfs
             exp_annotations:
-              summary: "SeaweedFS pod has been NotReady for 2+ minutes"
-              description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+              summary: "SeaweedFS deployment has zero ready replicas for 2+ minutes"
+              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin ais. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n ais get deployments,pods\n  kubectl -n ais logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s\nEdge transfers may fail or retry while the service is unavailable.\n"
 
   - interval: 30s
     name: SeaweedFSDown still fires for the pre-chart flat name
@@ -76,8 +76,8 @@ tests:
               namespace: seaweedfs
               deployment: seaweedfs
             exp_annotations:
-              summary: "SeaweedFS pod has been NotReady for 2+ minutes"
-              description: "Edge uploads will fail. Check `kubectl logs -n seaweedfs -l app=seaweedfs`."
+              summary: "SeaweedFS deployment has zero ready replicas for 2+ minutes"
+              description: "The matching deployment reports zero ready replicas. It may be unhealthy\nor deliberately scaled down. Check desired replicas, pod events and logs\nin seaweedfs. The selector matches deployment names containing\nseaweedfs; verify the actual workload before assuming a specific failure.\n  kubectl -n seaweedfs get deployments,pods\n  kubectl -n seaweedfs logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s\nEdge transfers may fail or retry while the service is unavailable.\n"
 
   - interval: 30s
     name: SeaweedFSDown stays quiet while replicas are ready
@@ -108,5 +108,5 @@ tests:
               status: "true"
               node: k0s-edge-worker-dev
             exp_annotations:
-              summary: "Edge worker k0s-edge-worker-dev NotReady for 5+ minutes"
-              description: "kubelet on the worker has stopped responding. New DICOMs will accumulate locally; already-staged sessions cannot upload."
+              summary: "Observed node k0s-edge-worker-dev NotReady for 5+ minutes"
+              description: "Management kube-state-metrics observes management-cluster nodes, not the\nremote child workers. This historical alert name does not add edge coverage.\nInspect node conditions, kubelet, disk pressure and network status. A missing\nnode series can remain silent here. Pipeline stages may be disrupted, but\nthis alert does not establish which files were received or uploaded.\n"

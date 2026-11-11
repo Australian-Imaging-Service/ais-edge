@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 The ingest pipeline: group -> assign.
 
@@ -197,7 +198,7 @@ spec:
             # of the loop and this stage stops. Passing it restores 0.13.1 behaviour.
             #
             # ON THIS STAGE ONLY. `group-orthanc` has no such option and would die with
-            # "no such option", and NOT via XINGEST_ON_RESOURCE_CLASH: that variable is
+            # "no such option", and NOT via ACFLOW_ON_RESOURCE_CLASH: that variable is
             # still a plain click.Choice on `associate` and `deidentify`, where the pair
             # form "avoid all" is not a valid choice.
             - "--on-resource-clash"
@@ -214,7 +215,7 @@ spec:
             # copy and no facility backup, so the watched directory is the
             # only copy — which is why dataPolicy defaults this to never and
             # the chart refuses the combination while dataPolicy is enforced.
-            - name: XINGEST_UNLINK_SOURCE
+            - name: ACFLOW_UNLINK_SOURCE
               value: "all"
             {{- end }}
           volumeMounts:
@@ -224,6 +225,22 @@ spec:
 ---
 {{- end }}
 {{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
+# THE REQUEUE TOOL for sessions in /data/assigned/__invalid__, in the label pod
+# (docs/recovering-invalid-sessions.md). It ships
+# with the chart so that an operator needs only kubectl, not this repository:
+#   kubectl -n <ns> exec deploy/<release>-assign -c assign -- \
+#     python3 /opt/ais-edge/requeue-invalid.py list | show <folder> | requeue ...
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-requeue-tool
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  requeue-invalid.py: |-
+{{ .Files.Get "files/requeue-invalid.py" | indent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -320,8 +337,16 @@ spec:
             {{- include "edge.logEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            # The requeue tool, read-only. A directory mount (no subPath), so a
+            # new chart version updates the file without restarting the stage.
+            - name: requeue-tool
+              mountPath: /opt/ais-edge
+              readOnly: true
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        - name: requeue-tool
+          configMap:
+            name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
 ---
@@ -329,7 +354,7 @@ spec:
   The de-identification recipes, from the site file.
 
   A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
-  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  accessionflow needs in the path cannot be stored as a key. Each path is
   sanitised into a legal key here and mapped back to the real path with
   items[].path on the volume below, so the operator writes real paths and never
   sees the restriction.
@@ -418,6 +443,14 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
+            # Keep SOPClassUID in the metadata sidecars of the output.
+            # accessionflow 0.18.0 (#247) keeps only __uid__ by default. The
+            # reclaimers (reclaim-files.py) read SOPClassUID from the sidecar
+            # to find the XNAT resource label, and they KEEP every series
+            # without it: no error, the disk fills. SOPClassUID is not PHI.
+            # CI: tests/reclaimer/deid-sidecar.sh.
+            - "--metadata-allowlist"
+            - "__uid__,SOPClassUID"
             {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
             # THIS TESTED "onAssigned" UNTIL NOW, WHICH COULD NEVER BE TRUE:
             # onAssigned belongs to the `grouped` key and is not in this key's
@@ -425,14 +458,22 @@ spec:
             # live edge, whose deidentify container had no --unlink-source.
             # Same reasoning as assign: without this, `--loop` rebuilds its
             # work list from a live listing every cycle and re-processes
-            # sessions it has already done. Deletes hardlinks, not data.
+            # sessions it has already done. With --unlink-source all, 0.18.0+
+            # removes the whole input snapshot, including unprocessed files.
+            # Do not add files to staging session folders by hand. Originals
+            # remain in the facility backup under the site retention policy;
+            # this stage does not verify that backup before it unlinks input.
             - "--unlink-source"
             - "all"
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
-            - name: XINGEST_REID_ENCRYPT_KEY
+            # The tool reads ACFLOW_REID_ENCRYPT_KEY (accessionflow 0.18.0 and
+            # later). The key INSIDE the Secret keeps its old name, so a site's
+            # existing Secret works unchanged. CAUTION: a wrong variable name
+            # here is silent: the maps are then written in plain text.
+            - name: ACFLOW_REID_ENCRYPT_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.ingest.deidentify.reidEncryptKeySecret }}
@@ -497,7 +538,7 @@ spec:
       automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
       {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
       # The package stage can start before deidentify creates its output
-      # directory, and `xnat-ingest package` refuses an input that is not there.
+      # directory, and `accessionflow package` refuses an input that is not there.
       initContainers:
         - name: init-deidentified-dir
           image: {{ $pkgImage }}
@@ -580,7 +621,7 @@ spec:
         - name: associate
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "associate"]
+          command: ["accessionflow", "attach"]
           args:
             - "/data/assigned"
             {{- range splitList ";" .Values.ingest.associate.datatypes }}

@@ -14,7 +14,9 @@ talk to a kubelet, it sends RPCs over that stream.
 
 The reverse tunnel that makes `kubectl exec`, `kubectl logs`,
 `kubectl port-forward`, and metrics-server scraping work even though
-edge workers have **zero inbound ports**. Without it, the management
+the control plane cannot initiate a direct connection to the worker. This
+does not mean the host has no inbound services: DICOM reception uses 4242,
+and the SSH bootstrap path needs site-authorized SSH reachability. Without it, the management
 API server has no way to call back into a kubelet running behind a
 NAT/firewall.
 
@@ -35,7 +37,10 @@ NAT/firewall.
   and no node port is allocated at all
 - Receives long-lived TLS+gRPC connections from agents
 - Makes RPC calls to the connected agent on behalf of the API server
-- Authenticates agents via mTLS using the cluster's internal CA
+- Uses the generated k0s/Konnectivity authentication configuration. The exact
+  agent client-certificate versus token settings are not verified (2026-11-10);
+  inspect the deployed agent arguments and server configuration before stating
+  that this specific link uses mutual TLS.
 
 ### Agent side (on each worker)
 - Pod in the child cluster's `kube-system` namespace
@@ -44,7 +49,9 @@ NAT/firewall.
   `https://konnectivity-edge-dev.aisedge.local:443` (single long-lived
   stream per worker)
 - Forwards incoming RPCs to local kubelet (`localhost:10250`)
-- Authenticates via the cluster's internal CA + a serviceaccount token
+- The historical deployment notes describe a trusted cluster CA and a
+  ServiceAccount token. Current token audience, rotation and TLS client-auth
+  details are not verified (2026-11-10); they are managed by k0s/k0smotron.
 
 ## Where it runs
 
@@ -82,10 +89,14 @@ KUBECONFIG=kubeconfig-edge-dev kubectl logs -n kube-system \
 
 ## Benefits
 
-- **Zero inbound on edge** — the entire firewall ask is "outbound 443"
+- **Outbound control-plane tunnel.** The tunnel removes the need for a
+  direct inbound kubelet path from management. DICOM senders, bootstrap SSH,
+  DNS and other site dependencies still need their own network rules.
 - **Built into k0s** — k0smotron wires it for us
-- **mTLS-authenticated** — both ends verify the other against the
-  cluster CA; no shared secrets
+- **Authenticated tunnel.** Verify the generated TLS and token configuration
+  for the installed versions. The chart preserves TLS passthrough; it does
+  not prove that every hop uses client certificates or that no bearer token
+  is involved.
 - **Multiplexed** — one TCP connection carries many concurrent RPC
   streams; reconnect-and-resume on transient drops
 
@@ -102,17 +113,19 @@ modes; keep them here rather than pointing elsewhere.
 | Risk | Impact | Mitigation |
 |---|---|---|
 | TLS-intercepting proxy in the path | Agent rejects the proxy's cert; tunnel never establishes | Site IT must bypass interception for the management IP |
-| Aggressive HTTP/2 idle timeout on a firewall | Stream drops periodically; brief `kubectl exec` stalls | Keep idle timeout ≥ 60 min on outbound 443 to mgmt |
+| Aggressive HTTP/2 idle timeout on a firewall | Long-lived streams can drop and interrupt requests | The historical recommendation was at least 60 minutes; that threshold is not verified (2026-11-10). Test the installed agent's keepalive and reconnect behavior with the site firewall and approved long-lived gRPC policy |
 | gRPC blocked / HTTP/1.1 forced | Tunnel breaks completely | Allow plain HTTPS/HTTP-2 to mgmt |
 | `konnectivity-<edge>.<domain>` not resolvable in pod | Agent CrashLoop with "no such host" | CoreDNS hosts plugin patched at install (`scripts/06c-post-join.sh`, onprem topology only) |
-| API server down | Agents remain connected to whichever k0smotron pod replaces it; brief gap | Auto-recovery |
+| API server or tunnel server down | Existing streams can close; recovery time depends on restart, DNS and reconnect behavior | Verify that agents reconnect after the server recovers. Do not assume connections survive Pod replacement or promise a fixed outage duration |
 
 **Crucially**: konnectivity is for **central-admin visibility** only. The
 DICOM data path (the edge `s3-uploader` → SeaweedFS) does NOT go through
 konnectivity; it
 uses ordinary HTTPS over the same nginx-ingress on 443. So a
 konnectivity outage means `kubectl logs` stops working but data
-keeps flowing.
+can continue while its own dependencies remain healthy. A shared management
+network outage can break both paths, and some cluster operations still need
+a working API connection.
 
 ## Replacements / future
 
@@ -128,8 +141,9 @@ keeps flowing.
 
 ## Future enhancements
 
-- Per-edge agent client certificates with short rotation cycles (today
-  they live as long as the cluster CA)
+- Verify the installed agent credential type and rotation period before
+  proposing shorter credentials. The old assertion that client certificates
+  last as long as the cluster CA is not verified (2026-11-10).
 - Konnectivity-server HA (multi-replica) once the management cluster
   becomes HA
 - Tighter telemetry on tunnel state. There is **no tunnel alert today**.
@@ -139,11 +153,14 @@ keeps flowing.
   `kube-system`, so mgmt Prometheus had zero series for it and the rule was
   deleted (`docs/TOUR.md` §9, `docs/alerting-architecture.md`). Restart
   count was the wrong signal regardless: the agent reconnects in-process, so
-  a live tunnel observed cycling every ~10s ("no servers connected",
+  a historical tunnel observation (record date unknown; not verified
+  2026-11-10) cycled about every 10s ("no servers connected",
   "authentication handshake failed: EOF") never incremented it. Vector
   already forwards the agent's stdout to Loki with a correct `cluster`
-  label, and that path *does* cross the tunnel — so the cheap next step is a
-  Loki ruler rule over those lines, not a metric. A `konnectivity_tunnel_up`
+  label. Vector tails local node logs and sends them to Loki over its own
+  HTTPS connection; those log bytes do not cross Konnectivity. Kubernetes
+  discovery can still depend on API access. A future Loki rule could use
+  those events, provided its input and outage behavior are tested. A `konnectivity_tunnel_up`
   gauge would still be the nicer signal, but it needs a path to mgmt that
   does not exist yet; if we want it as a metric, Loki `recording_rules` can
   derive one from the same log stream

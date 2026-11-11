@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # S3 staging reclaimer — the ONLY component that deletes from s3://<bucket>/staged
 # =============================================================================
-# GUIDING: xnat-ingest upload has no S3 retention of its own — it relists the
+# GUIDING: accessionflow store xnat has no S3 retention of its own; it relists the
 # staging prefix every loop and never removes what it sent, so a delivered
-# session gets re-uploaded and re-alerted forever without this job. Full
+# session remains in staging without this job. Since 0.19.0 a complete session
+# is skipped before the success line (0.20.0: stores/xnat/api/store_api.py:274); the old repeated alerts are history. Full
 # design write-up: docs/TOUR.md, docs/components/seaweedfs.md.
 #
 # -----------------------------------------------------------------------------
@@ -258,7 +260,7 @@ if [ "$RECLAIM" != "onXnatConfirmed" ]; then
 fi
 
 # python3 is in this list on purpose. It runs reclaim-files.py (the listing,
-# the proof and every delete), and the xnat-ingest image, the pin the uploader
+# the proof and every delete), and the accessionflow image, the pin the uploader
 # uses, has it with boto3. If a future base image dropped it, nothing would be
 # examined and the reclaimer would quietly keep everything forever. That is
 # safe, and it is also indistinguishable from "there was nothing to reclaim".

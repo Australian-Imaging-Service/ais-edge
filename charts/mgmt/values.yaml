@@ -1,3 +1,9 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
+# Review 2026-11-10: checked against current templates and scripts. Undated
+# measurements below are historical and not verified (2026-11-10) as current
+# fleet state. Security-pin explanations record earlier reviews, not a fresh
+# vulnerability scan. All configuration values remain unchanged in this sweep.
 # =============================================================================
 # AIS Edge — management cluster chart
 # =============================================================================
@@ -22,7 +28,8 @@
 # decisions.md, docs/ca-ceremony.md, docs/components/*.md.
 # =============================================================================
 
-# Appears as the `cluster` label on this plane's own logs/metrics.
+# Declared management identity; Vector currently sets its log label to mgmt
+# literally. This value does not automatically label every scraped metric.
 # CAUTION: must not collide with any edge's clusterLabel.
 clusterLabel: mgmt
 
@@ -66,11 +73,12 @@ dataPolicy:
   # `location` is WHERE each stage lives inside the edge pods. Defaults match
   # the edge chart's own volume mounts, so a fresh install needs no edit. They
   # exist so the policy engine walks declared paths instead of knowing about
-  # Orthanc or xnat-ingest — swap the de-identifier and you repoint a location
+  # Orthanc or accessionflow; swap the de-identifier and you repoint a location
   # rather than rewrite a reclaimer. MUST match charts/edge/values.yaml.
   # quarantine has no location of its own: it is subPath UNDER facilityBackup.
   originals:
-    # Third switch — originals are the only identifiable copy. See charts/edge.
+    # Third switch for policy expiry; originals may be the last retained source.
+    # Check actual backup coverage and upstream cleanup as explained in charts/edge.
     allowExpiry: false
     # retain: a DURATION deletes the whole top-level entry (one PATIENT under
     # the facility backup) once its NEWEST file is older than that. See
@@ -112,10 +120,12 @@ dataPolicy:
     grouped:        {location: /data/grouped, reclaim: onAssigned}   # no minAge: assign unlinks at assign time; only orphans reach the engine
     assigned:       {location: /data/assigned, reclaim: onUploaded, minAge: 0}
 
-    # Owned by THIS chart. xnat-ingest upload has no S3 retention of its own —
+    # Owned by THIS chart. accessionflow store xnat has no S3 retention of its own:
     # it rebuilds its work list from a live S3 listing every loop, so an
-    # already-uploaded session stays there and is re-listed/re-uploaded/
-    # re-alerted forever without this reclaimer.
+    # already-uploaded session stays there and is re-listed without this
+    # reclaimer. Since 0.19.0 a complete session skips before the success line
+    # (0.20.0: stores/xnat/api/store_api.py:274).
+    # Repeated success alerts from the old skip path are historical.
     s3Staged:
       reclaim: onXnatConfirmed   # never | onXnatConfirmed
       # THE TWO CLOCKS: this minAge must exceed the edge's
@@ -149,15 +159,18 @@ dataPolicy:
       # Cap per run. CAUTION: bounds a "delete everything" bug to this many
       # sessions; at hourly this still drains ~1200/day if truly needed.
       maxRemovals: 50
-      # The xnat-ingest image, the same pin as xnatUpload.image: reclaim-files.py
+      # The accessionflow image, the same pin as xnatUpload.image: reclaim-files.py
       # needs its python3 and boto3, and the uploader's own label rule. Pinned:
       # an unpinned tag is worst on the job that deletes data.
       image:
-        # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-        # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-        # repository when an upstream release contains them.
-        repository: ghcr.io/akshitbeniwal/xnat-ingest
-        tag: "0.16.2.post1"
+        # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+        # release replaces the fork build 0.16.2.post1. Validate each required fix;
+        # its version number alone does not prove behavioral equivalence.
+        # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
+        # ACFLOW_*). Every pin of the tool in both charts must name the same image
+        # (CI: log-phrases and cli-contract), and the templates follow this version.
+        repository: ghcr.io/australian-imaging-service/accessionflow
+        tag: "0.20.0"
         pullPolicy: IfNotPresent
 
   telemetry:
@@ -179,9 +192,9 @@ dataPolicy:
     # Setting loki/prometheus under telemetry is rejected at render, so the
     # mistake cannot be silent again.
     #
-    # podLogFiles stays: it has no counterpart anywhere. Nothing implements it
-    # yet — on-node pod log rotation is a kubelet setting and would be wired in
-    # scripts/06-join-edge-worker.sh.
+    # podLogFiles is implemented through kubelet rotation settings during join.
+    # This is independent of Loki retention and does not retroactively change
+    # an already-installed worker service; verify its effective configuration.
     # ON-NODE POD LOG ROTATION, enforced by the kubelet on each edge worker.
     #
     # NOT a duration, and that is the kubelet's constraint rather than a choice.
@@ -192,7 +205,8 @@ dataPolicy:
     # This key used to read `retain: 14d`, which nothing implemented and nothing
     # could: it promised a time window the kubelet cannot express. Stating the
     # bound the kubelet actually enforces is the honest version — total on-disk
-    # log per container is maxSize x maxFiles, so 10Mi x 5 = 50Mi.
+    # nominal rotated budget is maxSize x maxFiles, so 10Mi x 5 = 50Mi.
+    # Rotation is asynchronous and this is not an instantaneous disk quota.
     #
     # Applied by scripts/06-join-edge-worker.sh via --kubelet-extra-args when the
     # worker is installed. CAUTION: it is a JOIN-TIME setting, so changing it
@@ -319,7 +333,8 @@ seaweedfs:
     # 4.34, not 3.99, not 4.30. 3.99 has three published S3 path-traversal
     # CVEs (CVSS 10.0 / 8.1 / 7.7) that cross the per-bucket isolation this
     # whole design depends on; 4.30 fixes only the first. 4.34 is the lowest
-    # version clean of all six published SeaweedFS advisories.
+    # version selected in the 2026-08-06 six-advisory review. That historical
+    # result is not a current claim that this image has no vulnerabilities.
     # CAUTION: do not "helpfully" bump further without checking — 4.x also
     # turns on an Iceberg REST server (-s3.port.iceberg) that 3.99 never had.
     # Full CVE breakdown and what was re-verified before this bump:
@@ -391,7 +406,7 @@ seaweedfs:
     #
     # CAUTION: flipping `require` before step 2 has answered breaks every
     # upload with an error that names nothing. MEASURED: the TLS handshake
-    # still succeeds (TLS 1.3 sends the client cert last), nginx answers HTTP
+    # succeeded in that measured configuration, and nginx answered HTTP
     # 400 with an HTML body, and rclone reports it as an S3 XML parse failure
     # — so it reads as a dead endpoint, not an auth problem. The chart refuses
     # require without issue, and refuses issue without something delivering the
@@ -413,11 +428,14 @@ xnatUpload:
   enabled: true
   namespace: xnat-upload
   image:
-    # Fork build: upstream 0.16.2 plus the AIS fixes that upstream has not
-    # released yet (xnat-ingest PRs #210-#231). Go back to the upstream
-    # repository when an upstream release contains them.
-    repository: ghcr.io/akshitbeniwal/xnat-ingest
-    tag: "0.16.2.post1"
+    # accessionflow, the tool called xnat-ingest before 0.18.0. This upstream
+    # release replaces the fork build 0.16.2.post1. Validate each required fix;
+    # its version number alone does not prove behavioral equivalence.
+    # CAUTION: 0.18.0 renamed the commands and the XINGEST_* variables (now
+    # ACFLOW_*). Every pin of the tool in both charts must name the same image
+    # (CI: log-phrases and cli-contract), and the templates follow this version.
+    repository: ghcr.io/australian-imaging-service/accessionflow
+    tag: "0.20.0"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password
@@ -445,7 +463,8 @@ xnatUpload:
 
   loop: 60
 
-  # SECONDS OF QUIET IN THE BUCKET before a session is considered complete.
+  # SECONDS OF QUIET IN THE BUCKET before a session is eligible for inspection.
+  # Quiet is not proof that every expected resource has arrived.
   #
   # NOT OPTIONAL, AND THE UPSTREAM DEFAULT IS 0, which makes the check
   # `(now - last_modified) >= 0` always true, so this uploader reads a session
@@ -478,7 +497,7 @@ xnatUpload:
   # in it matches. A resource that the edge has sent in part waits for the
   # next pass (the partial upload measured above). This does not wait for a
   # whole session: a resource that has not arrived yet goes up on a later
-  # pass. Edge sessions carry manifests: xnat-ingest writes one in each
+  # pass. Edge sessions carry manifests: accessionflow writes one in each
   # resource and the edge copies it with the files.
   # false: upload the objects that are there.
   requireManifest: true
@@ -490,10 +509,11 @@ xnatUpload:
 
   resources:
     requests: {memory: 256Mi, cpu: 100m}
-    # CAUTION: xnat-ingest 0.16.2 (as 0.16.1) holds up to 256 MiB in memory for each
-    # archive it uploads, and uploads up to 10 at once: about 2.8 GiB for a
-    # session with many large scans. Lower this only after the image
-    # writes archives to disk (xnat-ingest PR #200).
+    # CAUTION: accessionflow 0.20.0 (as 0.19.0) calls xnat 0.8.1 upload_dir. Its
+    # tar_file/tgz_file methods use a 256 MiB SpooledTemporaryFile. Up to
+    # 10 workers can hold archives at once, as in the older 0.16.2 warning.
+    # Do not assume the fork archive fix (xnat-ingest PR #200) is present.
+    # Keep this limit until memory and temporary disk use are measured.
     limits:   {memory: 4Gi,   cpu: "2"}
 
 
@@ -647,7 +667,7 @@ certSync:
         # This edge's Loki push CLIENT CERTIFICATE, from the same CA as the
         # ca-bundle above. tls.key IS copied here (unlike the CA entry) —
         # this key authenticates one site to one endpoint and rotates every
-        # 90 days; it is not the fleet-signing key.
+        # a 90-day validity period with earlier renewal; it is not the signing key.
         # CAUTION: drop this entry when observability.enabled is false — the
         # cert has no source to copy and every run logs sync_failed.
         namespace: ""
@@ -786,7 +806,8 @@ observability:
     smtpRequireTLS: true
     # Plain value, not Secret-sourced: Alertmanager has smtp_auth_password_
     # FILE but no _username_file equivalent. CAUTION: empty means no SMTP
-    # auth — a relay that requires it rejects every message silently.
+    # auth; a relay that requires it rejects messages, with notification errors
+    # available in Alertmanager logs. Verify the actual relay requirements.
     smtpUsername: ""
     # Optional. Key: webhook-url. Must also appear in kube-prometheus-
     # stack.alertmanager.alertmanagerSpec.secrets or the chart refuses to
@@ -1007,7 +1028,8 @@ loki:
         ruler:  logs-bucket
         admin:  logs-bucket
       s3:
-        # [tpl]. Plain http on purpose — never leaves the node.
+        # [tpl]. Cluster-internal HTTP, not necessarily node-local if workloads
+        # are scheduled onto different nodes. This path has no transport TLS.
         endpoint: http://{{ .Release.Name }}-seaweedfs.{{ .Release.Namespace }}.svc.cluster.local:8333
         region: us-east-1               # ignored by SeaweedFS, required by the SDK
         s3ForcePathStyle: true
@@ -1044,7 +1066,7 @@ loki:
       replication_factor: 1
     # Evaluates the LogQL alert rules and pushes to Alertmanager. Lives here
     # rather than in Prometheus because mgmt Prometheus cannot scrape edge
-    # pods across the one-way konnectivity tunnel, and because these alerts'
+    # pods through the stock Konnectivity API-server tunnel, and these alerts'
     # source of truth is the JSON log event, not a derived metric.
     rulerConfig:
       storage:
@@ -1202,8 +1224,8 @@ vector:
         # The Vector chart runs `tpl` over customConfig, so this whole file
         # is evaluated as a Helm template. Written bare, `{{ cluster }}`
         # resolves against the CHART context (no `cluster` there) and
-        # renders EMPTY — every log line loses its stream labels with no
-        # error anywhere. Verify after any change:
+        # can fail template evaluation or produce incorrect labels. Preserve
+        # the runtime expressions and check the rendered ConfigMap. Verify after any change:
         #   kubectl -n ais-mgmt get cm mgmt-vector -o yaml | grep 'cluster:'
         # must show the literal `{{ cluster }}`, not an empty string.
         # (charts/edge avoids this differently — its Vector config is loaded

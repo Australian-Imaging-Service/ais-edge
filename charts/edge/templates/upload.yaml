@@ -332,18 +332,18 @@ spec:
         - name: upload
           image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          # xnat-ingest loops internally via --loop; no bash wrapper needed.
-          command: ["xnat-ingest", "upload"]
+          # accessionflow loops internally via --loop; no bash wrapper needed.
+          command: ["accessionflow", "store", "xnat"]
           args:
             - {{ include "edge.uploadSourceDir" . | quote }}
-            - "$(XINGEST_HOST)"
+            - "$(ACFLOW_HOST)"
             - "--always-include"
             - {{ .Values.upload.direct.alwaysInclude | quote }}
             - "--loop"
             - {{ .Values.upload.direct.loop | quote }}
             - "--wait-period"
             - {{ .Values.upload.direct.waitPeriod | quote }}
-            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # Pass the choice both ways. With neither flag, the CLI
             # does not require a manifest (its option default is unset).
             {{- if .Values.upload.direct.requireManifest }}
             - "--require-manifest"
@@ -355,22 +355,22 @@ spec:
             {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
-            - name: XINGEST_HOST
+            - name: ACFLOW_HOST
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: server
-            - name: XINGEST_USER
+            - name: ACFLOW_USER
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: username
-            - name: XINGEST_PASS
+            - name: ACFLOW_PASS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: password
-            - name: XINGEST_TEMPDIR
+            - name: ACFLOW_TEMPDIR
               value: {{ .Values.upload.direct.tempDir | quote }}
             {{- include "edge.extraPip.env" . | nindent 12 }}
           resources:

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Site secret management with SOPS + age.
 # =============================================================================
@@ -16,7 +17,9 @@
 #
 # The charts never contain credentials — they reference Secrets by name. So
 # `apply` is the whole integration: create the Secrets, then `helm upgrade`.
-# No helm-secrets plugin, no decrypt-to-tempfile, no plaintext on disk.
+# No helm-secrets plugin. `apply` decrypts into a pipe: no plaintext file.
+# One exception: when add-edge appends an s3 key pair to an ENCRYPTED file, it
+# decrypts to a temporary file under `mktemp -d`, re-encrypts, then shreds it.
 # =============================================================================
 set -euo pipefail
 
@@ -103,7 +106,7 @@ new)
   mgmt   the management node — SeaweedFS, observability, control planes,
          the XNAT uploader, the reclaimer, and the fleet-wide data policy.
          ONE per deployment.
-  edge   one facility node: Orthanc, the facility backup, the xnat-ingest
+  edge   one facility node: Orthanc, the facility backup, the accessionflow
          de-identification recipe, the S3 uploader. ONE per site.
 
   A new edge also needs an entry under \`edges:\` in the management site's

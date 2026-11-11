@@ -4,11 +4,12 @@
 
 [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics)
 (KSM) is a small service that listens to the Kubernetes API and
-exposes the **state of every object** as Prometheus metrics. Unlike
+exposes the state of configured built-in object kinds as Prometheus metrics.
+It does not export arbitrary custom resources without additional configuration. Unlike
 cAdvisor (which gives container-resource metrics) or kubelet (which
 gives node metrics), KSM gives **object metrics** —
 `kube_pod_status_phase`, `kube_deployment_status_replicas_ready`,
-`kube_certificate_renewal_timestamp_seconds`, `kube_node_status_condition`,
+`kube_cronjob_status_last_successful_time`, `kube_node_status_condition`,
 etc.
 
 ## Role in this stack
@@ -25,22 +26,27 @@ our alerts depend on it:
   `.Files.Get` because it carries `{{ $labels }}` Helm must not touch, so it
   cannot be templated with the release name; the regex is what makes one rule
   cover both layouts)
-- `CertificateExpiringSoon` — `certmanager_certificate_expiration_timestamp_seconds`
+- `CertificateExpiringSoon` uses `certmanager_certificate_expiration_timestamp_seconds`
+  from cert-manager itself, not KSM. Its scrape and availability are separate.
 - `ReclaimerNotSucceeding`: `kube_cronjob_status_last_successful_time` and
   `kube_cronjob_created` for each edge's `<release>-reclaim-<edge>` CronJob
 
 Because so much reads it, `KubeStateMetricsDown` (warning) fires when KSM has
 not been scraped successfully for 15 minutes: with its series gone, every
-alert above has nothing to evaluate and stays quiet, which looks healthy.
+KSM-dependent alert above can lose its input and stay quiet. The certificate
+expiry alert has a separate cert-manager input; KSM loss does not remove it.
 
-Two caveats on that list, both measured on the live management Prometheus
-rather than assumed:
+**Historical measurements (August 2026; live counts not verified 2026-11-10).**
+The observations below motivated the current rule design. The source review
+confirms the management-only KSM topology and the removed invalid rules; use
+the live diagnostic commands to establish current series counts:
 
 - **KSM runs on the management cluster only**, and nothing federates or
   remote-writes child-cluster metrics back to it (see
   `docs/alerting-architecture.md` for why that path was rejected — edge
-  signals arrive as logs through Loki instead). `kube_node_info` has exactly
-  one series and it is the management node.
+  signals arrive as logs through Loki instead). the historical `kube_node_info` query returned one management-node series.
+  A current deployment can have more management nodes; this is not an edge
+  census and must not be treated as a fixed cardinality.
 
   Two alerts that named child-cluster objects were deleted for exactly this
   reason, confirmed with zero series each: `EdgePodCrashLoop`
@@ -60,7 +66,7 @@ rather than assumed:
   appears as a **new series** at 1 — it never moves an existing value — so
   `changes()`, `delta()`, `rate()` and friends over one of them are
   identically 0. `NewEdgeJoined` was `changes(kube_node_info[10m]) > 0` and
-  never produced a sample in its life; it has been removed, and
+  could not detect a new object by that value expression; it has been removed, and
   `scripts/ci/promtool.sh` now rejects the shape. To say anything about a join
   metric, work on the SERIES SET rather than the value: `unless on (...)`
   against another metric, as `CertSyncNeverSucceeded` first did
@@ -92,7 +98,7 @@ rather than assumed:
 
 - Cluster: management cluster only
 - Namespace: `ais-mgmt` — the management release's namespace
-  (`install.sh:121`). There is no `observability` namespace; that was the
+  (`install.sh`, management Helm release namespace). There is no `observability` namespace; that was the
   old imperative installer's layout, and everything in the stack now lands
   in the release namespace instead
 - Workload: Deployment `mgmt-kube-state-metrics` (single replica). Note the
@@ -138,11 +144,14 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 
 ## Benefits
 
-- **Comprehensive** — every K8s object kind covered
+- **Configured built-in kinds covered** by the rendered `--resources` list.
+  CRD metrics need a separate custom-resource configuration.
 - **Cheap** — single low-resource pod
 - **Standard naming** — Prometheus + community dashboards expect these
   metric names
-- **Multi-tenant safe** — read-only, can't mutate the cluster
+- **Read-only Kubernetes verbs.** This limits direct mutation but does not
+  provide tenant isolation: the rendered ClusterRole can list and watch
+  Secrets and ConfigMaps across the management cluster.
 
 ## Risks and failure modes
 
@@ -150,13 +159,14 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 |---|---|---|
 | KSM down | Alerts that depend on its metrics stop firing | Auto-restarts; KPS scrapes regenerate state quickly |
 | API rate-limited | Stale metrics | KSM uses informers (cached); rate-limiting unlikely at our scale |
-| Cluster CRD added | New object kinds not exported | KSM has built-in support for popular CRDs (cert-manager, k0smotron); custom kinds need a CRD allow-list |
+| Cluster CRD added | Custom object state is absent from KSM by default | The rendered collector list contains built-in kinds. Configure custom-resource state metrics and matching RBAC explicitly. Certificate expiry in this stack comes from cert-manager's own exporter |
 | RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole (`mgmt-kube-state-metrics`, cluster-scoped); verify with `kubectl auth can-i list pods --as=system:serviceaccount:ais-mgmt:mgmt-kube-state-metrics` |
 
 ## Replacements / future
 
-- **prom-operator-pack** ships KSM by default; we let it manage
-  the deployment for us
+- **kube-prometheus-stack** vendors and deploys KSM here. Its values and
+  rendered RBAC are the configuration source; there is no separate
+  prom-operator-pack dependency in this repository.
 - **OpenCost / Kubecost** — adds cost-allocation metrics on top of
   KSM-style data; only useful in cloud
 - **kube-aggregator-metrics** — alternative; rarely used. Stick with KSM

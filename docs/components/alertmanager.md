@@ -10,18 +10,20 @@ which then deduplicates, groups, silences, and routes to receivers
 
 ## Role in this stack
 
+**Review status (2026-11-10):** routing and storage claims below were checked against the branch templates and the rendered Alertmanager CR. Delivery through a site relay was not verified in this documentation review. A valid render does not prove a mounted password exists, a relay accepts it, or a message reaches an inbox.
+
 The notification engine. Receives alerts from Prometheus when our
 PrometheusRule files fire — and from Loki's ruler, which posts its
 LogQL-derived alerts to the same Alertmanager — applies the routing
 tree (a severity spine: critical → email + Slack, warning → email,
-info → Slack, with per-alertname overrides sitting *above* it), and
+info → Slack when configured, otherwise email, with per-alertname overrides above it), and
 sends the appropriate message to each configured receiver.
 
 ## What Alertmanager has access to
 
 - **In-cluster network** — receives webhook posts from Prometheus, and from
   Loki's ruler, which is pointed at this same Service by
-  `loki.rulerConfig.alertmanager_url` in `charts/mgmt/values.yaml`
+  `loki.loki.rulerConfig.alertmanager_url` in `charts/mgmt/values.yaml`
 - **Outbound SMTP** to `observability.alerting.smtpHost` / `.smtpPort`, set in
   `sites/<site>/values.yaml`. Those are *not* environment variables: the
   config file ships with `__ALERT_SMTP_HOST__`-shaped sentinels and
@@ -54,14 +56,17 @@ sends the appropriate message to each configured receiver.
   — the operator names the StatefulSet `alertmanager-<Alertmanager CR>`, and
   the CR is `mgmt-kube-prometheus-stack-alertmanager`
 - Service: `mgmt-kube-prometheus-stack-alertmanager.ais-mgmt.svc:9093`
-- Every name above carries the release name. Install under a different release
-  and the prefix changes with it
+- The operator workload and Service names include the release name. The config
+  Secret remains `alertmanager-aisedge-config`; it is explicitly named by this chart.
+  Check the rendered CR before substituting names for another release
 - UI access via Grafana → Alerts, or `kubectl port-forward` to port 9093
 
 ## Routing tree (configured in `charts/mgmt/files/alertmanager-config.yaml`)
 
-Alertmanager takes the **first matching route**, top to bottom, so the order
-below is load-bearing rather than presentational — the config says so at the
+**Current event semantics:** accessionflow 0.20.0 emits upload success after new files were uploaded or a repair was attempted. An unchanged session no longer emits success on every loop. A success line is a file-level verdict; it does not prove header reconciliation or downstream pipelines. The long repeat interval and session grouping remain useful notification guards. Historical duplicate-mail measurements below describe the older emitter, not the current one.
+
+These sibling routes use the default or explicit `continue: false`. Alertmanager
+stops at the first matching sibling, so their order matters. The config explains this at the
 `SessionStagedNotConfirmedInXNAT` branch, which has to sit above
 `severity=critical` because that alert *is* critical and would otherwise never
 reach its own receiver.
@@ -72,11 +77,13 @@ route (root) ──► email-primary             every alert no branch below cla
    └─ to: observability.alerting.emailTo       group_interval 5m / repeat 12h
 
  ├─ alertname =~ "Watchdog|InfoInhibitor" ──► null-meta
- │     kube-prometheus-stack's own meta-alerts. Both fire permanently by
- │     design and carry severity="none", which matches no severity route, so
- │     before this branch existed they fell through to the ROOT receiver and
- │     mailed the operator forever. `null-meta` is a receiver with a name and
- │     no *_configs — Alertmanager's null sink. FIRST on purpose.
+ │     Watchdog is always firing. InfoInhibitor fires when its info-alert
+ │     condition matches; it is not a permanent heartbeat. Both are routed
+ │     to null-meta, which has no notification integration. Historical
+ │     routing before this branch mailed these meta-alerts; the incident
+ │     date is not verified (2026-11-10). FIRST on purpose.
+ ├─ alertname = "XNATUploaderRestarted" ──► email-no-resolved (repeat 24h)
+ ├─ alertname = "XNATUploaderMemoryGrowing" ► email-primary (wait 2m, repeat 24h)
  ├─ alertname = "DICOMRejectedUnmappedAET" ──► email-no-resolved
  │     firing mail, never a "[RESOLVED]" one: the expression only measures
  │     "no new rejections in 5m", while the rejected studies sit in the
@@ -84,15 +91,16 @@ route (root) ──► email-primary             every alert no branch below cla
  │     deprecated deid.engine: orthanc rejects; under ingest it never fires.
  ├─ alertname = "XNATUploadSuccess" ────────► email-upload-success
  │     group_by session, group_wait 10s, repeat_interval 720h. One mail per
- │     session that lands in XNAT; the uploader re-logs success on every
- │     --loop pass, so any shorter repeat is just mail about an upload that
- │     already worked.
+ │     session event group while it remains firing. Version 0.20.0 suppresses
+ │     unchanged-session success logs. The repeat guard does not promise
+ │     exactly-once mail across a resolve/refire, state loss, or repair.
  ├─ alertname = "XNATRepairAttempted" ──────► email-xnat-repair
  │     group_by [alertname, cluster], group_wait 2m, group_interval 5m,
  │     repeat_interval 720h. XNAT was missing files and the uploader tried to
  │     re-send them. One firing-only mail per edge, because one XNAT restart
  │     repairs many sessions at once; 5m keeps a session repaired after the
  │     first mail inside the next one, before its ~10m alert resolves.
+ ├─ alertname = "XNATResourceIncompleteAndStuck" ► email-primary (repeat 24h)
  ├─ severity = "info" ──────────────────────► slack-only   (Slack configured)
  │                                            info-email   (no Slack)
  │     repeat_interval 720h. CARotationDue trips at T-365d and stays firing
@@ -130,7 +138,8 @@ critical routes name. Deriving all three from one condition is the point — a
 route naming an absent receiver is rejected by Alertmanager at config load,
 so the two cannot drift apart.
 
-This is not cosmetic. Until it was fixed, the Slack receivers were rendered
+**Historical incident (date not verified, reviewed 2026-11-10):** before the
+conditional-receiver fix, the Slack receivers were rendered
 unconditionally with `api_url_file` pointing at a Secret nothing creates.
 Alertmanager reads that file at send time and treats ENOENT as *unrecoverable*
 — one attempt, no retry, no fallback — so on a site without Slack every
@@ -150,12 +159,14 @@ independently, so the email half still sent — but every critical notification
 was also recorded as failed, which is the wrong reading for
 `alertmanager_notifications_failed_total`.
 
-The rule the config now holds to: **no route may name a receiver that cannot
-deliver.** Falling back to email rather than to a null receiver is chosen
-because losing a CA-rotation warning is not recoverable and an extra message a
-month is; the volume that motivated splitting info off email is handled by the
-fallback receiver's shape (no resolved mail, 720h repeat) rather than by
-dropping the alert.
+The chart derives route names and optional receiver definitions from the same
+condition. This prevents a missing receiver definition; it cannot prove delivery.
+When Slack is configured, its info route has no automatic email fallback if Slack
+fails. The critical receiver sends to both integrations independently. Without
+Slack configured, the chart selects email at render time. Keep a tested transport
+and monitor notification failures; a valid receiver name alone is not sufficient.
+
+
 
 (`NewEdgeJoined` has since been deleted from the rules — `changes()` over
 kube-state-metrics' constant-valued `kube_node_info` is always 0, so it could
@@ -209,9 +220,9 @@ longer a pattern to fall back on.
 
 ## Operations
 
-Every object below is release-prefixed and lives in the release namespace,
-because kube-prometheus-stack is a subchart of `charts/mgmt`. Substitute your
-own release name if it is not `mgmt`.
+The operator workloads below include the release name and use its namespace.
+The chart-owned config Secret has the fixed name `alertmanager-aisedge-config`.
+Substitute your release and namespace, then confirm names in the rendered CR.
 
 ```bash
 # UI access
@@ -250,7 +261,9 @@ kubectl -n ais-mgmt get secret alertmanager-aisedge-config \
 - **Native integration with Prometheus** — single source of truth for
   rules and routing, no glue layer
 - **Inhibit / silence / group semantics** built in — avoids alert storms
-- **Stateless config** — rotate by recreating the Secret + bouncing the pod
+- **Declarative config:** Helm updates the config Secret and the operator
+  config-reloader applies it. Check the loaded config and reload success. Silence
+  and notification state remain persistent and separate from that config
 - **Multi-receiver support** — email, Slack, PagerDuty, OpsGenie,
   webhooks, …
 
@@ -258,7 +271,7 @@ kubectl -n ais-mgmt get secret alertmanager-aisedge-config \
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| SMTP relay unreachable | Alerts queue up; eventually drop after `notify.deadline` | Configure a fallback receiver (Slack); monitor Alertmanager's own metrics for delivery failures |
+| SMTP relay unreachable | Notifications retry within the notification context; delivery is not durable queue storage | Configure and test an independent integration if required; Slack fan-out is not automatic failover. Monitor delivery-failure metrics |
 | Slack webhook revoked | Slack notifications silently drop | Alertmanager logs the error; rotate the webhook Secret named by `observability.alerting.slackWebhookSecretRef` in `sites/<site>/secrets.enc.yaml`, re-apply it with `scripts/site-secrets.sh apply <site>`, then restart the StatefulSet. There is no `02d` script any more — steps 3 (site Secrets) and 4 (management chart) of `install.sh` replaced it |
 | SMTP password leak | Attacker can send mail-as-us | Stored in the `alertmanager-smtp` Secret and mounted at `/etc/alertmanager/secrets/`, never templated into a manifest; rotate at the relay, then `scripts/site-secrets.sh edit <site>` + `apply <site>` and restart the StatefulSet |
 | Inhibit rule too broad | Real alerts get hidden during an outage | Test rules in staging; the `ManagementClusterDown` rule only inhibits while it fires, and only the six alertnames it names, so it cannot widen by itself the way the old `severity =~ "warning\|info"` form could. The reclaimer rule matches per edge (`equal: ["cluster"]`), so one edge's outage never hides another's |
@@ -266,8 +279,11 @@ kubectl -n ais-mgmt get secret alertmanager-aisedge-config \
 
 ## Replacements / future
 
-- **PagerDuty / Opsgenie** — proper paging with on-call schedules.
-  Receivers can be added to Alertmanager without replacing it
+- **PagerDuty / existing Opsgenie integrations:** external paging with on-call schedules.
+  Receiver setup is separate from the shipped email routes. Opsgenie is a
+  historical option for existing customers: new sales ended 2025-06-04 and
+  support ends 2027-04-05. Plan migration before that date. See
+  [Atlassian's lifecycle notice](https://www.atlassian.com/licensing/opsgenie).
 - **Sentry / Honeybadger** — error-aggregation tools. Different focus
   (application errors vs operational alerts); can run alongside
 - **Webhook to a custom internal alerting service** — for sites that
@@ -280,5 +296,6 @@ kubectl -n ais-mgmt get secret alertmanager-aisedge-config \
 - Image-render attachments in Slack messages (a Grafana panel
   thumbnail next to the alert text)
 - `amtool` integration into ops runbooks for one-line silence creation
-- A periodic synthetic `Watchdog` alert that fires constantly so the
-  receiver chain (SMTP → inbox) is tested continuously
+- Route the existing always-firing `Watchdog` alert to a separate heartbeat
+  receiver. It currently goes to `null-meta`, so its existence does not test
+  SMTP delivery or prove that an operator received a message

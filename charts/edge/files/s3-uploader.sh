@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Edge S3 uploader — pushes assigned sessions to the central staging bucket.
 # =============================================================================
@@ -281,7 +282,7 @@ while true; do
         [ -d "$session_dir" ] || continue
         session_name=$(basename "$session_dir")
 
-        # Internal directories created by xnat-ingest, not sessions.
+        # Internal directories created by accessionflow, not sessions.
         case "$session_name" in
             __build__|__invalid__|__metadata__|'*') continue ;;
         esac

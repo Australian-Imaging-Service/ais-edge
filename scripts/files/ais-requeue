@@ -1,0 +1,59 @@
+#!/bin/sh
+# =============================================================================
+# ais-requeue: requeue a session from /data/assigned/__invalid__ on THIS edge
+# node, after a person found the missing label value.
+# =============================================================================
+#   sudo ais-requeue [--namespace <ns>] list
+#   sudo ais-requeue [--namespace <ns>] show <folder>
+#   sudo ais-requeue [--namespace <ns>] requeue <folder> --session <value>
+#                    [--subject <value>] [--project <value>] [--allow-existing]
+#
+# Runs ON THE EDGE NODE (tier-1: the node; tier-2: the edge VM). It needs no
+# kubectl and no copy of the ais-edge repository: it runs the tool that the edge
+# chart ships into the label (assign) container, /opt/ais-edge/requeue-invalid.py,
+# through k0s's own container runtime (k0s ctr). edge-join.sh (tier-2) and
+# install.sh (tier-1) install it at /usr/local/bin/ais-requeue.
+#
+# The tool never guesses a label: a person finds the value in the hospital's
+# records. The procedure and every method: docs/recovering-invalid-sessions.md.
+#
+# SAFE UNDER A SUDO RULE FOR THIS COMMAND ONLY: it sets --root and --operator
+# itself, and the first word must be list, show or requeue, so no option can
+# come before the subcommand (the tool also refuses abbreviated options). The
+# tool takes the folder only as a plain name in assigned/__invalid__: it refuses
+# a path, '..' and a symbolic link.
+# OPTION: --namespace <ns> (or AIS_NAMESPACE) when the release is not in xnat-ingest.
+# Exit codes are the tool's: 0 done, 2 refused or bad use, 3 folder not found,
+# 4 the label stage's lock is busy (try again).
+set -eu
+NS="${AIS_NAMESPACE:-xnat-ingest}"
+CTR="k0s ctr -n k8s.io"
+if [ "${1:-}" = "--namespace" ]; then
+    [ -n "${2:-}" ] || { echo "ais-requeue: --namespace needs a value" >&2; exit 2; }
+    NS="$2"; shift 2
+fi
+case "${1:-}" in
+    list|show|requeue) ;;
+    ""|-h|--help) sed -n '6,9p' "$0" | sed 's/^# *//'; exit 2 ;;
+    *) echo "ais-requeue: the first word must be list, show or requeue (not '$1')" >&2; exit 2 ;;
+esac
+
+# k0s ctr talks to containerd's root-only socket.
+[ "$(id -u)" = 0 ] || { echo "ais-requeue: run it with sudo" >&2; exit 2; }
+command -v k0s >/dev/null 2>&1 || { echo "ais-requeue: k0s is not on this machine's PATH; run it on the edge node" >&2; exit 2; }
+
+# The running label container of this namespace. An exited one from an earlier
+# pod can still be listed, so only a container with a RUNNING task counts.
+running=$($CTR tasks ls 2>/dev/null | awk '$3 == "RUNNING" { print $1 }')
+cid=""
+for c in $($CTR containers ls -q "labels.\"io.kubernetes.container.name\"==assign,labels.\"io.kubernetes.pod.namespace\"==${NS}" 2>/dev/null); do
+    if printf '%s\n' "$running" | grep -qx "$c"; then cid="$c"; fi
+done
+[ -n "$cid" ] || { echo "ais-requeue: no running label (assign) container of namespace ${NS} on this node" >&2; exit 2; }
+
+if ! $CTR tasks exec --exec-id "ais-requeue-check-$$" "$cid" test -f /opt/ais-edge/requeue-invalid.py; then
+    echo "ais-requeue: the label container has no /opt/ais-edge/requeue-invalid.py: the edge chart is older than this command. Upgrade the edge release." >&2
+    exit 2
+fi
+exec $CTR tasks exec --exec-id "ais-requeue-$$" "$cid" \
+    python3 /opt/ais-edge/requeue-invalid.py --root /data --operator "${SUDO_USER:-root}@$(hostname)" "$@"

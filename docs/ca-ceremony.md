@@ -1,9 +1,10 @@
 # The out-of-band root CA ceremony
 
 For `certManager.ca.mode: intermediate` in `charts/mgmt`. If you are running
-`mode: selfSigned` — the default, and the right answer for dev and for a
-tier-1 single-site install — none of this applies to you and you can stop
-reading.
+`mode: selfSigned`, this intermediate-CA ceremony does not apply. That mode
+is the management chart default. Tier-1 does not install this chart or its
+cert-manager stack. Existing fleets must plan a trust migration before
+generating or selecting a new root, even if its subject name stays the same.
 
 ---
 
@@ -15,13 +16,14 @@ reading.
 | Where the root key lives | a Secret on the management node | offline, see below |
 | What the cluster signs with | the root | an intermediate signed by the root |
 | What edges pin (`ca-bundle`) | the root | the root |
-| Rotating the signing key | re-distribute trust to every site by hand | replace one Secret |
+| Planned signing-key replacement | distribute a new root trust bundle and verify all consumers | replace the issuing Secret, reissue leaves, distribute chains and verify consumers while retaining the root |
 | Chart renders a CA `Certificate` | yes | **no** |
 
 In `intermediate` mode the chart renders no bootstrap `Issuer` and no CA
 `Certificate`. That absence is the point: the key needed to sign a CA
-certificate is deliberately not in the cluster, so nothing in the cluster can
-generate one. The chart consumes an existing Secret, named by
+under the root is deliberately offline. The online intermediate still has
+a signing key and must be protected. Its `pathlen:0` constraint limits valid
+subordinate chains; it does not physically prevent a stolen key from signing. The chart consumes an existing Secret, named by
 `certManager.ca.intermediate.secretRef`, and refuses to render if that name is
 empty.
 
@@ -34,16 +36,19 @@ imaging in SeaweedFS, the XNAT credentials and every child cluster kubeconfig.
 Moving the root key offline protects none of that, and anyone claiming it
 "secures the fleet" is selling something.
 
-What it changes is what happens *next*. With one self-signed root in a Secret,
-recovering means generating a new root and hand-carrying a new trust anchor to
-every site — which is what `scripts/rotate-ca.sh` does, and why it is a
-two-phase procedure run weeks apart. With the split, the compromised or
-expiring thing is the intermediate; you replace one Secret in one namespace and
-the edges never notice, because what they pin is the root and the root has not
-changed.
+The root can remain a trust anchor across a **planned** intermediate
+replacement. This needs more than a Secret edit: the new chain must be valid,
+leaves must be reissued where needed, cert-sync must deliver the intended
+material, and consumers must reload it. The chart does not implement automatic
+revocation of an old intermediate. If that intermediate is compromised, merely
+replacing its Secret leaves stolen credentials trusted through the same root.
 
-That is a smaller claim than the usual one, and it is the only one being made
-here.
+A root replacement needs a verified fleet-wide trust transition. The bundled
+rotation script is a historical procedure with known current naming gaps,
+detailed below; it is not ready to run unchanged. Distinguish routine expiry
+renewal from compromise response, where continuing to trust the old CA can be
+unsafe. The previous claim that replacing one Secret restores security was
+incorrect and was corrected in this 2026-11-10 source review.
 
 ---
 
@@ -57,9 +62,11 @@ inside the blast radius you moved it out of.
 
 In rough order of preference:
 
-1. **An HSM or a hardware token** (YubiKey PIV, SoftHSM on an air-gapped box).
-   The key is never extractable, so "did a copy leak" stops being a question
-   anyone has to answer.
+1. **An HSM or hardware token** with a verified non-exportable key policy.
+   Hardware and software PKCS#11 stores are different: SoftHSM is software,
+   and an air-gapped machine alone does not establish hardware key protection.
+   Verify backup, export and signing permissions for the selected device.
+   Specific device behavior is not verified (2026-11-10).
 2. **An encrypted key file on removable media**, two copies, in two physically
    separate locked locations, with the passphrase held by a different person
    and stored separately from both copies. The commands below assume this.
@@ -84,15 +91,24 @@ in the `ca-bundle` Secret on every edge. Only the key is sensitive.
 ## The ceremony
 
 Run on a machine that is not the management node and is not on the imaging
-network. All commands below were run and their output checked on
-**OpenSSL 3.0.2**; `-addext` on `openssl req -x509` needs 1.1.1 or newer.
+network. **Historical validation:** the original notes recorded a run with
+OpenSSL 3.0.2, but did not record its date. That run is not verified
+(2026-11-10). The command examples require an OpenSSL release supporting
+`req -addext`; check the local help and validate the resulting certificates.
+Set a restrictive file-creation mask before making keys:
+
+```bash
+umask 077
+```
 
 ### 1. Generate the root
 
 The CN is pinned. It must be `AIS Edge Root CA`, matching the CA already
-deployed on the existing management cluster, because every `ca-bundle` already
-distributed to every edge verifies against that subject. `charts/mgmt` refuses
-to render if `certManager.ca.commonName` is anything else.
+named in the chart defaults. Trust depends on the actual root key and
+certificate, not on matching its subject text. A new certificate with the
+same CN does not preserve trust in an existing fleet. The chart rejects a
+different `certManager.ca.commonName` unless `allowCommonNameChange` is set;
+that acknowledgement does not migrate distributed trust anchors.
 
 ```bash
 openssl genrsa -aes256 -out ais-edge-root-ca.key 4096
@@ -155,8 +171,9 @@ openssl x509 -req -in ais-edge-intermediate-2026.csr \
 ```
 
 `pathlen:0` means this intermediate may sign leaf certificates and may not
-sign another CA. Five years (`1826`) is deliberately shorter than the root's
-ten: the point of the split is that this one is replaceable, so replacing it
+form a valid chain through another subordinate CA when clients enforce the
+path-length constraint. The signing key itself can still produce signatures. Five years (`1826`) is shorter than a freshly issued ten-year root; check
+the root's **remaining** lifetime when repeating the ceremony: the point of the split is that this one is replaceable, so replacing it
 should be a rehearsed operation rather than a first-time one at expiry.
 
 `-days` and the rotation calendar are the same fact written twice. Put the
@@ -191,9 +208,11 @@ thing you are doing:
 
 * copy `ais-edge-root-ca.key` to the storage chosen above, twice, verifying
   each copy (`sha256sum`);
-* **shred the working copy** — `shred -u ais-edge-root-ca.key` on the ceremony
-  machine, along with `.srl` serial files if that machine is not itself the
-  offline store;
+* remove the working key after checking the protected copies. `shred -u`
+  cannot guarantee erasure on snapshots, copy-on-write storage or all SSDs.
+  Use the site's verified media and key-destruction procedure. Keep signing
+  and serial records in the protected CA record rather than deleting the
+  only audit trail;
 * keep `ais-edge-root-ca.crt` (public) — it goes to every edge.
 
 A root key still sitting in `~/ceremony/` a month later is the normal way this
@@ -209,18 +228,25 @@ wrong produces a `ClusterIssuer` reporting "secret not found" while every
 `Certificate` looks fine.
 
 ```bash
+# CA issuer chain order: issuing intermediate, then root.
+cat ais-edge-intermediate-2026.crt ais-edge-root-ca.crt > ais-edge-intermediate-2026-chain.crt
 kubectl -n cert-manager create secret generic ais-edge-intermediate-ca \
-  --from-file=tls.crt=ais-edge-intermediate-2026.crt \
+  --from-file=tls.crt=ais-edge-intermediate-2026-chain.crt \
   --from-file=tls.key=ais-edge-intermediate-2026.key \
   --from-file=ca.crt=ais-edge-root-ca.crt
 ```
 
 `generic`, not `tls`: `kubectl create secret tls` accepts only `--cert` and
 `--key`, and `ca.crt` has to be in there — it is the root, and it is what
-should end up in the `ca-bundle` every edge pins.
+should end up in the `ca-bundle` every edge pins. The complete `tls.crt`
+chain also lets the CA issuer populate leaf Secret `ca.crt` correctly.
+See the [CA issuer chain requirements](https://cert-manager.io/docs/configuration/ca/).
+Validate issued leaf Secrets and both Ingress client-CA anchors, not only
+the root copied directly by cert-sync.
 
-This Secret is **not** a Helm resource. It is never templated, never in git,
-and `helm uninstall` cannot remove it. Back it up wherever the site's other
+This Secret is **not** a Helm resource and must not be stored unencrypted
+in git. Helm does not delete it as a release-owned resource. Namespace
+deletion, cluster reset or broader teardown can still remove it. Back it up wherever the site's other
 non-Helm cluster state is backed up; losing it means another ceremony, which
 means fetching the root key again.
 
@@ -302,8 +328,9 @@ release in `ais-mgmt` is untouched, and nothing about the CA has changed.
 
 ## Verify after install
 
-None of this can be checked at render time — Helm cannot read cluster state —
-so these are not optional.
+These certificate-content and endpoint checks are required after deployment.
+A local `helm template` run checks the manifest, not the live Secret contents,
+issuer readiness, served chains or client reload behavior.
 
 ```bash
 # 1. The issuer accepted the Secret.
@@ -328,15 +355,17 @@ kubectl -n ais-mgmt describe certificate loki-tls | tail -20
 #    TLS validation fails.
 #
 #    This chart has NOT been run in intermediate mode against a live
-#    cluster, so whether cert-manager's CA issuer emits the full chain into
-#    tls.crt is UNVERIFIED here. Check it before migrating any site:
+#    cluster in the retained evidence. That remains not verified (2026-11-10).
+#    The CA issuer needs the complete issuing chain supplied above; check the
+#    actual leaf chain and anchor Secrets before migrating any site:
 kubectl -n ais-mgmt get secret loki-tls -o jsonpath='{.data.tls\.crt}' \
   | base64 -d | grep -c "BEGIN CERTIFICATE"
 #    Expect 2 (leaf + intermediate), not 1.
 
 #    And end to end, from a machine holding only the root:
 openssl s_client -connect loki.<domain>:443 -servername loki.<domain> \
-  -CAfile ais-edge-root-ca.crt </dev/null 2>&1 | grep -E "Verify return code|s:|i:"
+  -CAfile ais-edge-root-ca.crt -verify_return_error \
+  -verify_hostname loki.<domain> </dev/null 2>&1 | grep -E "Verify return code|s:|i:"
 #    Expect "Verify return code: 0 (ok)" and a chain showing the leaf, the
 #    intermediate, and the root as issuer.
 ```
@@ -349,16 +378,19 @@ breaks every edge at once.
 
 ## Rotating the intermediate
 
-This is the operation the whole design exists to make cheap. Edges are not
-touched, because the root they pin has not changed.
+A planned intermediate replacement can retain the root trust anchor. Edge
+trust bundles need not change solely because the issuer key changes, but
+issued leaf chains, client certificate delivery and consumer reloads still
+need verification. This procedure does not revoke a compromised old issuer.
 
 1. Fetch the root key from offline storage. Repeat steps 2–4 with a new name
    (`ais-edge-intermediate-2031`).
 2. Load it under a **new** Secret name, so the old one is still there to roll
    back to:
    ```bash
+   cat ais-edge-intermediate-2031.crt ais-edge-root-ca.crt > ais-edge-intermediate-2031-chain.crt
    kubectl -n cert-manager create secret generic ais-edge-intermediate-2031 \
-     --from-file=tls.crt=ais-edge-intermediate-2031.crt \
+     --from-file=tls.crt=ais-edge-intermediate-2031-chain.crt \
      --from-file=tls.key=ais-edge-intermediate-2031.key \
      --from-file=ca.crt=ais-edge-root-ca.crt
    ```
@@ -369,15 +401,18 @@ touched, because the root they pin has not changed.
    `clusterissuer/ais-edge-ca` is READY again.
 4. Re-issue the leaf certificates, so nothing is still serving a chain that
    ends at the retired intermediate. Either `cmctl renew --all` in each
-   namespace, or delete the leaf Secrets and let cert-manager re-create them.
-   Verify with the `grep -c "BEGIN CERTIFICATE"` check above.
+   affected namespace. Use explicit namespaces, for example
+   `cmctl renew --all -n ais-mgmt`, after reviewing the Certificates selected.
+   Do not delete serving Secrets as routine rotation. Check the full chain,
+   issuer, expiry, cert-sync results and served endpoint, not only PEM count.
 5. Put the root key back. Delete the old intermediate Secret only after every
    leaf has been re-issued and verified.
 
-Certificates issued by the old intermediate keep validating until they expire,
-because both intermediates chain to the same root — which is why this can be
-done without a maintenance window, and why step 4 is a tidy-up rather than a
-race.
+Existing certificates can remain trusted through the old intermediate while
+the whole chain is valid. They fail when that intermediate expires, even if
+the leaf expiry is later. Reissuance is therefore time-sensitive, and a
+maintenance-free cutover is not guaranteed. A compromised old intermediate
+can also remain trusted during overlap; routine replacement is not revocation.
 
 ## When the root expires
 
@@ -408,7 +443,9 @@ a both-roots bundle, then retirement — and check the names against
 
 ## Known gaps
 
-Recorded rather than implied away.
+Current source review dated 2026-11-10. The gaps below remain unless a
+specific fix is stated. Historical OpenSSL measurements have no recorded run
+date; no live intermediate-mode test is claimed by this review.
 
 * **This has not been run against a live cluster in `intermediate` mode.**
   Everything above renders, and the openssl half was executed and its output

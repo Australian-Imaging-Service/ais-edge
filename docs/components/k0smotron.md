@@ -41,13 +41,18 @@ management node.
   infrastructure (`RemoteMachine`) — that nothing here creates. Workers are
   joined with a token instead, by `scripts/06-join-edge-worker.sh` over SSH
   or by `scripts/06b-make-bootstrap.sh` + `scripts/06c-post-join.sh` as a
-  carry-over bundle, because an edge is a physical box in a hospital that
-  CAPI cannot provision
+  carry-over bundle, because this installer supports site-managed physical or virtual workers
+  through token-based join. This is a deployment choice, not a claim that
+  Cluster API can never provision infrastructure for a site
 
 For each edge in the `edges:` list in `sites/<site>/values.yaml`:
 - A namespace named after the cluster
-- A StatefulSet `kmc-<cluster>-0` (the k0s API + konnectivity)
-- A StatefulSet `kmc-<cluster>-etcd-0` (etcd, with PVC)
+- A control-plane StatefulSet, with Pod names such as `kmc-<cluster>-0`
+  (k0s API and Konnectivity). The `-0` ordinal belongs to the Pod name.
+- An etcd StatefulSet with persistent storage, with Pod names such as
+  `kmc-<cluster>-etcd-0`. Confirm generated names with `kubectl get sts,pods`
+  in the cluster namespace; these operator-owned resources are not in the
+  parent Helm render.
 - A Service per edge, from that site's `exposure` (fleet default
   `k0smotron.exposure.default: nodePort`; both shipped sites use `sni` —
   see `docs/TOUR.md` §2.2):
@@ -109,8 +114,11 @@ Key knobs in the Cluster CR:
   that mode exists: the child's in-cluster `kubernetes` Service
   (10.96.0.1:443) routes via the NodePort port number, and kube-router,
   kube-proxy and metrics-server on the worker use that path. `exposure: sni`
-  renders `ClusterIP` instead and reaches the API only through the
-  ssl-passthrough Ingress; it is the newer, less-measured path — see
+  renders `ClusterIP` instead. External access uses the ssl-passthrough
+  Ingress; a ClusterIP is still reachable from eligible management-cluster
+  clients. The worker's local API path uses k0smotron's generated HAProxy
+  configuration. Current end-to-end behavior for every exposure mode is not
+  verified (2026-11-10); see
   `k0smotron.exposure` in `charts/mgmt/values.yaml` and `docs/TOUR.md` §2.2
   for what has and has not been verified before migrating a fleet
 
@@ -135,7 +143,9 @@ helm upgrade --install mgmt charts/mgmt -n ais-mgmt -f sites/<site>/values.yaml
 # all exported by install.sh. Its positional argument is the bare edge name.
 ./install.sh <site>
 
-# Generate a new join token (rotates the bootstrap secret)
+# Request a new join token through the operator. This does not by itself
+# prove that every old issued token has been revoked; inspect bootstrap
+# credentials and use the installed k0s token lifecycle when revocation is needed.
 kubectl delete jointokenrequest -n edge-dev edge-dev-token --ignore-not-found
 kubectl apply -f - <<EOF
 apiVersion: k0smotron.io/v1beta1
@@ -156,8 +166,10 @@ EOF
   ssl-passthrough wiring for us, no manual Ingress YAML
 - **Built-in haproxy DaemonSet** — gives in-cluster components a local
   API endpoint (essential for kube-router, kube-proxy)
-- **Easy multi-tenancy** — each edge in its own namespace with
-  RBAC-isolated resources
+- **Separate hosted clusters and namespaces** organize edge resources.
+  They do not isolate sites from management administrators or a compromise
+  of the shared host, operator or credentials. Evaluate those shared trust
+  boundaries before calling the deployment multi-tenant.
 
 ## Risks and failure modes
 
@@ -189,5 +201,7 @@ EOF
   datastore (`spec.kineDataSourceURL`) and raising it alone yields a
   control plane that will not start
 - API audit logs from the hosted control plane → Vector → Loki
-- mTLS to konnectivity (currently the konnectivity tunnel uses k0s's
-  internal CA mTLS; we don't yet auth the agent's identity beyond that)
+- Review generated Konnectivity authentication and credential rotation.
+  The old description mixed client-certificate and token authentication.
+  Exact agent identity checks for the installed version are not verified
+  (2026-11-10); see the qualification in [konnectivity.md](konnectivity.md).

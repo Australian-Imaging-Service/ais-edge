@@ -508,7 +508,7 @@ PYEOF
     else
     res=$($KUBECTL -n "$NS_UPLOAD" exec "$UP" -- python3 -c '
 import os, json, base64, ssl, urllib.request, urllib.parse
-h=os.environ["XINGEST_HOST"].rstrip("/"); u=os.environ["XINGEST_USER"]; p=os.environ["XINGEST_PASS"]
+h=os.environ["ACFLOW_HOST"].rstrip("/"); u=os.environ["ACFLOW_USER"]; p=os.environ["ACFLOW_PASS"]
 if urllib.parse.urlsplit(h).scheme.lower() != "https":
     print("INSECURE_URL"); raise SystemExit
 ctx=ssl.create_default_context(); ctx.check_hostname=False; ctx.verify_mode=ssl.CERT_NONE

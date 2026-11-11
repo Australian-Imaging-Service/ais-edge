@@ -1,5 +1,7 @@
 # De-identification engines: two architectures
 
+The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
+
 Two engines can de-identify studies. **Use `deid.engine: ingest`.** It is the
 default (key `deid.engine` in `charts/edge/values.yaml`), and it is the only
 engine for a new site. The Orthanc Lua engine, `deid.engine: orthanc`, is
@@ -18,7 +20,7 @@ reference material for the deprecated engine is in one section of that page.
 `assign` files a study into XNAT under three ids. It reads each id from one
 DICOM tag, and `ingest.assign.tagMapping` names the three tags. When you leave
 it empty, the chart sets it from the engine
-(`charts/edge/templates/_helpers.tpl:850-857`):
+(`charts/edge/templates/_helpers.tpl`, helper `edge.assignTagMapping`):
 
 ```
                  ingest (default)    orthanc (deprecated)
@@ -61,12 +63,15 @@ instance arrives:
 
 **Properties**
 
-* De-identification happens at the door. Every later stage only ever sees
-  stripped data.
-* Pseudonyms are stable across visits — the same patient always hashes to the
-  same subject, so a follow-up scan joins the existing XNAT subject.
-* One-way. No mapping back to the original identifiers is kept, so a study
-  cannot be re-identified later by any means.
+* The hook changes only the fields covered by its profile. This does not
+  prove that private fields, pixels or every identifier are safe. Orthanc and
+  the facility backup can still hold original identifiable instances.
+* The same patient identifier and salt produce the same subject hash. This
+  depends on stable source identifiers and salt. The truncated djb2 hash has
+  no collision-free or cryptographic privacy guarantee.
+* The hook writes no explicit re-identification map. That does not make the
+  data irreversible: source copies, retained fields and enumeration with the
+  salt can link it to original identifiers. Treat this as a deprecated design.
 
 Sites used this architecture while `orthanc` was the default. Two site files
 in this repository still select it: `sites/edge-dev` and `sites/cloud-edge`.
@@ -83,7 +88,7 @@ scanner protocol or the operator at the console puts them there. `assign` reads
 the tags that `tagMapping` names, so **no AE-title map is involved and none is
 needed**. The routing question has its answer before the data arrives.
 
-Then de-identification is the only job that stays. The **xnat-ingest
+Then de-identification is the only job that stays. The **accessionflow
 `deidentify` stage** does it, between `assign` and `upload`:
 
 | step | what happens |
@@ -99,12 +104,13 @@ Then de-identification is the only job that stays. The **xnat-ingest
 
 **Properties**
 
-* Reversible. The reid mapping is a route back to the original identifiers. A
-  clinical follow-up needs that route to find a scan. The Lua hook has no
-  equivalent.
-* The XNAT labels are the tag values, verbatim. They are pseudonyms only if the
-  modality writes pseudonyms into those tags. They are stable across visits
-  only if the tags are.
+* The reid mapping records changed metadata values. It can support approved
+  linkage, but it cannot restore every removed file or pixel. Keep the
+  facility backup separately. The Lua hook has no equivalent mapping file.
+* The XNAT labels derive from the tag values. IDSpec preserves letters,
+  digits, underscores and hyphens; other character runs become underscores.
+  This normalization does not create pseudonyms. Labels are pseudonyms only
+  if the modality supplies them, and stable only if the source values are.
 * De-identification happens later in the pipeline, so identifiable data passes
   through `group` and `assign` and is present on the pipeline volume until the
   stage runs.
@@ -112,17 +118,19 @@ Then de-identification is the only job that stays. The **xnat-ingest
   not apply. A recipe hash can use a `<format>.salt` side-car file, which the
   chart does not supply.
 
-This is the architecture upstream xnat-ingest is written for, and it is the
+This is the architecture upstream accessionflow is written for, and it is the
 default here.
 
 **Why new sites use it:**
 
-* It carries data all the way to XNAT. The layout defect that stopped it is
-  fixed in the pinned image (see the caveats below).
+* Its layout can be consumed by the XNAT uploader. The older layout defect
+  is fixed in the pinned image (see the caveats below). Delivery still needs
+  valid labels, credentials, network access and destination file checks.
 * It de-identifies the file-drop path too. The Lua hook does not (see "Where
   the data enters").
-* It keeps a reid mapping, so a study can be re-identified when that is
-  required.
+* It keeps a reid mapping of changed metadata for approved re-identification
+  workflows. Encrypt and retain that sensitive output under the site policy;
+  it is not a substitute for the original study archive.
 * The recipe language can do more than the Orthanc profile, for example
   `JITTER` on dates.
 
@@ -155,8 +163,11 @@ Check which tags a modality actually sends, on a real study:
 dcmdump file.dcm | grep -E 'StudyID|PatientID|AccessionNumber'
 ```
 
-Measured on a live pipeline with the Lua hook disabled and `tagMapping` still
-set to the `ClinicalTrial*` tags, same run:
+**Historical measurement (run date not recorded; reviewed 2026-11-10):** the
+following run disabled the Lua hook while `tagMapping` still selected the
+`ClinicalTrial*` tags. Its original run evidence is not verified (2026-11-10).
+The current chart rejects that combination, so this is not an installation
+example. It illustrates why assignment needs populated source fields:
 
 ```
 study WITH the tags     -> test_project.PRETAG_SUBJ_008.PRETAG_SESS_008
@@ -171,7 +182,7 @@ way, for example `INVALID_MISSING_STUDYID_...`. The chart now refuses the
 
 ## Side by side
 
-| | A: Orthanc Lua hook (deprecated) | B: xnat-ingest deidentify |
+| | A: Orthanc Lua hook (deprecated) | B: accessionflow deidentify |
 |---|---|---|
 | values key | `deid.engine: orthanc` | `deid.engine: ingest` |
 | chart default | no, deprecated | **yes** |
@@ -179,9 +190,9 @@ way, for example `INVALID_MISSING_STUDYID_...`. The chart now refuses the
 | source of routing identifiers | derives them from the called AE title and the patient ID | expects them in the incoming data, or `constantProjectId` |
 | needs an AE-title map | yes | no |
 | strips PHI | yes, JSON profile | yes, pydicom `deid` recipe per project |
-| pseudonymises the XNAT labels | yes, before anything downstream sees the data (salted djb2, not an HMAC, see the deprecated section of [components/deidentification.md](components/deidentification.md)) | **no**, the labels are the tag values. See *What the recipe does not do* |
-| re-identification possible | no | yes, via the reid mapping |
-| identifiable data on the pipeline volume | no | yes, until the stage runs |
+| pseudonymises the XNAT labels | yes, before anything downstream sees the data (salted djb2, not an HMAC, see the deprecated section of [components/deidentification.md](components/deidentification.md)) | **no**, the labels derive from normalized tag values. See *What stays* below |
+| re-identification possible | no explicit map; source copies and weak hashes can still permit linkage | changed metadata can be linked via the sensitive reid mapping |
+| identifiable data on the pipeline volume | original Orthanc/backup data and fields outside the profile can remain | yes before deidentify; originals and reid maps remain subject to retention |
 | de-identifies the file-drop path | no | yes |
 | `group-orthanc` waits for the ready label | yes | no. The chart derives this from `deid.engine`, so there is nothing to clear by hand |
 
@@ -191,14 +202,17 @@ way, for example `INVALID_MISSING_STUDYID_...`. The chart now refuses the
 output one directory level deeper than `assign` does. So `upload` reported
 `Found 0 sessions` and data stopped there. That was
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144),
-closed on 2026-08-31. The pinned image,
-`ghcr.io/akshitbeniwal/xnat-ingest:0.16.2.post1`, writes the same layout as
-`assign` (`xnat_ingest/api/deidentify_api.py:542` at `v0.16.2.post1`). Data
-now goes all the way to XNAT.
+closed on 2026-08-31 (GitHub state checked 2026-11-10). This is historical
+behavior in 0.13.1. The pinned image,
+`ghcr.io/australian-imaging-service/accessionflow:0.20.0`, writes the same layout as
+`assign` (`accessionflow/model/accession.py`, `save()` in 0.20.0). The
+2026-11-10 test run reached XNAT with this layout. That result does not prove
+delivery for a different site or guarantee header extraction after upload.
 
 **The `ais_deid` salt caveat does not apply to the pinned image.** Older
 images de-identified through the `ais_deid` package. Its per-site salt was
-commented out in the shipped package:
+commented out in the package examined for the historical 2026-08-24 issue
+report (0.13.1 with ais-deid 0.1.2):
 
 ```python
 #_SALT: str | None = os.environ.get("DEID_SALT")
@@ -210,37 +224,41 @@ Unsalted, a hospital MRN is a small search space, so a pseudonym is recoverable
 by brute force, and two sites produce identical codes for the same patient.
 That is
 [xnat-ingest#143](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/143),
-still open upstream. The pinned image does not depend on `ais_deid` (see
-`pyproject.toml` at `v0.16.2.post1`). Its recipes change only the tags that
+open upstream when checked on 2026-11-10. The pinned image does not depend on `ais_deid` (see
+the installed 0.20.0 distribution dependencies). Its recipes change only the tags that
 they name, and the shipped recipe removes the identifiers. It does not hash
 them.
 
-**What stays.** The XNAT labels are the tag values, verbatim, because `assign`
-reads them before `deidentify` runs. If a recipe hashes a value, the key comes
-from a `<format>.salt` side-car file, and the chart does not supply one. The
-`AIS_DEID_HMAC_SALT` Secret serves only the deprecated Lua engine.
+**What stays.** The XNAT labels derive from source tags, normalized as
+described above, because `assign` reads them before `deidentify` runs. If a
+recipe hashes a value, the key comes from a `<format>.salt` side-car file, and
+the chart does not supply one. `AIS_DEID_HMAC_SALT` does not control ingest
+labels or recipes. The Orthanc Lua script still requires it at load time
+when the facility backup uses that script, even with the ingest engine.
 
 ## Where the data enters
 
-Orthanc is the only DICOM **network** receiver in this stack. xnat-ingest ships
+Orthanc is the only DICOM **network** receiver in this stack. accessionflow ships
 no DICOM network stack — `pynetdicom` is not installed and no subcommand listens
 on a port — so a scanner performing a C-STORE association has nothing else to
 talk to.
 
-Orthanc is not the only way in, though. `ingest.fileDrop` runs `xnat-ingest
-group` over a filesystem glob. So data that arrives as *files* gets into the
+Orthanc is not the only way in, though. `ingest.fileDrop` runs `accessionflow
+collate` over a filesystem glob. So data that arrives as *files* gets into the
 pipeline without Orthanc's REST pull: a share, a vendor export or an rsync.
 
 Only the `ingest` engine de-identifies that path. A dropped file goes from
 `group` to `assign`, and under `ingest` then to `deidentify`. The Lua hook runs
-only on instances that Orthanc receives over DICOM
-(`charts/edge/files/deidentify-and-forward.lua:130`). Under the deprecated
+only when `OnStoredInstance` sees `RequestOrigin == DicomProtocol`
+(`charts/edge/files/deidentify-and-forward.lua`). It returns for REST uploads
+and does not see a file drop. Those paths bypass both its backup write and
+the deprecated de-identification branch. Under the deprecated
 engine the uploader reads `/data/assigned`
-(`charts/edge/templates/_helpers.tpl:867-870`), so a dropped file goes to XNAT
+(`charts/edge/templates/_helpers.tpl`, `edge.uploadSourceDir`), so a dropped file goes to XNAT
 without de-identification.
 
 ## See also
 
 * [components/deidentification.md](components/deidentification.md): how to configure the `ingest` engine, and the reference for the deprecated one
 * [components/orthanc.md](components/orthanc.md) — the receiver
-* [components/xnat-ingest.md](components/xnat-ingest.md) — the pipeline stages
+* [components/accessionflow.md](components/accessionflow.md); the pipeline stages
