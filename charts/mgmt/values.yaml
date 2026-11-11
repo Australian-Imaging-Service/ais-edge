@@ -246,6 +246,29 @@ dataPolicy:
 #     dataPolicyReporter: true
 edges: []
 
+# =============================================================================
+# edgeNodeState: the Ready state of each edge's worker nodes
+# =============================================================================
+# The management kube-state-metrics sees management nodes only. Per edge, one
+# small kube-state-metrics (nodes only) runs in the edge's namespace on this
+# cluster and reads the child API (templates/edge-node-state.yaml). Alerts:
+# EdgeWorkerDisconnected, EdgeNodeStatusMissing, EdgeNodeStatusStale
+# (files/prometheus-rules/edge-nodes.yaml).
+# CAUTION: it mounts <edge>-kubeconfig, a cluster-admin credential for the
+# child cluster, read-only, as cert-sync uses it.
+edgeNodeState:
+  # false: no edge node alerts at all. Nothing else watches edge nodes.
+  enabled: true
+  # The same release as the subchart's kube-state-metrics. The options file
+  # (--config) and --kubeconfig are what this needs from it.
+  image:
+    repository: registry.k8s.io/kube-state-metrics/kube-state-metrics
+    tag: v2.19.1
+  # Nodes only, so small. No CPU limit (repo convention).
+  resources:
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}
+
 k0smotron:
   enabled: true
   # CAUTION: must match the k0s version on the edge WORKERS. Drifting here
@@ -987,7 +1010,7 @@ kube-prometheus-stack:
   prometheus-node-exporter: {enabled: false}
   nodeExporter: {enabled: false}
 
-  kubeStateMetrics: {enabled: true}      # required by SeaweedFSDown / EdgeWorkerDisconnected
+  kubeStateMetrics: {enabled: true}      # required by SeaweedFSDown / ManagementNodeNotReady
   kube-state-metrics:
     resources:
       requests: {cpu: 50m,  memory: 128Mi}

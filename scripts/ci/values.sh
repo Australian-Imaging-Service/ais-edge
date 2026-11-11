@@ -117,6 +117,12 @@ EOF
 # A second site. Every per-edge object (Cluster, S3 identity, bucket, uploader
 # Deployment, reclaimer CronJob, Ingress host) is ranged from this list, so one
 # entry never exercises the naming that two entries collide on.
+# The per-edge node collectors (templates/edge-node-state.yaml) and the
+# EdgeNodeStatusMissing inventory: no edge at all, and the feature off with
+# edges configured. Neither may render a collector or the edge-nodes rules.
+printf 'edges: []\n'                                       >"$V/mgmt-no-edges.yaml"
+printf 'edgeNodeState:\n  enabled: false\n'                >"$V/mgmt-edge-node-state-off.yaml"
+
 cat >"$V/mgmt-two-edges.yaml" <<'EOF'
 edges:
   - name: edge-alpha
@@ -957,6 +963,16 @@ edges:
     exposure: sni
 EOF
 
+# A Service name over 63 characters is refused by the API server partway
+# through an upgrade. "mgmt-node-state-" is 16, so the edge name below takes
+# the per-edge collector (templates/edge-node-state.yaml) to 67.
+cat >"$V/neg-mgmt-edge-node-state-name-too-long.yaml" <<'EOF'
+edges:
+  - name: edge-with-a-very-long-name-that-runs-past-the-limit
+    s3SecretRef: edge-long-s3
+    exposure: sni
+EOF
+
 # -- edge ---------------------------------------------------------------------
 printf 'upload:\n  mode: both\n'                          >"$V/neg-edge-bad-mode.yaml"
 printf 'upload:\n  s3:\n    endpoint: ""\n'               >"$V/neg-edge-s3-no-endpoint.yaml"
@@ -1428,6 +1444,8 @@ mgmt-upload-custom	charts/mgmt	mgmt-base.yaml mgmt-upload-custom.yaml
 mgmt-upload-extrapip	charts/mgmt	mgmt-base.yaml mgmt-upload-extrapip.yaml
 mgmt-k0smotron-external	charts/mgmt	mgmt-base.yaml mgmt-k0smotron-external.yaml
 mgmt-two-edges	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml
+mgmt-no-edges	charts/mgmt	mgmt-base.yaml mgmt-no-edges.yaml
+mgmt-edge-node-state-off	charts/mgmt	mgmt-base.yaml mgmt-two-edges.yaml mgmt-edge-node-state-off.yaml
 mgmt-reporter-optout	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout.yaml
 mgmt-reporter-optout-all	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml
 mgmt-reporter-optout-all-never	charts/mgmt	mgmt-base.yaml mgmt-reporter-optout-all.yaml mgmt-reporter-silent-never.yaml
@@ -1545,6 +1563,7 @@ neg-mgmt-certsync-tls-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-tls-key.y
 neg-mgmt-certsync-delimiter-in-name	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-delimiter-in-name.yaml	contains one of | , =
 neg-mgmt-certsync-delimiter-in-key	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-delimiter-in-key.yaml	key mapping ca.crt=ca.crt=x
 neg-mgmt-certsync-cronjob-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-certsync-cronjob-name-too-long.yaml	the API server rejects CronJob names over 52
+neg-mgmt-edge-node-state-name-too-long	charts/mgmt	mgmt-base.yaml neg-mgmt-edge-node-state-name-too-long.yaml	a Service name can have at most 63
 neg-mgmt-loki-mtls-no-certsync	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-certsync.yaml	but certSync.enabled=false
 neg-mgmt-loki-mtls-no-client-cert	charts/mgmt	mgmt-base.yaml neg-mgmt-loki-mtls-no-client-cert.yaml	no certSync.secrets entry copies
 neg-mgmt-s3-mtls-require-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-mtls-require-no-issue.yaml	clientCerts.require=true with clientCerts.issue=false

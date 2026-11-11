@@ -37,6 +37,8 @@ RULE_TEST_VALUES=(
   "__RECLAIMER_ALERT_AFTER_S__=10800"     # 3h, the chart default
   "__RECLAIMER_NAMESPACE__=xnat-upload"   # xnatUpload.namespace default
   "__RECLAIMER_CRONJOB_PREFIX__=mgmt"     # the release name render.sh uses
+  # Two configured edges, as templates/observability.yaml writes them.
+  '__EDGE_NODE_INVENTORY__=label_replace(vector(1), "cluster", "edge-a", "", "") or label_replace(vector(1), "cluster", "edge-b", "", "")'
 )
 RULES_DIR="$CI_WORK_DIR/prometheus-rules-src"
 rm -rf "$RULES_DIR"; cp -r "$RULES_SRC" "$RULES_DIR"

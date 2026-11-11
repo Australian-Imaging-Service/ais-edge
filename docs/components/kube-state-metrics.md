@@ -16,7 +16,11 @@ etc.
 
 The source of truth for "is this thing in the right state?" Most of
 our alerts depend on it:
-- `EdgeWorkerDisconnected` — `kube_node_status_condition{condition="Ready"}`
+- `ManagementNodeNotReady`: `kube_node_status_condition{job="kube-state-metrics",condition="Ready"}`,
+  management nodes only
+- `EdgeWorkerDisconnected`, `EdgeNodeStatusMissing`, `EdgeNodeStatusStale`: from the
+  per-edge collectors (`job="edge-node-state"`), not from this KSM. See
+  "Per-edge node collectors" below
 - `SeaweedFSDown` — `kube_deployment_status_replicas_ready{deployment=~".*seaweedfs.*"}`
   (a REGEX, deliberately: the imperative installer made `Deployment/seaweedfs`,
   the chart makes `<release>-seaweedfs` in the release namespace, so an exact
@@ -46,7 +50,9 @@ the live diagnostic commands to establish current series counts:
   `docs/alerting-architecture.md` for why that path was rejected — edge
   signals arrive as logs through Loki instead). the historical `kube_node_info` query returned one management-node series.
   A current deployment can have more management nodes; this is not an edge
-  census and must not be treated as a fixed cardinality.
+  census and must not be treated as a fixed cardinality. The per-edge node
+  collectors (below) also run on the management cluster: they read each
+  edge's API server, which runs here, not the edge's pod network.
 
   Two alerts that named child-cluster objects were deleted for exactly this
   reason, confirmed with zero series each: `EdgePodCrashLoop`
@@ -55,11 +61,16 @@ the live diagnostic commands to establish current series counts:
   (`pod=~"konnectivity-agent-.*"`, which runs on the edge's own kube-system,
   not the management one). `docs/TOUR.md` §9 has the measurement.
 
-  `EdgeWorkerDisconnected` is a DIFFERENT case, still open: it does have
-  `kube_node_status_condition` series, but only for the management node — it
-  fires, just not on the edge's behalf, so it is a management-node alert
-  wearing an edge name rather than a dead one. Treat
-  `scripts/check-alert-inputs.sh` as the authority on which inputs exist.
+  `EdgeWorkerDisconnected` was a DIFFERENT case: it had
+  `kube_node_status_condition` series, but only for the management node, so it
+  fired, just not on the edge's behalf. That rule is now
+  `ManagementNodeNotReady` (`job="kube-state-metrics"`), and
+  `EdgeWorkerDisconnected` reads the per-edge collectors
+  (`job="edge-node-state"`). `scripts/check-alert-inputs.sh` lists which
+  inputs have series, with two limits: it reads the source rule files, so
+  placeholders and `label_replace` arguments read as names that match
+  nothing; and an alert built on absence, such as `EdgeNodeStatusMissing`,
+  fires exactly when its input has no series.
 
 - **`*_info`, `*_labels` and `*_annotations` are join metrics, not gauges.**
   Their value is the constant 1 and every fact lives in a label. A new object
@@ -125,6 +136,54 @@ kube-state-metrics:
     limits:   { cpu: 200m, memory: 256Mi }
 ```
 
+## Per-edge node collectors
+
+The KSM above lists management nodes only. Edge workers are nodes of the
+k0smotron child clusters, so their Ready state comes from a second, small KSM
+per edge (`charts/mgmt/templates/edge-node-state.yaml`, values `edgeNodeState`):
+
+- It runs in the edge's namespace on the management cluster, as Deployment
+  `<release>-node-state-<edge>`, with `--resources=nodes`.
+- It reads the child API with `<edge>-kubeconfig`, the Secret k0smotron writes
+  in that namespace, mounted read-only. CAUTION: that kubeconfig is
+  cluster-admin for the child cluster, as for cert-sync. Nothing copies it.
+- The init container `find-api` finds the k0smotron control-plane Service by
+  label, as cert-sync does, and writes its address
+  (`https://<service>.<edge namespace>.svc.cluster.local:<port>`) into a KSM
+  options file. The CA and the client certificate still come from the
+  kubeconfig, so TLS verification stays on. With no matching Service, or
+  more than one, it fails and says so. Only this container gets the pod's
+  ServiceAccount token, which can only list Services in that namespace.
+- Its ServiceMonitor sets `job="edge-node-state"` and `cluster=<edge>` on
+  every target, so `up` carries them too.
+
+Alerts (`charts/mgmt/files/prometheus-rules/edge-nodes.yaml`):
+`EdgeWorkerDisconnected` (a node not Ready for 5 minutes),
+`EdgeNodeStatusMissing` (no Ready series for a configured edge for 10 minutes:
+the collector does not run, for example because it cannot reach the edge's
+API, or the child cluster has no node) and `EdgeNodeStatusStale` (watch
+errors and no successful watch for 10 minutes while the liveness check
+passes; a collector that started less than 10 minutes ago is not judged,
+because a restart resets its counters).
+
+Measured on v2.19.1 (2026-11-11: a local probe against the management API,
+and Codex's probe against a fake API): when its API goes away after start,
+the collector keeps its last node state (Ready stayed 1), and only
+`kube_state_metrics_watch_total{result="error"}` grows. But `/livez` on its
+main port then fails, so the liveness probe restarts it, and it exits at
+start until the API is back. So a lost API ends in `EdgeNodeStatusMissing`.
+`EdgeNodeStatusStale` is the backstop for a watch that fails while `/livez`
+passes (for example, a credential that lost access). A healthy collector
+opened its next watch 7 to 8 minutes after the first.
+
+```bash
+# The collectors, on the management cluster
+kubectl get pods -A -l app.kubernetes.io/component=edge-node-state
+kubectl -n <edge namespace> logs deploy/<release>-node-state-<edge> -c find-api
+# Edge node state as Prometheus sees it
+#   kube_node_status_condition{job="edge-node-state",condition="Ready",status="true"}
+```
+
 ## Operations
 
 ```bash
@@ -160,6 +219,7 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 | KSM down | Alerts that depend on its metrics stop firing | Auto-restarts; KPS scrapes regenerate state quickly |
 | API rate-limited | Stale metrics | KSM uses informers (cached); rate-limiting unlikely at our scale |
 | Cluster CRD added | Custom object state is absent from KSM by default | The rendered collector list contains built-in kinds. Configure custom-resource state metrics and matching RBAC explicitly. Certificate expiry in this stack comes from cert-manager's own exporter |
+| Child API unreachable (per-edge collector) | For a short time the collector serves its last node state | `/livez` fails, the liveness probe restarts it within about 30 seconds, and it exits at start until the API is back: `EdgeNodeStatusMissing` fires after 10 minutes. A watch that fails while `/livez` passes: `EdgeNodeStatusStale` |
 | RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole (`mgmt-kube-state-metrics`, cluster-scoped); verify with `kubectl auth can-i list pods --as=system:serviceaccount:ais-mgmt:mgmt-kube-state-metrics` |
 
 ## Replacements / future

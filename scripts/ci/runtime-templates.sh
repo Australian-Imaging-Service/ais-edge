@@ -408,6 +408,128 @@ PY
 )" && ci_pass "$inv_out" || ci_fail "reporter inventory: $inv_out"
 
 # -----------------------------------------------------------------------------
+# Edge node collectors cover exactly the configured edges
+# -----------------------------------------------------------------------------
+# templates/edge-node-state.yaml renders one collector per edge, and
+# templates/observability.yaml writes one inventory entry per edge into
+# EdgeNodeStatusMissing. A missing edge is an edge whose nodes nobody watches;
+# an extra entry fires for ever. No edge, or edgeNodeState off: neither may
+# render, since an empty inventory is not valid PromQL. The expected edges come
+# from the values files of each case, not from the render.
+ci_heading "Edge node collectors cover exactly the configured edges"
+# shellcheck source=scripts/ci/values.sh
+. "$HERE/values.sh" >/dev/null
+ci_positive_cases >"$CI_WORK_DIR/positive-cases.tsv"
+ens_out="$(python3 - "$CI_RENDER_DIR" "$CI_VALUES_DIR" "$REPO_ROOT/charts/mgmt/values.yaml" "$CI_WORK_DIR/positive-cases.tsv" 2>&1 <<'PY'
+import os, re, sys, yaml
+render_dir, values_dir, defaults_path, cases_path = sys.argv[1:5]
+defaults = yaml.safe_load(open(defaults_path)) or {}
+problems, checked, multi, zero, off = [], 0, False, False, False
+for line in open(cases_path):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 3 or parts[1] != "charts/mgmt":
+        continue
+    case, files = parts[0], parts[2].split()
+    edges = defaults.get("edges") or []
+    obs = (defaults.get("observability") or {}).get("enabled", True)
+    ens = (defaults.get("edgeNodeState") or {}).get("enabled", True)
+    for f in files:
+        v = yaml.safe_load(open(os.path.join(values_dir, f))) or {}
+        if "edges" in v:
+            edges = v["edges"] or []
+        if "enabled" in (v.get("observability") or {}):
+            obs = v["observability"]["enabled"]
+        if "enabled" in (v.get("edgeNodeState") or {}):
+            ens = v["edgeNodeState"]["enabled"]
+    path = os.path.join(render_dir, case + ".yaml")
+    if not os.path.exists(path):
+        problems.append("%s: no render" % case)
+        continue
+    checked += 1
+    docs = [d for d in yaml.safe_load_all(open(path)) if d]
+    want = {e["name"] for e in edges} if (obs and ens) else set()
+    comp = lambda d: ((d.get("metadata") or {}).get("labels") or {}).get("app.kubernetes.io/component")
+    got = {d["metadata"]["labels"].get("ais-edge.org/edge") for d in docs
+           if d.get("kind") == "Deployment" and comp(d) == "edge-node-state"}
+    mon = {}
+    for d in docs:
+        if d.get("kind") == "ServiceMonitor" and "node-state" in d["metadata"]["name"]:
+            for ep in d["spec"]["endpoints"]:
+                rl = {r.get("targetLabel"): r.get("replacement") for r in ep.get("relabelings") or []}
+                mon.setdefault(rl.get("cluster"), set()).add(rl.get("job"))
+    rule = [d for d in docs if d.get("kind") == "PrometheusRule" and d["metadata"]["name"].endswith("-edge-nodes")]
+    inv = set()
+    if rule:
+        ex = [r["expr"] for g in rule[0]["spec"]["groups"] for r in g["rules"] if r.get("alert") == "EdgeNodeStatusMissing"]
+        inv = set(re.findall(r'label_replace\(vector\(1\), "cluster", "([^"]+)"', ex[0])) if ex else set()
+    if got != want:
+        problems.append("%s: collectors for %s, expected %s" % (case, sorted(got), sorted(want)))
+    if set(mon) != want or any(j != {"edge-node-state"} for j in mon.values()):
+        problems.append("%s: ServiceMonitor cluster/job labels %s, expected job edge-node-state for %s" % (case, {k: sorted(v) for k, v in mon.items()}, sorted(want)))
+    if bool(rule) != bool(want) or inv != want:
+        problems.append("%s: edge-nodes rules %s with inventory %s, expected %s" % (case, "rendered" if rule else "absent", sorted(inv), sorted(want)))
+    multi = multi or len(want) > 1
+    zero = zero or (obs and ens and not edges)
+    off = off or (obs and not ens and bool(edges))
+if not checked:
+    problems.append("no mgmt render was checked")
+if not multi:
+    problems.append("no render has two edges, so the per-edge inventory is checked vacuously")
+if not zero:
+    problems.append("no render has zero edges with observability on")
+if not off:
+    problems.append("no render turns edgeNodeState off with edges configured")
+if problems:
+    raise SystemExit("; ".join(problems))
+print("edge node collectors, their ServiceMonitors and EdgeNodeStatusMissing match the configured edges in %d mgmt render(s), zero edges and off included" % checked)
+PY
+)" && ci_pass "$ens_out" || ci_fail "edge node collectors: $ens_out"
+
+# -----------------------------------------------------------------------------
+# In-cluster kubectl calls do not pass --request-timeout
+# -----------------------------------------------------------------------------
+# With no kubeconfig, kubectl uses the in-cluster config only while the merged
+# config equals the defaults. --request-timeout is an override, so kubectl then
+# calls http://localhost:8080 instead (measured on alpine/kubectl:1.35.4, see
+# files/cert-sync.sh). The per-edge collector's init container failed on its
+# first live start this way. Use `timeout <s> kubectl ...` instead. A script
+# that names --kubeconfig or --server has its own config and is not affected.
+ci_heading "In-cluster kubectl calls do not pass --request-timeout"
+rt_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, sys, yaml
+def bad(script):
+    # Shell comments do not run (the collector's own comment names the flag).
+    code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
+    return "kubectl" in code and "--request-timeout" in code and "--kubeconfig" not in code and "--server" not in code
+problems, scripts = [], 0
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    for d in yaml.safe_load_all(open(path)):
+        if not d or not isinstance(d, dict):
+            continue
+        spec = (d.get("spec") or {})
+        tmpl = spec.get("template") or ((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}
+        pod = tmpl.get("spec") or {}
+        for c in (pod.get("initContainers") or []) + (pod.get("containers") or []):
+            script = "\n".join(str(x) for x in (c.get("command") or []) + (c.get("args") or []))
+            if "kubectl" in script:
+                scripts += 1
+                if bad(script):
+                    problems.append("%s: %s %s container %s" % (os.path.basename(path), d.get("kind"), d["metadata"]["name"], c["name"]))
+if not bad("kubectl get svc --request-timeout=30s"):
+    problems.append("control: the check does not flag a plain in-cluster call with --request-timeout")
+if bad("kubectl --kubeconfig /k get svc --request-timeout=30s"):
+    problems.append("control: the check flags a call with its own kubeconfig")
+if bad("# do not use kubectl --request-timeout\ntimeout 30 kubectl get svc"):
+    problems.append("control: the check flags a comment")
+if not scripts:
+    problems.append("no rendered container runs kubectl: the check would pass on nothing")
+if problems:
+    raise SystemExit("; ".join(sorted(set(problems))))
+print("%d rendered container script(s) call kubectl; none passes --request-timeout on the in-cluster config" % scripts)
+PY
+)" && ci_pass "$rt_out" || ci_fail "kubectl --request-timeout: $rt_out"
+
+# -----------------------------------------------------------------------------
 # Durations with a leading zero render in base 10
 # -----------------------------------------------------------------------------
 # edge.durationSeconds and mgmt.durationSeconds used sprig int64, which reads a

@@ -91,22 +91,36 @@ tests:
 
   # ---------------------------------------------------------------------
   - interval: 30s
-    name: EdgeWorkerDisconnected fires when a node stops being Ready
+    name: ManagementNodeNotReady fires when a management node stops being Ready
     input_series:
-      - series: 'kube_node_status_condition{condition="Ready",status="true",node="k0s-edge-worker-dev"}'
+      - series: 'kube_node_status_condition{job="kube-state-metrics",condition="Ready",status="true",node="stream-2-ab-dev"}'
         values: "1+0x10 0+0x30"
     alert_rule_test:
       - eval_time: 2m
-        alertname: EdgeWorkerDisconnected
+        alertname: ManagementNodeNotReady
         exp_alerts: []
       - eval_time: 12m
-        alertname: EdgeWorkerDisconnected
+        alertname: ManagementNodeNotReady
         exp_alerts:
           - exp_labels:
               severity: critical
+              job: kube-state-metrics
               condition: Ready
               status: "true"
-              node: k0s-edge-worker-dev
+              node: stream-2-ab-dev
             exp_annotations:
-              summary: "Observed node k0s-edge-worker-dev NotReady for 5+ minutes"
-              description: "Management kube-state-metrics observes management-cluster nodes, not the\nremote child workers. This historical alert name does not add edge coverage.\nInspect node conditions, kubelet, disk pressure and network status. A missing\nnode series can remain silent here. Pipeline stages may be disrupted, but\nthis alert does not establish which files were received or uploaded.\n"
+              summary: "Management node stream-2-ab-dev NotReady for 5+ minutes"
+              description: "The management node stream-2-ab-dev is not Ready (False, or Unknown when its\nkubelet stopped reporting). SeaweedFS, the uploaders and the edge control planes\non it may be down. Check the node conditions, the kubelet and the disk:\n  kubectl describe node stream-2-ab-dev\nOn a one-node management cluster Prometheus runs on this node, so a node that is\nfully down cannot raise this alert. A node that is gone has no series either.\n"
+
+  # ---------------------------------------------------------------------
+  # The old rule had no job selector, so it would fire for ANY node series.
+  # An edge node (from the per-edge collector) is EdgeWorkerDisconnected's.
+  - interval: 30s
+    name: ManagementNodeNotReady stays quiet for an edge node
+    input_series:
+      - series: 'kube_node_status_condition{job="edge-node-state",cluster="edge-a",condition="Ready",status="true",node="k0s-edge-worker-dev"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ManagementNodeNotReady
+        exp_alerts: []

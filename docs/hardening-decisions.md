@@ -394,9 +394,13 @@ Three more Prometheus rules were unable to fire because mgmt Prometheus
 has no general child-pod scrape path through the API-server Konnectivity tunnel: `EdgePodCrashLoop` and
 `KonnectivityTunnelFlapping` named child-cluster objects that have zero
 series on mgmt and have since been deleted (`docs/TOUR.md` §9);
-`EdgeWorkerDisconnected` is a different case — it fires, just for the
-management node rather than any edge, and is still open. **An alert that
-cannot fire is worse than no alert, because it reads as coverage.**
+`EdgeWorkerDisconnected` was a different case: it fired, but for the
+management node rather than any edge. That rule is now
+`ManagementNodeNotReady`, and `EdgeWorkerDisconnected` reads a per-edge
+collector on the management cluster, which reads the edge's API server
+(`docs/components/kube-state-metrics.md`, "Per-edge node collectors").
+**An alert that cannot fire is worse than no alert, because it reads as
+coverage.**
 
 ### Do it properly
 

@@ -52,10 +52,19 @@ not a synthesised counter. Counting events in LogQL with `count_over_time`
 is the same operation we already perform for the dashboards, so the alert
 expressions sit close to the dashboard queries that operators already trust.
 
+Edge node state is the one exception. Each edge's API server is its k0smotron
+control plane, which runs on the management cluster, and the edge's kubelet
+already reports its node status to it. So a collector on the management
+cluster reads node state with no route into the edge's pod network. Per edge,
+`charts/mgmt/templates/edge-node-state.yaml` runs one kube-state-metrics,
+limited to nodes, against that API server. `EdgeWorkerDisconnected`,
+`EdgeNodeStatusMissing` and `EdgeNodeStatusStale` read it
+(`docs/components/kube-state-metrics.md`, "Per-edge node collectors").
+
 ## What lives where
 
 This table is the full shipped inventory, not a sample: **23** alerts in
-`charts/mgmt/files/loki-ruler-rules.yaml` and **13** across the six files in
+`charts/mgmt/files/loki-ruler-rules.yaml` and **16** across the seven files in
 `charts/mgmt/files/prometheus-rules/`. If you add one, add a row — an alert
 missing from here reads as coverage nobody knows about, and an alert listed
 here that no longer ships reads as coverage that does not exist.
@@ -90,7 +99,10 @@ here that no longer ships reads as coverage that does not exist.
 | `DeidentifyStageError` | Loki ruler | ERROR/CRITICAL stream severity or the existing error/traceback text from `deidentify` in 10m. Keeps the same alert name for accessionflow de-identification. |
 | `S3UploaderRestartedRecently` | Loki ruler | `refusing to start upload loop` / `alias_failed` / `endpoint_failed` / `dependency_missing` / `lock_failed` — the uploader's own refusals and stops (the pre-flight probe, a tool the image lacks, a writer lock that cannot be opened or taken), which otherwise look like silence. |
 | `ManagementClusterDown` | Prometheus | `up{job="apiserver"} == 0` from management Prometheus. A failed scrape is the signal, not proof the entire cluster is down; missing series or a failed evaluator cannot fire this expression. |
-| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition` — fires, but only ever for the management node; see `docs/components/kube-state-metrics.md`. |
+| `ManagementNodeNotReady` | Prometheus | `kube_node_status_condition{job="kube-state-metrics"}`: a management node not Ready (False or Unknown) for 5 minutes. On a one-node management cluster Prometheus runs on that node, so a node that is fully down cannot raise it. |
+| `EdgeWorkerDisconnected` | Prometheus | `kube_node_status_condition{job="edge-node-state"}` from the per-edge collector: an edge node not Ready (False or Unknown) for 5 minutes, labelled with the edge (`cluster`) and the node. |
+| `EdgeNodeStatusMissing` | Prometheus | No Ready series for a configured edge for 10 minutes: its collector does not run or is not scraped (it also restarts and stops while the edge's API server does not answer), or the child cluster has no node. Keyed on the configured edges, as `DataPolicyReporterSilent` is. |
+| `EdgeNodeStatusStale` | Prometheus | The per-edge collector has watch errors and no successful watch for 10 minutes (`kube_state_metrics_watch_total`) while its liveness check passes, for example a credential that lost access. It still serves its last node state, so `EdgeWorkerDisconnected` cannot fire for that edge meanwhile. Not judged in the first 10 minutes after a collector start (`process_start_time_seconds`), because a restart resets its counters. |
 | `SeaweedFSDown` | Prometheus | Deployment readiness, scraped from mgmt KSM. |
 | `SeaweedFSDiskFull` | Prometheus | `SeaweedFS_volumeServer_resource` from SeaweedFS's own exporter (capitalised exactly so — PromQL is case-sensitive). |
 | `CertificateExpiringSoon` | Prometheus | cert-manager's own metrics: fires when a certificate is more than a day past its renewal time (`certmanager_certificate_renewal_timestamp_seconds`, i.e. `notAfter - renewBefore`) or within 14 days of expiry. It used to fire at 60 days left, which every healthy 90-day certificate reaches 30 days before cert-manager renews it, so it mailed daily with nothing wrong. |
