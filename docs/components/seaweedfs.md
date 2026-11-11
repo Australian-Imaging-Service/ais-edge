@@ -77,7 +77,11 @@ hostname, exactly as it does on the Loki push endpoint, so it bounds
 *which* certificates are accepted at the door rather than which bucket a
 site can touch.
 
-**It ships off, and it is turned on in four steps, not one.**
+**The chart ships it off, and the example sites turn it on.** A new site
+made from `sites/example-mgmt` and `sites/example-edge` starts with it on:
+`install.sh` runs cert-sync for each edge before it installs the edge chart,
+so every edge has its certificate before it uploads. **An existing site
+turns it on in four steps, not one.**
 
 | Step | Where | What |
 |---|---|---|

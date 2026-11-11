@@ -177,7 +177,9 @@ seaweedfs:
     # the Ingress. It ADDS to the per-site S3 key pair (which is what scopes a
     # site to its own bucket); it does not replace it.
     #
-    # BOTH DEFAULT OFF, AND THEY ARE FLIPPED AT DIFFERENT TIMES:
+    # ON FOR A NEW SITE, BOTH AT ONCE: install.sh runs cert-sync for each edge
+    # before it installs the edge chart, so every edge has its certificate
+    # before it uploads. AN EXISTING SITE flips them at different times:
     #   1. issue: true, and uncomment the "<edge>-s3-client" certSync entry
     #      below ; together, or the render is refused. helm upgrade.
     #   2. kubectl -n xnat-ingest get secret s3-client-tls   on EVERY edge.
@@ -190,8 +192,8 @@ seaweedfs:
     # as a dead endpoint, not an auth problem. Use current Secret, certificate and endpoint checks for every site.
     # verify-live assists but has documented cloud/topology limitations.
     clientCerts:
-      issue: false
-      require: false
+      issue: true
+      require: true
 
 observability:
   alerting:
@@ -330,35 +332,36 @@ certSync:
         namespace: xnat-ingest
         name: s3-edge-credentials
         type: Opaque
-    # ---- mTLS on the S3 upload path: UNCOMMENT WITH THE FLAG, NOT BEFORE ----
+    # ---- mTLS on the S3 upload path: ON, TOGETHER WITH clientCerts.issue ----
     # This edge's S3 upload CLIENT CERTIFICATE. A SEPARATE identity from
     # `<edge>-loki-client` above and from the `<edge>-s3` key pair below it:
     # the two endpoints have separate CN allow-lists and trust-Secret names,
     # but the shipped anchors use the same fleet CA. Removing an upload CN
     # can preserve log access; replacing a shared CA has a broader effect.
     #
-    # It is commented out because the certificate does not exist until
-    # seaweedfs.ingress.clientCerts.issue is true. Uncommenting only this half
-    # would make cert-sync log sync_failed for it every six hours ; and exit
+    # It goes with seaweedfs.ingress.clientCerts.issue: the certificate does
+    # not exist until issue is true. This entry without issue would make
+    # cert-sync log sync_failed for it every six hours ; and exit
     # non-zero, taking CertSyncStale with it ; while every other Secret in the
     # same run syncs fine. The chart refuses to render on either half alone, in
     # both directions, so the two cannot drift apart.
     #
-    # Rollout: set clientCerts.issue: true AND uncomment this, upgrade, confirm
+    # An EXISTING site that turns mTLS on: set clientCerts.issue: true AND
+    # add this entry, upgrade, confirm
     # `kubectl -n xnat-ingest get secret s3-client-tls` on EVERY edge, set
     # upload.s3.requireClientCert in each edge site file, and only then set
     # clientCerts.require: true here.
-    # - source:
-    #     namespace: ais-mgmt
-    #     name: "<edge>-s3-client"
-    #     keys:
-    #       tls.crt: tls.crt
-    #       tls.key: tls.key
-    #   destination:
-    #     namespace: xnat-ingest
-    #     # Must equal upload.s3.clientCertSecret in the EDGE site values.
-    #     name: s3-client-tls
-    #     type: kubernetes.io/tls
+    - source:
+        namespace: ais-mgmt
+        name: "<edge>-s3-client"
+        keys:
+          tls.crt: tls.crt
+          tls.key: tls.key
+      destination:
+        namespace: xnat-ingest
+        # Must equal upload.s3.clientCertSecret in the EDGE site values.
+        name: s3-client-tls
+        type: kubernetes.io/tls
 
 # OPTIONAL: needed when an edge in upload.mode s3 turns the package stage on.
 # The management uploader then reads the zips, so it needs the same DICOM
