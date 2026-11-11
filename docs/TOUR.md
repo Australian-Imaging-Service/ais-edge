@@ -581,8 +581,9 @@ Two cautions:
 
 ### Turning on Orthanc's REST API authentication
 
-The chart default is `orthanc.auth.enabled: true`; the example site overrides
-it to `false`. Check the merged values. `ClusterIP` limits normal external
+The chart default is `orthanc.auth.enabled: true`, and the example sites keep
+it on. A site made from an older copy of an example can still override it to
+`false`. Check the merged values. `ClusterIP` limits normal external
 Service exposure but is not an authorization boundary. In-cluster clients and
 users with port-forward access can still reach the API, including its delete
 operations. Enable authentication and supply the matching Secret keys below.
@@ -606,8 +607,9 @@ openssl rand -base64 24                       # use this as <password> below
 scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
 ```
 
-Add this document (the template is already in your `secrets.enc.yaml`, commented
-out — uncomment and fill it in):
+Add this document. A site made from the current example already has it, with
+`REPLACE_ORTHANC_PASSWORD` to fill in. In an older site it is in your
+`secrets.enc.yaml`, commented out — uncomment and fill it in:
 
 ```yaml
 ---

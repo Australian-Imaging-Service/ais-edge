@@ -137,6 +137,26 @@ DICOM bytes from the shared local store). `<release>` is the site name unless
 on the node's IP so modalities can reach it without an in-cluster Service —
 `orthanc.expose.dicom` can be switched to `nodePort` or `both` instead.
 
+`svc/<release>-orthanc` is always `ClusterIP`, with both ports. Outside
+access has separate `NodePort` Services, one port each:
+
+| Setting | Service | Port |
+|---|---|---|
+| `orthanc.expose.dicom: nodePort` or `both` | `<release>-orthanc-dicom` | DICOM, `orthanc.expose.nodePorts.dicom` (30042) |
+| `orthanc.expose.http: nodePort` | `<release>-orthanc-http` | REST API, `orthanc.expose.nodePorts.http` (30842) |
+
+A Service type applies to every port in the Service. Before this split,
+`orthanc.expose.dicom: nodePort` made the one Service `NodePort`, and
+Kubernetes gave the REST API a node port too, which it picked itself.
+The REST API can delete studies. The chart refuses
+`orthanc.expose.http: nodePort` while `orthanc.auth.enabled` is false.
+
+On an upgrade from a release with one Service, the DICOM node port moves
+from `<release>-orthanc` to `<release>-orthanc-dicom`, with the same
+number, so modalities need no change. A rollback to such a release fails
+with `provided port is already allocated` while `<release>-orthanc-dicom`
+holds the port. Delete that Service first, then roll back.
+
 ## Configuration
 
 Receiver settings live under `orthanc:` in `sites/<site>/values.yaml`.

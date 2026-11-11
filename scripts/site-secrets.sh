@@ -171,8 +171,10 @@ ${ROLE_USAGE}" ;;
     if [ "$ROLE" = "single" ]; then
         echo "  4. ./install.sh ${SITE}"
         echo
-        echo "  Two things nothing generates for you, both in the secrets file:"
+        echo "  Three things nothing generates for you, all in the secrets file:"
         echo "    * AIS_DEID_HMAC_SALT: set once with openssl rand -hex 32."
+        echo "    * the Orthanc login: one password from openssl rand -base64 24,"
+        echo "      in place of REPLACE_ORTHANC_PASSWORD (twice, orthanc-credentials)."
         echo "      Required by the backup script at startup. Its value is unused"
         echo "      for ingest labels and recipes; rotation does not change them."
         echo "    * the XNAT account. Tier-1 uploads to XNAT from this machine, so"
@@ -367,7 +369,9 @@ EOF2
   2. Fill in sites/${EDGE}/secrets.enc.yaml — orthanc-deid-salt still needs
      'openssl rand -hex 32' (deliberately NOT auto-generated: this salt must
      survive reinstalls, and a command that silently regenerates it on a
-     second run would quietly re-pseudonymise every existing patient).
+     second run would quietly re-pseudonymise every existing patient), and
+     orthanc-credentials needs one password from 'openssl rand -base64 24'
+     in place of REPLACE_ORTHANC_PASSWORD (twice): the Orthanc login.
   3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':
 
        - name: ${EDGE}

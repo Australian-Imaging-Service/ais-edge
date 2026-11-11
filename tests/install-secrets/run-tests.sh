@@ -44,6 +44,9 @@ v["nodeIP"] = "192.0.2.10"
 v["installMode"] = mode
 v.setdefault("deid", {})["policyReviewed"] = True
 v.setdefault("observability", {}).setdefault("stack", {})["enabled"] = False
+# Login off: the cases test the installer's check, so the needed set stays the
+# two Secrets that every tier-1 site has (the example turns the login on).
+v.setdefault("orthanc", {}).setdefault("auth", {})["enabled"] = False
 if extra == "observability":
     st = v["observability"]["stack"]
     st["enabled"] = True

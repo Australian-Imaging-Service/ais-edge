@@ -7,7 +7,12 @@ INGEST
                    bound on the node IP (hostPort) — point modalities at <node-ip>:{{ .Values.orthanc.dicomPort }}
 {{- end }}
 {{- if has .Values.orthanc.expose.dicom (list "nodePort" "both") }}
-                   NodePort {{ .Values.orthanc.expose.nodePorts.dicom }}
+                   NodePort {{ .Values.orthanc.expose.nodePorts.dicom }} (Service {{ include "edge.fullname" . }}-orthanc-dicom, DICOM port only)
+{{- end }}
+{{- if eq .Values.orthanc.expose.http "nodePort" }}
+  Orthanc REST API NodePort {{ .Values.orthanc.expose.nodePorts.http }} (Service {{ include "edge.fullname" . }}-orthanc-http); login required
+{{- else }}
+  Orthanc REST API in the cluster only: {{ include "edge.fullname" . }}-orthanc:{{ .Values.orthanc.httpPort }}
 {{- end }}
 {{- if .Values.ingest.fileDrop.enabled }}
   File drop        {{ .Values.ingest.fileDrop.inputGlob }}
