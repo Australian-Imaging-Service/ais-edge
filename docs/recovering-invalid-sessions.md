@@ -56,6 +56,49 @@ guesses it.
 Use one of the methods below for steps 1, 2 and 5. All of them run the same
 tool, except the manual fallback.
 
+### Example
+
+From a test run, with method 1. The values are synthetic.
+
+```console
+$ sudo ais-requeue list
+folder                                                                       missing                  files  age
+test_project.MRNAFK3-20261110152854.INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK session=ACCESSIONNUMBER  20     0.0h
+```
+
+`<folder>` is the name in the first column. It is a name, not a path. Copy it
+whole.
+
+```console
+$ sudo ais-requeue show test_project.MRNAFK3-20261110152854.INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK
+folder:   test_project.MRNAFK3-20261110152854.INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK
+labels:   project=test_project, subject=MRNAFK3-20261110152854, session=INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK
+missing:  session (DICOM ACCESSIONNUMBER)
+Look up the missing value with these study details (patient data: keep it on this terminal):
+  PatientID          MRNAFK3-20261110152854
+  StudyDate          20260909
+  StudyTime          040041
+  StudyDescription   test_project
+  Modality           MR
+  AccessionNumber    (empty)
+  StudyInstanceUID   1.2.826.0.1.3680043.8.498.12268812667897551533890468604834365304
+```
+
+The session ID is missing. The person with the hospital's records finds the
+AccessionNumber of this study, here `ACCK320261110152854`. Give it with
+`--session`:
+
+```console
+$ sudo ais-requeue requeue test_project.MRNAFK3-20261110152854.INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK --session ACCK320261110152854
+{"ts": "2026-11-10T15:36:43Z", "event": "invalid_requeued", "operator": "ubuntu@k0s-edge-worker-dev", "from": "test_project.MRNAFK3-20261110152854.INVALID_MISSING_ACCESSIONNUMBER_JQWrfStK", "to": "test_project.MRNAFK3-20261110152854.ACCK320261110152854", ...}
+requeued: assigned/test_project.MRNAFK3-20261110152854.ACCK320261110152854. Next: watch the uploader log for this session, then check it in XNAT.
+```
+
+The folder now has the name `<project>.<subject>.<session>`. The upload sends
+it to XNAT with the session label `ACCK320261110152854`. When more data for the
+study waits in `grouped/`, a `NOTE:` line follows. See
+[More data for the same study](#more-data-for-the-same-study).
+
 ## Choose a method
 
 | Method | Where you run it | You need | sudo |
