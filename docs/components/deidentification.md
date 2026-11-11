@@ -495,7 +495,7 @@ identifier becomes a PATH rather than a filename: `medimage/dicom-series` is a
 directory `medimage` holding a file `dicom-series`.
 
 That structure is load-bearing. The stage walks
-`<spec-dir>/<project>/<category>/<format>` and skips a file at the top level
+`RECIPE_DIR/<project>/<category>/<format>` and skips a file at the top level
 that is not in a directory. So a flat file named `medimage@dicom-series.json`
 is never read. The stage then finds no recipes and fails each session with
 `No deidentification recipe files found for '<project>' and no default
