@@ -62,6 +62,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
   {{- end }}
 
+  {{- /* THE REST API GETS A NODE PORT ONLY ON PURPOSE. <release>-orthanc is
+         always ClusterIP; orthanc.expose.http: nodePort adds a Service with the
+         HTTP port only. Any other word used to fall back to ClusterIP with no
+         message, so a typo looked like a working setting. With login off, a
+         node port gives anyone who reaches the node the API, and the API can
+         delete studies. */ -}}
+  {{- if not (has .Values.orthanc.expose.http (list "ClusterIP" "nodePort")) }}
+      {{- fail (printf "orthanc.expose.http must be ClusterIP or nodePort, got %q." .Values.orthanc.expose.http) }}
+  {{- end }}
+  {{- if and (eq .Values.orthanc.expose.http "nodePort") (not .Values.orthanc.auth.enabled) }}
+      {{- fail "orthanc.expose.http=nodePort with orthanc.auth.enabled=false puts the Orthanc REST API on a node port with no login, and the API can delete studies. Turn orthanc.auth.enabled on, or keep orthanc.expose.http ClusterIP." }}
+  {{- end }}
+
   {{- /* THE FACILITY BACKUP IS REQUIRED UNDER BOTH ENGINES, and it used to be
          gated as though it were an orthanc-only concern. It became reachable
          when ingest became the default, which is how the gating was found.

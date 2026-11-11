@@ -141,9 +141,27 @@ is exactly what the chart passes to `group-orthanc`; a site installed
 under a different release name shifts both.
 
 DICOM port 4242 is exposed via `hostPort` directly on the edge node IP
-so modalities can reach it without an in-cluster Service. (The Service
-flips to `NodePort` if `orthanc.expose.dicom` or `orthanc.expose.http`
-asks for it — the default keeps the REST API in-cluster only.)
+so modalities can reach it without an in-cluster Service.
+
+`svc/edge-orthanc` is always `ClusterIP`, with both ports. Outside
+access has separate `NodePort` Services, one port each:
+
+| Setting | Service | Port |
+|---|---|---|
+| `orthanc.expose.dicom: nodePort` or `both` | `edge-orthanc-dicom` | DICOM, `orthanc.expose.nodePorts.dicom` (30042) |
+| `orthanc.expose.http: nodePort` | `edge-orthanc-http` | REST API, `orthanc.expose.nodePorts.http` (30842) |
+
+A Service type applies to every port in the Service. Before this split,
+`orthanc.expose.dicom: nodePort` made the one Service `NodePort`, and
+Kubernetes gave the REST API a node port too, which it picked itself.
+The REST API can delete studies. The chart refuses
+`orthanc.expose.http: nodePort` while `orthanc.auth.enabled` is false.
+
+On an upgrade from a release with one Service, the DICOM node port moves
+from `edge-orthanc` to `edge-orthanc-dicom`, with the same number, so
+modalities need no change. A rollback to such a release fails with
+`provided port is already allocated` while `edge-orthanc-dicom` holds the
+port. Delete that Service first, then roll back.
 
 ## Configuration
 

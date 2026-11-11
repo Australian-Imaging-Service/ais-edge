@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes log-phrases requeue-invalid
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes orthanc-exposure log-phrases requeue-invalid
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy s3-uploader-image greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -169,6 +169,11 @@ runtime-templates: $(RENDER_DEP)
 # NOTES.txt renders only at install, so no other stage reads it.
 notes:
 	@scripts/ci/notes.sh
+
+# Every orthanc.expose setting, rendered: the REST API gets a node port only
+# with orthanc.expose.http: nodePort, and each NodePort Service has one port.
+orthanc-exposure:
+	@scripts/ci/orthanc-exposure.sh
 
 shell-syntax:
 	@scripts/ci/shell-syntax.sh
