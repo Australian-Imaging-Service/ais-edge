@@ -218,7 +218,7 @@ groups:
     annotations:
       summary: '>2 single-node XNAT upload errors in 10 minutes on {{ $labels.cluster }}'
       description: |
-        The tier-1 uploader runs on this node and uploads directly to XNAT. It is repeatedly failing. Inspect `kubectl logs -n xnat-ingest -l component=upload` for the cause; different-checksums conflicts have their own per-session alert. --tail=-1 --since=1h
+        The tier-1 uploader runs on this node and uploads directly to XNAT. It is repeatedly failing. Inspect `kubectl logs -n xnat-ingest -l component=upload --tail=-1 --since=1h` for the cause; different-checksums conflicts have their own per-session alert.
   # THE UPLOADER THIS TIER ACTUALLY RENDERS. This rule used to select
   # component="s3-uploader" and match event="upload_started" / "upload_completed".
   # Neither exists on this branch:
