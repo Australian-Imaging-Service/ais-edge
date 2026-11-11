@@ -988,6 +988,10 @@ printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: S
 printf 'deid:\n  engine: none\n  policyReviewed: false\n' >"$V/neg-edge-deid-no-engine.yaml"
 printf 'deid:\n  engine: ingest\ningest:\n  assign:\n    tagMapping: {project: StudyID, subject: PSEUDONYM_TAG, session: PSEUDONYM_SESSION_TAG}\n  deidentify:\n    specConfigMap: specs\n    specFiles: {}\n' >"$V/neg-edge-deid-no-specfiles.yaml"
 printf 'orthanc:\n  deid:\n    existingSaltSecret: ""\n'  >"$V/neg-edge-deid-no-salt.yaml"
+# The REST API on a node port with no login; and an expose.http word the chart
+# does not know (it used to fall back to ClusterIP with no message).
+printf 'orthanc:\n  auth:\n    enabled: false\n  expose:\n    http: nodePort\n' >"$V/neg-edge-orthanc-http-noauth.yaml"
+printf 'orthanc:\n  expose:\n    http: NodePort\n' >"$V/neg-edge-orthanc-http-word.yaml"
 
 # The migration guards, which are the upgrade path for every existing site and
 # execute exactly once each, in anger. Nothing had ever run them.
@@ -1563,6 +1567,8 @@ neg-edge-deid-no-engine	charts/edge	edge-base.yaml neg-edge-deid-no-engine.yaml	
 neg-edge-deid-no-specfiles	charts/edge	edge-base.yaml neg-edge-deid-no-specfiles.yaml	specFiles is empty
 neg-edge-deid-empty-profile	charts/edge	edge-base.yaml neg-edge-deid-empty-profile.yaml	profile is empty
 neg-edge-deid-no-salt	charts/edge	edge-base.yaml neg-edge-deid-no-salt.yaml	existingSaltSecret is empty
+neg-edge-orthanc-http-noauth	charts/edge	edge-base.yaml neg-edge-orthanc-http-noauth.yaml	puts the Orthanc REST API on a node port with no login
+neg-edge-orthanc-http-word	charts/edge	edge-base.yaml neg-edge-orthanc-http-word.yaml	orthanc.expose.http must be ClusterIP or nodePort
 neg-edge-deid-legacy-orthanc-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-orthanc-key.yaml	has been replaced by the single key
 neg-edge-deid-legacy-ingest-key	charts/edge	edge-base.yaml neg-edge-deid-legacy-ingest-key.yaml	has been replaced by the single key
 neg-edge-associate-enabled	charts/edge	edge-base.yaml neg-edge-associate-enabled.yaml	is not supported yet
