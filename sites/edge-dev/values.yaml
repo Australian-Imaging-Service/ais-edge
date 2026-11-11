@@ -89,10 +89,12 @@ orthanc:
   # The AE title THIS Orthanc answers to. Modalities are configured to send here.
   aet: AISEDGE
   auth:
-    # true requires the orthanc-credentials Secret for HTTP access.
+    # On, as in the chart default: the REST API can delete studies.
+    # The Secret orthanc-credentials is in secrets.enc.yaml.
     # This is HTTP authentication, not DICOM sender authentication.
     # Restrict the DICOM and HTTP listeners at the network boundary.
-    enabled: false
+    enabled: true
+    existingSecret: orthanc-credentials
   deid:
     existingSaltSecret: orthanc-deid-salt
 

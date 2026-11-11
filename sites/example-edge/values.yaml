@@ -92,10 +92,13 @@ orthanc:
   # The AE title THIS Orthanc answers to. Modalities are configured to send here.
   aet: AISEDGE
   auth:
-    # true requires the orthanc-credentials Secret for HTTP access.
+    # On, as in the chart default: the REST API can delete studies, and
+    # in-cluster workloads and port-forward users can reach it.
+    # The Secret is in secrets.example.yaml (three keys, one password).
     # This is HTTP authentication, not DICOM sender authentication.
     # Restrict the DICOM and HTTP listeners at the network boundary.
-    enabled: false
+    enabled: true
+    existingSecret: orthanc-credentials
   deid:
     # The receiver Lua startup currently loads existingSaltSecret, including
     # under the ingest engine. The ingest path returns before legacy hashing

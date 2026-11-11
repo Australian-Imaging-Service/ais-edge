@@ -947,8 +947,9 @@ each site. `CertificateExpiringSoon` fires at 60 days.
 
 ## Orthanc REST API Authentication
 
-The chart default sets `orthanc.auth.enabled: true`; the `example-edge`
-site overrides it to `false`. Check the merged site values. The REST Service
+The chart default sets `orthanc.auth.enabled: true`, and the `example-edge`
+site keeps it on. A site made from an older copy of that example can still
+override it to `false`. Check the merged site values. The REST Service
 defaults to `ClusterIP`. This limits normal external exposure but is not an
 authorization boundary: reachable clients, including in-cluster workloads or
 users with port-forward access, may call it. The API can delete studies.
@@ -974,8 +975,9 @@ openssl rand -base64 24                       # use this as <password> below
 scripts/site-secrets.sh edit <site>           # decrypts to $EDITOR, re-encrypts on save
 ```
 
-Add this document (the template is already in your `secrets.enc.yaml`, commented
-out — uncomment and fill it in):
+Add this document. A site made from the current example already has it, with
+`REPLACE_ORTHANC_PASSWORD` to fill in. In an older site it is in your
+`secrets.enc.yaml`, commented out — uncomment and fill it in:
 
 ```yaml
 ---
