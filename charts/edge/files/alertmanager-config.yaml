@@ -6,9 +6,11 @@
 # The inherited Slack discussion below is historical tier-2 rationale, not
 # an implemented optional Slack integration on this branch. Its CA examples
 # likewise refer to tier-2 history, not local tier-1 certificate rules.
-# The stack retains Alertmanager notification state for 120h by default.
-# A 720h repeat interval cannot guarantee monthly spacing beyond that state
-# retention. Re-fire and state loss can also send another notification.
+# Alertmanager keeps its notification state for 744h
+# (kube-prometheus-stack.alertmanager.alertmanagerSpec.retention in values.yaml),
+# longer than the longest repeat interval here (720h). The subchart default,
+# 120h, pruned that state first, so a 720h route could mail again after 5 days.
+# A re-fire or a lost state volume can still send another notification.
 # =============================================================================
 # Alertmanager configuration  —  email primary, optional Slack secondary
 # =============================================================================
