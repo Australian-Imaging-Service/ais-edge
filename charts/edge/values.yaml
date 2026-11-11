@@ -612,16 +612,20 @@ orthanc:
   # hostPort  — bind 4242 on the node IP. Standard DICOM port; modalities are
   #             painful to repoint, so this is the default. Pins the pod to
   #             one node, which is fine for a single-node edge.
-  # nodePort  — expose via NodePort instead.
+  # nodePort  — expose via NodePort instead (Service <release>-orthanc-dicom,
+  #             with the DICOM port only).
   # both      — both, for a migration window.
   expose:
     dicom: hostPort
     nodePorts:
       dicom: 30042
       http: 30842
-    # Intended REST exposure. The current shared Service becomes NodePort if
-    # DICOM uses nodePort/both, exposing its HTTP port too. Check the rendered
-    # Service rather than relying on this value alone; keep authentication on.
+    # The REST API. It can delete studies.
+    # ClusterIP  in-cluster only, on <release>-orthanc (the default).
+    # nodePort   also on a node port (Service <release>-orthanc-http, with the
+    #            HTTP port only). The chart refuses it with auth.enabled false.
+    # The DICOM setting above does not change this: <release>-orthanc is
+    # always ClusterIP.
     http: ClusterIP
 
   auth:
