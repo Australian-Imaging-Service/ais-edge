@@ -486,6 +486,50 @@ PY
 )" && ci_pass "$ens_out" || ci_fail "edge node collectors: $ens_out"
 
 # -----------------------------------------------------------------------------
+# In-cluster kubectl calls do not pass --request-timeout
+# -----------------------------------------------------------------------------
+# With no kubeconfig, kubectl uses the in-cluster config only while the merged
+# config equals the defaults. --request-timeout is an override, so kubectl then
+# calls http://localhost:8080 instead (measured on alpine/kubectl:1.35.4, see
+# files/cert-sync.sh). The per-edge collector's init container failed on its
+# first live start this way. Use `timeout <s> kubectl ...` instead. A script
+# that names --kubeconfig or --server has its own config and is not affected.
+ci_heading "In-cluster kubectl calls do not pass --request-timeout"
+rt_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY'
+import glob, os, sys, yaml
+def bad(script):
+    # Shell comments do not run (the collector's own comment names the flag).
+    code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
+    return "kubectl" in code and "--request-timeout" in code and "--kubeconfig" not in code and "--server" not in code
+problems, scripts = [], 0
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    for d in yaml.safe_load_all(open(path)):
+        if not d or not isinstance(d, dict):
+            continue
+        spec = (d.get("spec") or {})
+        tmpl = spec.get("template") or ((spec.get("jobTemplate") or {}).get("spec") or {}).get("template") or {}
+        pod = tmpl.get("spec") or {}
+        for c in (pod.get("initContainers") or []) + (pod.get("containers") or []):
+            script = "\n".join(str(x) for x in (c.get("command") or []) + (c.get("args") or []))
+            if "kubectl" in script:
+                scripts += 1
+                if bad(script):
+                    problems.append("%s: %s %s container %s" % (os.path.basename(path), d.get("kind"), d["metadata"]["name"], c["name"]))
+if not bad("kubectl get svc --request-timeout=30s"):
+    problems.append("control: the check does not flag a plain in-cluster call with --request-timeout")
+if bad("kubectl --kubeconfig /k get svc --request-timeout=30s"):
+    problems.append("control: the check flags a call with its own kubeconfig")
+if bad("# do not use kubectl --request-timeout\ntimeout 30 kubectl get svc"):
+    problems.append("control: the check flags a comment")
+if not scripts:
+    problems.append("no rendered container runs kubectl: the check would pass on nothing")
+if problems:
+    raise SystemExit("; ".join(sorted(set(problems))))
+print("%d rendered container script(s) call kubectl; none passes --request-timeout on the in-cluster config" % scripts)
+PY
+)" && ci_pass "$rt_out" || ci_fail "kubectl --request-timeout: $rt_out"
+
+# -----------------------------------------------------------------------------
 # Durations with a leading zero render in base 10
 # -----------------------------------------------------------------------------
 # edge.durationSeconds and mgmt.durationSeconds used sprig int64, which reads a

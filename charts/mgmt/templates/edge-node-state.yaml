@@ -131,7 +131,10 @@ spec:
             - |
               set -eu
               sel="app=k0smotron,cluster=${EDGE_NAME},app.kubernetes.io/component=control-plane"
-              found=$(kubectl -n "$EDGE_NAMESPACE" get svc -l "$sel" --request-timeout=30s \
+              # `timeout`, NOT kubectl --request-timeout: that flag makes kubectl
+              # drop the in-cluster config and call localhost:8080 (measured here
+              # and in files/cert-sync.sh on alpine/kubectl:1.35.4).
+              found=$(timeout 30 kubectl -n "$EDGE_NAMESPACE" get svc -l "$sel" \
                 -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.ports[?(@.name=="api")].port}{"\n"}{end}')
               n=$(printf '%s\n' "$found" | grep -c . || true)
               if [ "$n" != 1 ]; then
