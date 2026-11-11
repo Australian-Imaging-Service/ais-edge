@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases cli-contract requeue-invalid
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes log-phrases cli-contract requeue-invalid install-secrets
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -130,6 +130,12 @@ reclaimer: $(RENDER_DEP)
 # requeued folder (docker; CI_REQUIRE_REQUEUE_IMAGE=1 makes a missing image fail).
 requeue-invalid:
 	@tests/requeue-invalid/run-tests.sh
+
+# install.sh with no secrets.enc.yaml, against a stub kubectl: installMode
+# existing goes on only when the cluster has every Secret the chart needs,
+# and an API error is never read as "present".
+install-secrets:
+	@tests/install-secrets/run-tests.sh
 
 reclaimer-fence:
 	@tests/reclaimer-fence/run-tests.sh

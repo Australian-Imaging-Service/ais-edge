@@ -776,7 +776,10 @@ that is wrong rather than failing later inside a library:
   that never answers while the pipeline quietly fills the disk.
 - `nodeIP` must be set.
 - `secrets.enc.yaml` must exist, must be encrypted, and must not still contain
-  the shipped `REPLACE_` placeholders.
+  the shipped `REPLACE_` placeholders. The one exception is
+  `installMode: existing` with no secrets file: then every Secret that the
+  rendered chart refers to, and does not create, must already be in the
+  cluster (an API error refuses), and step 2 is skipped.
 - `sops` must be installed.
 
 ### Proving it worked

@@ -478,6 +478,13 @@ If you already have a single-node Kubernetes cluster (k3s, kubeadm, MicroK8s, â€
    it says `=== 01: Installing k0s management cluster ===`, the site file did
    not take `installMode: existing` â€” stop the run there rather than let it
    install k0s on a host that already runs Kubernetes.
+6. If your cluster already holds the site Secrets (you keep them in a secret
+   store, not in `sites/<site>/secrets.enc.yaml`), you need no secrets file.
+   With `installMode: existing` and no file, `install.sh` renders the chart
+   with your site file, lists every Secret that the chart refers to and does
+   not create, and asks the cluster for each one. It goes on, and skips step
+   2, only if all of them are there. It names each absent Secret, and it
+   refuses on any API error: an error does not mean that the Secret is there.
 
 Note that Orthanc uses `hostPort: 4242` and both volumes are `hostPath` PVs, so
 the DICOM modalities must be able to reach the node's IP and the node must have
