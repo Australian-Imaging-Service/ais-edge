@@ -134,6 +134,10 @@ tests:
     values: 0+1x40
   - series: kube_state_metrics_watch_total{job="edge-node-state",cluster="edge-b",resource="*v1.Node",result="success"}
     values: 1+0x10 2+0x10 3+0x20
+  - series: process_start_time_seconds{job="edge-node-state",cluster="edge-a"}
+    values: -600+0x40
+  - series: process_start_time_seconds{job="edge-node-state",cluster="edge-b"}
+    values: -600+0x40
   alert_rule_test:
   - eval_time: 3m
     alertname: EdgeNodeStatusStale
@@ -145,10 +149,11 @@ tests:
         severity: warning
         cluster: edge-a
       exp_annotations:
-        summary: 'Edge edge-a: node state is old, the child API does not answer'
+        summary: 'Edge edge-a: node state is old, the node watch fails'
         description: "The collector for edge edge-a fails to watch the edge's nodes, and it\nhad no successful watch for 10 minutes, while its liveness check still passes (the\nAPI server answers, but the\
-          \ watch fails, for example because the credential lost\naccess). It still shows the last node state it saw, so EdgeWorkerDisconnected\ncannot fire for this edge until it recovers. Check the edge's\
-          \ control plane and\nthe collector's log on the management cluster:\n  kubectl get pods -A -l app=k0smotron,cluster=edge-a\n  kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n"
+          \ watch fails, for example because the credential lost\naccess). It still shows the last node state it saw, so EdgeWorkerDisconnected\ncannot fire for this edge until it recovers. A collector\
+          \ that started less than\n10 minutes ago is not judged here, because a restart resets its counters. Check the\nedge's control plane and the collector's log on the management cluster:\n  kubectl\
+          \ get pods -A -l app=k0smotron,cluster=edge-a\n  kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n"
 - interval: 30s
   name: EdgeNodeStatusStale stays quiet for one error followed by a successful watch
   input_series:
@@ -156,6 +161,8 @@ tests:
     values: 0 1+0x40
   - series: kube_state_metrics_watch_total{job="edge-node-state",cluster="edge-a",resource="*v1.Node",result="success"}
     values: 1 1 2+0x39
+  - series: process_start_time_seconds{job="edge-node-state",cluster="edge-a"}
+    values: -600+0x40
   alert_rule_test:
   - eval_time: 3m
     alertname: EdgeNodeStatusStale
@@ -164,5 +171,20 @@ tests:
     alertname: EdgeNodeStatusStale
     exp_alerts: []
   - eval_time: 15m
+    alertname: EdgeNodeStatusStale
+    exp_alerts: []
+- name: Healthy restarted collector must not report stale node data
+  interval: 30s
+  input_series:
+  - series: kube_state_metrics_watch_total{job="edge-node-state",cluster="edge-a",resource="*v1.Node",result="success",instance="10.1.0.1:8081"}
+    values: 1+0x13 stale 1+0x15 2+0x10
+  - series: kube_state_metrics_watch_total{job="edge-node-state",cluster="edge-a",resource="*v1.Node",result="error",instance="10.1.0.1:8081"}
+    values: _ _ _ _ _ _ _ _ _ _ _ _ 1 2 stale
+  - series: kube_node_status_condition{job="edge-node-state",cluster="edge-a",condition="Ready",status="true",node="worker"}
+    values: 1+0x13 stale 1+0x40
+  - series: process_start_time_seconds{job="edge-node-state",cluster="edge-a",instance="10.1.0.1:8081"}
+    values: -600+0x13 stale 450+0x40
+  alert_rule_test:
+  - eval_time: 12m
     alertname: EdgeNodeStatusStale
     exp_alerts: []

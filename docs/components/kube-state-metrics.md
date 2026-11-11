@@ -66,8 +66,11 @@ the live diagnostic commands to establish current series counts:
   fired, just not on the edge's behalf. That rule is now
   `ManagementNodeNotReady` (`job="kube-state-metrics"`), and
   `EdgeWorkerDisconnected` reads the per-edge collectors
-  (`job="edge-node-state"`). Treat `scripts/check-alert-inputs.sh` as the
-  authority on which inputs exist.
+  (`job="edge-node-state"`). `scripts/check-alert-inputs.sh` lists which
+  inputs have series, with two limits: it reads the source rule files, so
+  placeholders and `label_replace` arguments read as names that match
+  nothing; and an alert built on absence, such as `EdgeNodeStatusMissing`,
+  fires exactly when its input has no series.
 
 - **`*_info`, `*_labels` and `*_annotations` are join metrics, not gauges.**
   Their value is the constant 1 and every fact lives in a label. A new object
@@ -156,16 +159,22 @@ per edge (`charts/mgmt/templates/edge-node-state.yaml`, values `edgeNodeState`):
 
 Alerts (`charts/mgmt/files/prometheus-rules/edge-nodes.yaml`):
 `EdgeWorkerDisconnected` (a node not Ready for 5 minutes),
-`EdgeNodeStatusMissing` (no Ready series for a configured edge for 10 minutes)
-and `EdgeNodeStatusStale` (watch errors and no successful watch for 10
-minutes).
+`EdgeNodeStatusMissing` (no Ready series for a configured edge for 10 minutes:
+the collector does not run, for example because it cannot reach the edge's
+API, or the child cluster has no node) and `EdgeNodeStatusStale` (watch
+errors and no successful watch for 10 minutes while the liveness check
+passes; a collector that started less than 10 minutes ago is not judged,
+because a restart resets its counters).
 
-Measured on v2.19.1 (2026-11-11, a local probe against the management API):
-when its API goes away after start, the collector keeps serving its last
-node state (Ready stayed 1), and only
-`kube_state_metrics_watch_total{result="error"}` grows. That is why
-`EdgeNodeStatusStale` exists. A healthy collector opened its next watch 7 to
-8 minutes after the first.
+Measured on v2.19.1 (2026-11-11: a local probe against the management API,
+and Codex's probe against a fake API): when its API goes away after start,
+the collector keeps its last node state (Ready stayed 1), and only
+`kube_state_metrics_watch_total{result="error"}` grows. But `/livez` on its
+main port then fails, so the liveness probe restarts it, and it exits at
+start until the API is back. So a lost API ends in `EdgeNodeStatusMissing`.
+`EdgeNodeStatusStale` is the backstop for a watch that fails while `/livez`
+passes (for example, a credential that lost access). A healthy collector
+opened its next watch 7 to 8 minutes after the first.
 
 ```bash
 # The collectors, on the management cluster
@@ -210,7 +219,7 @@ xdg-open http://localhost:9090/targets   # look for "kube-state-metrics" target
 | KSM down | Alerts that depend on its metrics stop firing | Auto-restarts; KPS scrapes regenerate state quickly |
 | API rate-limited | Stale metrics | KSM uses informers (cached); rate-limiting unlikely at our scale |
 | Cluster CRD added | Custom object state is absent from KSM by default | The rendered collector list contains built-in kinds. Configure custom-resource state metrics and matching RBAC explicitly. Certificate expiry in this stack comes from cert-manager's own exporter |
-| Child API unreachable (per-edge collector) | The collector keeps serving its last node state, so `EdgeWorkerDisconnected` cannot fire for that edge | `EdgeNodeStatusStale` fires after 10 minutes of watch errors with no successful watch (plus its 5 minute `for`) |
+| Child API unreachable (per-edge collector) | For a short time the collector serves its last node state | `/livez` fails, the liveness probe restarts it within about 30 seconds, and it exits at start until the API is back: `EdgeNodeStatusMissing` fires after 10 minutes. A watch that fails while `/livez` passes: `EdgeNodeStatusStale` |
 | RBAC drift | KSM can't read some objects | KPS chart provides the right ClusterRole (`mgmt-kube-state-metrics`, cluster-scoped); verify with `kubectl auth can-i list pods --as=system:serviceaccount:ais-mgmt:mgmt-kube-state-metrics` |
 
 ## Replacements / future
