@@ -34,7 +34,10 @@ groups:
         # inventory has one series per edge, and `unless` drops each edge that
         # has a Ready series. So it fires for an edge whose collector is down
         # or never started (a failed scrape marks its series stale at once),
-        # and for a child cluster with no node.
+        # and for a child cluster with no node. ALSO when the child API is gone:
+        # kube-state-metrics' /livez then fails, the liveness probe restarts it,
+        # and it exits at start while the API is down (measured on v2.19.1,
+        # Codex probe 2026-11-11), so its series go too.
         expr: |
           (
             __EDGE_NODE_INVENTORY__
@@ -48,16 +51,20 @@ groups:
           description: |
             Prometheus has no Ready state for any node of edge {{ $labels.cluster }}, so
             EdgeWorkerDisconnected cannot fire for this edge. Either its collector does not
-            run or is not scraped, or the child cluster has no node (the worker never
-            joined, or it was removed). On the management cluster:
+            run or is not scraped (it also restarts and stops while the edge's API server
+            does not answer), or the child cluster has no node (the worker never joined,
+            or it was removed). On the management cluster:
               kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge={{ $labels.cluster }}
               kubectl -n <that namespace> describe pod <that pod>
               kubectl -n <that namespace> logs <that pod> -c find-api
             The init container find-api says when it finds no control-plane Service, or more
             than one. A pod that waits for its volume means <edge>-kubeconfig is missing.
       - alert: EdgeNodeStatusStale
-        # The collector keeps its last node state when the child API goes
-        # away. Measured on v2.19.1: Ready stayed 1, and only
+        # THE BACKSTOP. When the child API is gone, the liveness probe restarts
+        # the collector first and EdgeNodeStatusMissing fires. This catches what
+        # /livez does not see: the API answers but the node watch fails (for
+        # example the credential lost access). The collector keeps its last node
+        # state meanwhile: measured on v2.19.1, Ready stayed 1 and only
         # kube_state_metrics_watch_total{result="error"} grew. A healthy
         # collector opens a new watch every 5 to 10 minutes (measured: 7 to 8),
         # so errors and no successful watch in 10 minutes mean the node state
@@ -71,9 +78,11 @@ groups:
         annotations:
           summary: "Edge {{ $labels.cluster }}: node state is old, the child API does not answer"
           description: |
-            The collector for edge {{ $labels.cluster }} cannot watch the child API, and it had
-            no successful watch for 10 minutes. It still shows the last node state it saw,
-            so EdgeWorkerDisconnected cannot fire for this edge until it reconnects. Check
-            the edge's control plane and the collector on the management cluster:
+            The collector for edge {{ $labels.cluster }} fails to watch the edge's nodes, and it
+            had no successful watch for 10 minutes, while its liveness check still passes (the
+            API server answers, but the watch fails, for example because the credential lost
+            access). It still shows the last node state it saw, so EdgeWorkerDisconnected
+            cannot fire for this edge until it recovers. Check the edge's control plane and
+            the collector's log on the management cluster:
               kubectl get pods -A -l app=k0smotron,cluster={{ $labels.cluster }}
               kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge={{ $labels.cluster }}

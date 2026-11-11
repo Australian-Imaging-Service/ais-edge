@@ -85,10 +85,10 @@ tests:
         cluster: edge-b
       exp_annotations:
         summary: 'Edge edge-b: no node state for 10+ minutes'
-        description: "Prometheus has no Ready state for any node of edge edge-b, so\nEdgeWorkerDisconnected cannot fire for this edge. Either its collector does not\nrun or is not scraped, or the child\
-          \ cluster has no node (the worker never\njoined, or it was removed). On the management cluster:\n  kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-b\n\
-          \  kubectl -n <that namespace> describe pod <that pod>\n  kubectl -n <that namespace> logs <that pod> -c find-api\nThe init container find-api says when it finds no control-plane Service, or more\n\
-          than one. A pod that waits for its volume means <edge>-kubeconfig is missing.\n"
+        description: "Prometheus has no Ready state for any node of edge edge-b, so\nEdgeWorkerDisconnected cannot fire for this edge. Either its collector does not\nrun or is not scraped (it also restarts\
+          \ and stops while the edge's API server\ndoes not answer), or the child cluster has no node (the worker never joined,\nor it was removed). On the management cluster:\n  kubectl get pods -A -l\
+          \ app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-b\n  kubectl -n <that namespace> describe pod <that pod>\n  kubectl -n <that namespace> logs <that pod> -c find-api\nThe init\
+          \ container find-api says when it finds no control-plane Service, or more\nthan one. A pod that waits for its volume means <edge>-kubeconfig is missing.\n"
 - interval: 30s
   name: EdgeNodeStatusMissing fires when an edge's series go stale (collector down)
   input_series:
@@ -108,10 +108,10 @@ tests:
         cluster: edge-a
       exp_annotations:
         summary: 'Edge edge-a: no node state for 10+ minutes'
-        description: "Prometheus has no Ready state for any node of edge edge-a, so\nEdgeWorkerDisconnected cannot fire for this edge. Either its collector does not\nrun or is not scraped, or the child\
-          \ cluster has no node (the worker never\njoined, or it was removed). On the management cluster:\n  kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n\
-          \  kubectl -n <that namespace> describe pod <that pod>\n  kubectl -n <that namespace> logs <that pod> -c find-api\nThe init container find-api says when it finds no control-plane Service, or more\n\
-          than one. A pod that waits for its volume means <edge>-kubeconfig is missing.\n"
+        description: "Prometheus has no Ready state for any node of edge edge-a, so\nEdgeWorkerDisconnected cannot fire for this edge. Either its collector does not\nrun or is not scraped (it also restarts\
+          \ and stops while the edge's API server\ndoes not answer), or the child cluster has no node (the worker never joined,\nor it was removed). On the management cluster:\n  kubectl get pods -A -l\
+          \ app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n  kubectl -n <that namespace> describe pod <that pod>\n  kubectl -n <that namespace> logs <that pod> -c find-api\nThe init\
+          \ container find-api says when it finds no control-plane Service, or more\nthan one. A pod that waits for its volume means <edge>-kubeconfig is missing.\n"
 - interval: 30s
   name: EdgeNodeStatusMissing stays quiet while every edge reports
   input_series:
@@ -146,9 +146,9 @@ tests:
         cluster: edge-a
       exp_annotations:
         summary: 'Edge edge-a: node state is old, the child API does not answer'
-        description: "The collector for edge edge-a cannot watch the child API, and it had\nno successful watch for 10 minutes. It still shows the last node state it saw,\nso EdgeWorkerDisconnected cannot\
-          \ fire for this edge until it reconnects. Check\nthe edge's control plane and the collector on the management cluster:\n  kubectl get pods -A -l app=k0smotron,cluster=edge-a\n  kubectl get pods\
-          \ -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n"
+        description: "The collector for edge edge-a fails to watch the edge's nodes, and it\nhad no successful watch for 10 minutes, while its liveness check still passes (the\nAPI server answers, but the\
+          \ watch fails, for example because the credential lost\naccess). It still shows the last node state it saw, so EdgeWorkerDisconnected\ncannot fire for this edge until it recovers. Check the edge's\
+          \ control plane and\nthe collector's log on the management cluster:\n  kubectl get pods -A -l app=k0smotron,cluster=edge-a\n  kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge=edge-a\n"
 - interval: 30s
   name: EdgeNodeStatusStale stays quiet for one error followed by a successful watch
   input_series:

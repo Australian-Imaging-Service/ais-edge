@@ -794,8 +794,10 @@ annotations are Prometheus's templates, not Helm's.
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
 {{- if or (ne (base $path) "uploader.yaml") (gt (len $uploaderDeployments) 0) }}
 {{- if or (ne (base $path) "edge-nodes.yaml") (gt (len $edgeNodeInventory) 0) }}
-{{- /* No reclaimer CronJob renders under reclaim: never, so neither does its rule. */ -}}
-{{- if not (and (eq (base $path) "reclaimer.yaml") (eq (toString $s3staged.reclaim) "never")) }}
+{{- /* No reclaimer CronJob renders under reclaim: never, or with no edge
+       (templates/s3-staged-reclaimer.yaml ranges over edges), so neither does
+       its rule. A rule with nothing to watch reads as coverage. */ -}}
+{{- if not (and (eq (base $path) "reclaimer.yaml") (or (eq (toString $s3staged.reclaim) "never") (not $.Values.edges))) }}
 {{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) | replace "__EDGE_NODE_INVENTORY__" (join " or " $edgeNodeInventory) }}
 {{- /* A surviving sentinel is SILENT here: PromQL reads a bare __NAME__ as a
        metric name, so the rule loads, looks healthy and never fires. */ -}}
