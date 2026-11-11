@@ -190,12 +190,14 @@ upload:
     caBundleSecret: ca-bundle
     caBundleKey: ca.crt
 
-    # mTLS ON THE UPLOAD PATH ; OFF, AND STEP 3 OF A FOUR-STEP ROLLOUT.
+    # mTLS ON THE UPLOAD PATH ; ON. The management site issues and requires
+    # the certificate, and install.sh delivers it before this chart starts.
+    # For an EXISTING site this is step 3 of a four-step rollout.
     # caBundleSecret above is who we TRUST; this is who we ARE. They are
     # independent: on cloud the server certificate can come from a public CA
     # with appropriate trust; this chart still validates its CA-bundle setting while this one still comes from the fleet CA.
     #
-    # Do NOT set this until, on the MANAGEMENT side:
+    # At an existing site, do NOT set this until, on the MANAGEMENT side:
     #   1. seaweedfs.ingress.clientCerts.issue: true, plus the matching
     #      certSync.secrets entry (both are commented out in the management
     #      site file, together, for this reason)
@@ -208,8 +210,8 @@ upload:
     # management `require` before this is on can reject uploads; a historical test returned HTTP 400
     # that rclone reports as an S3 XML parse failure ; naming neither
     # certificates nor auth, and reaching the logs as endpoint_failed.
-    # requireClientCert: true
-    # clientCertSecret: s3-client-tls
+    requireClientCert: true
+    clientCertSecret: s3-client-tls
     interval: 60
 
 observability:
