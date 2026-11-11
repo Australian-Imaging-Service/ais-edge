@@ -51,15 +51,20 @@ groups:
               kubectl -n {{ $labels.namespace }} get deployments,pods
               kubectl -n {{ $labels.namespace }} logs -l app=seaweedfs --tail=-1 --since=__RECLAIMER_ALERT_AFTER_S__s
             Edge transfers may fail or retry while the service is unavailable.
-      - alert: EdgeWorkerDisconnected
-        expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+      # MANAGEMENT NODES ONLY. job="kube-state-metrics" is the subchart's
+      # collector, which lists this cluster. Edge workers are in
+      # edge-nodes.yaml (EdgeWorkerDisconnected). defaultRules.create is false,
+      # so no upstream KubeNodeNotReady covers either.
+      - alert: ManagementNodeNotReady
+        expr: kube_node_status_condition{job="kube-state-metrics",condition="Ready",status="true"} == 0
         for: 5m
         labels: { severity: critical }
         annotations:
-          summary: "Observed node {{ $labels.node }} NotReady for 5+ minutes"
+          summary: "Management node {{ $labels.node }} NotReady for 5+ minutes"
           description: |
-            Management kube-state-metrics observes management-cluster nodes, not the
-            remote child workers. This historical alert name does not add edge coverage.
-            Inspect node conditions, kubelet, disk pressure and network status. A missing
-            node series can remain silent here. Pipeline stages may be disrupted, but
-            this alert does not establish which files were received or uploaded.
+            The management node {{ $labels.node }} is not Ready (False, or Unknown when its
+            kubelet stopped reporting). SeaweedFS, the uploaders and the edge control planes
+            on it may be down. Check the node conditions, the kubelet and the disk:
+              kubectl describe node {{ $labels.node }}
+            On a one-node management cluster Prometheus runs on this node, so a node that is
+            fully down cannot raise this alert. A node that is gone has no series either.

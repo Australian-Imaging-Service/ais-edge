@@ -1,0 +1,79 @@
+# =============================================================================
+# Edge worker nodes (Prometheus). Source: templates/edge-node-state.yaml
+# =============================================================================
+# Per edge, one kube-state-metrics (nodes only) runs in the edge's namespace on
+# the management cluster and reads that edge's child API. Its ServiceMonitor
+# sets job="edge-node-state" and cluster=<edge name> on every target.
+#
+# templates/observability.yaml renders this file only when edges exist and
+# edgeNodeState.enabled is true. It fills __EDGE_NODE_INVENTORY__ with one
+# label_replace(vector(1), "cluster", "<edge>", "", "") per configured edge.
+# Management nodes: ManagementNodeNotReady in critical.yaml.
+# =============================================================================
+groups:
+  - name: edge-nodes
+    rules:
+      - alert: EdgeWorkerDisconnected
+        # Ready "true" == 0 means False, or Unknown (the kubelet stopped
+        # reporting, for example the edge is off the network).
+        expr: kube_node_status_condition{job="edge-node-state",condition="Ready",status="true"} == 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Edge {{ $labels.cluster }}: node {{ $labels.node }} NotReady for 5+ minutes"
+          description: |
+            The child API of edge {{ $labels.cluster }} reports node {{ $labels.node }} as not
+            Ready (False, or Unknown when its kubelet stopped reporting) for 5 minutes. The
+            edge may be down, off the network, or short of disk or memory. Its DICOM
+            receiver and its uploads can stop. Check the node in the edge's cluster:
+              kubectl --kubeconfig <edge kubeconfig> describe node {{ $labels.node }}
+            and the network path from the edge to the management node. This alert does not
+            establish which files were received or uploaded.
+      - alert: EdgeNodeStatusMissing
+        # KEYED ON THE CONFIGURED EDGES, as DataPolicyReporterSilent is: the
+        # inventory has one series per edge, and `unless` drops each edge that
+        # has a Ready series. So it fires for an edge whose collector is down
+        # or never started (a failed scrape marks its series stale at once),
+        # and for a child cluster with no node.
+        expr: |
+          (
+            __EDGE_NODE_INVENTORY__
+          )
+          unless on (cluster)
+          count by (cluster) (kube_node_status_condition{job="edge-node-state",condition="Ready",status="true"})
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Edge {{ $labels.cluster }}: no node state for 10+ minutes"
+          description: |
+            Prometheus has no Ready state for any node of edge {{ $labels.cluster }}, so
+            EdgeWorkerDisconnected cannot fire for this edge. Either its collector does not
+            run or is not scraped, or the child cluster has no node (the worker never
+            joined, or it was removed). On the management cluster:
+              kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge={{ $labels.cluster }}
+              kubectl -n <that namespace> describe pod <that pod>
+              kubectl -n <that namespace> logs <that pod> -c find-api
+            The init container find-api says when it finds no control-plane Service, or more
+            than one. A pod that waits for its volume means <edge>-kubeconfig is missing.
+      - alert: EdgeNodeStatusStale
+        # The collector keeps its last node state when the child API goes
+        # away. Measured on v2.19.1: Ready stayed 1, and only
+        # kube_state_metrics_watch_total{result="error"} grew. A healthy
+        # collector opens a new watch every 5 to 10 minutes (measured: 7 to 8),
+        # so errors and no successful watch in 10 minutes mean the node state
+        # is old.
+        expr: |
+          sum by (cluster) (increase(kube_state_metrics_watch_total{job="edge-node-state",resource="*v1.Node",result="error"}[10m])) > 0
+          unless on (cluster)
+          sum by (cluster) (increase(kube_state_metrics_watch_total{job="edge-node-state",resource="*v1.Node",result="success"}[10m])) > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Edge {{ $labels.cluster }}: node state is old, the child API does not answer"
+          description: |
+            The collector for edge {{ $labels.cluster }} cannot watch the child API, and it had
+            no successful watch for 10 minutes. It still shows the last node state it saw,
+            so EdgeWorkerDisconnected cannot fire for this edge until it reconnects. Check
+            the edge's control plane and the collector on the management cluster:
+              kubectl get pods -A -l app=k0smotron,cluster={{ $labels.cluster }}
+              kubectl get pods -A -l app.kubernetes.io/component=edge-node-state,ais-edge.org/edge={{ $labels.cluster }}

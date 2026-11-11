@@ -65,9 +65,11 @@ firing alerts to Alertmanager.
   travel as logs (Vector → Loki) and are alerted on there by the Loki ruler,
   rather than being turned back into metrics first. Any rule naming a
   child-cluster object from mgmt Prometheus cannot see that object through
-  these local scrapes. Historical unreachable-object rules were removed; the
-  surviving rule named `EdgeWorkerDisconnected` actually selects management
-  cluster node readiness. It is not proof that an edge worker is disconnected
+  these local scrapes. Historical unreachable-object rules were removed. Edge
+  node state is the one exception: per edge, a small kube-state-metrics runs
+  on the management cluster and reads the edge's API server, which also runs
+  here (`job="edge-node-state"`, read by `EdgeWorkerDisconnected`).
+  Management nodes have `ManagementNodeNotReady`
   ([`../alerting-architecture.md`](../alerting-architecture.md))
 - Namespace: `ais-mgmt` — the release namespace, set by `install.sh`
   (`MGMT_NS`). kube-prometheus-stack is a *subchart* of `charts/mgmt` with no

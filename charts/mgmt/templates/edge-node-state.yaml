@@ -1,0 +1,274 @@
+{{- /*
+=============================================================================
+Edge node state: the Ready condition of each edge's worker nodes
+=============================================================================
+The management kube-state-metrics lists management nodes only. Edge workers
+are nodes of the k0smotron child clusters, so nothing here saw their Ready
+state, and EdgeWorkerDisconnected fired for management nodes only.
+
+Per edge, this runs one kube-state-metrics with --resources=nodes in the
+edge's namespace on THIS cluster. It reads the child API with the
+<edge>-kubeconfig Secret that k0smotron writes in that namespace.
+
+CAUTION: that kubeconfig is cluster-admin for the child cluster
+(templates/cert-sync.yaml says how that was checked). It is mounted read-only
+into this pod only, and nothing copies it. --resources=nodes limits what is
+collected, not what the credential can do.
+
+THE ADDRESS. The kubeconfig names the external ingress hostname. Inside this
+cluster the child API is the k0smotron control-plane Service, found by label
+as files/cert-sync.sh does. The init container writes that address into a
+kube-state-metrics options file (apiserver:). The CA and the client
+certificate still come from the kubeconfig, so TLS verification stays on: the
+serving certificate carries the Service DNS name. No such Service, or more
+than one: the init container fails and says so.
+
+Only the init container gets this pod's ServiceAccount token, and that token
+can only list Services in the edge namespace.
+
+Rules: files/prometheus-rules/edge-nodes.yaml. The ServiceMonitor sets
+job="edge-node-state" and cluster=<edge> on every target, so `up` carries them.
+*/ -}}
+{{- if and .Values.observability.enabled .Values.edgeNodeState.enabled .Values.edges }}
+{{- $root := . }}
+{{- $fullname := include "mgmt.fullname" . }}
+{{- range $edge := .Values.edges }}
+{{- $edgeNs := $edge.namespace | default $edge.name }}
+{{- $kcSecret := $edge.kubeconfigSecret | default (printf "%s-kubeconfig" $edge.name) }}
+{{- $name := printf "%s-node-state-%s" $fullname $edge.name }}
+{{- /* A Service name is a DNS label: 63 characters at most. Over the limit the
+       API server rejects it halfway through an upgrade. */ -}}
+{{- if gt (len $name) 63 }}
+  {{- fail (printf "edge node state name %q is %d characters, and a Service name can have at most 63. Shorten the release name or the edge name." $name (len $name)) }}
+{{- end }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: edge-node-state
+    ais-edge.org/edge: {{ $edge.name }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+rules:
+  # The control-plane Service is found by label, as cert-sync finds it.
+  # Services carry no credential. No Secret access: the kubeconfig is a volume.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    ais-edge.org/edge: {{ $edge.name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $edgeNs }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: edge-node-state
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mgmt.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: edge-node-state
+      ais-edge.org/edge: {{ $edge.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "mgmt.name" $root }}
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/component: edge-node-state
+        ais-edge.org/edge: {{ $edge.name }}
+    spec:
+      serviceAccountName: {{ $name }}
+      # The token goes to the init container only (volume mgmt-api), never to
+      # kube-state-metrics, which talks to the child API with the kubeconfig.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        # Writes /work/options.yaml: apiserver: https://<svc>.<ns>.svc.cluster.local:<port>.
+        # Same labels as files/cert-sync.sh, but zero or several Services fail
+        # here instead of taking the first one.
+        - name: find-api
+          image: "{{ $root.Values.certSync.image.repository }}:{{ $root.Values.certSync.image.tag }}"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              sel="app=k0smotron,cluster=${EDGE_NAME},app.kubernetes.io/component=control-plane"
+              found=$(kubectl -n "$EDGE_NAMESPACE" get svc -l "$sel" --request-timeout=30s \
+                -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.ports[?(@.name=="api")].port}{"\n"}{end}')
+              n=$(printf '%s\n' "$found" | grep -c . || true)
+              if [ "$n" != 1 ]; then
+                echo "need exactly 1 Service with labels $sel in namespace $EDGE_NAMESPACE, found $n: $found" >&2
+                exit 1
+              fi
+              set -- $found
+              if [ -z "${2:-}" ]; then
+                echo "Service $1 in namespace $EDGE_NAMESPACE has no port named api" >&2
+                exit 1
+              fi
+              printf 'apiserver: https://%s.%s.svc.cluster.local:%s\n' "$1" "$EDGE_NAMESPACE" "$2" > /work/options.yaml
+              cat /work/options.yaml
+          env:
+            - name: EDGE_NAME
+              value: {{ $edge.name | quote }}
+            - name: EDGE_NAMESPACE
+              value: {{ $edgeNs | quote }}
+            # kubectl writes its discovery cache under $HOME.
+            - name: HOME
+              value: /tmp
+          volumeMounts:
+            - {name: work, mountPath: /work}
+            - {name: tmp, mountPath: /tmp}
+            - {name: mgmt-api, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+      containers:
+        - name: kube-state-metrics
+          image: "{{ $root.Values.edgeNodeState.image.repository }}:{{ $root.Values.edgeNodeState.image.tag }}"
+          args:
+            # The options file wins over the flags (kube-state-metrics --help),
+            # and it sets only apiserver. The kubeconfig keeps the CA and the
+            # client certificate.
+            - --config=/work/options.yaml
+            - --kubeconfig=/kube/value
+            - --resources=nodes
+            - --port=8080
+            - --telemetry-port=8081
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: metrics, containerPort: 8081}
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          resources:
+            {{- toYaml $root.Values.edgeNodeState.resources | nindent 12 }}
+          volumeMounts:
+            - {name: work, mountPath: /work, readOnly: true}
+            - {name: kubeconfig, mountPath: /kube, readOnly: true}
+      volumes:
+        - name: work
+          emptyDir: {sizeLimit: 1Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 16Mi}
+        # Written by k0smotron, one data key `value`. Not optional: with no
+        # Secret the pod waits, and EdgeNodeStatusMissing fires for this edge.
+        - name: kubeconfig
+          secret:
+            secretName: {{ $kcSecret }}
+            defaultMode: 0440
+        - name: mgmt-api
+          projected:
+            sources:
+              - serviceAccountToken: {path: token, expirationSeconds: 3600}
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
+              - downwardAPI:
+                  items: [{path: namespace, fieldRef: {fieldPath: metadata.namespace}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $edgeNs }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: edge-node-state
+    ais-edge.org/edge: {{ $edge.name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "mgmt.name" $root }}
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: edge-node-state
+    ais-edge.org/edge: {{ $edge.name }}
+  ports:
+    - {name: http-metrics, port: 8080, targetPort: http, protocol: TCP}
+    - {name: telemetry, port: 8081, targetPort: metrics, protocol: TCP}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "mgmt.labels" $root | nindent 4 }}
+    # Prometheus discovers monitors BY THIS LABEL (mgmt.prometheusReleaseLabel).
+    release: {{ include "mgmt.prometheusReleaseLabel" $root }}
+spec:
+  namespaceSelector:
+    matchNames: [{{ $edgeNs | quote }}]
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: edge-node-state
+      ais-edge.org/edge: {{ $edge.name }}
+  endpoints:
+    # TARGET relabeling, so `up` carries job and cluster too: the rules find
+    # an edge with no data by cluster. The cluster label is the edge name, as
+    # on the Loki alerts.
+    - port: http-metrics
+      honorLabels: true
+      relabelings:
+        - {action: replace, targetLabel: job, replacement: edge-node-state}
+        - {action: replace, targetLabel: cluster, replacement: {{ $edge.name | quote }}}
+    # kube_state_metrics_watch_total: EdgeNodeStatusStale reads it.
+    - port: telemetry
+      relabelings:
+        - {action: replace, targetLabel: job, replacement: edge-node-state}
+        - {action: replace, targetLabel: cluster, replacement: {{ $edge.name | quote }}}
+{{- end }}
+{{- end }}

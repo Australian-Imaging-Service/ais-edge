@@ -781,11 +781,22 @@ annotations are Prometheus's templates, not Helm's.
   {{- end }}
 {{- end }}
 {{- $uploaderDeploymentRegex := printf "(%s)" (join "|" $uploaderDeployments) | replace "\\" "\\\\" }}
+{{- /* EdgeNodeStatusMissing (files/prometheus-rules/edge-nodes.yaml): one
+       series per configured edge, as for DataPolicyReporterSilent. No edge, or
+       edgeNodeState off: no collector renders (templates/edge-node-state.yaml),
+       so neither does the file. An empty inventory is not valid PromQL. */ -}}
+{{- $edgeNodeInventory := list }}
+{{- if .Values.edgeNodeState.enabled }}
+  {{- range .Values.edges }}
+    {{- $edgeNodeInventory = append $edgeNodeInventory (printf "label_replace(vector(1), \"cluster\", \"%s\", \"\", \"\")" .name) }}
+  {{- end }}
+{{- end }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
 {{- if or (ne (base $path) "uploader.yaml") (gt (len $uploaderDeployments) 0) }}
+{{- if or (ne (base $path) "edge-nodes.yaml") (gt (len $edgeNodeInventory) 0) }}
 {{- /* No reclaimer CronJob renders under reclaim: never, so neither does its rule. */ -}}
 {{- if not (and (eq (base $path) "reclaimer.yaml") (eq (toString $s3staged.reclaim) "never")) }}
-{{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) }}
+{{- $promRules := $.Files.Get $path | replace "__RECLAIMER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__RECLAIMER_CRONJOB_PREFIX__" (include "mgmt.fullname" $) | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $.Values.xnatUpload.namespace | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) | replace "__EDGE_NODE_INVENTORY__" (join " or " $edgeNodeInventory) }}
 {{- /* A surviving sentinel is SILENT here: PromQL reads a bare __NAME__ as a
        metric name, so the rule loads, looks healthy and never fires. */ -}}
 {{- if regexMatch "__[A-Z0-9_-]+__" $promRules }}
@@ -802,6 +813,7 @@ metadata:
 spec:
   {{- $promRules | nindent 2 }}
 ---
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

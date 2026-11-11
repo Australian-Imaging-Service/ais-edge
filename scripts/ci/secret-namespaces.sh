@@ -175,6 +175,12 @@ for path in rendered:
         # cert-manager materialises this Secret from the Certificate.
         if kind == 'Certificate':
             created.add((ns, (d.get('spec') or {}).get('secretName')))
+        # k0smotron writes <cluster>-kubeconfig (one data key `value`) in the
+        # namespace of each Cluster it reconciles. cert-sync and the per-edge
+        # node collector (templates/edge-node-state.yaml) read it. Derived from
+        # the rendered Cluster, so a kubeconfig Secret nothing creates still fails.
+        if kind == 'Cluster' and str(d.get('apiVersion', '')).startswith('k0smotron.io/'):
+            created.add((ns, f"{md.get('name')}-kubeconfig"))
 
         def walk(o):
             if isinstance(o, dict):
