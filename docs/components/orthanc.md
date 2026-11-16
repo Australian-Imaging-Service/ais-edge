@@ -71,7 +71,7 @@ Do not treat a successful C-STORE response as proof that a separate backup copy
 exists, that a study was assigned, or that de-identification succeeded.
 
 The group stage uses processed state to avoid exporting unchanged input on every
-pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.20.0` image includes
+pass. The pinned `ghcr.io/australian-imaging-service/accessionflow:0.20.4` image includes
 snapshot support. It writes a label of the form
 `xnat-ingest-processed-<LastUpdate>-<digest>`. A processed study whose update
 state changed can be staged again. This is important when a later series arrives

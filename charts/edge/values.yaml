@@ -331,7 +331,7 @@ dataPolicy:
     # applies, so this needs no new signal.
     # CAUTION: needs an accessionflow that writes the export snapshot label
     # (upstream #211, merged 2026-10-28, in no upstream release up to v0.17.1).
-    # The default upstream image, accessionflow 0.20.0, writes it
+    # The default upstream image, accessionflow 0.20.4, writes it
     # (sources/orthanc/staging.py:156-167). With an older
     # image this backend keeps every study and logs export_state_unknown.
     orthancStorage:
@@ -730,7 +730,7 @@ ingest:
     # names (upstream MIGRATING.md). The templates follow this version:
     # move the tag only together with them.
     repository: ghcr.io/australian-imaging-service/accessionflow
-    tag: "0.20.0"
+    tag: "0.20.4"
     pullPolicy: IfNotPresent
 
   # One JSON object per log line. The alert rules and dashboards parse these
@@ -935,8 +935,8 @@ ingest:
   # An empty input directory is normal while waiting for new work.
   package:
     enabled: false
-    # Runs on ingest.image.tag like every stage. The 0.20.0 image has the
-    # required library versions (the same as 0.19.0). Install the AIS vendor extra package for
+    # Runs on ingest.image.tag like every stage. The 0.20.4 image has the
+    # required library versions (fileformats 0.22.7, fileformats-medimage 0.15.5). Install the AIS vendor extra package for
     # the default conversions. See What it needs in docs/package-stage.md.
     interval: 60
     copyMode: hardlink_or_copy

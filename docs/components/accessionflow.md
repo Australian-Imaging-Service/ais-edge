@@ -5,7 +5,10 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 ## Overview
 
 **Verified scope (2026-11-10):** descriptions below follow this branch
-and accessionflow 0.20.0. Orthanc is the receiver; the default `ingest` engine
+and accessionflow 0.20.0. The pin moved to 0.20.4 on 2026-11-16: the commands
+and options that the chart uses are the same in the two images (compared
+option by option). The modules of the store, label and Orthanc collate commands did
+not change. The shared accession and resource model changed (0.20.3, 0.20.4). Orthanc is the receiver; the default `ingest` engine
 de-identifies downstream. The Orthanc/Lua de-identification engine was
 deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
 Recipe output and source retention must be checked separately: a stage name,
@@ -162,7 +165,7 @@ No AET routing or unknown-AET quarantine applies to either ingest input path.
 
 | Deployment | Namespace | Image |
 |---|---|---|
-| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/accessionflow:0.20.0`) |
+| `<release>-group-orthanc` | `xnat-ingest` | `ingest.image.repository:ingest.image.tag` (default `ghcr.io/australian-imaging-service/accessionflow:0.20.4`) |
 | `<release>-assign` | `xnat-ingest` | same image |
 | `<release>-deidentify` | `xnat-ingest` | same image |
 | `<release>-upload` | `xnat-ingest` | same image |
@@ -186,8 +189,9 @@ is in [deidentification.md](deidentification.md#deprecated-orthanc-lua-engine).
 Version 0.20.0 uses source subcommands: `collate orthanc` and
 `collate folder`. The Orthanc command takes
 `URL STORE_DIR OUTPUT_DIR USER PASSWORD`, the same five positional arguments as 0.19.0.
-The file-drop options are `--accession-uid` and `--acquisition-id`,
-with `ACFLOW_ACCESSION_UID` and `ACFLOW_ACQUISITION_ID`. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
+The file-drop options are `--accession` and `--acquisition` (`ACFLOW_ACCESSION` for
+the first). Before 0.20.3 they were `--accession-uid` and `--acquisition-id`; 0.20.4
+still accepts those two option names. The chart passes none of them. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
 The third deidentify argument is `RECIPE_DIR`. It accepts
 `ACFLOW_RECIPE_DIR`; `ACFLOW_SPEC_DIR` remains a compatible alias.
 The old `check-upload` command is now `check-store xnat`.
@@ -878,7 +882,7 @@ is not a metadata restriction on every later stage.
 In 0.20.0, `Accession.new_empty()` also copies the accession's custom
 `fields`. These are separate from metadata sidecars. `save()` writes
 them without the metadata allowlist, and `store xnat` sends them as
-XNAT custom fields. The chart does not run `select-fields`; if a custom
+XNAT custom fields. The chart does not run `annotate` (`select-fields` before 0.20.2); if a custom
 step populates these fields, review their contents separately.
 
 ## XNAT grouping identity after the migration

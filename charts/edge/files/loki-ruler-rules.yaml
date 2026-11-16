@@ -194,7 +194,7 @@ groups:
   # different (tracebacks, auth failures, connection errors) and those still count.
   #
   # Historical rationale retained below; its current disposition follows.
-  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.20.0)
+  # THE EXCLUSION IS KEPT, BUT NOT FOR THAT REASON ANY MORE. From 0.15.6 on (pinned 0.20.4)
   # the re-offer is answered from a file-set comparison rather than a label one,
   # so a session that really was delivered is skipped silently and the emitter
   # quoted above is gone. What the exclusion now buys is separation of concerns:
@@ -354,7 +354,7 @@ groups:
     # to read mid-write) but ANY interrupted upload reaches the same state: a
     # pod evicted mid-transfer, a dropped connection, an XNAT restart.
     # Current review (2026-11-10):
-    # The pinned 0.20.0 store attempts missing-file repair on later passes. Interrupted
+    # The pinned 0.20.4 store attempts missing-file repair on later passes. Interrupted
     # transfer alone does not establish the conflict matched by this rule. Persistent
     # extra or differing files need a separate reconciliation.
     #
@@ -394,7 +394,7 @@ groups:
     # configurations, crossing in about 32 minutes at loop=60 and 52 at
     # loop=120, plus the 15m `for:`.
     # Current review (2026-11-10):
-    # In pinned 0.20.0, the loop sleeps for the remainder of the configured interval
+    # In pinned 0.20.4, the loop sleeps for the remainder of the configured interval
     # after work. The retained max(20, 1800 / (loop + 35)) threshold uses an older
     # conservative timing model. Its 35-second observation and derived crossing times
     # are historical, not a current timing guarantee. Expression changes are outside
@@ -443,7 +443,7 @@ groups:
         3. Check the reclaimer's decision and the configured retention policy.
            Reclaim requires its own proof, but this alert alone cannot establish
            that all source data is intact or that another cleanup path did not run.
-        4. The pinned 0.20.0 store clears cached XNAT listings on later passes.
+        4. The pinned 0.20.4 store clears cached XNAT listings on later passes.
            A restart is not required solely to refresh that cache. Do not delete a
            destination resource or restart a deployment just to clear this alert.
 
@@ -593,7 +593,7 @@ groups:
            could not establish proof. Review ReclaimerRunUnavailable as applicable.
 
         Historical context: old label-only all_uploaded checks could skip an empty
-        resource. The pinned 0.20.0 store compares file sets/checksums and refreshes
+        resource. The pinned 0.20.4 store compares file sets/checksums and refreshes
         listings. Its success or skip line still does not certify header extraction
         or all downstream XNAT processing. Keep source evidence until verified.
   - alert: ReclaimerRunUnavailable
