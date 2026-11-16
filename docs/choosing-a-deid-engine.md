@@ -204,7 +204,7 @@ output one directory level deeper than `assign` does. So `upload` reported
 [xnat-ingest#144](https://github.com/Australian-Imaging-Service/xnat-ingest/issues/144),
 closed on 2026-08-31 (GitHub state checked 2026-11-10). This is historical
 behavior in 0.13.1. The pinned image,
-`ghcr.io/australian-imaging-service/accessionflow:0.20.0`, writes the same layout as
+`ghcr.io/australian-imaging-service/accessionflow:0.20.4`, writes the same layout as
 `assign` (`accessionflow/model/accession.py`, `save()` in 0.20.0). The
 2026-11-10 test run reached XNAT with this layout. That result does not prove
 delivery for a different site or guarantee header extraction after upload.

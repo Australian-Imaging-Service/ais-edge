@@ -329,7 +329,7 @@ groups:
                could not establish proof. Review ReclaimerRunUnavailable as applicable.
 
             Historical context: old label-only all_uploaded checks could skip an empty
-            resource. The pinned 0.20.0 store compares file sets/checksums and refreshes
+            resource. The pinned 0.20.4 store compares file sets/checksums and refreshes
             listings. Its success or skip line still does not certify header extraction
             or all downstream XNAT processing. Keep source evidence until verified.
       - alert: XNATResourceIncompleteAndStuck
@@ -371,7 +371,7 @@ groups:
         # (xnatUpload.waitPeriod), but ANY partial upload reaches this state:
         # an interrupted pod, a dropped connection, an XNAT hiccup.
         # Current review (2026-11-10):
-        # That behavior belongs to the older implementation. The pinned 0.20.0 store
+        # That behavior belongs to the older implementation. The pinned 0.20.4 store
         # attempts shortfall repair. An interruption alone does not establish a
         # persistent differing-file conflict. Quiet-time staging reduces mid-write reads
         # but does not prove study completeness.
@@ -488,7 +488,7 @@ groups:
         # exactly twice the threshold by construction. It is 20 at the shipped
         # loop of 60, crossing in about 32 minutes plus the 15m `for:`.
         # Current review (2026-11-10):
-        # In pinned 0.20.0, the loop sleeps for the remainder of the configured interval
+        # In pinned 0.20.4, the loop sleeps for the remainder of the configured interval
         # after work. The retained max(20, 1800 / (loop + 35)) threshold uses an older
         # conservative timing model. Its 35-second observation and derived crossing
         # times are historical, not a current timing guarantee. Expression changes are
@@ -535,7 +535,7 @@ groups:
             3. Check the reclaimer's decision and the configured retention policy.
                Reclaim requires its own proof, but this alert alone cannot establish
                that all source data is intact or that another cleanup path did not run.
-            4. The pinned 0.20.0 store clears cached XNAT listings on later passes.
+            4. The pinned 0.20.4 store clears cached XNAT listings on later passes.
                A restart is not required solely to refresh that cache. Do not delete a
                destination resource or restart a deployment just to clear this alert.
 
@@ -1256,7 +1256,7 @@ groups:
         # before the mail was composed, and because the root route sent resolved
         # notifications it cost two mails each time.
         # Current review (2026-11-10):
-        # The pinned 0.20.0 loop refreshes connection/listing state on later passes.
+        # The pinned 0.20.4 loop refreshes connection/listing state on later passes.
         # Historical cookie-expiry incidents and the old approximately 62-second loop
         # measurement are not a current recovery guarantee. Environment-injected
         # credentials do not refresh merely because a Secret changes.

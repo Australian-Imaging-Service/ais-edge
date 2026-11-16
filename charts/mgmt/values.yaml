@@ -173,7 +173,7 @@ dataPolicy:
         # ACFLOW_*). Every pin of the tool in both charts must name the same image
         # (CI: log-phrases and cli-contract), and the templates follow this version.
         repository: ghcr.io/australian-imaging-service/accessionflow
-        tag: "0.20.0"
+        tag: "0.20.4"
         pullPolicy: IfNotPresent
 
   telemetry:
@@ -461,7 +461,7 @@ xnatUpload:
     # ACFLOW_*). Every pin of the tool in both charts must name the same image
     # (CI: log-phrases and cli-contract), and the templates follow this version.
     repository: ghcr.io/australian-imaging-service/accessionflow
-    tag: "0.20.0"
+    tag: "0.20.4"
     pullPolicy: IfNotPresent
 
   xnatSecretRef: xnat-credentials     # keys: server, username, password

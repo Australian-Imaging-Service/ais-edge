@@ -213,7 +213,7 @@ on; it does not honor every per-edge bucket override or bucket-prefix value), an
 (`component=seaweedfs`, `component=upload,edge=<name>`, `component=s3-uploader`)
 rather than by hardcoded name.
 
-> **What changed since.** The pinned uploader is accessionflow 0.20.0 (`helpers/remotes.py`, `iterate_s3_sessions`)
+> **What changed since.** The pinned uploader is accessionflow 0.20.4 (`helpers/remotes.py`, `iterate_s3_sessions`)
 > builds its session list from the object keys and skips a key that ends in
 > `/`, so an empty folder is not a session to it, and `mgmt-reclaim-<edge>`
 > leaves the session folder behind on purpose: it deletes the objects one by

@@ -84,7 +84,7 @@ unstable again. When it is stable, `OnStableStudy` removes the
 `study_reopened`. Label writes do not change `LastUpdate`, so an unchanged
 study is never re-staged.
 
-The chart default image is upstream accessionflow 0.20.0
+The chart default image is upstream accessionflow 0.20.4
 (`ingest.image` in `charts/edge/values.yaml`). It contains xnat-ingest PR #211,
 historically recorded as merged on 2026-10-28. The merge date was not
 re-verified for this review (2026-11-10); the pinned source itself verifies

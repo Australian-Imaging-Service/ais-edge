@@ -1645,7 +1645,7 @@ patient data — is still sitting on that machine.
 Stated plainly so you can weigh them.
 
 Items 1 and 2 below preserve measurements from older xnat-ingest releases.
-They are fixed in the pinned accessionflow 0.20.0 image. A complete session
+They are fixed in the pinned accessionflow 0.20.4 image (since 0.20.0). A complete session
 now produces a skip message and bypasses the success line. The uploader
 clears xnatpy caches before object operations. Do not apply the old restart
 advice below to routine recovery on 0.20.0. The history explains the alert

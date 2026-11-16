@@ -128,7 +128,7 @@ route:
   # three. The other half is in files/loki-ruler-rules.yaml, where that rule's
   # range now comfortably exceeds the uploader's loop period so the series
   # stays continuous; scripts/ci/promtool.sh keeps it that way.
-  # Current: The pinned 0.20.0 store skips complete sessions without repeating the
+  # Current: The pinned 0.20.4 store skips complete sessions without repeating the
   # success line. The old approximately 62-second emitter period is historical. The
   # retained range and grouping still govern observed events, not exactly-once delivery.
   #
