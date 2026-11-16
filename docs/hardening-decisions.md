@@ -693,7 +693,7 @@ Prometheus, Loki, Grafana and SeaweedFS, and not viable at 30.
   everywhere, which the current deployment does not do.
 * **State the ceiling honestly in the docs: capacity requires workload measurements on the target management
   node.** The historical 15-site estimate is not a validated limit for the
-  pinned 0.20.0 image, its archive buffers, or concurrent large sessions. Beyond that the single-management-node design needs revisiting, and
+  pinned 0.20.4 image, its archive buffers, or concurrent large sessions. Beyond that the single-management-node design needs revisiting, and
   pretending otherwise is how a fleet discovers a scaling wall in production.
 * I considered CronJob-per-site instead (cheaper at rest). Rejected: a large
   session benefits from continuous progress, and a cold start plus scheduling

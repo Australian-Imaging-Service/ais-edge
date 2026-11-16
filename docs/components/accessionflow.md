@@ -5,7 +5,10 @@ The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 ## Overview
 
 **Verified scope (2026-11-10):** descriptions below follow this branch
-and accessionflow 0.20.0. Orthanc is the receiver; the default `ingest` engine
+and accessionflow 0.20.0. The pin moved to 0.20.4 on 2026-11-16: the commands
+and options that the charts use are the same in the two images (compared
+option by option). The modules of the store, label and Orthanc collate commands did
+not change. The shared accession and resource model changed (0.20.3, 0.20.4). Orthanc is the receiver; the default `ingest` engine
 de-identifies downstream. The Orthanc/Lua de-identification engine was
 deprecated on 2026-11-02 and appears only for existing-site diagnosis or history.
 Recipe output and source retention must be checked separately: a stage name,
@@ -13,7 +16,7 @@ processed label, or successful upload is not proof of a complete privacy policy.
 
 [accessionflow](https://github.com/Australian-Imaging-Service/accessionflow)
 is the AIS-maintained Python tool that groups, labels, and de-identifies DICOMs into
-XNAT-ready sessions and uploads them. The pinned version is **0.20.0**,
+XNAT-ready sessions and uploads them. The pinned version is **0.20.4**,
 from the upstream accessionflow image. It replaces the AIS fork build
 0.16.2.post1 (`ingest.image` in `charts/edge/values.yaml`). The old single `sort` command
 was split into these stages:
@@ -178,11 +181,11 @@ recorded in a shell history.
 
 | Pod | Cluster | Namespace | Image |
 |---|---|---|---|
-| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
-| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
-| `edge-deidentify` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
+| `edge-group-orthanc` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.4` |
+| `edge-assign` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.4` |
+| `edge-deidentify` | edge | `xnat-ingest` | `ghcr.io/australian-imaging-service/accessionflow:0.20.4` |
 | `edge-s3-uploader` | edge | `xnat-ingest` | `ubuntu:noble-20260917` (`upload.s3.shell.image`, NOT accessionflow), with rclone lifted from `rclone/rclone:1.75.0` by an initContainer |
-| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0` |
+| `mgmt-upload-<edge>` | mgmt | `xnat-upload` | `ghcr.io/australian-imaging-service/accessionflow:0.20.4` |
 
 Every name is **release-prefixed** by the chart's `fullname` helper, and
 `install.sh` installs the edge chart as release `edge` and the management
@@ -217,7 +220,7 @@ XNAT twice.
 The previous `0.16.2.post1` tag was a **fork build**, pulled from
 `ghcr.io/akshitbeniwal/xnat-ingest`: upstream 0.16.2 plus the AIS changes
 tracked in xnat-ingest PRs #210-#231. The charts now use the upstream
-`ghcr.io/australian-imaging-service/accessionflow:0.20.0` image. The package
+`ghcr.io/australian-imaging-service/accessionflow:0.20.4` image. The package
 name and environment-variable prefix changed at 0.18.0, along with the
 collate and label command names. Version 0.19.0 renamed upload to store.
 The namespace, stage labels, storage paths and receipt labels did not change. The earlier AIS-Edge patch set (including the
@@ -236,8 +239,9 @@ side-loads the image into the container runtime. Override the tag via
 Version 0.20.0 uses source subcommands: `collate orthanc` and
 `collate folder`. The Orthanc command takes
 `URL STORE_DIR OUTPUT_DIR USER PASSWORD`, the same five positional arguments as 0.19.0.
-The file-drop options are `--accession-uid` and `--acquisition-id`,
-with `ACFLOW_ACCESSION_UID` and `ACFLOW_ACQUISITION_ID`. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
+The file-drop options are `--accession` and `--acquisition` (`ACFLOW_ACCESSION` for
+the first). Before 0.20.3 they were `--accession-uid` and `--acquisition-id`; 0.20.4
+still accepts those two option names. The charts pass none of them. For `label xnat`, the XNAT names `--session` and `--scan` remain unchanged.
 The third deidentify argument is `RECIPE_DIR`. It accepts
 `ACFLOW_RECIPE_DIR`; `ACFLOW_SPEC_DIR` remains a compatible alias.
 The old `check-upload` command is now `check-store xnat`.
@@ -964,7 +968,7 @@ deletes. A dry run makes the same checks and removes no data.
 **Historical record (measurement dates not verified; reviewed 2026-11-10):**
 the measurements in this section describe older
 xnat-ingest releases. The status notes below distinguish them from the
-pinned accessionflow 0.20.0 behavior. Keep the measurements for incident
+pinned accessionflow 0.20.4 behavior (the same code as 0.20.0). Keep the measurements for incident
 comparison; do not apply their old restart or alert advice without the status
 notes.
 
@@ -1178,7 +1182,7 @@ is not a metadata restriction on every later stage.
 In 0.20.0, `Accession.new_empty()` also copies the accession's custom
 `fields`. These are separate from metadata sidecars. `save()` writes
 them without the metadata allowlist, and `store xnat` sends them as
-XNAT custom fields. The chart does not run `select-fields`; if a custom
+XNAT custom fields. The chart does not run `annotate` (`select-fields` before 0.20.2); if a custom
 step populates these fields, review their contents separately.
 
 ## XNAT grouping identity after the migration

@@ -762,7 +762,7 @@ Two other tier-2 differences:
   `OrthancDeidLuaError`.
 * `accessionflow` is pinned in **both** charts: `charts/edge` for the pipeline
   stages and `charts/mgmt` for the S3 -> XNAT uploader. Both pin the upstream image
-  `ghcr.io/australian-imaging-service/accessionflow:0.20.0` (`ingest.image` in
+  `ghcr.io/australian-imaging-service/accessionflow:0.20.4` (`ingest.image` in
   `charts/edge/values.yaml`; `xnatUpload.image` and
   `dataPolicy.derived.s3Staged.image` in `charts/mgmt/values.yaml`). Both must
   move together, because the CLI contract is shared.
@@ -879,7 +879,9 @@ did nothing; 0.13.0 implemented it but could not import at all because its
 ([#138](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/138),
 [#139](https://github.com/Australian-Imaging-Service/xnat-ingest/pull/139)).
 
-The charts pin the upstream image `ghcr.io/australian-imaging-service/accessionflow:0.20.0`
+The charts pin the upstream image `ghcr.io/australian-imaging-service/accessionflow:0.20.4`
 (`ingest.image` in `charts/edge/values.yaml`). Current source references on this
-page refer to 0.20.0. The former 0.16.2.post1 fork is migration history;
+page refer to 0.20.0. The deidentify, label and store code that they name is
+the same in 0.20.4, apart from six lines of `api/deidentify_api.py` (0.20.1: a
+deidentify method that takes no recipe no longer needs one). The former 0.16.2.post1 fork is migration history;
 its old module names and source line numbers are not the current interface.
