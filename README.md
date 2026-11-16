@@ -6,6 +6,11 @@ A single-node appliance that receives DICOM from local modalities, de-identifies
 it on-node, and uploads it to XNAT. Part of
 [NIF FDRI Stream 2](https://github.com/Australian-Imaging-Service).
 
+> **New here?** Use the [interactive tier-1 walkthrough](https://github.com/Australian-Imaging-Service/ais-edge/tree/main/docs/interactive).
+> It shows the path of one study, writes your site file from your answers, and
+> gives every install step with its check. The page is on the `main` branch,
+> in `docs/interactive/`, with the ways to open it.
+
 One Ubuntu machine runs the whole pipeline on a single-node
 [k0s](https://k0sproject.io/) cluster:
 
