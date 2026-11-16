@@ -194,6 +194,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: make reclaimer-fence
 
+      # The first edge of a new site: install.sh refuses a secrets file that
+      # has a placeholder, so add-edge must leave none.
+      - name: Site secrets (add-edge leaves no placeholder)
+        if: ${{ !cancelled() }}
+        run: make site-secrets
+
       - name: Cleaner activation (the S3 delete opt-in fails closed)
         if: ${{ !cancelled() }}
         run: make cleaner-activation

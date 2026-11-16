@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Stub sops for tests/site-secrets. It is NOT encryption.
+
+It keeps the properties of the real tool that scripts/site-secrets.sh depends on:
+
+  -e FILE   Refuses a path that .sops.yaml has no rule for.
+            Hides the VALUES under data/stringData. Names and comments stay readable.
+            Adds one `sops:` block to each document.
+            Prints four-space indentation, also when the input has two.
+  -d FILE   Refuses a file that has no `sops:` block.
+            Gives the values back. Keeps the four-space indentation.
+
+All other flags are ignored (the script passes --config).
+"""
+import re
+import sys
+
+args = sys.argv[1:]
+path = args[-1]
+text = open(path).read()
+VALUE = re.compile(r"^([ \t]+[A-Za-z0-9_.-]+:[ \t]*)(\S.*)$")
+HIDDEN = re.compile(r"^([ \t]+[A-Za-z0-9_.-]+:[ \t]*)ENC\[(.*)\]$")
+
+
+def encrypt(doc: str) -> str:
+    lines = doc.split("\n")
+    if not any(l and not l.startswith("#") for l in lines):
+        return doc                                    # comments only: no Secret in this document
+    if any(re.match(r"^  \S", l) for l in lines):     # two-space input: print four
+        lines = [re.sub(r"^( +)", lambda m: m.group(1) * 2, l) for l in lines]
+    out, hide = [], False
+    for l in lines:
+        if l and not l[0].isspace() and not l.startswith("#"):
+            hide = bool(re.match(r"^(stringData|data):[ \t]*$", l))
+        m = VALUE.match(l) if hide else None
+        out.append(f"{m.group(1)}ENC[{m.group(2)[::-1]}]" if m else l)
+    body = "\n".join(out).rstrip("\n")
+    return body + "\nsops:\n    stub: true\n"
+
+
+def decrypt(doc: str) -> str:
+    doc = re.sub(r"(?m)^sops:\n(?:[ \t]+.*\n)*", "", doc)
+    return "\n".join(HIDDEN.sub(lambda m: m.group(1) + m.group(2)[::-1], l) for l in doc.split("\n"))
+
+
+docs = re.split(r"(?m)^---[ \t]*\n", text)
+if "-d" in args:
+    if not re.search(r"(?m)^sops:", text):
+        sys.exit("stub sops: sops metadata not found")
+    sys.stdout.write("---\n".join(decrypt(d) for d in docs))
+elif "-e" in args:
+    if not re.search(r"sites/[^/]+/secrets\.enc\.ya?ml$", path):
+        sys.exit("stub sops: no matching creation rules found")
+    sys.stdout.write("---\n".join(encrypt(d) for d in docs))
+else:
+    sys.exit("stub sops: only -d and -e")

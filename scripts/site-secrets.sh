@@ -18,7 +18,7 @@
 # The charts never contain credentials — they reference Secrets by name. So
 # `apply` is the whole integration: create the Secrets, then `helm upgrade`.
 # No helm-secrets plugin. `apply` decrypts into a pipe: no plaintext file.
-# One exception: when add-edge appends an s3 key pair to an ENCRYPTED file, it
+# One exception: when add-edge puts an s3 key pair in an ENCRYPTED file, it
 # decrypts to a temporary file under `mktemp -d`, re-encrypts, then shreds it.
 # =============================================================================
 set -euo pipefail
@@ -171,9 +171,9 @@ add-edge)
   e.g.  $0 add-edge stream-2-ab-dev hospital-a
 
   Scaffolds sites/<edge-name>/ from sites/example-edge, generates this
-  edge's S3 key pair, writes it into the edge's own secrets file AND appends
-  a matching Secret to the management site's secrets file, then prints the
-  'edges:' block to paste into the management site's values.yaml."
+  edge's S3 key pair, puts it in the management site's secrets file as the
+  Secret <edge-name>-s3 (cert-sync delivers it to the edge), then prints the
+  'edges:' block for the management site's values.yaml."
     fi
     MGMT_DIR="${REPO_DIR}/sites/${MGMT}"
     MGMT_SECRETS="$(secrets_file "$MGMT")"
@@ -186,37 +186,73 @@ add-edge)
     [ -d "$TEMPLATE" ] || die "template ${TEMPLATE} not found"
     command -v openssl >/dev/null || die "openssl is required to generate the S3 key pair"
 
-    # DOES THIS SECRET ALREADY EXIST? Append-only is safe across DIFFERENT
-    # names, but not against the same one twice, and two paths reach it:
+    # A PLAINTEXT VIEW of the management secrets. The decision below reads
+    # VALUES, and an encrypted file shows only names (.sops.yaml encrypts
+    # ^(data|stringData)$). A plaintext file is its own view.
     #
-    #   1. sites/example-mgmt ships a concrete `edge-dev-s3` block (CI requires
-    #      it — scripts/ci/secret-namespaces.sh resolves every secretKeyRef
-    #      against that file), and example-mgmt/values.yaml names its first
-    #      edge `edge-dev`. So the FIRST edge an operator adds, following the
-    #      templates verbatim, collides by default.
-    #   2. Re-running add-edge for an existing edge.
+    # `sops -e` chooses recipients by matching the FILE PATH against
+    # .sops.yaml's path_regex (sites/[^/]+/secrets\.enc\.ya?ml$) — an
+    # arbitrary `mktemp` path fails with "no matching creation rules
+    # found", not a permissions or content error. The regex is
+    # unanchored at the front, so any parent directory works as long as
+    # the path ENDS in sites/<name>/secrets.enc.yaml; a scratch
+    # directory shaped the same way satisfies it without touching the
+    # real file until the encrypted result is ready to swap in.
+    ENCRYPTED=false
+    PLAIN="$MGMT_SECRETS"
+    if grep -q '^sops:' "$MGMT_SECRETS"; then
+        ENCRYPTED=true
+        SCRATCH="$(mktemp -d)"
+        PLAIN="${SCRATCH}/sites/${MGMT}/secrets.enc.yaml"
+        mkdir -p "$(dirname "$PLAIN")"
+        trap 'shred -u "$PLAIN" 2>/dev/null; rm -rf "$SCRATCH"' EXIT
+        sops --config "$SOPS_CONFIG" -d "$MGMT_SECRETS" > "$PLAIN"
+    fi
+
+    # THE TEMPLATE'S SECRET FOR THE FIRST EDGE. sites/example-mgmt ships one
+    # per-edge Secret, `edge-dev-s3`, with placeholder keys (CI requires it —
+    # scripts/ci/secret-namespaces.sh resolves every secretKeyRef against that
+    # file). While its keys are placeholders, no edge owns it.
+    #   TEMPLATE_LINE  the line of its metadata.name
+    #   TEMPLATE_NAME  its name
+    # Both are empty when the file has no such Secret.
+    # The match is on the VALUE of access-key. Indentation is free: sops
+    # prints four spaces where the template has two.
+    TEMPLATE_BLOCK="$(awk '
+        /^---/           { in_meta = 0; line = 0; name = "" }
+        /^[^[:space:]#]/ { in_meta = ($0 ~ /^metadata:[[:space:]]*$/) }
+        in_meta && !line && /^[[:space:]]+name:[[:space:]]*[^[:space:]]+[[:space:]]*$/ { line = NR; name = $2 }
+        /^[[:space:]]+access-key:[[:space:]]*REPLACE_EDGE_S3_ACCESS_KEY[[:space:]]*$/ { if (line) print line, name; exit }
+    ' "$PLAIN")"
+    TEMPLATE_LINE="${TEMPLATE_BLOCK%% *}"
+    TEMPLATE_NAME="${TEMPLATE_BLOCK#* }"
+
+    # WHERE DOES THE KEY PAIR GO?
+    #   fill    The template's Secret has no owner. Give it this edge's name
+    #           and keys. This is the FIRST edge, with any name.
+    #   append  No such Secret. Add a new document at the end of the file.
     #
-    # Appending regardless produced two Secrets of one name in one file. The
-    # later one wins on `kubectl apply`, so it usually looked fine — until the
-    # order changed and the edge got the literal string REPLACE_EDGE_S3_ACCESS_KEY
-    # as its S3 key, which fails as a 403 at upload with nothing naming the cause.
+    # An append beside the template's Secret left its two placeholders in the
+    # file, and install.sh refuses a file that has a placeholder. The repo also
+    # ships sites/edge-dev/, so a first edge cannot have the template's name.
     #
-    # metadata.name stays readable even once encrypted (.sops.yaml encrypts only
-    # ^(data|stringData)$), so this check needs no decryption.
+    # A Secret of THIS name with real keys is a stop. Two Secrets of one name
+    # in one file: the later one wins on `kubectl apply`, so it usually looked
+    # fine — until the order changed and the edge got the literal string
+    # REPLACE_EDGE_S3_ACCESS_KEY as its S3 key, which fails as a 403 at upload
+    # with nothing naming the cause.
+    MODE=append
     if grep -q "^[[:space:]]*name:[[:space:]]*${EDGE}-s3[[:space:]]*$" "$MGMT_SECRETS"; then
-        if ! grep -q '^sops:' "$MGMT_SECRETS" && grep -q 'REPLACE_EDGE_S3_ACCESS_KEY' "$MGMT_SECRETS"; then
-            # Case 1: the shipped template placeholder. Fill it rather than
-            # duplicate it — that is what the operator meant by add-edge.
-            REPLACED_PLACEHOLDER=true
-        else
-            # Case 2: a real key pair. Never silently rotate a live edge's
-            # identity; every object it already staged was written with it.
-            die "sites/${MGMT}/secrets.enc.yaml already defines ${EDGE}-s3 with a real key pair.
+        # Never silently rotate a live edge's identity; every object it
+        # already staged was written with it.
+        [ "$TEMPLATE_NAME" = "${EDGE}-s3" ] || die "sites/${MGMT}/secrets.enc.yaml already defines ${EDGE}-s3 with a real key pair.
   add-edge would append a SECOND Secret of the same name and rotate this edge's
   S3 identity, breaking its uploads. To rotate deliberately, edit it:
       $0 edit ${MGMT}
   To add a different edge, pick another name."
-        fi
+        MODE=fill
+    elif [ -n "$TEMPLATE_BLOCK" ]; then
+        MODE=fill
     fi
 
     ACCESS_KEY="$(openssl rand -hex 10)"
@@ -238,12 +274,10 @@ add-edge)
     cp "${TEMPLATE}/secrets.example.yaml" "${EDGE_DIR}/secrets.enc.yaml"
     info "created sites/${EDGE}/ from sites/example-edge/"
 
-    # Append-only. Decrypting an ALREADY-encrypted management secrets file to
-    # append one document, rather than editing its existing content, is safe
-    # for the same reason `new` is safe to run repeatedly for different
-    # sites: nothing already there is read, parsed or rewritten, only added
-    # to. If the file is still plaintext (a fresh site, not yet encrypted),
-    # append directly and skip the decrypt/re-encrypt round trip.
+    # The append adds one document and changes nothing that is there. It is
+    # safe for the same reason `new` is safe to run repeatedly for different
+    # sites. The fill changes three lines of the template's own Secret (see
+    # below). No other Secret is parsed or rewritten in either mode.
     NEW_DOC="$(cat <<EOF2
 ---
 # This edge's S3 identity, generated by 'site-secrets.sh add-edge'. It is held
@@ -262,38 +296,54 @@ stringData:
   secret-key: ${SECRET_KEY}
 EOF2
 )"
-    if [ "${REPLACED_PLACEHOLDER:-false}" = true ]; then
+    if [ "$MODE" = fill ]; then
         # The template's own block is already in the right place, with the
-        # right name and namespace and its explanatory comments — fill its two
-        # values rather than appending a second copy of the same Secret. Only
-        # reachable while the file is still plaintext (guard above), so there
-        # is no decrypt/re-encrypt round trip here.
-        sed -i "s|REPLACE_EDGE_S3_ACCESS_KEY|${ACCESS_KEY}|; s|REPLACE_EDGE_S3_SECRET_KEY|${SECRET_KEY}|" \
-            "$MGMT_SECRETS"
-        info "filled the template's ${EDGE}-s3 key pair in sites/${MGMT}/secrets.enc.yaml (still PLAINTEXT)"
-    elif grep -q '^sops:' "$MGMT_SECRETS"; then
-        # `sops -e` chooses recipients by matching the FILE PATH against
-        # .sops.yaml's path_regex (sites/[^/]+/secrets\.enc\.ya?ml$) — an
-        # arbitrary `mktemp` path fails with "no matching creation rules
-        # found", not a permissions or content error. The regex is
-        # unanchored at the front, so any parent directory works as long as
-        # the path ENDS in sites/<name>/secrets.enc.yaml; a scratch
-        # directory shaped the same way satisfies it without touching the
-        # real file until the encrypted result is ready to swap in.
-        TMPDIR="$(mktemp -d)"
-        TMP="${TMPDIR}/sites/${MGMT}/secrets.enc.yaml"
-        mkdir -p "$(dirname "$TMP")"
-        trap 'shred -u "$TMP" 2>/dev/null; rm -rf "$TMPDIR"' EXIT
-        sops --config "$SOPS_CONFIG" -d "$MGMT_SECRETS" > "$TMP"
-        printf '\n%s\n' "$NEW_DOC" >> "$TMP"
-        sops --config "$SOPS_CONFIG" -e "$TMP" > "${MGMT_SECRETS}.new"
-        mv "${MGMT_SECRETS}.new" "$MGMT_SECRETS"
-        shred -u "$TMP" 2>/dev/null; rm -rf "$TMPDIR"
-        trap - EXIT
-        info "appended ${EDGE}-s3 to sites/${MGMT}/secrets.enc.yaml (re-encrypted)"
+        # right namespace and its explanatory comments. LINE EDITS ONLY: its
+        # name line and its two key lines.
+        # The values go in through the environment, not through the program
+        # text. An edge name is then never part of a pattern, and a key is
+        # never on a command line.
+        FILLED="$(S3_NAME="${EDGE}-s3" S3_ACCESS="$ACCESS_KEY" S3_SECRET="$SECRET_KEY" awk -v line="$TEMPLATE_LINE" '
+            NR == line { sub(/name:.*/, ""); $0 = $0 "name: " ENVIRON["S3_NAME"] }
+            /^[[:space:]]+access-key:[[:space:]]*REPLACE_EDGE_S3_ACCESS_KEY[[:space:]]*$/ { sub(/REPLACE_EDGE_S3_ACCESS_KEY.*/, ENVIRON["S3_ACCESS"]) }
+            /^[[:space:]]+secret-key:[[:space:]]*REPLACE_EDGE_S3_SECRET_KEY[[:space:]]*$/ { sub(/REPLACE_EDGE_S3_SECRET_KEY.*/, ENVIRON["S3_SECRET"]) }
+            { print }
+        ' "$PLAIN")"
+        [ -n "$FILLED" ] || die "could not fill ${TEMPLATE_NAME} in sites/${MGMT}/secrets.enc.yaml; the file is not changed"
+        printf '%s\n' "$FILLED" > "$PLAIN"
+        if [ "$TEMPLATE_NAME" = "${EDGE}-s3" ]; then
+            DID="filled the template's ${EDGE}-s3 key pair in sites/${MGMT}/secrets.enc.yaml"
+        else
+            DID="renamed the template's ${TEMPLATE_NAME} to ${EDGE}-s3 and filled its key pair in sites/${MGMT}/secrets.enc.yaml"
+        fi
     else
-        printf '\n%s\n' "$NEW_DOC" >> "$MGMT_SECRETS"
-        info "appended ${EDGE}-s3 to sites/${MGMT}/secrets.enc.yaml (still PLAINTEXT)"
+        printf '\n%s\n' "$NEW_DOC" >> "$PLAIN"
+        DID="appended ${EDGE}-s3 to sites/${MGMT}/secrets.enc.yaml"
+    fi
+    if $ENCRYPTED; then
+        sops --config "$SOPS_CONFIG" -e "$PLAIN" > "${MGMT_SECRETS}.new"
+        mv "${MGMT_SECRETS}.new" "$MGMT_SECRETS"
+        shred -u "$PLAIN" 2>/dev/null; rm -rf "$SCRATCH"
+        trap - EXIT
+        info "${DID} (re-encrypted)"
+    else
+        info "${DID} (still PLAINTEXT)"
+    fi
+
+    # THE EXAMPLE ENTRY. sites/example-mgmt/values.yaml ships one entry under
+    # 'edges:' that names the template's Secret. After a fill, that entry is
+    # this edge: the operator changes it. A second entry beside it is a second
+    # edge, and install.sh refuses it (its s3SecretRef names no Secret).
+    EXAMPLE_ENTRY=false
+    if [ "$MODE" = fill ] && grep -q "^[[:space:]]*s3SecretRef:[[:space:]]*${TEMPLATE_NAME}[[:space:]]*$" "${MGMT_DIR}/values.yaml" 2>/dev/null; then
+        EXAMPLE_ENTRY=true
+    fi
+    if $EXAMPLE_ENTRY; then
+        STEP3="3. sites/${MGMT}/values.yaml still has the template's example entry under
+     'edges:' (s3SecretRef: ${TEMPLATE_NAME}). Change THAT entry into this edge.
+     Do not add a second entry beside it:"
+    else
+        STEP3="3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':"
     fi
 
     cat <<EOF3
@@ -316,7 +366,7 @@ EOF2
      Replace REPLACE_ORTHANC_PASSWORD (in orthanc-credentials, twice) with
      one password from 'openssl rand -base64 24': the Orthanc login.
      At a production site, also add the reid key Secret from the template.
-  3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':
+  ${STEP3}
 
        - name: ${EDGE}
          nodeIP: "<this edge's IP>"

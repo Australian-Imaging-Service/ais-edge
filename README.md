@@ -220,6 +220,12 @@ scripts/site-secrets.sh new my-site mgmt
 #    the same one into two files.
 scripts/site-secrets.sh add-edge my-site my-edge
 
+#    THE FIRST EDGE takes the template's own Secret. add-edge renames
+#    `edge-dev-s3` to `my-edge-s3` in sites/my-site/secrets.enc.yaml and fills
+#    its key pair, so no placeholder stays for install.sh to refuse. In step 5,
+#    change the template's example entry under `edges:` (name: edge-dev) into
+#    your edge. Do not add a second entry beside it. add-edge prints the entry.
+
 #    `new my-edge edge` also works, and then the edge's name has to be made to
 #    agree in FIVE places by hand. Renaming an edge means editing all of them:
 #      sites/my-site/values.yaml       edges[].name
@@ -792,6 +798,7 @@ make verify-live SITE=<site>   # NOT CI — read-only checks against a RUNNING
 | `cleaner-activation` | 27 cases against a stub kubectl and a stub curl: the order of the steps that opt a bucket out of the SeaweedFS cleaner, and that a failed query (a pod listing, the multipart check, a scale) is never read as "nothing runs": a failure attests and resumes nothing beyond that point, what it changed stays marked on the object, and a rerun puts it back |
 | `s3-uploader` | 9 cases against a stub rclone: the uploader copies only inside the upload-tree writer lock, skips a session while the lock is held, claims a repair request by rename and answers it with `--ignore-times`, returns it on a failed copy, requeues a claim left by a crash, and has no delete at all |
 | `secret-contract` | every mounted Secret exists, in the right namespace, with the right keys |
+| `site-secrets` | 9 cases against a stub sops: `add-edge` gives the template's per-edge Secret to the first edge, with any name, and leaves no placeholder value in the management secrets file. It never makes two Secrets of one name, and it does the same on an encrypted file |
 | `values-consumers` | audited `dataPolicy` leaves have a reader or a tracked exception. `KNOWN_DEAD` is empty; `originals.fileDrop.minAge` remains declared but not enforced. This is not a census of every values key |
 | `loki-rules` | the real Loki ruler expressions, evaluated against fixture logs by the pinned Loki — promtool covers only the Prometheus rules |
 | `data-policy` | the edge retention engine runs under the chart-pinned curl image, with assertions on surviving files, Orthanc receipt checks and policy refusal cases |
