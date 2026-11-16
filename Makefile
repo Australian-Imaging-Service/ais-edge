@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes orthanc-exposure log-phrases requeue-invalid
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax fingerprint-contract shared-files cli-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract values-consumers reclaimer-fence cleaner-activation s3-uploader notes orthanc-exposure log-phrases requeue-invalid site-secrets
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy s3-uploader-image greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -123,6 +123,11 @@ requeue-invalid:
 
 reclaimer-fence:
 	@tests/reclaimer-fence/run-tests.sh
+
+# scripts/site-secrets.sh add-edge on a copy of the templates, with a stub sops:
+# the first edge takes the template's Secret, and no placeholder stays in the file.
+site-secrets:
+	@tests/site-secrets/run-tests.sh
 
 # scripts/cleaner-activation.sh against a stub kubectl and a stub curl: a failed
 # query is never "nothing runs", and nothing is attested or resumed after one.

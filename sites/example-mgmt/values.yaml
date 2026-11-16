@@ -164,6 +164,12 @@ observability:
 # One entry per edge. Each gets its own hosted control plane, S3 bucket, S3
 # identity, uploader and reclaimer on this node.
 #
+# THE FIRST EDGE: the entry below is an example. Run
+# `scripts/site-secrets.sh add-edge <this site> <edge>`. It gives the
+# template's edge-dev-s3 Secret to your edge and prints this entry with your
+# edge's name. Change THIS entry into your edge. Do not add a second entry
+# beside it: install.sh refuses an entry whose s3SecretRef names no Secret.
+#
 # ADDING A SECOND EDGE: add an entry here, create sites/<edge>/ from
 # sites/example-edge/, then re-run install.sh. Review per-edge Secrets, identities, capacity and routes too. The new
 # edge can differ from the first in every edge-local respect (the

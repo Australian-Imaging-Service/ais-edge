@@ -454,9 +454,17 @@ scripts/site-secrets.sh new my-deployment mgmt
   3. scripts/site-secrets.sh encrypt my-deployment   <-- do not commit before this
 ```
 
-Do exactly those three. Fill in every `REPLACE_` in the secrets file — the six
-credentials in the table above, remembering that `seaweedfs-upload` appears
-twice and both copies must carry the same value — then encrypt.
+Do the first two now. Fill in every `REPLACE_` in the secrets file: the six
+credentials in the table above. Remember that `seaweedfs-upload` appears
+twice and both copies must carry the same value. Leave the two
+`REPLACE_EDGE_S3_` values of `edge-dev-s3` as they are: that Secret is for your
+first edge, and Step C fills it. Encrypt after Step C, when `add-edge` has
+printed the command.
+
+> **If you encrypt first**, `encrypt` warns about those two values and asks
+> `Encrypt anyway? [y/N]`. Answer `n`, run Step C, then encrypt. A file that is
+> already encrypted also works: `add-edge` decrypts it, fills the Secret and
+> re-encrypts it.
 
 ### Step C — each edge
 
@@ -474,7 +482,13 @@ It does three things and then tells you the other five, including the exact
 
 ```
 [site-secrets] created sites/hospital-a/ from sites/example-edge/
-[site-secrets] appended hospital-a-s3 to sites/my-deployment/secrets.enc.yaml (re-encrypted)
+[site-secrets] renamed the template's edge-dev-s3 to hospital-a-s3 and filled its key pair in sites/my-deployment/secrets.enc.yaml (still PLAINTEXT)
+
+  Generated and wired automatically:
+    - sites/my-deployment/secrets.enc.yaml   hospital-a-s3 Secret, new S3 key pair
+    - cert-sync will deliver it into the edge as s3-edge-credentials once
+      step 3 below is in place and install.sh has run — nothing to write
+      on the edge side for this credential
 
   Still needed by hand:
 
@@ -485,19 +499,38 @@ It does three things and then tells you the other five, including the exact
   2. Fill in sites/hospital-a/secrets.enc.yaml. Replace the orthanc-deid-salt
      placeholder with the output of 'openssl rand -hex 32'. The Orthanc pod
      needs this Secret. Under deid.engine: ingest nothing uses its value.
+     Replace REPLACE_ORTHANC_PASSWORD (in orthanc-credentials, twice) with
+     one password from 'openssl rand -base64 24': the Orthanc login.
      At a production site, also add the reid key Secret from the template.
-  3. Paste this into sites/my-deployment/values.yaml, under 'edges:':
+  3. sites/my-deployment/values.yaml still has the template's example entry under
+     'edges:' (s3SecretRef: edge-dev-s3). Change THAT entry into this edge.
+     Do not add a second entry beside it:
 
        - name: hospital-a
          nodeIP: "<this edge's IP>"
-         sshUser: ubuntu
+         join: ssh                      # ssh | bundle
+         sshUser: ubuntu                # join: ssh only — drop both for bundle
          sshKey: ~/.ssh/id_ed25519
          s3SecretRef: hospital-a-s3
          exposure: sni
 
+     If this management node cannot reach the edge inbound (whitelisted IPs,
+     VPN, GlobalProtect), use 'join: bundle' and omit sshUser/sshKey. The
+     installer then writes hospital-a-join.sh for you to carry to the site.
+
   4. scripts/site-secrets.sh encrypt hospital-a
+     scripts/site-secrets.sh encrypt my-deployment
   5. ./install.sh my-deployment
 ```
+
+**The first edge takes the template's own Secret.** `sites/example-mgmt` ships
+one per-edge Secret, `edge-dev-s3`, with placeholder keys. For your first edge,
+`add-edge` gives it the name `<edge>-s3` and fills the key pair. No placeholder
+stays in the management file, so `install.sh` does not refuse it. The template's
+`edges:` list has one example entry that names that Secret. Change that entry
+into your edge, as step 3 of the output says. Do not add a second entry beside
+it. For each later edge, the second line reads `appended <edge>-s3 to ...` and
+step 3 says to paste a new entry (§5b).
 
 **There is no manual `apply` for an edge.** `install.sh` applies the management
 secrets at its step 3 and this edge's into the child cluster at step 7. You only
