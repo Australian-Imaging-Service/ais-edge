@@ -13,6 +13,11 @@ automated agents tracking the system over time. Each follows a consistent
 structure (Overview → Role → Access → How it runs → Configuration →
 Operations → Risks → Replacements / Future).
 
+## Interactive walkthroughs
+
+- [`interactive/`](interactive/README.md): one page for each tier that takes a
+  newcomer from nothing to a working install. Start there if you are new.
+
 ## Components
 
 ### Data plane

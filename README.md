@@ -10,6 +10,10 @@ route, and without XNAT credentials ever leaving the management node.
 
 > **New here?** Read [docs/TOUR.md](docs/TOUR.md) first — a guided walkthrough
 > of what you configure, what runs, what can go wrong, and where the data goes.
+>
+> **Prefer to click through it?** [docs/interactive](docs/interactive/README.md) has an
+> interactive walkthrough for each tier. It shows the path of one study, writes your
+> site files from your answers, and gives every install step with its check.
 
 ## Contents
 
@@ -769,6 +773,8 @@ config/k0s-controller.yaml     the management k0s controller config (scripts/01)
 manifests/01-management/       the k0smotron Cluster template rendered by
                                scripts/05, one per edge
 docs/                          component guides, CA ceremony, alerting design
+docs/interactive/              the interactive walkthrough pages (one HTML file
+                               for each tier) and how to open them
 ```
 
 ---
