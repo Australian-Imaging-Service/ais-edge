@@ -385,6 +385,9 @@ EOF
 # 0 ("expire immediately") and 3712. "0000007200" is also exactly 10 digits,
 # the most the parser accepts, and takes the plain-seconds branch.
 # runtime-templates.sh asserts the numbers in stages.tsv.
+# CAUTION: this case renders under upload.mode=direct (ci_positive_cases).
+# assigned is the upload tree here, and 10 days on it is longer than the
+# bucket's 36h: under s3 the chart refuses that pair (the two clocks).
 cat >"$V/edge-duration-base10.yaml" <<'EOF'
 dataPolicy:
   originals:
@@ -1036,6 +1039,11 @@ printf 'upload:\n  mode: s3\ndataPolicy:\n  derived:\n    deidentified:\n      r
 # SessionStagedNotConfirmedInXNAT counts a session unconfirmed 48h after the
 # reclaimer first saw it: two days would page for every healthy session.
 printf 'dataPolicy:\n  derived:\n    s3Staged:\n      minAge: 2d\n' >"$V/neg-mgmt-s3staged-minage-over-36h.yaml"
+# The two clocks (s3): the bucket copy must outlive the edge copy. A management
+# age equal to the edge's lets the bucket copy go first; the edge then asks for
+# a new copy, again and again. The second case is the tree's own recovery
+# window: the CronJob waits for the longer age, so that one counts.
+printf 'dataPolicy:\n  derived:\n    s3Staged:\n      minAge: 1d\n' >"$V/neg-edge-s3staged-minage-not-longer.yaml"
 # The folder store's deleter rechecks identities with tick-granular file times: no age, no bind.
 printf 'dataPolicy:\n  derived:\n    stagedReclaimer:\n      minAge: 30s\n' >"$V/neg-edge-stagedreclaimer-minage-under-1m.yaml"
 
@@ -1479,7 +1487,7 @@ edge-assign-filedrop-only	charts/edge	edge-base.yaml edge-upload-direct.yaml edg
 edge-backup-off	charts/edge	edge-base.yaml edge-backup-off.yaml
 edge-backup-policy-off	charts/edge	edge-base.yaml edge-backup-policy-off.yaml
 edge-datapolicy-on	charts/edge	edge-base.yaml edge-datapolicy-on.yaml
-edge-duration-base10	charts/edge	edge-base.yaml edge-duration-base10.yaml
+edge-duration-base10	charts/edge	edge-base.yaml edge-upload-direct.yaml edge-duration-base10.yaml
 edge-duration-padded	charts/edge	edge-base.yaml edge-duration-padded.yaml
 edge-deid-off	charts/edge	edge-base.yaml edge-deid-off.yaml
 edge-cloud	charts/edge	edge-base.yaml edge-cloud.yaml
@@ -1573,6 +1581,8 @@ neg-mgmt-s3-certsync-entry-no-issue	charts/mgmt	mgmt-base.yaml neg-mgmt-s3-certs
 neg-edge-bad-mode	charts/edge	edge-base.yaml neg-edge-bad-mode.yaml	upload.mode must be
 neg-edge-s3-no-endpoint	charts/edge	edge-base.yaml neg-edge-s3-no-endpoint.yaml	needs an S3 endpoint, and none could be derived
 neg-edge-stagedreclaimer-minage-under-1m	charts/edge	edge-base.yaml neg-edge-stagedreclaimer-minage-under-1m.yaml	is under 1m
+neg-edge-s3staged-minage-not-longer	charts/edge	edge-base.yaml neg-edge-s3staged-minage-not-longer.yaml	is not longer than this edge's clean-up age, dataPolicy.derived.stagedReclaimer.minAge=1d
+neg-edge-s3staged-minage-under-tree-age	charts/edge	edge-base.yaml edge-datapolicy-on.yaml edge-deid-ingest.yaml edge-tree-minage.yaml	is not longer than this edge's clean-up age, dataPolicy.derived.deidentified.minAge=7d
 neg-edge-s3-no-bucket	charts/edge	edge-base.yaml neg-edge-s3-no-bucket.yaml	no staging bucket could be derived
 neg-edge-https-no-ca	charts/edge	edge-base.yaml neg-edge-https-no-ca.yaml	every upload would fail the TLS handshake
 neg-edge-s3-no-client-secret	charts/edge	edge-base.yaml neg-edge-s3-no-client-secret.yaml	upload.s3.clientCertSecret is empty

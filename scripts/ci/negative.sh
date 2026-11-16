@@ -79,7 +79,7 @@ charts/mgmt/templates/observability.yaml	14
 charts/mgmt/templates/s3-staged-reclaimer.yaml	3
 charts/mgmt/templates/seaweedfs.yaml	2
 charts/edge/templates/_helpers.tpl	40
-charts/edge/templates/staged-reclaimer.yaml	1
+charts/edge/templates/staged-reclaimer.yaml	2
 EOF
 }
 

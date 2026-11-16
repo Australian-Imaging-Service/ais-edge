@@ -516,8 +516,14 @@ dataPolicy:
       # longer, by more than the edge's run interval, its proof time, its lock
       # wait and any edge downtime: if the bucket copy went first, the edge's
       # proof would fail, request a re-copy, and the two would ping-pong until
-      # the edge won a window (RecopyLoop alerts on it). Neither chart can read
-      # the other's value, so keep this at 36 hours against a day on the edge.
+      # the edge won a window (RecopyLoop alerts on it). Keep this at 36 hours
+      # against a day on the edge.
+      # GUIDING: the management site file sets the real value. install.sh
+      # renders this chart with that file, and the chart refuses an age that
+      # is not longer than the edge's (the staged-reclaimer's minAge, or the
+      # minAge of its tree when that is longer). The management chart cannot
+      # read an edge's values, so only this chart can compare the two.
+      # CAUTION: the guard is an order, not a margin. Keep the hours between.
       # CAUTION: at most 36h (the mgmt chart refuses more): the XNAT proof runs
       # only after this age, and SessionStagedNotConfirmedInXNAT counts a session
       # unconfirmed 48 hours after the reclaimer first saw it.

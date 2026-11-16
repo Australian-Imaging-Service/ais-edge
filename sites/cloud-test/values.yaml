@@ -410,9 +410,13 @@ dataPolicy:
     # not delivery proof, nor does file proof certify metadata extraction.
     s3Staged:
       reclaim: onXnatConfirmed    # never | onXnatConfirmed
-      minAge: 1d                  # <duration> — also gates the
-                                  #   the current chart caps this at 36h for the
-                                  #   48h confirmation alert; review both before changing the code
+      minAge: 36h                 # <duration>, at most 36h: the chart refuses
+                                  #   more (SessionStagedNotConfirmedInXNAT).
+                                  #   CAUTION: keep it LONGER than the edge's
+                                  #   stagedReclaimer.minAge (1d by default):
+                                  #   "the two clocks" in charts/edge/values.yaml.
+                                  #   The edge chart refuses an age that is
+                                  #   not longer. 36h is the chart default.
       verifyAgainstXnat: true     # true | false — false removes the only proof
                                   #   of delivery; do not
       schedule: "17 * * * *"      # cron — how often the reclaimer runs

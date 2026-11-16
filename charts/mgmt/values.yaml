@@ -133,6 +133,9 @@ dataPolicy:
       # interval, proof time, lock wait and any downtime, or the bucket copy goes
       # before the edge has proven its local copy against it and the two
       # ping-pong (see charts/edge/values.yaml, s3Staged). 36 hours against a day.
+      # GUIDING: this chart cannot read an edge's values. The edge chart is
+      # rendered with this site file, and it refuses an age here that is not
+      # longer than the edge's.
       # CAUTION: at most 36h, and the chart refuses more. The XNAT proof runs only
       # after this age, and SessionStagedNotConfirmedInXNAT counts a session
       # unconfirmed 48 hours after the reclaimer first saw it: a longer minAge
