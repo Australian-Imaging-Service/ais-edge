@@ -206,6 +206,14 @@ free text. The example has no blanket private-tag removal. Review the private
 blocks each modality supplies and add supported removal rules if needed. Test
 that required research metadata remains usable after that change.
 
+**Private tags: no recipe line removes them all.** The pipeline calls the deid
+library with `remove_private=False`. The line `REMOVE ALL_PRIVATE` is accepted
+and removes nothing, because the library reads it as a tag with that name
+(tested 2026-11-16 with deid 0.4.13 in the accessionflow 0.20.0 image: two
+private values in, two out). To remove a private group, add one line for each
+group, with the group as four hex digits: `REMOVE select:GROUP:0029`. The same
+test removed that group and kept the other one.
+
 **PatientSex and PatientAge remain.** These fields can be useful for research,
 but can also narrow a small cohort. Their presence is an explicit example-policy
 choice. A site's approval may require a different choice. Do not infer that
