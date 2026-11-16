@@ -287,8 +287,16 @@ ingest:
         # Historical synthetic test: local-scheduling-ref-8842 survived an older
         # example; its run date is not verified (2026-11-10).
         #
-        # The current deid library supports recipe REMOVE ALL_PRIVATE. Decide which
-        # private data may remain for the intended use and test the complete recipe.
+        # CAUTION: no recipe line removes ALL private tags. The line
+        # `REMOVE ALL_PRIVATE` is accepted and removes NOTHING: the library reads
+        # it as a tag with that name, and there is none. Tested 2026-11-16 with
+        # deid 0.4.13 in the accessionflow 0.20.0 image. The pipeline calls the
+        # library with remove_private=False.
+        # OPTION: remove one private group with one line. The group is four hex
+        # digits. Add a line for each group that must go:
+        #   REMOVE select:GROUP:0029
+        # GUIDING: decide which private data may remain for the intended use and
+        # test the complete recipe on files from each scanner.
         # Do not equate retained private blocks with a guarantee of anonymity.
 
 
