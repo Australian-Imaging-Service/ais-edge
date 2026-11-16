@@ -113,8 +113,9 @@ $EDITOR sites/my-hospital/secrets.enc.yaml           # still PLAINTEXT at this p
 #   fill in every REPLACE_ on an UNCOMMENTED line, and set `server:` to your
 #   XNAT. The server ships as https://xnat.example.org and is NOT a REPLACE_
 #   token, so filling in only the REPLACE_ ones leaves it pointing at nothing.
-#   REPLACE_ also appears in comments (the orthanc-credentials block, which you
-#   only uncomment if you turn Orthanc auth on) — leave those alone.
+#   The orthanc-credentials block is the Orthanc login, and it is required:
+#   REPLACE_ORTHANC_PASSWORD appears twice there. Put ONE password in both
+#   places (openssl rand -base64 24). If they differ, Orthanc answers 401.
 scripts/site-secrets.sh encrypt my-hospital          # do not commit before this
 
 #   ALERTING IS TWO HALVES, IN TWO FILES. The secrets file makes you fill in
