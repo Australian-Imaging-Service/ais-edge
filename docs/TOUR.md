@@ -362,11 +362,11 @@ admin key on a hospital machine.
 |                        | Management site (one)                                    | Each edge site                        |
 | ---------------------- | -------------------------------------------------------- | ------------------------------------- |
 | Namespaces             | `ais-mgmt`, `xnat-upload`                                | `xnat-ingest`                         |
-| You fill in            | 6 credentials in 7 Secret *documents* (`seaweedfs-upload` is created twice), plus one `<edge>-s3` per edge | **1 Secret**, the salt. A production site adds the reid key |
+| You fill in            | 6 credentials in 7 Secret *documents* (`seaweedfs-upload` is created twice), plus one `<edge>-s3` per edge | **2 Secrets**: the salt and the Orthanc login. A production site adds the reid key |
 | Delivered for you      | —                                                        | CA bundle, Loki client cert, S3 key   |
 
-That last row is the part people get wrong: an edge has **one** secret that
-you must write by hand, two at a production site with the reid key. Everything
+That last row is the part people get wrong: an edge has **two** secrets that
+you must write by hand, three at a production site with the reid key. Everything
 else arrives via cert-sync (see "Three secrets you must NOT create by hand"
 below).
 
@@ -410,10 +410,12 @@ below).
 | Secret                | Keys                                  | What it is                                                                                                                              |
 | --------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT` (64 hex chars) | the salt of the Orthanc Lua script. The Orthanc pod needs this Secret whenever the facility backup is on, and the script stops at load without it. Under `deid.engine: ingest` nothing uses the value, so a new value changes no XNAT label. See components/deidentification.md, *Pseudonym strength* |
+| `orthanc-credentials` | `users.json`, `orthanc-user`, `orthanc-password` | the Orthanc login. `orthanc.auth.enabled` is true in the chart and in the example site, because the Orthanc REST API can delete studies. Orthanc checks `users.json`; group-orthanc logs in with the other two keys. Put ONE password in both places (`REPLACE_ORTHANC_PASSWORD` appears twice), from `openssl rand -base64 24`. If they differ, Orthanc answers 401 and studies stay in Orthanc. See "Turning on Orthanc's REST API authentication" below |
 | `reid-key` (you choose the name) | `XINGEST_REID_ENCRYPT_KEY` (a Fernet key) | encrypts the re-identification maps in `/data/reid`. Optional for the chart, required at a production site. Name it in `ingest.deidentify.reidEncryptKeySecret`. Keep a copy off the edge: a map needs the key that wrote it |
 
 Everything else in the edge template is commented out and optional: the reid
-key above, Orthanc auth, direct-mode XNAT credentials and Samba.
+key above, direct-mode XNAT credentials and Samba. The Orthanc login is not in
+that list: the template ships it as an active Secret, and you fill it in.
 `s3-edge-credentials` is deliberately absent. See "Three secrets you must NOT
 create by hand on an edge" below.
 
@@ -1238,6 +1240,8 @@ $EDITOR sites/edge-syd/values.yaml
 
 # 3. the salt Secret: the Orthanc pod needs it, see the note below
 openssl rand -hex 32                       # paste as AIS_DEID_HMAC_SALT
+#    and the Orthanc login: ONE password, in the two places of orthanc-credentials
+openssl rand -base64 24                    # replaces REPLACE_ORTHANC_PASSWORD, twice
 $EDITOR sites/edge-syd/secrets.enc.yaml    # still PLAINTEXT despite the name
 
 # 4. paste the printed 'edges:' block into the management values.yaml

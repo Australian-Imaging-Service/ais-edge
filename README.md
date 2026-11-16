@@ -901,7 +901,10 @@ $EDITOR sites/<edge>/values.yaml
 #    REPLACE_64_HEX_CHARS. The Orthanc pod needs the Secret. Under
 #    deid.engine: ingest nothing uses its value. Fill it in so that encrypt
 #    does not warn. At a production site, also add the reid key Secret.
+#    The Orthanc login is in the same file: put ONE password in the two
+#    places of orthanc-credentials (REPLACE_ORTHANC_PASSWORD appears twice).
 openssl rand -hex 32
+openssl rand -base64 24
 $EDITOR sites/<edge>/secrets.enc.yaml
 
 # 4. paste the printed block under 'edges:'. s3SecretRef must be <edge>-s3 —
