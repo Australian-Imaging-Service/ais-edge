@@ -1,0 +1,79 @@
+# =============================================================================
+# Interactive walkthroughs -> GitHub Pages
+# =============================================================================
+# Publishes docs/interactive/ as a small web site, so that the two walkthrough
+# pages open in a browser as pages, not as source text.
+#
+# GUIDING: GitHub Pages must be ON for this repository. A repository admin sets
+# it one time: Settings -> Pages -> Source: "GitHub Actions".
+# CAUTION: while Pages is off, the publish job does not run. The check job
+# prints a notice and the run ends without an error, so no failed run arrives
+# in a mailbox.
+# CAUTION: the repository is public, so the site is public. Put no secret and
+# no detail of a real site in docs/interactive/.
+name: interactive-docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/interactive/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time. A newer push waits for the one that runs.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Is GitHub Pages on?
+    runs-on: ubuntu-latest
+    permissions:
+      pages: read
+    outputs:
+      on: ${{ steps.pages.outputs.on }}
+    steps:
+      - name: Ask the API
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" >/dev/null 2>&1; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "on=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Pages is off for this repository, so nothing is published. A repository admin sets Settings -> Pages -> Source: GitHub Actions."
+          fi
+
+  publish:
+    name: Publish docs/interactive
+    needs: check
+    if: needs.check.outputs.on == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Configure Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Upload docs/interactive
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/interactive
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

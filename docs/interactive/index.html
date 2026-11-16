@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIS-Edge walkthroughs</title>
+<style>
+  :root { --bg: #F1F4F7; --ink: #12202B; --muted: #5B6C79; --line: #CAD4DC; --card: #fff; --teal: #0B7A82; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0D161D; --ink: #E7EEF3; --muted: #8FA1AE; --line: #283946; --card: #14212B; --teal: #3BC2CB; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 56px 16px 64px; }
+  p.kick { font: 12px/1 ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; color: var(--teal); margin: 0 0 12px; }
+  h1 { font-size: clamp(30px, 6vw, 44px); line-height: 1.08; margin: 0 0 14px; letter-spacing: -.01em; }
+  p.lead { color: var(--muted); margin: 0 0 30px; max-width: 46em; }
+  .cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  a.card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 22px; color: inherit; text-decoration: none; }
+  a.card:hover, a.card:focus-visible { border-color: var(--teal); outline: none; }
+  a.card b { display: block; font-size: 22px; margin-bottom: 6px; }
+  a.card span { color: var(--muted); display: block; }
+  a.card i { display: block; margin-top: 14px; font: 12px/1 ui-monospace, monospace; font-style: normal; color: var(--teal); }
+  p.foot { color: var(--muted); font-size: 14px; margin-top: 30px; }
+  p.foot a { color: var(--teal); }
+</style>
+</head>
+<body>
+<main>
+  <p class="kick">AIS-Edge</p>
+  <h1>Interactive walkthroughs</h1>
+  <p class="lead">Each page takes you from nothing to a working install: the path of one study, the words you need, your site files written from your answers, and every install step with its check.</p>
+  <div class="cards">
+    <a class="card" href="tier-1.html"><b>Tier-1</b><span>One machine between your scanners and XNAT.</span><i>branch tier-1-solution</i></a>
+    <a class="card" href="tier-2.html"><b>Tier-2</b><span>An edge machine in the hospital and a central management machine.</span><i>branch main</i></a>
+  </div>
+  <p class="foot">The files are in <a href="https://github.com/Australian-Imaging-Service/ais-edge/tree/main/docs/interactive">docs/interactive</a> of the repository.</p>
+</main>
+</body>
+</html>
