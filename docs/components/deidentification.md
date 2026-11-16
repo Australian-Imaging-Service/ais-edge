@@ -207,6 +207,14 @@ about processing, not validation of anonymity. Check headers, pixels, assigned
 XNAT labels, and the sensitive mapping together. A copied resource classified
 as not containing PHI has not had every byte inspected for identifiers.
 
+**Private tags: no recipe line removes them all.** The pipeline calls the deid
+library with `remove_private=False`. The line `REMOVE ALL_PRIVATE` is accepted
+and removes nothing, because the library reads it as a tag with that name
+(tested 2026-11-16 with deid 0.4.13 in the accessionflow 0.20.0 image: two
+private values in, two out). To remove a private group, add one line for each
+group, with the group as four hex digits: `REMOVE select:GROUP:0029`. The same
+test removed that group and kept the other one.
+
 The engine applies a recipe, and **only the tags the recipe names are touched**.
 The shipped example needs a site review before it is used as policy. Three
 things about it are not clear
