@@ -50,7 +50,7 @@ per machine. Tier-1 has one of each, and that shapes everything below.
 sites/
   example-single/          <- the template; copy it, don't edit it
     values.yaml            <- everything non-secret
-    secrets.example.yaml   <- the four secrets you must fill in
+    secrets.example.yaml   <- the five secrets you must fill in
   my-hospital/             <- yours, created by `site-secrets.sh new`
     values.yaml
     secrets.enc.yaml       <- SOPS-encrypted; safe to commit
@@ -400,7 +400,7 @@ get paged. That wiring is checked by the test suite.
 
 ## 3. Secrets
 
-Four Secrets, one encrypted file, and one key you must not lose.
+Five Secrets, one encrypted file, and one key you must not lose.
 
 The charts never contain credentials — they reference Secrets *by name*. So the
 entire integration is: create the Secrets in the cluster, then run Helm. The apply path
@@ -419,6 +419,7 @@ can see that `xnat-credentials` has a `password` without seeing the password.
 | --- | --- | --- |
 | `xnat-credentials` | `server`, `username`, `password` | the upload stage |
 | `orthanc-deid-salt` | `AIS_DEID_HMAC_SALT`, 64 hex chars | Orthanc backup-script startup check; its value is unused for ingest de-identification |
+| `orthanc-credentials` | `users.json`, `orthanc-user`, `orthanc-password` | Orthanc checks `users.json`; group-orthanc logs in with the other two. The login is on by default. Put one password in both places (`REPLACE_ORTHANC_PASSWORD` appears twice), or Orthanc answers 401 (see "Turning on Orthanc's REST API authentication") |
 | `grafana-admin-credentials` | `admin-user`, `admin-password` | Grafana |
 | `alertmanager-smtp` | `username`, `password` | Alertmanager, for alert email |
 
