@@ -816,7 +816,9 @@ What ships now, in `upload.mode: s3`:
   `stagedReclaimer.minAge` (a day). The edge's clock counts from the newest
   local file AND from the newest object of the session in the bucket, so a
   backlog of old files copied today waits its window too (found by Codex,
-  codex-178). Neither chart can read the other's value, so a `RecopyLoop`
+  codex-178). The edge chart is rendered with the management site file and
+  refuses a bucket age that is not longer than the edge's. It checks the
+  order, not the margin, so a `RecopyLoop`
   alert watches for the crossing, counting completed re-copies, not claimed
   requests (an uploader that cannot copy claims the same request on every
   pass; measured 2026-10-14). The longer clock also has

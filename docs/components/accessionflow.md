@@ -755,8 +755,14 @@ never retires its copy. `RecopyLoop` fires on more than three completed
 re-copies (`recopy_done`) of one session in 24 hours; claimed requests are
 not counted, because an uploader that cannot copy claims the same request on
 every pass (measured on 2026-10-14: 21 sessions, five hours, nothing copied),
-and that failure has its own alerts. Neither chart can read the other's value, so the
-defaults are 36 hours against a day. The longer clock has a ceiling too: the
+and that failure has its own alerts. The defaults are 36 hours against a day.
+The management chart cannot read an edge's values. `install.sh` renders the
+edge chart with the management site file, so the edge chart compares the two:
+it refuses a `s3Staged.minAge` that is not longer than the edge's clean-up age.
+That age is `stagedReclaimer.minAge`, or the `minAge` of the tree that the
+CronJob reclaims when that is longer. A recovery window on that tree must thus
+stay shorter than `s3Staged.minAge` under `s3`. The guard checks the order
+only. The margin is yours to keep. The longer clock has a ceiling too: the
 management reclaimer proves a session in XNAT only after `s3Staged.minAge`,
 and `SessionStagedNotConfirmedInXNAT` counts a session unconfirmed 48 hours
 after the reclaimer first logged it, so a minAge of two days or more would

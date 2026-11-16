@@ -46,6 +46,37 @@ proof runs only after it. See values.yaml, s3Staged.
 {{- if and (ne $srMinAgeS "-") (lt (int64 $srMinAgeS) 60) }}
   {{- fail (printf "dataPolicy.derived.stagedReclaimer.minAge=%v is under 1m. The reclaimer rechecks each file by identity before it deletes, and file times have tick granularity: with no age a rewrite within the same tick as the previous write is invisible to it. Set at least 1m." .Values.dataPolicy.derived.stagedReclaimer.minAge) }}
 {{- end }}
+{{- /* THE TWO CLOCKS (s3): THE BUCKET COPY MUST OUTLIVE THE EDGE COPY.
+       This CronJob deletes a session after the LONGER of stagedReclaimer.minAge
+       and the minAge of its tree, and only when the objects in the bucket are
+       that old too. The management reclaimer deletes the objects after
+       s3Staged.minAge.
+       Equal ages: the two run in the same cron minute, and the objects can go
+       first. A shorter bucket age: the objects always go first. This CronJob
+       then finds no object, asks for a new copy and waits its age again. The
+       edge keeps its copy and the bucket is written again and again.
+       GUIDING: install.sh renders this chart with the management site file,
+       so s3Staged here is the management value. With no management value it
+       is this chart's default, 36h.
+       CAUTION: this is an order, not a margin. Keep the hours between the two
+       longer than a run interval, a proof and an edge outage (values.yaml). */ -}}
+{{- if and (eq .Values.upload.mode "s3") (ne (toString .Values.dataPolicy.derived.s3Staged.reclaim) "never") }}
+  {{- $bucketS := include "edge.durationSeconds" .Values.dataPolicy.derived.s3Staged.minAge }}
+  {{- $edgeKey := "stagedReclaimer" }}
+  {{- $edgeAge := .Values.dataPolicy.derived.stagedReclaimer.minAge }}
+  {{- $edgeS := $srMinAgeS }}
+  {{- $treeKey := include "edge.uploadTreeKey" . }}
+  {{- $treeAge := (index .Values.dataPolicy.derived $treeKey).minAge }}
+  {{- $treeS := include "edge.durationSeconds" $treeAge }}
+  {{- if and (ne $treeS "-") (or (eq $edgeS "-") (gt (int64 $treeS) (int64 $edgeS))) }}
+    {{- $edgeKey = $treeKey }}
+    {{- $edgeAge = $treeAge }}
+    {{- $edgeS = $treeS }}
+  {{- end }}
+  {{- if and (ne $bucketS "-") (ne $edgeS "-") (le (int64 $bucketS) (int64 $edgeS)) }}
+    {{- fail (printf "dataPolicy.derived.s3Staged.minAge=%v is not longer than this edge's clean-up age, dataPolicy.derived.%s.minAge=%v. The management reclaimer deletes the bucket copy of a session after s3Staged.minAge. This edge deletes its own copy only after its age, and only when the bucket still holds every file. With this pair the bucket copy can go first: the edge finds no object, asks for a new copy and waits again (RecopyLoop). Set dataPolicy.derived.s3Staged.minAge to 36h in the management site file (the chart default, and the most that the management chart accepts), or make the edge age shorter than s3Staged.minAge." .Values.dataPolicy.derived.s3Staged.minAge $edgeKey $edgeAge) }}
+  {{- end }}
+{{- end }}
 {{- $root := . }}
 {{- $stagedRoot := include "edge.uploadSourceDir" . }}
 {{- $armed := and .Values.dataPolicy.enabled (not .Values.dataPolicy.dryRun) }}

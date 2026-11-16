@@ -332,7 +332,8 @@ it verifies against XNAT under `direct` (with `false` it removes nothing), and
 how many sessions one run may remove. Under `s3` the management side's
 `dataPolicy.derived.s3Staged.minAge` must be the longer clock by a wide
 margin, or the bucket copy goes before the edge has proven its own against it
-(`charts/edge/values.yaml`, "the two clocks").
+(`charts/edge/values.yaml`, "the two clocks"). The edge chart refuses a
+management age that is not longer than the edge's. The example sites set 36h.
 
 ---
 
