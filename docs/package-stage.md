@@ -37,8 +37,8 @@ with the individual DICOM files in XNAT.
 
 ## What it needs
 
-**Current status (0.20.0):** the pinned accessionflow image includes
-fileformats 0.22.5, fileformats-medimage 0.15.5 and fileformats-extras 0.22.5.
+**Current status (0.20.4):** the pinned accessionflow image includes
+fileformats 0.22.7, fileformats-medimage 0.15.5 and fileformats-extras 0.22.5.
 These meet the library requirements for the default package spec. The vendor
 package is not bundled; install the two pinned vendor packages below in both
 the package pod and the uploader that reads its output. Validate the enabled
@@ -55,7 +55,7 @@ These are historical requirements, not a reason to wait for a release after
 - `deid.engine: ingest`. The stage runs after the accessionflow deidentify stage
   only.
 - An accessionflow image with fileformats 0.22.1 and fileformats-medimage
-  0.15.4 or later. The current 0.20.0 pin meets both floors. Older xnat-ingest
+  0.15.4 or later. The current 0.20.4 pin meets both floors. Older xnat-ingest
   0.16.2 failed at start with `ValueError: Invalid option 'reproducible'` for
   the default spec. Removing that option did not fix its datatype mismatch:
   conversion could fail with `Incorrect type for field in 'in_file' field of

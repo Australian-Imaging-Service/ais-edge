@@ -529,7 +529,7 @@ synthetic workflow after any override.
 | k0s | v1.35.2+k0s.0 | Single-node cluster (`k0s install controller --single`); pinned in `install.sh` via `K0S_VERSION` |
 | local-path-provisioner | v0.0.36 | StorageClass `local-path`, used by the observability PVCs |
 | Orthanc | 1.12.11 (plugins) | `jodogne/orthanc-plugins:1.12.11` — DICOM SCP on port 4242. Needs ≥ 1.12.0 for study-level labels |
-| accessionflow | image tag `0.20.0` | `ghcr.io/australian-imaging-service/accessionflow:0.20.0`, the upstream image. Includes default deidentify, local upload and grouping snapshot support. The inspected package reports `0.20.0`; record the deployed digest too. The old fork reported `0.16.3.dev49+ais.20261021.r13.g3182cc6`, which is retained here only as migration history. |
+| accessionflow | image tag `0.20.4` | `ghcr.io/australian-imaging-service/accessionflow:0.20.4`, the upstream image. Includes default deidentify, local upload and grouping snapshot support. The inspected package reports `0.20.4`; record the deployed digest too. The old fork reported `0.16.3.dev49+ais.20261021.r13.g3182cc6`, which is retained here only as migration history. |
 | kube-prometheus-stack | 87.19.2 | Vendored subchart, `fullnameOverride: ais-kps`. Ships Prometheus v3.13.1, Alertmanager v0.33.1, Grafana 13.1.1, kube-state-metrics v2.19.1 |
 | Loki | 7.1.0 (app 3.6.8) | Vendored subchart, `fullnameOverride: ais-loki`. SingleBinary, **filesystem** storage on a PVC (no object store) |
 | Vector | timberio/vector 0.49.0-distroless-libc | Hand-written DaemonSet, tails all pod logs, pushes to the in-cluster Loki |

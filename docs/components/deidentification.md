@@ -701,10 +701,10 @@ for DICOM-protocol input when the callback succeeds, and its own retention
 policy may remove copies later. `--unlink-source all` does not prove that
 an original or encrypted mapping remains recoverable.
 
-This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.20.0`.
+This branch pins `ghcr.io/australian-imaging-service/accessionflow:0.20.4`.
 The locally inspected image has image ID
-`sha256:8da884b0ea8cd8804e06b9c2a76fa0a8e78ff3c70c93c3a828c9c04777f319ac`
-and reports package version `0.20.0`. The former fork image reported
+`sha256:16f764770e977e02c45bf0cfe6200fd489ac682717ca871f1ec9d981abedc085`
+and reports package version `0.20.4`. The former fork image reported
 `0.16.3.dev49+ais.20261021.r13.g3182cc6`; that is a historical identifier.
 The registry tag and installed package version are different identifiers.
 Record the deployed digest when checking a site; do not infer a live version
