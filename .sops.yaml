@@ -14,11 +14,14 @@
 # trail — that is the one thing age genuinely cannot do.
 #
 # KEY LAYOUT
-#   team key   every operator can decrypt every site. This is the key that
-#              lives in the team password manager.
+#   team key   every operator of YOUR deployment can decrypt every site. Keep
+#              it in your team password manager.
 #   site key   held by that site's admin, so a site can decrypt and install
 #              its own secrets without holding the keys to the whole fleet.
-# Both are listed as recipients, so either can decrypt independently.
+# When both are listed as recipients, either can decrypt independently.
+# AS SHIPPED, both rules below hold a PLACEHOLDER, not a key. The first
+# add-recipient puts your key in its place. Each later add-recipient adds a key
+# to both rules.
 #
 # ENCRYPTED VS NOT
 #   Only the VALUES are encrypted; keys stay readable (encrypted_regex below).
@@ -31,23 +34,28 @@
 #   scripts/site-secrets.sh encrypt <site>      encrypt a site's secrets
 #   scripts/site-secrets.sh apply <site>        decrypt straight into the cluster
 #
-# VERIFY THE RECIPIENTS before encrypting a real site. The public keys below
-# are configured recipients, not placeholders to replace blindly. Confirm
-# that an intended operator holds a matching private key. To add an operator,
+# THE RECIPIENTS. As shipped, the recipient below is a placeholder. encrypt
+# refuses while it is there, and sops refuses it as a recipient. Run init-key,
+# then add-recipient with the public key that init-key prints. Confirm that
+# each recipient is a key that an intended operator holds. To add an operator,
 # use add-recipient, then sops updatekeys sites/<site>/secrets.enc.yaml for
 # each existing file. encrypt is a no-op for an already encrypted file.
+# CAUTION: do not commit a real key to this file in the shared repository.
+# Each site that is set up from the repository is then encrypted to that key
+# too, and the holder of that key can read the secrets of each such site.
+# Keep your key in your own copy of this file. CI refuses a real key here.
 # =============================================================================
 
 creation_rules:
-  # Per-site secrets: readable by the team key and by that site's own key.
+  # Per-site secrets: readable by every key listed here (as shipped: none).
   # The regex captures the site name so a new site needs no new rule.
   - path_regex: sites/[^/]+/secrets\.enc\.ya?ml$
     encrypted_regex: '^(data|stringData)$'
     age: >-
-      age13952y4twf97ng8zjr654g496p6t9ud20hps5rwnwg0n0e2hmhvasr9w0nu
+      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY
 
-  # Anything else that ends up encrypted: team key only.
+  # Anything else that ends up encrypted: the same keys.
   - path_regex: .*\.enc\.ya?ml$
     encrypted_regex: '^(data|stringData)$'
     age: >-
-      age13952y4twf97ng8zjr654g496p6t9ud20hps5rwnwg0n0e2hmhvasr9w0nu
+      REPLACE_WITH_TEAM_AGE_PUBLIC_KEY
