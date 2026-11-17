@@ -925,7 +925,6 @@ details.more .frag-note { margin-bottom: 8px; }
     </fieldset>
     <fieldset class="role">
       <legend>You<span class="badge">complete</span></legend>
-      <label><input type="checkbox" id="ck-team" data-k="team"><span>Decide if the maintainers' team key may decrypt this site's secrets (install step 2)</span></label>
       <label><input type="checkbox" id="ck-pm" data-k="pm"><span>A password manager entry, ready for the age key and the passwords</span></label>
     </fieldset>
   </div>
@@ -1229,7 +1228,7 @@ cd ais-edge</code></pre></div>
         <p class="prose">The age key decrypts the secrets file. If you lose it, nobody can decrypt that file again.</p>
         <div class="code"><pre><code>scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient "$(grep -oE 'age1[a-z0-9]+' ~/.config/sops/age/keys.txt | head -1)"   <span class="c"># adds your public key</span></code></pre></div>
-        <p class="caution"><b>Decide first:</b> the shipped <code class="inl">.sops.yaml</code> already lists one key of the maintainers, and <code class="inl">add-recipient</code> adds your key beside it. That key can then read this site's XNAT password. If it must not, remove it from <code class="inl">.sops.yaml</code> before step 5.</p>
+        <p>The repository ships <code class="inl">.sops.yaml</code> with a placeholder, not a key. <code class="inl">add-recipient</code> puts your key in its place, so your key is the only one that can read this site's secrets file.</p>
         <p class="check"><b>Check</b><span><code class="inl">~/.config/sops/age/keys.txt</code> is saved in a password manager.</span></p>
       </article>
 
