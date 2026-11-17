@@ -87,7 +87,11 @@ NODE_IP="$(cfg nodeIP)"
 INSTALL_MODE="$(cfg installMode fresh)"
 UPLOAD_MODE="$(cfg upload.mode direct)"
 OBS_STACK="$(cfg observability.stack.enabled false)"
-GRAFANA_PORT="$(cfg observability.stack.grafana.nodePort 30030)"
+# The Service's real NodePort: the site's kube-prometheus-stack block, else the
+# chart default. Not observability.stack.grafana.nodePort: that key was removed,
+# and nothing reads it (a site that changed the real port got a wrong URL here).
+GRAFANA_PORT="$(cfg kube-prometheus-stack.grafana.service.nodePort)"
+[ -n "$GRAFANA_PORT" ] || GRAFANA_PORT="$(VALUES="${SCRIPT_DIR}/charts/edge/values.yaml" cfg kube-prometheus-stack.grafana.service.nodePort 30030)"
 RELEASE="${AIS_RELEASE:-$SITE}"
 
 # TIER-1 IS upload.mode=direct BY DEFINITION. s3 needs a SeaweedFS and a
@@ -142,14 +146,50 @@ if [ -f "$SECRETS" ]; then
 ${UNFILLED}
        Fix with: scripts/site-secrets.sh edit ${SITE}"
     fi
-else
+elif [ "$INSTALL_MODE" != "existing" ]; then
     die "no sites/${SITE}/secrets.enc.yaml.
        The chart references xnat-credentials and orthanc-deid-salt BY NAME and
        creates neither, so every pipeline pod would sit in
        CreateContainerConfigError while helm --wait blocked for ten minutes.
        The old installer refused up front for exactly this reason.
          scripts/site-secrets.sh new ${SITE} single
+         scripts/site-secrets.sh encrypt ${SITE}
+       A site that keeps its Secrets in the cluster by other means: set
+       installMode: existing (the cluster must already exist)."
+else
+    # NO SECRETS FILE, installMode: existing. Go on only if every Secret that
+    # the chart refers to, and does not create, is already in the cluster: a
+    # site that keeps its Secrets another way. Step 2 then has nothing to do.
+    # A failed query is NOT "present": any error refuses.
+    for t in kubectl helm python3; do
+        command -v "$t" >/dev/null 2>&1 || die "no sites/${SITE}/secrets.enc.yaml, and ${t} is missing, so the cluster's Secrets cannot be checked."
+    done
+    # stdout only: helm warnings on stderr must not reach the YAML parser.
+    SECRETS_RENDER="$(helm template "$RELEASE" "${SCRIPT_DIR}/charts/edge" --namespace "$NAMESPACE" -f "$VALUES" 2>/dev/null)" \
+        || die "no sites/${SITE}/secrets.enc.yaml, and the chart does not render with this site file, so the Secrets it needs are unknown:
+$(helm template "$RELEASE" "${SCRIPT_DIR}/charts/edge" --namespace "$NAMESPACE" -f "$VALUES" 2>&1 >/dev/null | head -5)"
+    NEEDED_SECRETS="$(printf '%s\n' "$SECRETS_RENDER" | python3 "${SCRIPT_DIR}/scripts/required-secrets.py" "$NAMESPACE")" \
+        || die "no sites/${SITE}/secrets.enc.yaml, and the Secrets that the chart needs could not be listed."
+    [ -n "$NEEDED_SECRETS" ] || die "no sites/${SITE}/secrets.enc.yaml, and the render names no Secret. Refusing: a tier-1 release needs at least xnat-credentials."
+    ABSENT_SECRETS=""
+    for ref in $NEEDED_SECRETS; do
+        if out="$(KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}" kubectl --namespace "${ref%%/*}" get secret "${ref#*/}" -o name 2>&1)"; then
+            :
+        elif printf '%s' "$out" | grep -q 'NotFound'; then
+            ABSENT_SECRETS="${ABSENT_SECRETS} ${ref}"
+        else
+            die "no sites/${SITE}/secrets.enc.yaml, and the cluster could not be asked for Secret ${ref}:
+       $(printf '%s' "$out" | head -2)
+       An error does not mean the Secret is there. Fix the cluster access, or
+       add the secrets file."
+        fi
+    done
+    [ -z "$ABSENT_SECRETS" ] || die "no sites/${SITE}/secrets.enc.yaml, and the cluster does not have:${ABSENT_SECRETS}
+       The chart refers to these BY NAME and does not create them. Create them
+       in the cluster, or add the secrets file:
+         scripts/site-secrets.sh new ${SITE} single
          scripts/site-secrets.sh encrypt ${SITE}"
+    info "no sites/${SITE}/secrets.enc.yaml: the cluster has every Secret that the chart needs ($(printf '%s' "$NEEDED_SECRETS" | tr '\n' ' ')). Step 2 is skipped."
 fi
 
 [ -n "${MISSING:-}" ] && [ "$INSTALL_MODE" != "fresh" ] && die "missing required tools:${MISSING}"
@@ -224,6 +264,17 @@ if step "3/3  helm: the pipeline (Orthanc, de-id, group, assign, direct upload)"
         --wait --timeout 10m
 fi
 
+# The operator command for sessions in assigned/__invalid__
+# (docs/recovering-invalid-sessions.md): sudo ais-requeue list. It
+# runs the tool that the chart ships into the label container, through k0s, so
+# no kubectl and no repository are needed later. Root-owned, so a container
+# cannot change what root runs. -n: never wait for a password here.
+if sudo -n install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue 2>/dev/null; then
+    REQUEUE_CMD="installed"
+else
+    REQUEUE_CMD="NOT installed: sudo install -o root -g root -m 0755 ${SCRIPT_DIR}/scripts/files/ais-requeue /usr/local/bin/ais-requeue"
+fi
+
 echo
 echo "============================================"
 echo " Installed"
@@ -236,8 +287,25 @@ echo "  Grafana        : http://${NODE_IP}:${GRAFANA_PORT}"
 fi
 echo
 echo "  Prove it works : scripts/verify-live.sh ${SITE}"
+echo "  Invalid sessions: sudo ais-requeue list   (${REQUEUE_CMD})"
 echo
-echo "  Data retention is OFF on a fresh install (dataPolicy.enabled: false,"
-echo "  dryRun: true). Nothing is expired or reclaimed until you turn it on."
-echo "  This node holds the ONLY copy of the facility backup — read the dryRun"
-echo "  decisions for a week before enabling anything."
+# Say what the site file sets. Chart defaults: enabled false, dryRun true.
+DP_ENABLED="$(cfg dataPolicy.enabled false | tr '[:upper:]' '[:lower:]')"
+DP_DRYRUN="$(cfg dataPolicy.dryRun true | tr '[:upper:]' '[:lower:]')"
+if [ "$DP_ENABLED" != "true" ]; then
+echo "  Data retention is OFF (dataPolicy.enabled: false). Nothing is expired or"
+echo "  reclaimed until you turn it on. Read a week of dryRun decisions first."
+elif [ "$DP_DRYRUN" != "false" ]; then
+echo "  Data retention is in DRY RUN (dataPolicy.dryRun: true). The data policy"
+echo "  and the reclaimers log their decisions and remove nothing. Read a week of"
+echo "  decisions before you set dryRun: false."
+else
+echo "  Data retention is ON (dataPolicy.enabled: true, dryRun: false). The data"
+echo "  policy and the reclaimers remove copies that are proven somewhere else."
+fi
+if [ "$(cfg storage.facilityBackup.enabled true | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+echo "  This node holds the ONLY copy of the facility backup."
+else
+echo "  The facility backup is OFF: Orthanc and the pipeline folders hold the only"
+echo "  copy of each study. Keep it on unless the site keeps its originals elsewhere."
+fi

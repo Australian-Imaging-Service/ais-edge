@@ -20,15 +20,15 @@ for dt in "${_dts[@]}"; do
   [[ -n "$dt" ]] && datatype_args+=(--datatype "$dt")
 done
 
-# Optional --scan override; empty means xnat-ingest's default.
+# Optional label --scan override; empty means accessionflow's default.
 scan_args=()
 [[ -n "${SCAN_FIELD:-}" ]] && scan_args=(--scan "$SCAN_FIELD")
 
 group_id_args=()
 [[ -n "${GROUP_SESSION_FIELD:-}" ]] &&
-  group_id_args+=(--session "$GROUP_SESSION_FIELD" generic/file-set)
+  group_id_args+=(--accession "$GROUP_SESSION_FIELD" generic/file-set)
 [[ -n "${GROUP_SCAN_FIELD:-}" ]] &&
-  group_id_args+=(--scan "$GROUP_SCAN_FIELD" generic/file-set)
+  group_id_args+=(--acquisition "$GROUP_SCAN_FIELD" generic/file-set)
 
 SOURCE_BASE="${INPUT_GLOB%/\*\*/\*}"
 
@@ -43,7 +43,9 @@ while true; do
     log "Grouping study: $study"
     # --recursive: **/* also matches subdirectories, which group would
     # otherwise read as files and fail on (FormatRecognitionError).
-    if ! xnat-ingest group \
+    # accessionflow 0.20 names: collate folder (was group), label xnat (was
+    # assign); collate's --session/--scan became --accession/--acquisition.
+    if ! accessionflow collate folder \
         "${study_dir}**/*" \
         "$GROUPED_DIR" \
         "${datatype_args[@]}" \
@@ -57,7 +59,7 @@ while true; do
       continue
     fi
 
-    # `group` can create an empty study skeleton when every file is younger
+    # `collate` can create an empty study skeleton when every file is younger
     # than WAIT_PERIOD. A top-level glob then matches even though assign sees
     # zero sessions, which previously marked the source done permanently.
     if ! find "$GROUPED_DIR" -name __MANIFEST__.json -print -quit 2>/dev/null | grep -q .; then
@@ -66,7 +68,7 @@ while true; do
       continue
     fi
 
-    if xnat-ingest assign "$GROUPED_DIR" "$ASSIGNED_DIR" \
+    if accessionflow label xnat "$GROUPED_DIR" "$ASSIGNED_DIR" \
         --project "${PROJECT_FIELD:?}" \
         --subject "${SUBJECT_FIELD:?}" \
         --session "${SESSION_FIELD:?}" \

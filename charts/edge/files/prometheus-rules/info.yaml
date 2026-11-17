@@ -1,6 +1,11 @@
+# Documentation review 2026-11-10: historical measurements below describe
+# their recorded runs. Undated run evidence is not verified (2026-11-10).
+# Current conditions are defined by the expressions and their input availability.
 # =============================================================================
-# Info alerts: routine informational events. Slack when a webhook is
-# configured, email when not (files/alertmanager-config.yaml).
+# Info alerts: routine informational events, sent by the configured email
+# receiver on tier-1. This branch does not splice optional Slack receivers.
+# With observability disabled but the stack on, the email presence guard
+# is bypassed; a blank address can select null. Inspect the actual receiver.
 # CAUTION: every re-fire after a resolve is a new mail; keep these event-shaped.
 # =============================================================================
 # NOTE: this file is a BARE `groups:` fragment, not a whole
@@ -19,6 +24,9 @@ groups:
       severity: info
     annotations:
       summary: Node inventory changed on the tier-1 host
-      description: The number of nodes in this cluster changed in the last 10 minutes. On a tier-1 appliance there is exactly
-        one node, so this should never fire.
+      description: |
+        The sampled count of kube_node_info series changed within ten minutes.
+        Tier-1 normally has one node, but a scrape gap, stale-series removal or
+        inventory change can affect the count. Check node objects and target health;
+        this is not proof of an unexpected physical node joining the appliance.
 

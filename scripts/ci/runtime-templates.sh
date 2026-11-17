@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # 7. Runtime-template survival — the silent-breakage check
 # =============================================================================
@@ -138,7 +139,7 @@ done < <(expectations | ci_renders_present)
 # dataPolicy `location` must match where the data ACTUALLY is
 # =============================================================================
 # Each dataPolicy stage declares a location so the policy engine can walk paths
-# instead of knowing about Orthanc or xnat-ingest — that is what lets the
+# instead of knowing about Orthanc or accessionflow; that is what lets the
 # de-identifier or the ingest path be replaced without rewriting retention.
 #
 # The cost of that indirection is a NEW way to fail silently: if a template's
@@ -232,7 +233,9 @@ fi
 #
 # Both layouts must be present, or one engine's wiring is checked vacuously:
 # the orthanc layout (upload source == ASSIGNED_DIR) and the ingest layout
-# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR).
+# (upload source is the deidentified tree, assign still writes ASSIGNED_DIR),
+# and the package layout (the package stage reads /data/deidentified and writes
+# the tree the uploader drains).
 #
 # EXTERNAL_RECLAIM_STAGE must name a row of stages.tsv, and at least one render
 # must set it. The engine compares it against field 1 of that table, and it is
@@ -280,7 +283,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
     except yaml.YAMLError as e:
         problems.append("%s: %s" % (case, " ".join(str(e).split())))
         continue
-    dp = up = dp_cpu = None
+    dp = up = dp_cpu = pkg = None
     rows = {}
     for d in docs:
         for c in containers(d):
@@ -289,6 +292,8 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                 dp_cpu = ((c.get("resources") or {}).get("limits") or {}).get("cpu")
             if d.get("kind") == "Deployment" and c.get("name") == "uploader":
                 up = env(c)
+            if d.get("kind") == "Deployment" and c.get("name") == "package":
+                pkg = c.get("args") or []
         if d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
             rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
     for d in docs:
@@ -333,7 +338,17 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
                         "multi-process burst: any CFS quota throttles most of the periods it runs in, and "
                         "CPUThrottlingHigh flaps on it. Keep only the memory limit" % (case, dp_cpu))
     src, adir = dp.get("UPLOAD_SOURCE_DIR") or "", dp.get("ASSIGNED_DIR") or ""
-    layouts.add("ingest" if src != adir else "orthanc")
+    layouts.add("package" if pkg is not None else "ingest" if src != adir else "orthanc")
+    # The package stage writes the tree the uploader drains, and must retire
+    # its input itself: nothing else can satisfy a reclaim on /data/deidentified.
+    if pkg is not None:
+        if pkg[1:2] != [src]:
+            problems.append("%s: the package stage writes %r but the uploader reads %r" % (case, pkg[1:2], src))
+        if pkg[:1] != ["/data/deidentified"]:
+            problems.append("%s: the package stage reads %r, not the deidentify stage's /data/deidentified" % (case, pkg[:1]))
+        dword = rows.get("derived.deidentified", [""] * 6)[5]
+        if dword == "onPackaged" and "--unlink-source" not in pkg:
+            problems.append("%s: derived.deidentified is onPackaged but the package stage does not unlink its input" % case)
     if not src.startswith("/"):
         problems.append("%s: UPLOAD_SOURCE_DIR=%r is not an absolute path" % (case, src))
     if "derived.assigned" in rows and adir != rows["derived.assigned"][2]:
@@ -381,7 +396,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "edge-*.yaml"))):
 
 if checked == 0:
     problems.append("no edge render carries the data-policy DaemonSet: the check would pass on nothing")
-for want in ("orthanc", "ingest"):
+for want in ("orthanc", "ingest", "package"):
     if checked and want not in layouts:
         problems.append("no render exercises the %s layout, so its wiring goes unchecked" % want)
 if checked and not interval_case_seen:
@@ -446,6 +461,44 @@ if bad:
 print("%d leading-zero and ceiling durations render in base 10 (08d=691200, 010d=864000)" % len(WANT))
 PY
 )" && ci_pass "$dur_out" || ci_fail "durations: $dur_out"
+fi
+
+# -----------------------------------------------------------------------------
+# The parser trims a value before it reads it, so retain: " 1h " renders 3600.
+# The stage table carried the RAW word next to those seconds. The engine's word
+# check (expire_original) then saw " 1h " as a non-duration and kept the
+# original for ever, while the site believed it expired. Helm's trim strips
+# Unicode blanks (U+00A0, U+2003) that a shell loop does not, so the table has
+# to trim with the same `toString | trim` as the parser. This checks the two
+# rows the engine reads against the padded values of the fixture.
+ci_heading "padded durations render trimmed"
+
+pad_render="$CI_RENDER_DIR/edge-duration-padded.yaml"
+if [ ! -s "$pad_render" ]; then
+  ci_fail "no render at $pad_render: the edge-duration-padded case is missing from ci_positive_cases"
+else
+  pad_out="$(python3 - "$pad_render" 2>&1 <<'PY'
+import sys, yaml
+# stage, 1-based word column, 1-based seconds column
+WANT = [("originals.facilityBackup", 6, 7), ("originals.quarantine", 6, 7)]
+rows = None
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if d and d.get("kind") == "ConfigMap" and "stages.tsv" in (d.get("data") or {}):
+        rows = {r[0]: r for r in (l.split("\t") for l in d["data"]["stages.tsv"].splitlines() if l.strip())}
+if rows is None:
+    raise SystemExit("no stages.tsv in the render, so nothing was checked")
+bad = []
+for stage, wcol, scol in WANT:
+    row = rows.get(stage) or []
+    word = row[wcol - 1] if len(row) >= wcol else None
+    secs = row[scol - 1] if len(row) >= scol else None
+    if word != "1h" or secs != "3600":
+        bad.append("%s: word %r seconds %r, expected '1h' and '3600'" % (stage, word, secs))
+if bad:
+    raise SystemExit("; ".join(bad) + ". The engine reads the word: an untrimmed word is not a duration to it, and the original is kept for ever.")
+print("%d padded retain values render as the trimmed word next to their seconds" % len(WANT))
+PY
+)" && ci_pass "$pad_out" || ci_fail "padded durations: $pad_out"
 fi
 
 # -----------------------------------------------------------------------------
@@ -537,7 +590,7 @@ PY
 # =============================================================================
 # Without a manifest check, a resource without its manifest is uploaded as it
 # is, and later passes see a partial resource as already uploaded. Measured
-# 2026-10-14 on the CLI: with neither flag, xnat-ingest does not require a
+# 2026-10-14 on the CLI: with neither flag, accessionflow does not require a
 # manifest (the option default is unset), so the chart must pass
 # --require-manifest explicitly. requireManifest is true by default. This
 # fails when a default render does not pass --require-manifest, or when a site
@@ -559,12 +612,12 @@ for doc in yaml.safe_load_all(open(path)):
     if not doc or doc.get("kind") != "Deployment":
         continue
     for c in doc["spec"]["template"]["spec"].get("containers", []):
-        if (c.get("command") or [])[:2] == ["xnat-ingest", "upload"]:
+        if (c.get("command") or [])[:3] == ["accessionflow", "store", "xnat"]:
             args = c.get("args") or []
             found.append((doc["metadata"]["name"],
                           [f for f in ("--require-manifest", "--dont-require-manifest") if f in args]))
 if not found:
-    raise SystemExit("no 'xnat-ingest upload' container in the render")
+    raise SystemExit("no 'accessionflow store xnat' container in the render")
 wrong = [(name, flags) for name, flags in found if flags != [expect]]
 if wrong:
     raise SystemExit(f"expected exactly {expect}, got {wrong}")
@@ -588,17 +641,24 @@ EOF
 # .alive check relies on it), or when the staged-reclaimer gets other lock paths.
 ci_heading "the upload-tree writer runs under the writer lock"
 
-while IFS=$'\t' read -r case_name locked plain; do
+while IFS=$'\t' read -r case_name locked plain serialised; do
   render="$CI_RENDER_DIR/$case_name.yaml"
   if [ ! -s "$render" ]; then
     ci_fail "no render at $render — run scripts/ci/render.sh first"
     continue
   fi
-  lock_out="$(python3 - "$render" "$locked" "$plain" 2>&1 <<'PY2'
-import sys, yaml
+  lock_out="$(python3 - "$render" "$locked" "$plain" "${serialised:--}" 2>&1 <<'PY2'
+import re, sys, yaml
 
-path, locked, plain = sys.argv[1:4]
-tree = {"assign": "assigned", "deidentify": "deidentified"}
+path, locked, plain, serialised = sys.argv[1:5]
+# The same map as edge.stageCommand in _helpers.tpl.
+ARGV = {"group": ["collate", "folder"], "group-orthanc": ["collate", "orthanc"], "assign": ["label", "xnat"],
+        "deidentify": ["deidentify"], "package": ["package"]}
+tool = lambda stage: ["accessionflow"] + ARGV[stage]
+tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
+# A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
+# pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
+STOPS = re.compile(r"trap exit TERM INT; .*; sleep [0-9]+ & wait \$!; done")
 stages, strategy, reclaimer = {}, {}, None
 for doc in yaml.safe_load_all(open(path)):
     if not doc:
@@ -614,13 +674,15 @@ for doc in yaml.safe_load_all(open(path)):
             strategy[c["name"]] = (doc["spec"].get("strategy") or {}).get("type")
 
 cmd, args = stages.get(locked, ([], []))
-if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["xnat-ingest", locked]:
+if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(locked):
     raise SystemExit(f"{locked} is not wrapped: command={cmd}")
 lock, alive = f"/data/.locks/{tree[locked]}.lock", f"/data/.locks/{tree[locked]}.alive"
 if f"flock {lock} " not in cmd[2]:
     raise SystemExit(f"{locked} does not take {lock}: {cmd[2]}")
 if f"exec 9>>{alive} && flock -s 9 && " not in cmd[2]:
     raise SystemExit(f"{locked} does not hold {alive} for its life: {cmd[2]}")
+if not STOPS.fullmatch(cmd[2]):
+    raise SystemExit(f"{locked} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {cmd[2]}")
 if strategy.get(locked) != "Recreate":
     raise SystemExit(f"{locked} is not strategy Recreate: {strategy.get(locked)}")
 if reclaimer is not None and (reclaimer.get("WRITER_LOCK"), reclaimer.get("WRITER_ALIVE")) != (lock, alive):
@@ -629,10 +691,33 @@ if "--loop" in args:
     raise SystemExit(f"{locked} is wrapped and still passes --loop")
 if plain != "-":
     cmd, args = stages.get(plain, ([], []))
-    if cmd != ["xnat-ingest", plain] or "--loop" not in args:
-        raise SystemExit(f"{plain} does not write the upload tree, but command={cmd}")
-print(f"{locked} under {tree[locked]}.lock" + (", reclaimer on the same locks" if reclaimer else "")
-      + ("" if plain == "-" else f", {plain} loops on its own"))
+    if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != tool(plain) or "--loop" in args:
+        raise SystemExit(f"{plain} must use a single-pass producer wrapper: command={cmd}")
+    if f"flock /data/.locks/{tree[plain]}.lock " not in cmd[2] or not STOPS.fullmatch(cmd[2]):
+        raise SystemExit(f"{plain} must serialize producers and stop on TERM: {cmd[2]}")
+if serialised != "-":
+    # The stage that writes the writer's INPUT tree holds its own tree lock for
+    # each pass, and the writer takes that lock before the upload-tree lock for
+    # each of its passes: a pass of one never runs beside a pass of the other,
+    # in steady state and across the upgrade that turns the writer on or off.
+    wcmd, _ = stages.get(locked, ([], []))
+    inner = f"/data/.locks/{tree[serialised]}.lock"
+    if f"flock {inner} flock {lock} " not in wcmd[2]:
+        raise SystemExit(f"{locked} does not take {inner} before {lock} for each pass: {wcmd[2]}")
+    scmd, sargs = stages.get(serialised, ([], []))
+    if scmd[:2] != ["/bin/sh", "-c"] or scmd[3:] != tool(serialised):
+        raise SystemExit(f"{serialised} is not wrapped: command={scmd}")
+    if f"flock {inner} " not in scmd[2] or "flock -s 9" in scmd[2] or ".alive" in scmd[2]:
+        raise SystemExit(f"{serialised} must take turns on {inner} without an alive handle: {scmd[2]}")
+    if not STOPS.fullmatch(scmd[2]):
+        raise SystemExit(f"{serialised} does not stop on TERM and INT (trap exit TERM INT; ... sleep N & wait $!): {scmd[2]}")
+    if "--loop" in sargs:
+        raise SystemExit(f"{serialised} takes turns on the lock and still passes --loop")
+    if strategy.get(serialised) != "Recreate":
+        raise SystemExit(f"{serialised} is not strategy Recreate: {strategy.get(serialised)}")
+print(f"{locked} under {tree[locked]}.lock, stops on TERM and INT" + (", reclaimer on the same locks" if reclaimer else "")
+      + ("" if plain == "-" else f", {plain} holds its producer lock")
+      + ("" if serialised == "-" else f", {serialised} holds {tree[serialised]}.lock per pass and {locked} takes it first"))
 PY2
   )" && ci_pass "$case_name: $lock_out" \
      || ci_fail "$case_name: $lock_out"
@@ -642,32 +727,286 @@ edge-deid-off	assign	-
 edge-upload-direct	assign	-
 edge-upload-alerts	deidentify	assign
 edge-direct-ingest-reclaim	deidentify	assign
+edge-direct-ingest-package	package	-	deidentify
+edge-s3-ingest-package	package	-	deidentify
 EOF
 
+# =============================================================================
+# The stage wrappers stop on SIGTERM
+# =============================================================================
+# The wrapper shell is PID 1 of its container. PID 1 has no default signal
+# action. A wrapper without a trap ignored the SIGTERM from the kubelet: each
+# stop waited 30 s for SIGKILL, and a pass could start after the SIGTERM
+# (measured on the tier-2 test edge, 2026-10-20). This check runs each rendered
+# wrapper with dash, the shell of the stage image, and sends the signals:
+#   - TERM or INT in the sleep: the shell stops at once, status 128 + signal.
+#   - TERM in a pass: the pass ends, then the shell stops with its status.
+#   - A pass that fails stops the shell with its status, as before.
+# No pass starts after a signal. A pass holds its locks while it runs.
+# The stage is a fake, and /data/.locks is a temporary directory.
+# The shell is PID 1 of a new PID namespace when `unshare` can make one, as in
+# the container. Else it is a plain child: a wrapper without the trap then
+# stops at once, before the pass ends, so this check still finds it. In both,
+# dash starts with the default action for TERM and INT, as PID 1 does in the
+# container (a shell cannot trap a signal that was ignored when it started).
+ci_heading "the stage wrappers stop on SIGTERM"
+if ! command -v dash >/dev/null 2>&1 || ! command -v flock >/dev/null 2>&1; then
+  ci_skip "stage wrapper signals NOT CHECKED: dash or flock (util-linux) is not on this host"
+else
+  stop_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_STOP'
+import concurrent.futures, glob, os, re, shutil, signal, subprocess, sys, tempfile, time, yaml
+
+wrappers = {}
+LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)   # the C parser is 20x faster
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*.yaml"))):
+    text = open(path).read()
+    if "flock /data/.locks/" not in text:
+        continue
+    for doc in yaml.load_all(text, Loader=LOADER):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for c in doc["spec"]["template"]["spec"].get("containers", []):
+            cmd = c.get("command") or []
+            if c["name"] in ("group", "group-fs", "assign"):
+                expected = {"group": "group-orthanc", "group-fs": "group", "assign": "assign"}[c["name"]]
+                tree = "assigned" if expected == "assign" else "grouped"
+                argv = {"group-orthanc": ["collate", "orthanc"], "group": ["collate", "folder"], "assign": ["label", "xnat"]}[expected]
+                if cmd[:2] != ["/bin/sh", "-c"] or cmd[3:] != ["accessionflow"] + argv:
+                    raise SystemExit(f"{c['name']} is not wrapped: {cmd}")
+                if f"flock /data/.locks/{tree}.lock " not in cmd[2] or "--loop" in c.get("args", []):
+                    raise SystemExit(f"{c['name']} must lock each single pass: {cmd}")
+            if cmd[:2] == ["/bin/sh", "-c"] and cmd[3:4] == ["accessionflow"]:
+                wrappers.setdefault(cmd[2], f"{os.path.basename(path)[:-5]}:{c['name']}")
+# serialised (one lock), locked (.alive + one lock), locked with the outer lock
+shapes = {("flock -s 9" in s, s.count("flock /data/.locks/")) for s in wrappers}
+if not {(False, 1), (True, 1), (True, 2)} <= shapes:
+    raise SystemExit(f"expected the serialised, locked and nested-lock wrappers, found {sorted(shapes)}")
+
+DASH = shutil.which("dash")
+NS = ["unshare", "--user", "--map-root-user", "--pid", "--fork", "--kill-child"]
+try:
+    PID1 = subprocess.run(NS + ["true"], capture_output=True, timeout=10).returncode == 0
+except (OSError, subprocess.TimeoutExpired):
+    PID1 = False
+# A shell cannot trap a signal that was ignored when it started. unshare
+# (util-linux 2.37) starts its child with TERM and INT ignored. So set the
+# default actions, as the container runtime gives PID 1, then start dash.
+DEFAULT_SIGNALS = [sys.executable, "-c", "import os, signal, sys\n"
+                   "for s in (signal.SIGTERM, signal.SIGINT, signal.SIGPIPE, signal.SIGXFSZ):\n"
+                   "    signal.signal(s, signal.SIG_DFL)\n"
+                   "os.execv(sys.argv[1], sys.argv[1:])"]
+FAKE = """#!/bin/sh
+echo "start $(date +%s.%N)" >> "$PROOF_LOG"
+for l in $PROOF_LOCKS; do flock -n "$l" true && echo "free $l" >> "$PROOF_LOG"; done
+sleep "$PASS_SECONDS"
+echo "end $(date +%s.%N)" >> "$PROOF_LOG"
+exit "$PASS_STATUS"
+"""
+# name, pass seconds, pass status, signal, when to send it, expected status
+CASES = [
+    ("TERM in the sleep", 0, 0, signal.SIGTERM, "sleep", 143),
+    ("INT in the sleep", 0, 0, signal.SIGINT, "sleep", 130),
+    ("TERM in a pass", 2, 0, signal.SIGTERM, "pass", 0),
+    ("TERM in a failing pass", 1, 3, signal.SIGTERM, "pass", 3),
+    ("a failing pass", 0, 3, None, None, 3),
+]
+
+
+CHILDREN_FILE = os.path.exists(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+
+
+def children(pid):
+    """(pid, comm) of each child, as this /proc numbers them."""
+    if CHILDREN_FILE:
+        try:
+            kids = open(f"/proc/{pid}/task/{pid}/children").read().split()
+        except OSError:
+            return []
+    else:   # no CONFIG_PROC_CHILDREN: read the parent of each process
+        kids = []
+        for d in filter(str.isdigit, os.listdir("/proc")):
+            try:
+                stat = open(f"/proc/{d}/stat").read()
+            except OSError:
+                continue
+            if stat[stat.rindex(")") + 2:].split()[1] == str(pid):
+                kids.append(d)
+    found = []
+    for k in kids:
+        try:
+            found.append((int(k), open(f"/proc/{k}/comm").read().strip()))
+        except OSError:
+            pass
+    return found
+
+
+def until(pred, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return bool(pred())
+
+
+def shell_of(p):
+    """The pid of dash (after the exec): the child of unshare, or the process itself."""
+    end = time.time() + 5
+    while time.time() < end:
+        for pid, comm in children(p.pid) if PID1 else [(p.pid, "")]:
+            try:
+                comm = comm if comm == "dash" else open(f"/proc/{pid}/comm").read().strip()
+            except OSError:
+                continue
+            if comm == "dash":
+                return pid
+        time.sleep(0.02)
+    return None
+
+
+def stamps(log, word):
+    try:
+        return [float(l.split()[1]) for l in open(log) if l.startswith(word + " ")]
+    except OSError:
+        return []
+
+
+def run(script, case):
+    name, seconds, status, sig, when, want = case
+    with tempfile.TemporaryDirectory(prefix="stage-stop-") as tmp:
+        body = script.replace("/data/.locks", os.path.join(tmp, "locks"))
+        locks = re.findall(r"\S+\.lock", body)
+        log, fake = os.path.join(tmp, "log"), os.path.join(tmp, "accessionflow")
+        with open(fake, "w") as f:
+            f.write(FAKE)
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, PROOF_LOG=log, PROOF_LOCKS=" ".join(locks),
+                   PASS_SECONDS=str(seconds), PASS_STATUS=str(status))
+        p = subprocess.Popen((NS if PID1 else []) + DEFAULT_SIGNALS + [DASH, "-c", body, fake, "stage"],
+                             env=env, start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            shell = shell_of(p) if sig else None
+            if sig and not shell:
+                return f"{name}: no shell under unshare"
+            if when == "sleep":
+                # Send it in the sleep, not at the end of the pass.
+                if not until(lambda: any(c == "sleep" for _, c in children(shell)), 5):
+                    return f"{name}: the shell does not sleep after a pass"
+                time.sleep(0.3)
+            elif when == "pass":
+                if not until(lambda: stamps(log, "start"), 5):
+                    return f"{name}: no pass started"
+                time.sleep(0.3)
+            sent = time.time()
+            if sig:
+                try:
+                    os.kill(shell, sig)
+                except ProcessLookupError:
+                    return f"{name}: the shell stopped before the signal"
+            if not until(lambda: p.poll() is not None, seconds + 3):
+                return f"{name}: still runs {seconds + 3} s after the signal"
+            gone = time.time()
+            if p.returncode != want:
+                return f"{name}: status {p.returncode}, not {want}"
+            if len(stamps(log, "start")) != 1:
+                return f"{name}: {len(stamps(log, 'start'))} passes started, not 1"
+            if when == "pass":
+                ends = stamps(log, "end")
+                if not ends or gone < ends[0]:
+                    return f"{name}: the shell stopped before the pass ended"
+                if gone - ends[0] > 3:
+                    return f"{name}: the shell stopped {gone - ends[0]:.1f} s after the pass"
+            if any(l.startswith("free ") for l in open(log)):
+                return f"{name}: a pass ran without its lock"
+            for lock in locks:
+                if subprocess.run(["flock", "-n", lock, "true"]).returncode != 0:
+                    return f"{name}: {lock} is held after the shell stopped"
+            return round(gone - sent, 2) if when == "sleep" else None
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.wait()
+
+
+jobs = [(s, c) for s in wrappers for c in CASES]
+with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    results = list(pool.map(lambda j: run(*j), jobs))
+problems = [f"{wrappers[s]}: {r}" for (s, _), r in zip(jobs, results) if isinstance(r, str)]
+if problems:
+    raise SystemExit("; ".join(problems))
+slowest = max(r for r in results if isinstance(r, float))
+print(f"{len(wrappers)} wrappers x {len(CASES)} cases, "
+      + ("as PID 1 of a new PID namespace" if PID1 else "as a plain child (unshare cannot make a PID namespace here)")
+      + f": TERM and INT in the sleep stop it in {slowest} s or less; TERM in a pass stops it after the pass")
+PY_STOP
+  )" && ci_pass "stage wrapper signals: $stop_out" \
+     || ci_fail "stage wrapper signals: $stop_out"
+fi
+
 # Per-stage resource settings must reach their own application container.
+# The chart ships measured defaults (charts/edge/values.yaml). Helm deep-merges
+# maps, so a site setting changes only the keys it names, `null` on a key removes
+# that key, and `resources: null` removes them all. No default may set a CPU limit;
+# deidentify has no default memory limit (pydicom/deid#301, see the values comment).
 ci_heading "ingest stage resource settings"
-resource_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_RESOURCES'
+resource_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/values.yaml" 2>&1 <<'PY_RESOURCES'
 from pathlib import Path
-import sys, yaml
+import copy, sys, yaml
 
 root = Path(sys.argv[1])
-expected = {
-    "group": {"requests": {"cpu": "101m", "memory": "301Mi"},
-              "limits": {"cpu": "901m", "memory": "1301Mi"}},
-    "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"},
-                 "limits": {"cpu": "902m", "memory": "1302Mi"}},
-    "assign": {"requests": {"memory": "444Mi"}},
-    "deidentify": {"limits": {"cpu": "888m"}},
+ingest = yaml.safe_load(Path(sys.argv[2]).read_text())["ingest"]
+defaults = {"group": ingest["orthancGroup"]["resources"], "group-fs": ingest["fileDrop"]["resources"],
+            "assign": ingest["assign"]["resources"], "deidentify": ingest["deidentify"]["resources"]}
+for name, res in defaults.items():
+    assert isinstance(res, dict) and res, f"{name}: no default resources"
+    assert res.get("requests", {}).get("cpu") and res.get("requests", {}).get("memory"), f"{name}: default needs cpu and memory requests"
+    assert "cpu" not in res.get("limits", {}), f"{name}: default sets a CPU limit (throttles the stage)"
+    if name == "deidentify":
+        # deid 0.4.13 keeps every parsed file until the pass ends (pydicom/deid#301), so a
+        # fixed default would stop any larger session on every pass. Change this with the docs.
+        assert "memory" not in res.get("limits", {}), "deidentify: a default memory limit stops large sessions (deid#301)"
+    else:
+        assert res.get("limits", {}).get("memory"), f"{name}: default needs a memory limit"
+
+
+def merged(base, override):
+    """Helm's coalesce for these maps: the site key wins, null deletes the key."""
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if value is None:
+            out.pop(key, None)
+        elif isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merged(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+# The site settings in scripts/ci/values.sh for each case.
+site = {
+    "edge-stage-resources": {
+        "group": {"requests": {"cpu": "101m", "memory": "301Mi"}, "limits": {"cpu": "901m", "memory": "1301Mi"}},
+        "group-fs": {"requests": {"cpu": "102m", "memory": "302Mi"}, "limits": {"cpu": "902m", "memory": "1302Mi"}},
+        "assign": {"requests": {"memory": "444Mi"}},
+        "deidentify": {"limits": {"cpu": "888m"}},
+    },
+    "edge-stage-resources-keynull": {
+        "group": {"limits": {"memory": None}},
+        "assign": {"requests": None},
+    },
 }
 for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-resources-null",
-             "edge-assign-filedrop-only"):
+             "edge-stage-resources-keynull", "edge-assign-filedrop-only"):
     found = {}
     for doc in yaml.safe_load_all((root / f"{case}.yaml").read_text()):
         if not doc or doc.get("kind") != "Deployment":
             continue
         for container in doc["spec"]["template"]["spec"].get("containers", []):
             name = container["name"]
-            if name in expected:
+            if name in defaults:
                 if name in found:
                     raise SystemExit(f"{case}: duplicate stage container {name}")
                 found[name] = container.get("resources")
@@ -679,7 +1018,10 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init["image"] == container["image"], case
                     assert init["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init["command"] == ["mkdir", "-p", "/data/grouped"] and not init.get("args"), case
-                    assert init["volumeMounts"] == container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    assert init["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
+                    # The requeue tool (charts/edge/files/requeue-invalid.py), read-only.
+                    assert container["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"},
+                        {"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], case
                 if name == "deidentify":
                     init = doc["spec"]["template"]["spec"]["initContainers"]
                     assert len(init) == 1 and init[0]["name"] == "init-assigned-dir", case
@@ -687,19 +1029,59 @@ for case in ("edge-direct-ingest-reclaim", "edge-stage-resources", "edge-stage-r
                     assert init[0]["image"] == container["image"], case
                     assert init[0]["imagePullPolicy"] == container["imagePullPolicy"], case
                     assert init[0]["volumeMounts"] == [{"name": "pipeline", "mountPath": "/data"}], case
-    names = set(expected)
-    if case == "edge-direct-ingest-reclaim":
+    names = set(defaults)
+    if case in ("edge-direct-ingest-reclaim", "edge-stage-resources-keynull"):
         names.remove("group-fs")
     elif case == "edge-assign-filedrop-only":
         names.remove("group")
     if set(found) != names:
         raise SystemExit(f"{case}: expected stage containers {names}, got {set(found)}")
-    wanted = expected if case == "edge-stage-resources" else dict.fromkeys(names)
+    if case == "edge-stage-resources-null":
+        wanted = dict.fromkeys(names)
+    else:
+        wanted = {n: merged(defaults[n], site.get(case, {}).get(n, {})) for n in names}
     if found != wanted:
         raise SystemExit(f"{case}: expected resources {wanted}, got {found}")
-print("stage resources and assign initialization verified, including file-drop without Orthanc")
+print("stage defaults, site merge, key and map removal, and assign initialization verified, including file-drop without Orthanc")
 PY_RESOURCES
 )" && ci_pass "ingest resources: $resource_out" || ci_fail "ingest resources: $resource_out"
+
+# The requeue tool ships with the chart, so an operator needs only kubectl:
+# the ConfigMap holds the file byte for byte and the label pod mounts it.
+ci_heading "requeue tool in the label pod"
+requeue_out="$(python3 - "$CI_RENDER_DIR" "$REPO_ROOT/charts/edge/files/requeue-invalid.py" 2>&1 <<'PY_REQUEUE'
+from pathlib import Path
+import sys, yaml
+root, src = Path(sys.argv[1]), Path(sys.argv[2]).read_text().rstrip("\n")
+checked = 0
+for f in sorted(root.glob("edge-*.yaml")):
+    docs = [d for d in yaml.safe_load_all(f.read_text()) if d]
+    deps = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-assign")]
+    if not deps:
+        continue
+    cms = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
+    spec = deps[0]["spec"]["template"]["spec"]
+    vol = [v for v in spec["volumes"] if v["name"] == "requeue-tool"]
+    assert len(vol) == 1, (f.name, "no requeue-tool volume")
+    name = vol[0]["configMap"]["name"]
+    assert name in cms, (f.name, "ConfigMap missing", name)
+    assert cms[name]["data"]["requeue-invalid.py"] == src, (f.name, "the ConfigMap is not the file")
+    mounts = [m for m in spec["containers"][0]["volumeMounts"] if m["name"] == "requeue-tool"]
+    assert mounts == [{"name": "requeue-tool", "mountPath": "/opt/ais-edge", "readOnly": True}], (f.name, mounts)
+    checked += 1
+assert checked >= 3, f"only {checked} rendered edge cases have a label pod"
+print(f"{checked} edge renders: the label pod mounts the requeue tool read-only, identical to the file")
+PY_REQUEUE
+)" && ci_pass "requeue tool: $requeue_out" || ci_fail "requeue tool: $requeue_out"
+
+# Tier-1 has no edge join: install.sh installs the edge command on the node.
+ci_heading "install.sh installs ais-requeue"
+if grep -qF 'install -o root -g root -m 0755 "${SCRIPT_DIR}/scripts/files/ais-requeue" /usr/local/bin/ais-requeue' "$REPO_ROOT/install.sh" \
+   && [ -x "$REPO_ROOT/scripts/files/ais-requeue" ]; then
+    ci_pass "install.sh installs scripts/files/ais-requeue root-owned in /usr/local/bin"
+else
+    ci_fail "install.sh does not install scripts/files/ais-requeue (or the file is not executable)"
+fi
 
 ci_heading "upload input and temporary parent exist before startup"
 upload_startup_out="$(python3 - "$CI_RENDER_DIR" 2>&1 <<'PY_UPLOAD'
@@ -754,5 +1136,64 @@ subprocess.run(['sh', '-n', '-c', init['args'][0]], check=True)
 print('receiver endpoint, credentials, curl image and shell syntax checked')
 PY_GROUP
 )" && ci_pass "group startup: $group_startup_out" || ci_fail "group startup: $group_startup_out"
+
+ci_heading "Vector discovers short-lived pod logs"
+vector_poll_out="$(python3 - "$CI_RENDER_DIR" edge-observability-on edge-obsstack-on 2>&1 <<'PY_VECTOR_POLL'
+import sys, yaml
+from pathlib import Path
+for case in sys.argv[2:]:
+    sources = []
+    for doc in yaml.safe_load_all((Path(sys.argv[1]) / (case + ".yaml")).read_text()):
+        if not doc or doc.get("kind") != "ConfigMap":
+            continue
+        for name, body in doc.get("data", {}).items():
+            if name != "vector.yaml":
+                continue
+            config = yaml.safe_load(body)
+            sources.extend(s for s in config.get("sources", {}).values() if s.get("type") == "kubernetes_logs")
+    assert sources, f"{case}: no Kubernetes log source found"
+    assert all(s.get("glob_minimum_cooldown_ms") == 1000 for s in sources), case
+print("every rendered Kubernetes log source scans at a one-second interval")
+PY_VECTOR_POLL
+)" && ci_pass "$vector_poll_out" || ci_fail "$vector_poll_out"
+
+ci_heading "facility backup policy follows its mounted volume"
+if out="$(python3 - "$CI_RENDER_DIR" <<'PYBACKUP'
+import sys, pathlib, yaml
+for case, want in (("edge-datapolicy-on", True), ("edge-backup-off", False), ("edge-backup-policy-off", False)):
+    docs = [d for d in yaml.safe_load_all((pathlib.Path(sys.argv[1]) / (case + ".yaml")).read_text()) if d]
+    tables = [d["data"]["stages.tsv"] for d in docs if d.get("kind") == "ConfigMap" and "stages.tsv" in d.get("data", {})]
+    assert len(tables) == 1, (case, "missing policy table")
+    rows = {line.split("\t")[0] for line in tables[0].splitlines() if line.strip()}
+    for name in ("originals.facilityBackup", "originals.quarantine"):
+        assert (name in rows) == want, (case, name, "wrong policy row presence")
+    assert "derived.assigned" in rows, (case, "unrelated stage removed")
+print("backup on, volume off, and policy off rows match")
+PYBACKUP
+)"; then ci_pass "$out"; else ci_fail "$out"; fi
+
+# THE RE-IDENTIFICATION KEY reaches deidentify under the name the tool reads
+# (ACFLOW_REID_ENCRYPT_KEY), from the Secret key sites already have
+# (XINGEST_REID_ENCRYPT_KEY). A wrong name is silent: plain-text maps.
+if out="$(python3 - "$CI_RENDER_DIR/edge-deid-ingest-reid-key.yaml" 2>&1 <<'PY_REID'
+import sys, yaml
+for doc in yaml.safe_load_all(open(sys.argv[1])):
+    if not doc or doc.get("kind") != "Deployment":
+        continue
+    for c in doc["spec"]["template"]["spec"].get("containers", []):
+        if c["name"] != "deidentify":
+            continue
+        env = {e["name"]: e for e in c.get("env", [])}
+        e = env.get("ACFLOW_REID_ENCRYPT_KEY")
+        if not e:
+            raise SystemExit(f"deidentify has no ACFLOW_REID_ENCRYPT_KEY: {sorted(env)}")
+        ref = e.get("valueFrom", {}).get("secretKeyRef", {})
+        if (ref.get("name"), ref.get("key")) != ("reid-key", "XINGEST_REID_ENCRYPT_KEY"):
+            raise SystemExit(f"ACFLOW_REID_ENCRYPT_KEY reads {ref}, not reid-key / XINGEST_REID_ENCRYPT_KEY")
+        print("deidentify reads ACFLOW_REID_ENCRYPT_KEY from Secret reid-key, key XINGEST_REID_ENCRYPT_KEY")
+        raise SystemExit(0)
+raise SystemExit("no deidentify container in the render")
+PY_REID
+)"; then ci_pass "$out"; else ci_fail "reid key: $out"; fi
 
 ci_summary "runtime-templates"

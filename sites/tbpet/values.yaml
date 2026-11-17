@@ -69,7 +69,10 @@ orthanc:
   applyStableLabel: true
   expose:
     dicom: nodePort
-    http: nodePort
+    # Tier-1 refuses an unauthenticated REST API on a node port (it can delete
+    # studies). Reach the UI with:
+    #   kubectl -n ais-edge port-forward svc/edge-orthanc 8042:8042
+    http: ClusterIP
     nodePorts:
       dicom: 31014
       http: 30842

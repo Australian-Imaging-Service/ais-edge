@@ -99,6 +99,7 @@ esac
 
 case "$url" in
 */data/projects\?format=json*)
+    [ -f "$S/xnat-probe-status" ] && { emit '{}' "$(cat "$S/xnat-probe-status")"; exit 0; }
     [ -f "$S/xnat-auth.fail" ] && { emit '<html>401</html>' '401'; exit 0; }
     emit '{"ResultSet":{"Result":[]}}' '200'; exit 0 ;;
 

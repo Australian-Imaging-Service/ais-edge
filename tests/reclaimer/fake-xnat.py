@@ -73,10 +73,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.close()
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         parts = path.strip("/").split("/")
+        if self.command == "GET" and path == "/data/JSESSION":
+            return self.answer(200, (self.new_session or cookie).encode())
         if self.command == "GET" and parts[-1] == "experiments" and len(parts) == 6:
             code = fx.get("status", {}).get("experiments", 200)
             rows = fx.get("experiments", {}).get(f"{parts[2]}/{parts[4]}", [])
             return self.answer(code, json.dumps({"ResultSet": {"Result": rows}}).encode())
+        if self.command == "GET" and len(parts) == 3 and parts[:2] == ["data", "experiments"]:
+            exists = any(r.get("ID") == parts[2] for rows in fx.get("experiments", {}).values() for r in rows)
+            code = fx.get("status", {}).get("experiment", 200 if exists else 404)
+            return self.answer(code, json.dumps({"items": [{"data_fields": {"ID": parts[2]}}]}).encode())
         if self.command == "GET" and path.endswith("/scans/ALL/files"):
             code = fx.get("status", {}).get("files", 200)
             rows = fx.get("files", {}).get(parts[2], [])

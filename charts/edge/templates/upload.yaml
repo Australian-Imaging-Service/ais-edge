@@ -203,22 +203,23 @@ spec:
             {{- end }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+        {{- include "edge.extraPip.initContainer" (dict "root" $ "image" (printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag)) | nindent 8 }}
       containers:
         - name: upload
           image: "{{ .Values.ingest.image.repository }}:{{ .Values.ingest.image.tag }}"
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          # xnat-ingest loops internally via --loop; no bash wrapper needed.
-          command: ["xnat-ingest", "upload"]
+          # accessionflow loops internally via --loop; no bash wrapper needed.
+          command: ["accessionflow", "store", "xnat"]
           args:
             - {{ include "edge.uploadSourceDir" . | quote }}
-            - "$(XINGEST_HOST)"
+            - "$(ACFLOW_HOST)"
             - "--always-include"
             - {{ .Values.upload.direct.alwaysInclude | quote }}
             - "--loop"
             - {{ .Values.upload.direct.loop | quote }}
             - "--wait-period"
             - {{ .Values.upload.direct.waitPeriod | quote }}
-            # Pass the choice both ways. With neither flag, xnat-ingest's CLI
+            # Pass the choice both ways. With neither flag, the CLI
             # does not require a manifest (its option default is unset).
             {{- if .Values.upload.direct.requireManifest }}
             - "--require-manifest"
@@ -231,29 +232,32 @@ spec:
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- include "edge.proxyEnv" . | nindent 12 }}
-            - name: XINGEST_HOST
+            - name: ACFLOW_HOST
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: server
-            - name: XINGEST_USER
+            - name: ACFLOW_USER
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: username
-            - name: XINGEST_PASS
+            - name: ACFLOW_PASS
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.upload.direct.existingSecret }}
                   key: password
-            - name: XINGEST_TEMPDIR
+            - name: ACFLOW_TEMPDIR
               value: {{ .Values.upload.direct.tempDir | quote }}
+            {{- include "edge.extraPip.env" . | nindent 12 }}
           resources:
             {{- toYaml .Values.upload.direct.resources | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.extraPip.volumeMount" . | nindent 12 }}
             {{- include "edge.exportVolumeMount" . | nindent 12 }}
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.extraPip.volume" . | nindent 8 }}
         {{- include "edge.exportVolume" . | nindent 8 }}
 {{- end }}

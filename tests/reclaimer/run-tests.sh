@@ -399,21 +399,26 @@ U1="/data/experiments/EXP1/scans/1/resources/101/files/f1.dcm"
 U2="/data/experiments/EXP1/scans/1/resources/101/files/f2.dcm"
 
 # THE UPLOADER'S LABEL RULE COMES FROM THE PINNED IMAGE. reclaim-files.py loads
-# xnat_ingest/helpers/xnat_scan_types.py from the installed xnat-ingest. Here the
-# module is copied out of the image the chart runs, onto PYTHONPATH. Without
-# docker the filesystem cases are skipped, loudly; CI_REQUIRE_RECLAIMER_IMAGE=1
-# makes that a failure.
+# stores/xnat/scan_types.py from the installed accessionflow (before 0.18.0:
+# xnat_ingest/helpers/xnat_scan_types.py). Here the module is copied out of the
+# image the chart runs, onto PYTHONPATH, in the accessionflow layout (a
+# namespace package, so no __init__.py). Without docker the filesystem cases
+# are skipped, loudly; CI_REQUIRE_RECLAIMER_IMAGE=1 makes that a failure.
 FS_PYMOD="$WORK/pymod"; FS_SKIP=""
-rm -rf "$FS_PYMOD"; mkdir -p "$FS_PYMOD/xnat_ingest/helpers" "$WORK/broken-rule/xnat_ingest/helpers"
-: > "$FS_PYMOD/xnat_ingest/__init__.py"; : > "$FS_PYMOD/xnat_ingest/helpers/__init__.py"
-: > "$WORK/broken-rule/xnat_ingest/__init__.py"
-printf 'raise ImportError("no label rule here")\n' > "$WORK/broken-rule/xnat_ingest/helpers/xnat_scan_types.py"
+FS_RULE="$FS_PYMOD/accessionflow/stores/xnat/scan_types.py"
+rm -rf "$FS_PYMOD" "$WORK/broken-rule"
+mkdir -p "$(dirname "$FS_RULE")" "$WORK/broken-rule/accessionflow/stores/xnat"
+printf 'raise ImportError("no label rule here")\n' > "$WORK/broken-rule/accessionflow/stores/xnat/scan_types.py"
 FS_IMAGE="$(python3 -c "import yaml; i = yaml.safe_load(open('$REPO/charts/edge/values.yaml'))['ingest']['image']; print(i['repository'] + ':' + i['tag'])")"
 if ! docker run --rm --entrypoint python3 "$FS_IMAGE" -c 'import importlib.util, os
-s = importlib.util.find_spec("xnat_ingest")
-print(open(os.path.join(s.submodule_search_locations[0], "helpers", "xnat_scan_types.py")).read())' \
-        > "$FS_PYMOD/xnat_ingest/helpers/xnat_scan_types.py" 2>/dev/null \
-   || ! grep -q 'def xnat_resource_label_from_sop_class' "$FS_PYMOD/xnat_ingest/helpers/xnat_scan_types.py"; then
+for name, parts in (("accessionflow", ("stores", "xnat", "scan_types.py")),
+                    ("xnat_ingest", ("helpers", "xnat_scan_types.py"))):
+    s = importlib.util.find_spec(name)
+    for base in (s.submodule_search_locations or []) if s else []:
+        if os.path.isfile(os.path.join(base, *parts)):
+            print(open(os.path.join(base, *parts)).read()); raise SystemExit
+raise SystemExit(1)' > "$FS_RULE" 2>/dev/null \
+   || ! grep -q 'def xnat_resource_label_from_sop_class' "$FS_RULE"; then
     FS_SKIP="cannot copy the label rule out of $FS_IMAGE (docker)"
 fi
 
@@ -598,6 +603,9 @@ assert_fs_no_sop_key()    { reason "$1" unmapped_resource && kept_files "$2" "$S
 setup_fs_no_metadata()    { fs_session "$1" "$SESS" 2 1.scan secondary none; xnat_files subj EXP1 visit 2 100 1 secondary; }
 assert_fs_no_metadata()   { reason "$1" unmapped_resource && kept_files "$2" "$SESS/1.scan/secondary/f1.dcm"; }
 setup_fs_empty_sop()      { fs_session "$1" "$SESS" 2 1.scan DICOM empty; xnat_files subj EXP1 visit 2; }
+# A zipped series (the package stage's DICOM-zip): one archive, labelled by its
+# folder name like any non-DICOM resource, so it is proved and removed.
+setup_fs_dicom_zip()      { fs_session "$1" "$SESS" 1 1.scan DICOM-zip - medimage/dicom-series+zip; xnat_files subj EXP1 visit 1 100 1 DICOM-zip; }
 # A single DICOM image: its label comes from its header, so it is not mapped.
 setup_fs_dicom_image()    { fs_session "$1" "$SESS" 1 1.scan secondary - medimage/dicom-image; xnat_files subj EXP1 visit 1 100 1 secondary; }
 assert_fs_dicom_image()   { reason "$1" unmapped_resource && kept_files "$2" "$SESS/1.scan/secondary/f1.dcm"; }
@@ -705,6 +713,12 @@ assert_fs_one_xnat_session() {
         || { echo "want 1 session opened and closed, got: $(tr '\n' ' ' < "$log")"; return 1; }
     ! grep -q '"event":"xnat_session_close_failed"' "$1" || { echo "the logout failed"; return 1; }
 }
+# A redirect must retain the data and name the URL correction.
+setup_fs_xnat_redirect() {
+    fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2
+    printf '301' > "$CASE_DIR/xnat-probe-status"
+}
+assert_fs_xnat_redirect() { grep '"event":"reclaim_unavailable"' "$1" | grep -q '"reason":"xnat_probe_failed"' && kept_files "$2" "$R/f1.dcm" "$R/f2.dcm" && grep -q 'final HTTPS URL' "$1"; }
 # The login fails: the run still decides, with a login per request, and says so.
 setup_fs_session_fallback() { fs_session "$1" "$SESS" 2; xnat_files subj EXP1 visit 2; : > "$CASE_DIR/xnat-jsession.fail"; }
 assert_fs_session_fallback() { grep -q '"event":"xnat_session_fallback"' "$1" || { echo "no xnat_session_fallback event"; return 1; }; }
@@ -742,6 +756,7 @@ run_fs_case fs_both_labels             yes reclaim_removed
 run_fs_case fs_no_sop_key              no  reclaim_kept
 run_fs_case fs_no_metadata             no  reclaim_kept
 run_fs_case fs_empty_sop               yes reclaim_removed
+run_fs_case fs_dicom_zip               yes reclaim_removed
 run_fs_case fs_dicom_image             no  reclaim_kept
 run_fs_case fs_unknown_dicom_type      no  reclaim_kept
 run_fs_case fs_no_label_rule           no  reclaim_kept       PYTHONPATH="$WORK/broken-rule"
@@ -766,6 +781,7 @@ run_fs_case fs_lock_paths_unset        no  reclaim_unavailable WRITER_LOCK=
 run_fs_case fs_dry_run                 no  reclaim_skipped    DRY_RUN=true
 run_fs_case fs_build_dir_ignored       yes reclaim_removed
 run_fs_case fs_one_xnat_session        yes reclaim_removed
+run_fs_case fs_xnat_redirect           no  reclaim_unavailable
 run_fs_case fs_session_fallback        yes reclaim_removed
 run_fs_case fs_xnat_tls_verified       yes reclaim_removed      XNAT_VERIFY_SSL=true
 run_fs_case fs_session_close_failed    yes reclaim_removed
@@ -913,4 +929,6 @@ if [ "$FAIL" -gt 0 ]; then
     printf '  - %s\n' "${FAILED[@]}"
     exit 1
 fi
+# Shared-connection controls exercise fresh per-session reads and auth expiry.
+python3 "$HERE/test-batch.py" || exit 1
 exit 0

@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{/* ===================================================================== */}}
 {{/* Naming                                                                */}}
 {{/* ===================================================================== */}}
@@ -59,6 +60,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- end }}
   {{- if and (or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled) (not .Values.orthanc.deid.existingSaltSecret) }}
       {{- fail "orthanc.deid.existingSaltSecret is empty: the subject/session pseudonym hashes need a salt." }}
+  {{- end }}
+
+  {{- /* THE REST API GETS A NODE PORT ONLY ON PURPOSE. <release>-orthanc is
+         always ClusterIP; orthanc.expose.http: nodePort adds a Service with the
+         HTTP port only. Any other word used to fall back to ClusterIP with no
+         message, so a typo looked like a working setting. With login off, a
+         node port gives anyone who reaches the node the API, and the API can
+         delete studies. */ -}}
+  {{- if not (has .Values.orthanc.expose.http (list "ClusterIP" "nodePort")) }}
+      {{- fail (printf "orthanc.expose.http must be ClusterIP or nodePort, got %q." .Values.orthanc.expose.http) }}
+  {{- end }}
+  {{- if and (eq .Values.orthanc.expose.http "nodePort") (not .Values.orthanc.auth.enabled) }}
+      {{- fail "orthanc.expose.http=nodePort with orthanc.auth.enabled=false puts the Orthanc REST API on a node port with no login, and the API can delete studies. Turn orthanc.auth.enabled on, or keep orthanc.expose.http ClusterIP." }}
   {{- end }}
 
   {{- /* THE FACILITY BACKUP IS REQUIRED UNDER BOTH ENGINES, and it used to be
@@ -178,7 +192,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          than in the helper so the message names the key and the alternatives. */ -}}
   {{- $engine := include "edge.deidEngine" . }}
   {{- if not (has $engine (list "orthanc" "ingest" "none")) }}
-    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the xnat-ingest deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires deid.policyReviewed=true." $engine) }}
+    {{- fail (printf "deid.engine must be one of orthanc, ingest or none, got %q. orthanc runs the Lua hook at the front door; ingest runs the accessionflow deidentify stage between assign and upload; none is for sites whose modalities de-identify upstream and requires deid.policyReviewed=true." $engine) }}
   {{- end }}
   {{- /* `eq $engine "none"`, NOT "neither of the two I know". The broad form
          meant a TYPO satisfied it: deid.engine=ingset failed with a message
@@ -199,15 +213,15 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          CreateContainerConfigError on an edge nobody is watching. */ -}}
   {{- /* specFiles is what puts the '@' and the per-project directory on disk. A
        ConfigMap key cannot contain '@' and a ConfigMap mounts flat, so without
-       the mapping the recipes land as bare keys in one directory, xnat-ingest
+       the mapping the recipes land as bare keys in one directory, accessionflow
        matches none of them, and every session is skipped as "no applicable
        spec" — logged, but easy to read as "nothing to do". */ -}}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specConfigMap (not .Values.ingest.deidentify.specFiles) }}
-  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap mounts its keys flat in one directory, but xnat-ingest's load_specs walks <spec-dir>/<category>/<format> and SKIPS anything at the top level that is not a directory, so flat keys match nothing and every session fails with 'No deidentification specs found'. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series: \"__default__/medimage/dicom-series\"}." }}
+  {{- fail "ingest.deidentify.specConfigMap is set but ingest.deidentify.specFiles is empty. A ConfigMap mounts its keys flat in one directory, but accessionflow's load_recipe_files walks <spec-dir>/<category>/<format> and SKIPS anything at the top level that is not a directory, so flat keys match nothing and every session fails with 'No deidentification recipe files found'. Map each key to the path it must appear at, e.g. specFiles: {default-dicom-series: \"__default__/medimage/dicom-series\"}." }}
 {{- end }}
 
 {{- if and (eq (include "edge.deidEngine" .) "ingest") (not .Values.ingest.deidentify.specs) (not .Values.ingest.deidentify.specConfigMap) }}
-    {{- fail "deid.engine=ingest but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under SPEC_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
+    {{- fail "deid.engine=ingest but no recipes are configured. Set ingest.deidentify.specs in the site file (key = path under RECIPE_DIR, value = the pydicom deid recipe) and the chart builds and mounts the ConfigMap for you — see charts/edge/files/deid-specs.example/. To manage the ConfigMap yourself instead, set ingest.deidentify.specConfigMap and specFiles. With neither, the volume renders with no source and the pod sits in CreateContainerConfigError on the edge." }}
   {{- end }}
 
   {{- /* THE MIRROR OF THE GUARD ABOVE, and the one that was missing. Recipes
@@ -233,7 +247,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
   {{- if .Values.ingest.deidentify.specConfigMap }}{{- $supplied = append $supplied "specConfigMap" }}{{- end }}
   {{- if .Values.ingest.deidentify.specFiles }}{{- $supplied = append $supplied "specFiles" }}{{- end }}
   {{- if $supplied }}
-    {{- fail (printf "ingest.deidentify.%s is set, but deid.engine=%s. Those recipes belong to the xnat-ingest de-identification stage, which only renders under deid.engine=ingest, so nothing would mount them and no deidentify pod would exist: the chart would install cleanly and your recipe would never run. De-identification would still happen, via the Orthanc Lua profile in orthanc.deid.profile, which is a DIFFERENT recipe. Either set deid.engine=ingest to use what you have written here, or edit orthanc.deid.profile instead, which is what the selected engine reads." (join ", ingest.deidentify." $supplied) (include "edge.deidEngine" .)) }}
+    {{- fail (printf "ingest.deidentify.%s is set, but deid.engine=%s. Those recipes belong to the accessionflow de-identification stage, which only renders under deid.engine=ingest, so nothing would mount them and no deidentify pod would exist: the chart would install cleanly and your recipe would never run. De-identification would still happen, via the Orthanc Lua profile in orthanc.deid.profile, which is a DIFFERENT recipe. Either set deid.engine=ingest to use what you have written here, or edit orthanc.deid.profile instead, which is what the selected engine reads." (join ", ingest.deidentify." $supplied) (include "edge.deidEngine" .)) }}
   {{- end }}
 {{- end }}
 
@@ -266,22 +280,21 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
     {{- if not .Values.orthanc.deid.profile }}
       {{- fail "orthanc.deid.profile is empty: Orthanc /modify would be given nothing to change, so studies would reach XNAT with PHI intact and nothing would look wrong. Start from charts/edge/files/deidentification-profile.example.json and set it to this site's policy." }}
     {{- end }}
-        {{- /* group-orthanc IMPLEMENTS only one copy mode: xnat-ingest raises
-               outright. api/group_api.py:261 refuses any copy_mode other than
+        {{- /* group-orthanc IMPLEMENTS only one copy mode: accessionflow raises
+               outright. api/collate_api.py:263-269 refuses any copy_mode other than
                hardlink_or_copy for the Orthanc path:
 
                  NotImplementedError: 'unlink_source', copy_mode' and 'raise_errors'
-                 are not yet implemented for Orthanc grouping.
+                 are not yet implemented for Orthanc collation.
 
                It is a RUNTIME raise, so the pod renders, schedules, starts and then
                CrashLoops with a message that does not name the setting that caused
-               it. RE-VERIFIED against the pinned 0.16.2 (api/group_api.py:268, the file is
-               unchanged since 0.16.1); the
-               same raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
+               it. RE-VERIFIED against accessionflow 0.20.0 (sources/orthanc/api/collate_api.py:72-78).
+               The same historical raise is in 0.13.1 and 0.15.6, so this is a long-standing footgun rather than a version
                regression. The other stages do accept the full range, which is
                what makes this key look safe to change. */ -}}
         {{- if and (eq (include "edge.deidEngine" .) "orthanc") (ne .Values.ingest.orthancGroup.copyMode "hardlink_or_copy") }}
-          {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. xnat-ingest's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
+          {{- fail (printf "ingest.orthancGroup.copyMode=%s is not supported. accessionflow's Orthanc grouping accepts ONLY hardlink_or_copy and raises NotImplementedError for anything else, at run time, so the group-orthanc pod would CrashLoop with a message that does not name this setting. Set it back to hardlink_or_copy. The other stages (fileDrop, assign, deidentify, associate) do accept the full range." .Values.ingest.orthancGroup.copyMode) }}
         {{- end }}
 
         {{- /* PREREQUISITES FOR orthanc.auth.enabled=true, ASSERTED AT RENDER.
@@ -325,10 +338,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          to agree with each other and with the label and the tag mapping. Setting
          them now does nothing, so they must fail rather than be ignored. */ -}}
   {{- if hasKey .Values.orthanc.deid "enabled" }}
-    {{- fail "orthanc.deid.enabled has been replaced by the single key deid.engine. Set deid.engine=orthanc for the Lua hook, or deid.engine=ingest for the xnat-ingest stage; the chart derives the hook, the stage, the group label and the reclaim condition from it, which is what stops them disagreeing." }}
+    {{- fail "orthanc.deid.enabled has been replaced by the single key deid.engine. Set deid.engine=orthanc for the Lua hook, or deid.engine=ingest for the accessionflow stage; the chart derives the hook, the stage, the group label and the reclaim condition from it, which is what stops them disagreeing." }}
   {{- end }}
   {{- if hasKey .Values.ingest.deidentify "enabled" }}
-    {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the xnat-ingest de-identification stage." }}
+    {{- fail "ingest.deidentify.enabled has been replaced by the single key deid.engine. Set deid.engine=ingest to run the accessionflow de-identification stage." }}
+  {{- end }}
+
+  {{- /* THE ATTACH STAGE IS NOT SUPPORTED YET. accessionflow attach takes
+         INPUT_DIR OUTPUT_DIR DATATYPE GLOB ID_PATTERN; this chart has no value
+         for where the raw files are, how to match them to a session, or where
+         the output goes, so the stage has never run correctly. Refused until
+         a site needs it and the stage is built properly. */}}
+  {{- if .Values.ingest.associate.enabled }}
+    {{- fail "ingest.associate.enabled is not supported yet: the accessionflow attach stage needs inputs this chart does not provide (where the raw files are, how to match them to a session, where its output goes). Leave it false." }}
   {{- end }}
 
   {{- /* THE SECOND THING THE LUA HOOK SUPPLIES, and the one that is easy to
@@ -431,9 +453,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          forever. */ -}}
   {{- $luaHookLoads := or (eq (include "edge.deidEngine" .) "orthanc") .Values.storage.facilityBackup.enabled }}
   {{- if and .Values.ingest.orthancGroup.enabled (not $luaHookLoads) }}
-    {{- if and .Values.ingest.orthancGroup.toProcessLabel (not .Values.orthanc.applyStableLabel) }}
-      {{- fail "ingest.orthancGroup.toProcessLabel is set but Nothing applies that label: deid.engine is not orthanc, storage.facilityBackup is disabled (so the Lua hook does not load), and orthanc.applyStableLabel is false. group-orthanc would filter out every study. Enable the optional stable-label hook or clear the filter." }}
-    {{- end }}
     {{- if and .Values.orthanc.applyStableLabel (not .Values.ingest.orthancGroup.toProcessLabel) }}
       {{- fail "orthanc.applyStableLabel=true requires ingest.orthancGroup.toProcessLabel." }}
     {{- end }}
@@ -484,6 +503,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          script were written for upload.mode=direct and landed on the branch
          whose default mode is s3, so THIS branch - the one that only ever runs
          direct - was the one left without them. */ -}}
+  {{- /* THE PACKAGE STAGE MOVES THE TERMINAL TREE to /data/packaged, so the
+         deidentified tree becomes an intermediate one, exactly as assigned
+         did under the ingest engine. Its consumer is the package stage, which
+         retires each session with --unlink-source once the packaged copy is
+         written; onUploaded can never be satisfied for it. */ -}}
+  {{- if eq (include "edge.packageEnabled" .) "true" }}
+    {{- if eq (include "edge.deidentifiedReclaim" .) "onUploaded" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onUploaded with ingest.package enabled. The uploader then reads /data/packaged, so the markers it writes describe THAT tree and onUploaded can never be satisfied for /data/deidentified: every de-identified session would accumulate on the edge disk. Use onPackaged (or auto), which lets the package stage retire each session as soon as it has written the packaged copy, or never if you intend to keep them." }}
+    {{- end }}
+  {{- end }}
+  {{- if eq (include "edge.deidentifiedReclaim" .) "onPackaged" }}
+    {{- if ne (include "edge.packageEnabled" .) "true" }}
+      {{- fail "dataPolicy.derived.deidentified.reclaim=onPackaged but the package stage does not render (it needs ingest.package.enabled=true and deid.engine=ingest). That condition is satisfied by the package STAGE unlinking its own input, so nothing would ever retire /data/deidentified. Use auto." }}
+    {{- end }}
+    {{- $minAge := include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}
+    {{- if and (ne $minAge "-") (gt (int64 $minAge) 0) }}
+      {{- fail (printf "dataPolicy.derived.deidentified.minAge=%v is set alongside reclaim=onPackaged. The package stage deletes each session the moment it has written the packaged copy, so a recovery window on this tree can never elapse. Set minAge to 0, or set dataPolicy.derived.packaged.minAge for a window after upload." .Values.dataPolicy.derived.deidentified.minAge) }}
+    {{- end }}
+  {{- end }}
+
   {{- if eq .Values.upload.mode "direct" }}
     {{- $terminal := include "edge.uploadSourceDir" . }}
     {{- /* DELIBERATELY NOT `assigned` AS WELL when it is the terminal tree: the
@@ -512,7 +551,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          tree the uploader reads. The engine now keeps in both cases, which
          would leave the stage growing while the policy read as if it were
          being cleaned; refusing here makes the mistake an install error. */ -}}
-  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded" "onPackaged") "packaged" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
   {{- range $stage, $allowed := $reclaimWords }}
     {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
     {{- if not (has $w $allowed) }}
@@ -698,6 +737,9 @@ affinity:
 {{/* Structured logging. The alert rules and dashboards parse these fields
      directly, so this is a functional setting, not a formatting one. */}}
 {{- define "edge.logEnv" -}}
+# GUIDING: progress bars obscure the stage logs in unattended containers.
+- name: TQDM_DISABLE
+  value: "1"
 - name: AIS_LOG_FORMAT
   value: {{ .Values.ingest.logFormat | quote }}
 {{- end }}
@@ -895,8 +937,16 @@ keep a tree it would otherwise retire.
 {{- define "edge.deidentifiedReclaim" -}}
 {{- $v := .Values.dataPolicy.derived.deidentified.reclaim -}}
 {{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.packageEnabled" .) "true" }}onPackaged
 {{- else if eq (include "edge.deidEngine" .) "ingest" }}onUploaded
 {{- else }}never{{ end }}
+{{- end }}
+
+{{- /* /data/packaged is only ever the terminal tree, so onUploaded is the
+       only word that retires it. */ -}}
+{{- define "edge.packagedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.packaged.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}{{- else }}onUploaded{{ end }}
 {{- end }}
 
 {{/*
@@ -929,9 +979,9 @@ the two cannot drift and the alert can never name a directory nothing writes to.
        because its storage is UUID-named — a directory walk cannot tell which
        files belong to which session — and putting that knowledge inline would
        undo the independence that lets the de-identifier be replaced. */ -}}
-{{- if .Values.dataPolicy.originals.facilityBackup.enabled }}
-originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
-originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
+{{- if and .Values.storage.facilityBackup.enabled .Values.dataPolicy.originals.facilityBackup.enabled }}
+originals.facilityBackup	original	{{ .Values.dataPolicy.originals.facilityBackup.location }}	{{ .Values.dataPolicy.originals.facilityBackup.minFreeDiskPercent | default "-" }}	-	{{ .Values.dataPolicy.originals.facilityBackup.retain | toString | trim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.facilityBackup.retain }}	filesystem
+originals.quarantine	original	{{ printf "%s/%s" (trimSuffix "/" .Values.dataPolicy.originals.facilityBackup.location) .Values.dataPolicy.originals.quarantine.subPath }}	-	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.alertAfter }}	{{ .Values.dataPolicy.originals.quarantine.retain | toString | trim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.quarantine.retain }}	filesystem
 {{- end }}
 {{- if .Values.ingest.fileDrop.enabled }}
 originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}	-	-	{{ .Values.dataPolicy.originals.fileDrop.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.originals.fileDrop.minAge }}	filesystem
@@ -940,7 +990,10 @@ derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.loca
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
 derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
-derived.deidentified	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+derived.deidentified	derived	/data/deidentified	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+derived.packaged	derived	{{ include "edge.uploadSourceDir" . }}	-	-	{{ include "edge.packagedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.packaged.minAge }}	filesystem
 {{- end }}
 {{- end }}
 
@@ -960,7 +1013,7 @@ ever reclaimed, and the only symptom is staging that quietly stops draining.
 {{/*
 The directory upload reads from.
 
-assign writes /data/assigned. When the xnat-ingest deidentify stage is on it
+assign writes /data/assigned. When the accessionflow deidentify stage is on it
 sits between the two, reading /data/assigned and writing /data/deidentified,
 so upload has to follow it — otherwise it would keep uploading the
 pre-deidentification copy and the stage would be silently pointless.
@@ -1017,8 +1070,17 @@ with a message rather than silently selecting neither engine.
 {{- eq (include "edge.deidEngine" .) "ingest" -}}
 {{- end }}
 
+{{- /* The package stage renders only under the ingest engine, because its
+       input is the deidentify stage's output. ingest.package.enabled under any
+       other engine is ignored rather than refused: it defaults to true, and a
+       site on the Orthanc engine has nothing to package. */ -}}
+{{- define "edge.packageEnabled" -}}
+{{- and .Values.ingest.package.enabled (eq (include "edge.deidEngine" .) "ingest") -}}
+{{- end }}
+
 {{- define "edge.uploadSourceDir" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}/data/packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
 {{- end }}
 
 {{- /*
@@ -1040,7 +1102,59 @@ every site is configured, both branches resolve to the assigned key exactly as
 before.
 */}}
 {{- define "edge.uploadReclaim" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}{{ include "edge.packagedReclaim" . }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- end }}
+
+{{- /*
+SITE-SPECIFIC PYTHON PACKAGES (ingest.extraPipPackages), for every pod that
+loads staged sessions whose manifests can name a type the image does not ship.
+An init container pip-installs them into an emptyDir that the main container
+reads via PYTHONPATH; fileformats is a namespace package, so they merge with the
+image's own copy.
+
+The init container MUST run the same image as the container it serves: pip
+installs for the running Python, so the pod passes its own image in.
+  include "edge.extraPip.initContainers" (dict "root" $ "image" $image)
+*/ -}}
+{{- /* One init container, as a list item: the caller writes `initContainers:`
+     and may put other items beside it (upload.yaml creates its directories first). */ -}}
+{{- define "edge.extraPip.initContainer" -}}
+{{- with .root.Values.ingest.extraPipPackages }}
+- name: pip-install
+  image: {{ $.image }}
+  imagePullPolicy: {{ $.root.Values.ingest.image.pullPolicy }}
+  command: ["pip", "install", "--no-deps", "--no-cache-dir", "--disable-pip-version-check", "--target", "/opt/site-packages"]
+  args:
+    {{- range . }}
+    - {{ . | quote }}
+    {{- end }}
+  volumeMounts:
+    - name: site-packages
+      mountPath: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.env" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: PYTHONPATH
+  value: /opt/site-packages
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volumeMount" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  mountPath: /opt/site-packages
+  readOnly: true
+{{- end }}
+{{- end }}
+
+{{- define "edge.extraPip.volume" -}}
+{{- if .Values.ingest.extraPipPackages }}
+- name: site-packages
+  emptyDir: {}
+{{- end }}
 {{- end }}
 
 {{- /* The terminal tree as a dataPolicy.derived key: the tree the uploader
@@ -1049,7 +1163,8 @@ before.
      CronJob waits for (TREE_MIN_AGE) both come from here, so they cannot name
      different trees. */}}
 {{- define "edge.uploadTreeKey" -}}
-{{- if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}packaged
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
 {{- end }}
 
 {{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
@@ -1067,7 +1182,7 @@ before.
      whole life. The deleter deletes only while it cannot take it: then a wrapped
      writer runs now, and Recreate means no older writer without the lock runs.
      CAUTION: this guards an upgrade, not a rollback to a writer without the lock
-     (see docs/components/xnat-ingest.md). */}}
+     (see docs/components/accessionflow.md). */}}
 {{- define "edge.uploadTreeAlive" -}}
 /data/.locks/{{ include "edge.uploadTreeKey" . }}.alive
 {{- end }}
@@ -1081,10 +1196,80 @@ before.
      and any child it leaves keep the lock until they stop.
      A pass that fails stops the container, as an exception out of --loop did.
      fd 9 holds the shared lock on edge.uploadTreeAlive for the container's life. */}}
-{{- define "edge.lockedStage" -}}
+{{- /* A stage that writes an INTERMEDIATE tree the upload-tree writer reads and
+     retires (deidentify when the package stage is on). Same one-pass-per-lock
+     loop as edge.lockedStage, on the same lock, without the .alive handle: its
+     passes never overlap a package pass, so nothing changes under the package
+     stage while it reads and unlinks a session. */}}
+{{- /* The stage takes turns on ITS OWN tree lock (deidentified.lock for
+     deidentify), the same lock it holds as the writer when the package stage is
+     off. The upload-tree writer (edge.lockedStage with a fourth argument) takes
+     that lock too, for each of its passes, before the upload-tree lock. A lock
+     is held for a whole pass and released by the kernel when the pod stops, so
+     a pass of one stage never runs beside a pass of the other: not in steady
+     state, and not during the upgrade that turns the package stage on or off
+     or rolls it back, when an old pod of either stage may still be finishing a
+     pass. No marker file, nothing that can go stale. */}}
+{{- /* STOP SIGNALS, for both wrappers (edge.serialisedStage, edge.lockedStage).
+     The shell is PID 1 of its container, and the kubelet sends SIGTERM to
+     PID 1 only. PID 1 has no default action for a signal. Without a trap, the
+     SIGTERM had no effect: each stop waited for SIGKILL at the end of the
+     grace period (30 s), and a pass could start after the SIGTERM.
+     GUIDING: `trap exit TERM INT` stops the loop at the next command boundary.
+     In the sleep, that is at once: the sleep runs in the background, and
+     `wait` returns when the signal comes. In a pass, that is when the pass
+     ends: the shell runs no trap while a foreground command runs. The pass
+     gets no signal, so it does not stop during a write, and its exit releases
+     its lock as before. No pass starts from the sleep after the signal.
+     GUIDING: `exit` in a trap keeps the status of the command before the
+     trap: 128 + the signal number after the sleep, the pass status after a
+     pass. A pass that fails still stops the container with its status.
+     CAUTION: a pass that is longer than the grace period still gets SIGKILL.
+     A signal that comes while a pass waits for its lock has effect only after
+     that pass.
+     CAUTION: a child that a pass leaves running is stopped when the shell
+     exits after the pass (PID 1 exits, so the kernel stops the namespace).
+     CAUTION: keep `sleep N & wait $!`. A sleep in the foreground holds the
+     trap until the sleep ends.
+     scripts/ci/runtime-templates.sh runs the rendered wrappers with dash and
+     sends these signals. */}}
+{{- /* The accessionflow command words of a pipeline stage. The keys are the
+     stage names that the lock trees and pod names use; they did not change when
+     xnat-ingest became accessionflow (0.18.0). A stage without an entry runs
+     under its own name, and CI cli-contract fails when the image has no such
+     command (a values file cannot reach this, so it is no render guard). */}}
+{{- define "edge.stageCommand" -}}
+{{- $argv := dict "group" (list "collate" "folder") "group-orthanc" (list "collate" "orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
+- accessionflow
+{{- range (index $argv . | default (list .)) }}
+- {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{- define "edge.serialisedStage" -}}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
-- {{ printf "mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do flock %s \"$0\" \"$@\" || exit; sleep %v; done" (include "edge.uploadTreeAlive" (index . 0)) (include "edge.uploadTreeLock" (index . 0)) (index . 2) | quote }}
-- xnat-ingest
-- {{ index . 1 | quote }}
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
+{{- include "edge.stageCommand" (index . 1) }}
+{{- end }}
+
+{{- /* (list $ "<stage>" <interval> ["<stage whose tree this one reads>"]). With
+     the fourth argument each pass first takes that stage's own tree lock, then
+     the upload-tree lock: the package stage reads /data/deidentified, so it
+     takes deidentified.lock (which deidentify holds for each of its passes in
+     either mode) and then packaged.lock (which the staged reclaimer fences
+     on). deidentify never takes packaged.lock and the reclaimer never takes
+     deidentified.lock, so the nested order cannot deadlock. */}}
+{{- define "edge.lockedStage" -}}
+{{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $outer := "" }}
+{{- if gt (len .) 3 }}
+{{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}
+{{- end }}
+- /bin/sh
+- -c
+- {{ printf "trap exit TERM INT; mkdir -p /data/.locks && exec 9>>%s && flock -s 9 && while :; do %sflock %s \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (include "edge.uploadTreeAlive" $root) $outer (include "edge.uploadTreeLock" $root) $interval | quote }}
+{{- include "edge.stageCommand" $stage }}
 {{- end }}

@@ -180,6 +180,12 @@ spec:
             claimName: {{ include "edge.facilityBackupPvc" . }}
         {{- end }}
 ---
+# The in-cluster address of Orthanc. ALWAYS ClusterIP, with both ports.
+# collate orthanc, the data policy and `kubectl port-forward` use this name.
+# Outside access is in the separate NodePort Services below. A Service type
+# applies to EVERY port in the Service: when this Service was NodePort for
+# DICOM, Kubernetes also gave the REST API (which can delete studies) a node
+# port that it picked itself.
 apiVersion: v1
 kind: Service
 metadata:
@@ -189,11 +195,7 @@ metadata:
     {{- include "edge.labels" . | nindent 4 }}
     app: orthanc
 spec:
-  {{- if or (has .Values.orthanc.expose.dicom (list "nodePort" "both")) (eq .Values.orthanc.expose.http "nodePort") }}
-  type: NodePort
-  {{- else }}
   type: ClusterIP
-  {{- end }}
   selector:
     app: orthanc
     component: dicom-receiver
@@ -202,16 +204,61 @@ spec:
       port: {{ .Values.orthanc.dicomPort }}
       targetPort: dicom
       protocol: TCP
-      {{- if has .Values.orthanc.expose.dicom (list "nodePort" "both") }}
-      nodePort: {{ .Values.orthanc.expose.nodePorts.dicom }}
-      {{- end }}
     - name: http
       port: {{ .Values.orthanc.httpPort }}
       targetPort: http
       protocol: TCP
-      {{- if eq .Values.orthanc.expose.http "nodePort" }}
+{{- if has .Values.orthanc.expose.dicom (list "nodePort" "both") }}
+---
+# DICOM from outside the cluster on a node port. This Service has ONLY the
+# DICOM port, so the REST API cannot get a node port through it.
+# CAUTION, rollback: a release before this Service gives the same node port
+# to <release>-orthanc. Delete this Service first, or the rollback fails with
+# "provided port is already allocated".
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "edge.fullname" . }}-orthanc-dicom
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: orthanc
+spec:
+  type: NodePort
+  selector:
+    app: orthanc
+    component: dicom-receiver
+  ports:
+    - name: dicom
+      port: {{ .Values.orthanc.dicomPort }}
+      targetPort: dicom
+      protocol: TCP
+      nodePort: {{ .Values.orthanc.expose.nodePorts.dicom }}
+{{- end }}
+{{- if eq .Values.orthanc.expose.http "nodePort" }}
+---
+# The REST API from outside the cluster, ONLY when orthanc.expose.http is
+# nodePort. The chart refuses that with orthanc.auth.enabled false.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "edge.fullname" . }}-orthanc-http
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: orthanc
+spec:
+  type: NodePort
+  selector:
+    app: orthanc
+    component: dicom-receiver
+  ports:
+    - name: http
+      port: {{ .Values.orthanc.httpPort }}
+      targetPort: http
+      protocol: TCP
       nodePort: {{ .Values.orthanc.expose.nodePorts.http }}
-      {{- end }}
+{{- end }}
 {{- if .Values.serviceAccounts.create }}
 ---
 apiVersion: v1

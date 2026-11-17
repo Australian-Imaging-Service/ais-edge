@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # reclaim-files.py: the filesystem backend of reclaim-staged.sh (tier-1).
 # =============================================================================
-# reclaim-staged.sh calls this once per session name. It deletes a resource only
+# reclaim-staged.sh calls --batch once per run; direct session calls remain supported. It deletes a resource only
 # when XNAT holds each file of it with the same size, and only the files it proved.
 # Exit: 0 removed something, 10 kept, 11 skipped (too young or dry run).
 # Any other exit is an error; the caller logs reclaim_failed.
@@ -10,13 +11,15 @@
 # PROOF, per file: the ONE row of the experiment's file listing in the resource the
 # uploader maps this folder to, with the same path in it. Then HEAD its URI: only
 # 200 with a Content-Length equal to the local size passes. The mapping is the
-# uploader's (xnat-ingest 0.16 get_xnat_resource): the same scan id; for a DICOM
+# uploader's (accessionflow 0.19 stores/xnat/remotes.py, get_xnat_resource): the same scan id; for a DICOM
 # series, the ONE label that xnat_resource_label_from_sop_class gives for the SOP
 # classes in the resource's __METADATA__.json (loaded from the installed
-# xnat-ingest, so it is the pinned rule); for a non-DICOM folder, its name. All
+# accessionflow, so it is the pinned rule); for a non-DICOM folder, its name. All
 # files must be in one XNAT resource. Not mapped, so kept: a series split by
 # modality (<id>-<modality>), a single DICOM image, and a series whose metadata
-# has no SOPClassUID key (the uploader would read the headers).
+# has no SOPClassUID key (the uploader would read the headers). The deidentify
+# stage keeps that key (--metadata-allowlist in ingest-pipeline.yaml); without it
+# accessionflow 0.18.0 and later write only __uid__ (tests/reclaimer/deid-sidecar.sh).
 # CAUTION: the listing alone is not proof. XNAT keeps a row for a file it lost.
 # CAUTION: this proves presence and size, NOT content.
 #
@@ -34,10 +37,13 @@ import ssl
 import stat
 import sys
 import time
+import tempfile
 import urllib.parse
 from datetime import datetime
 
 E = os.environ
+STORAGE = "filesystem"
+PROOF = "xnat"
 ROOT = E["STAGED_ROOT"].rstrip("/")
 DRY_RUN = E.get("DRY_RUN", "true") == "true"
 MIN_AGE_S = int(E["MIN_AGE_S"])
@@ -47,12 +53,33 @@ SIDECARS = {"__MANIFEST__.json", "MANIFEST.json", "__METADATA__.json"}
 DICOM_SERIES = {"medimage/dicom-series", "medimage/dicom-dir", "medimage/dicom-collection"}
 
 
+# Where the uploader's label rule lives: accessionflow (0.18.0 and later) or
+# xnat-ingest (before), so the rule follows the image that the chart pins.
+RULE_FILES = (("accessionflow", ("stores", "xnat", "scan_types.py")),
+              ("xnat_ingest", ("helpers", "xnat_scan_types.py")))
+
+
+def rule_file():
+    """The path of the label rule in the installed package, or None.
+    accessionflow is a namespace package, so every location is searched."""
+    for name, parts in RULE_FILES:
+        spec = importlib.util.find_spec(name)
+        for base in (spec.submodule_search_locations or []) if spec else []:
+            path = os.path.join(base, *parts)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
 def sop_label(sop_class_uids):
-    """The uploader's own rule, from the installed xnat-ingest. Loaded from its
-    file: the module imports only typing, and the package import is not needed."""
+    """The uploader's own rule, from the installed package. Loaded from its
+    file: the module imports only typing, and the package import is not needed.
+    CAUTION: when it cannot load, every DICOM resource is KEPT, so a wrong path
+    here fills the disk without an error."""
     try:
-        pkg = importlib.util.find_spec("xnat_ingest")
-        path = os.path.join(pkg.submodule_search_locations[0], "helpers", "xnat_scan_types.py")
+        path = rule_file()
+        if path is None:
+            raise FileNotFoundError("no accessionflow or xnat_ingest label rule in this image")
         spec = importlib.util.spec_from_file_location("xnat_scan_types", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -151,6 +178,11 @@ class Resource:
             if "SOPClassUID" not in meta:
                 raise Keep("unmapped_resource", f"{self.path}: no SOPClassUID in __METADATA__.json; the uploader would read the headers")
             return sop_label(meta["SOPClassUID"]) if meta["SOPClassUID"] else name
+        if datatype.endswith("+zip"):
+            # A zipped series (the package stage's DICOM-zip) is one archive
+            # file. The uploader keeps the folder name for it: it is neither a
+            # DICOM collection nor a DICOM image, so no header decides.
+            return name
         if datatype.startswith("medimage/dicom"):
             # Includes a single DICOM image: the uploader takes its label from
             # the image header and refuses a folder that differs. Not mapped.
@@ -191,84 +223,128 @@ class Resource:
 
 
 class Xnat:
-    """GET and HEAD on one connection. Redirects are never followed."""
+    """Reuse transport and authentication, never response data. Do not follow redirects."""
 
     def __init__(self):
         url = urllib.parse.urlsplit(E["XNAT_SERVER"])
         self.prefix = url.path.rstrip("/")
         if url.scheme == "https":
-            ctx = ssl.create_default_context()   # the system trust store, as curl uses
+            ctx = ssl.create_default_context()
             if E.get("XNAT_VERIFY_SSL", "true") != "true":
                 ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
             self.conn = http.client.HTTPSConnection(url.hostname, url.port, timeout=TIMEOUT, context=ctx)
         else:
             self.conn = http.client.HTTPConnection(url.hostname, url.port, timeout=TIMEOUT)
-        self.owned = False   # True when this helper opened the session and must end it
-        if E.get("XNAT_JSESSION"):   # the run's one XNAT session, from reclaim-staged.sh
-            self.headers = {"Cookie": "JSESSIONID=" + E["XNAT_JSESSION"]}
-        else:
-            token = base64.b64encode(f"{E.get('XNAT_USER', '')}:{E.get('XNAT_PASS', '')}".encode())
-            self.headers = {"Authorization": "Basic " + token.decode()}
+        token = base64.b64encode(f"{E.get('XNAT_USER', '')}:{E.get('XNAT_PASS', '')}".encode()).decode()
+        self.basic = {"Authorization": "Basic " + token}
+        self.owned = False
+        self.headers = ({"Cookie": "JSESSIONID=" + E["XNAT_JSESSION"]}
+                        if E.get("XNAT_JSESSION") else dict(self.basic))
 
-    def request(self, method, path, query=""):
+    def raw_request(self, method, path, query="", headers=None):
         path = urllib.parse.quote(urllib.parse.unquote(path), safe="/:@")
         if self.prefix and not path.startswith(self.prefix + "/"):
             path = self.prefix + path
+        auth = self.headers if headers is None else headers
         try:
-            self.conn.request(method, path + ("?" + query if query else ""), headers=self.headers)
+            self.conn.request(method, path + ("?" + query if query else ""),
+                              headers={**auth, "Cache-Control": "no-cache", "Pragma": "no-cache"})
             resp = self.conn.getresponse()
             body = resp.read()
-        except (OSError, http.client.HTTPException) as e:
+        except (OSError, http.client.HTTPException) as exc:
             self.conn.close()
-            raise Keep("xnat_check_failed", f"{method} {path}: {e}")
-        if "Authorization" in self.headers:
-            # XNAT opens a session for each request that logs in. Keep the first
-            # one, or a run would leave a session behind for every file it checks.
-            m = re.search(r"JSESSIONID=([^;\s]+)", " ".join(resp.headers.get_all("Set-Cookie") or []))
-            if m:
-                self.headers, self.owned = {"Cookie": "JSESSIONID=" + m.group(1)}, True
+            raise Keep("xnat_check_failed", f"{method} {path}: {exc}")
         return resp.status, resp.headers, body
 
+    @staticmethod
+    def cookie(headers):
+        match = re.search(r"JSESSIONID=([^;\s]+)", " ".join(headers.get_all("Set-Cookie") or []))
+        return match.group(1) if match else None
+
+    def login(self):
+        if self.owned:
+            self.close()  # a permission failure can leave the old login valid
+        status, headers, body = self.raw_request("GET", "/data/JSESSION", headers=self.basic)
+        token = self.cookie(headers)
+        if token is None:
+            token = body.decode(errors="replace").strip()
+        if status != 200 or not re.fullmatch(r"[A-Za-z0-9._-]{1,256}", token):
+            raise Keep("xnat_check_failed", f"XNAT re-authentication failed: HTTP {status}")
+        self.headers, self.owned = {"Cookie": "JSESSIONID=" + token}, True
+        jlog("xnat_session_opened", "", "reusing one XNAT session for this run")
+
+    def request(self, method, path, query=""):
+        status, headers, body = self.raw_request(method, path, query)
+        if method != "DELETE" and (status in (401, 403) or 300 <= status < 400):
+            # One bounded refresh. An auth response is never an absence result.
+            self.login()
+            status, headers, body = self.raw_request(method, path, query)
+            if status in (401, 403) or 300 <= status < 400:
+                raise Keep("xnat_check_failed", f"{method} {path}: HTTP {status} after re-authentication")
+        elif "Authorization" in self.headers:
+            token = self.cookie(headers)
+            if token:
+                self.headers, self.owned = {"Cookie": "JSESSIONID=" + token}, True
+        return status, headers, body
+
     def close(self):
-        """End the session this helper opened; the run's own session is not ours."""
+        # A signal can interrupt an in-flight response. Logout needs a fresh
+        # transport even when that old connection is still Request-sent.
+        self.conn.close()
         if self.owned:
             try:
-                self.request("DELETE", "/data/JSESSION")
-            except Keep:
-                pass
+                status, _, _ = self.raw_request("DELETE", "/data/JSESSION")
+                if status != 200:
+                    jlog("xnat_session_close_failed", "",
+                         f"the XNAT logout returned HTTP {status}; XNAT keeps this session until it times out")
+            except Keep as exc:
+                jlog("xnat_session_close_failed", "", str(exc))
         self.conn.close()
+        self.owned = False
 
     def rows(self, path, what, absent=None):
-        """The rows of a listing. absent: the reason when XNAT answers 404, which says
-        the thing is not there at lookup (a session not uploaded yet). Without it, a
-        404 is a failed check, as any other code."""
         status, _, body = self.request("GET", path, "format=json")
         if status == 404 and absent:
             raise Keep(absent, f"{what}: HTTP 404, not found at lookup")
         if status != 200:
             raise Keep("xnat_check_failed", f"{what}: HTTP {status}")
         try:
-            return json.loads(body)["ResultSet"]["Result"]
+            rows = json.loads(body)["ResultSet"]["Result"]
+            if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                raise ValueError("invalid rows")
+            return rows
         except Exception:
             raise Keep("xnat_check_failed", f"{what}: the answer is not the expected JSON")
 
     def file_index(self, project, subject, visit):
-        """{relpath: [(scan id, resource label, resource id, URI, digest)]} for the session."""
         want = (visit, f"{subject}_{visit}")
         exps = [r["ID"] for r in self.rows(f"/data/projects/{project}/subjects/{subject}/experiments",
                                            "experiment lookup", absent="incomplete_in_xnat")
                 if r.get("label") in want or r.get("ID") in want]
         if not exps:
             raise Keep("incomplete_in_xnat", "XNAT has no experiment for this session")
+        if len(exps) != 1:
+            raise Keep("xnat_ambiguous", "XNAT lists more than one experiment for this session")
+        # The file catalog may outlive the experiment or its file bodies. Check
+        # the experiment endpoint before the catalog, then still HEAD each file.
+        status, _, body = self.request("GET", f"/data/experiments/{exps[0]}", "format=json")
+        if status == 404:
+            raise Keep("incomplete_in_xnat", "experiment endpoint: HTTP 404, not found at lookup")
+        if status != 200:
+            raise Keep("xnat_check_failed", f"experiment endpoint: HTTP {status}")
+        try:
+            experiment = json.loads(body)
+            if not isinstance(experiment, dict) or not experiment:
+                raise ValueError("invalid experiment")
+        except Exception:
+            raise Keep("xnat_check_failed", "experiment endpoint: the answer is not the expected JSON")
         index = {}
-        for r in self.rows(f"/data/experiments/{exps[0]}/scans/ALL/files", "file listing"):
-            m = re.match(r"^.*?/scans/([^/]+)/resources/([^/]+)/files/(.+)$", r.get("URI") or "")
-            if m:
-                scan, res, rel = (urllib.parse.unquote(g) for g in m.groups())
-                # XNAT 1.9 names the resource by its numeric id in the URI and
-                # lists the label as "collection" and the id as "cat_ID".
-                label, rid = str(r.get("collection") or res), str(r.get("cat_ID") or res)
-                index.setdefault(rel, []).append((scan, label, rid, r["URI"], str(r.get("digest") or "")))
+        for row in self.rows(f"/data/experiments/{exps[0]}/scans/ALL/files", "file listing"):
+            match = re.match(r"^.*?/scans/([^/]+)/resources/([^/]+)/files/(.+)$", row.get("URI") or "")
+            if match:
+                scan, res, rel = (urllib.parse.unquote(g) for g in match.groups())
+                label, rid = str(row.get("collection") or res), str(row.get("cat_ID") or res)
+                index.setdefault(rel, []).append((scan, label, rid, row["URI"], str(row.get("digest") or "")))
         return index
 
     def head_size(self, uri):
@@ -355,7 +431,7 @@ def tidy(sdir, unknown, act):
     return only_sidecars(sdir, act) or found
 
 
-def reclaim(session):
+def reclaim(session, *, s3=None, xnat=None):
     sdir = os.path.join(ROOT, session)
     parts = session.split(".")
     if len(parts) != 3 or not all(parts) or not os.path.isdir(sdir):
@@ -396,7 +472,8 @@ def reclaim(session):
 
     # Proof, outside the lock.
     if resources:
-        xnat = Xnat()
+        owned_xnat = xnat is None
+        xnat = xnat or Xnat()
         try:
             index = xnat.file_index(*parts)
             for res in list(resources):
@@ -406,7 +483,8 @@ def reclaim(session):
                     kept.append(k)
                     resources.remove(res)
         finally:
-            xnat.close()
+            if owned_xnat:
+                xnat.close()
     nfiles = sum(len(r.data) for r in resources)
     if resources and not kept and not unknown:
         jlog("reclaim_confirmed", session,
@@ -455,7 +533,90 @@ def report_kept(session, kept, unknown, batches, removed):
     return KEPT
 
 
+BATCH_UNAVAILABLE = 20  # pre-flight style abort already logged by the worker
+BATCH_S3 = False
+
+
+def session_names(s3=None):
+    """Discover names only. The per-session snapshot must be taken later."""
+    with os.scandir(ROOT) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("__"):
+                yield entry.name
+
+
+def batch():
+    """One worker and shared connections; no listing or proof survives a session."""
+    s3 = None
+    xnat = Xnat() if PROOF == "xnat" and E.get("VERIFY_XNAT", "true") == "true" else None
+    counts = dict(examined=0, removed=0, kept=0, skipped=0)
+    if BATCH_S3:
+        counts["empty"] = 0
+    # Finish discovery before the first delete, as the shell did. Spool names to
+    # disk instead of retaining every prefix or every session's objects in RAM.
+    try:
+        with tempfile.TemporaryFile(mode="w+t") as names:
+            try:
+                for name in session_names(s3):
+                    names.write(json.dumps(name) + "\n")
+            except Exception as exc:
+                message = f"listing staging failed: {exc}; nothing examined"
+                jlog("reclaim_unavailable", "", message, reason="staging_list_failed")
+                names.seek(0)
+                for number, line in enumerate(names):
+                    if number >= int(E.get("UNAVAILABLE_SESSION_CAP", "500")):
+                        jlog("reclaim_unavailable", "", "staged session report reached the cap",
+                             reason="staging_list_failed", truncated=True)
+                        break
+                    jlog("reclaim_unavailable", json.loads(line),
+                         "staged, and this run could not decide anything about it: " + message,
+                         reason="staging_list_failed")
+                return BATCH_UNAVAILABLE
+            names.seek(0)
+            for line in names:
+                session = json.loads(line)
+                if not session:
+                    continue
+                counts["examined"] += 1
+                if session == ".reclaim-state":
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9._-]+", session) or session.startswith((".", "-", "__")):
+                    jlog("reclaim_kept", session,
+                         "prefix name is not a plain [A-Za-z0-9._-] session id — refusing to pass it on",
+                         reason="unsafe_prefix_name")
+                    counts["kept"] += 1
+                    continue
+                cap = int(E.get("MAX_REMOVALS", "50"))
+                if counts["removed"] >= cap:
+                    jlog("reclaim_skipped", "", f"per-run removal cap of {cap} reached — remaining sessions left for the next run")
+                    break
+                try:
+                    rc = reclaim(session, s3=s3, xnat=xnat)
+                except Keep as exc:
+                    jlog("reclaim_kept", session, str(exc), reason=exc.reason)
+                    rc = KEPT
+                except Exception as exc:
+                    # Equivalent to a failed child process: keep the remaining
+                    # data and make this session's failure visible.
+                    jlog("reclaim_failed", session, f"reclaim-files.py stopped for this session: {type(exc).__name__}: {exc}")
+                    rc = KEPT
+                key = {0: "removed", 10: "kept", 11: "skipped", 12: "empty"}.get(rc)
+                if key not in counts:
+                    jlog("reclaim_failed", session, f"reclaim-files.py stopped with exit {rc}; nothing more was done for this session")
+                    key = "kept"
+                counts[key] += 1
+        jlog("reclaim_finished", "", " ".join(f"{k}={v}" for k, v in counts.items()), **counts)
+        return 0
+    finally:
+        if xnat is not None:
+            xnat.close()
+        if s3 is not None:
+            s3.close()
+
+
 def main():
+    if sys.argv[1] == "--batch":
+        return batch()
     session = sys.argv[1]
     try:
         return reclaim(session)
@@ -465,4 +626,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # A stop can interrupt an HTTP operation or a sequence of conditional
+    # deletes. Raising runs the writer-lock and XNAT cleanup finally blocks.
+    # Each unlink/DeleteObject is atomic; the manifest is removed last.
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
     sys.exit(main())

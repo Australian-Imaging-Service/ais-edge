@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # S3 staging reclaimer — the ONLY component that deletes from s3://<bucket>/staged
 # =============================================================================
-# GUIDING: xnat-ingest upload has no S3 retention of its own — it relists the
+# GUIDING: accessionflow store xnat has no S3 retention of its own; it relists the
 # staging prefix every loop and never removes what it sent, so a delivered
-# session gets re-uploaded and re-alerted forever without this job. Full
+# session remains in staging without this job. Since 0.19.0 a complete session
+# is skipped before the success line (0.20.0: stores/xnat/api/store_api.py:274); the old repeated alerts are history. Full
 # design write-up: docs/TOUR.md, docs/components/seaweedfs.md.
 #
 # -----------------------------------------------------------------------------
@@ -54,6 +56,30 @@
 # =============================================================================
 set -uo pipefail
 
+# Run the data worker as a tracked child. TERM must reach it even when this
+# shell is PID 1. Its Python handler runs finally blocks, then the shell's
+# EXIT trap closes the borrowed XNAT login. No new session starts after a stop.
+RECLAIM_PID=""
+stop_reclaim() {
+    local sig="$1" status="$2"
+    trap '' TERM INT
+    if [ -n "$RECLAIM_PID" ]; then
+        kill -s "$sig" "$RECLAIM_PID" 2>/dev/null || true
+        wait "$RECLAIM_PID" 2>/dev/null || true
+    fi
+    exit "$status"
+}
+trap 'stop_reclaim TERM 143' TERM
+trap 'stop_reclaim INT 130' INT
+run_files_helper() {
+    python3 "$FILES_HELPER" "$@" &
+    RECLAIM_PID=$!
+    local rc=0
+    wait "$RECLAIM_PID" || rc=$?
+    RECLAIM_PID=""
+    return "$rc"
+}
+
 # --- required -----------------------------------------------------------------
 # STORAGE is read HERE, before anything else, because it decides which of the
 # variables below are required at all. Reading it further down (where the rest of
@@ -85,7 +111,7 @@ FILES_HELPER="${FILES_HELPER:-$(dirname "$0")/reclaim-files.py}"
 
 # Where the two-consecutive-runs markers live. DELIBERATELY OUTSIDE S3_PREFIX.
 #
-# `xnat-ingest upload` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
+# `accessionflow store xnat` lists s3://<bucket>/<S3_PREFIX> and treats every prefix
 # it finds as a session. A state directory under staged/ would therefore be
 # picked up as a session, "uploaded" with zero resources, and would re-fire
 # XNATUploadSuccess every loop — recreating precisely the bug this reclaimer
@@ -501,6 +527,10 @@ if [ "$VERIFY_XNAT" = "true" ]; then
     probe_timings=$(printf '%s' "$probe" | tail -n2 | head -n1)
     probe_err_text=$(tr '\n' ' ' < "$probe_err" 2>/dev/null)
     rm -f "$probe_err"
+    case "$code" in
+        301|302|303|307|308)
+            unavailable xnat_probe_failed "XNAT returned HTTP ${code}: set the server in xnat-credentials to its final HTTPS URL. The reclaimer does not follow redirects; HTTP sends credentials in clear text. Nothing was removed" ;;
+    esac
     if [ "$code" != "200" ]; then
         # Not a data-loss condition — but every session would come back
         # unconfirmed, so the run would be a very expensive no-op.
@@ -607,7 +637,7 @@ staged_totals() {
     # or ERR, or "UNDECLARED <message>".
     #
     # Sidecars are excluded on purpose and on both sides: ImagingResource.load()
-    # in xnat-ingest drops __MANIFEST__.json, MANIFEST.json and
+    # in accessionflow drops __MANIFEST__.json, MANIFEST.json and
     # __METADATA__.json from the fileset, so they are never uploaded and never
     # appear in a manifest's checksums. Counting them here would guarantee a
     # mismatch against XNAT for every session.
@@ -711,7 +741,7 @@ xnat_totals() {
     # So the listing IS populated immediately after upload and is empty on every
     # older session, while the resource stats are correct at every age. Also
     # measured empty on the older ones: /files, /scans/{id}/files, and
-    # /scans/{id}/resources/{label}/files, the last being the one xnat-ingest
+    # /scans/{id}/resources/{label}/files, the last being the one accessionflow
     # itself reads (it works around the same emptiness by POSTing
     # /data/services/refresh/catalog when a scan reports no files).
     #
@@ -859,6 +889,21 @@ st_rm()             { filer_rm "$1"; }
 st_marker_seen()  { aws s3api head-object --bucket "$S3_BUCKET" --key "${STATE_PREFIX}/${1}.empty" >/dev/null 2>&1; }
 st_marker_set()   { printf 'seen-empty %s\n' "$(date -Iseconds)" | aws s3 cp - "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors 2>/dev/null || true; }
 st_marker_clear() { aws s3 rm "s3://${S3_BUCKET}/${STATE_PREFIX}/${1}.empty" --only-show-errors >/dev/null 2>&1 || true; }
+
+# The filesystem path shares one worker and one XNAT connection for this run.
+# The legacy S3 path below is not rendered by tier-1 and is unchanged here.
+if [ "$STORAGE" = "filesystem" ]; then
+    rc=0
+    MIN_AGE="$MIN_AGE" MIN_AGE_S="$MIN_AGE_S" MIN_AGE_KEY="$_minage_key" DRY_RUN="$DRY_RUN" \
+        VERIFY_XNAT="$VERIFY_XNAT" XNAT_SERVER="$XNAT_SERVER" XNAT_JSESSION="$XNAT_JSESSION" \
+        HTTP_TIMEOUT="$HTTP_TIMEOUT" MAX_REMOVALS="$MAX_REMOVALS" \
+        run_files_helper --batch || rc=$?
+    [ "$rc" -eq 20 ] && exit 1  # discovery abort: reclaim_unavailable was already logged
+    if [ "$rc" -ne 0 ]; then
+        jlog reclaim_failed "" "reclaim-files.py stopped with exit ${rc}; the run did not finish"
+    fi
+    exit "$rc"
+fi
 
 if ! prefixes=$(st_list_prefixes); then
     # The one abort where the fan-out probably cannot help: we could not list

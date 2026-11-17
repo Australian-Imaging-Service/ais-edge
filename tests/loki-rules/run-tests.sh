@@ -43,23 +43,12 @@ fi
 TIER_NS="$(grep -m1 '^namespace:' "${REPO_ROOT}/${OBS_CHART}/values.yaml" | awk '{print $2}')"
 TIER_NS="${TIER_NS:-xnat-upload}"
 RULES="${REPO_ROOT}/${OBS_CHART}/files/loki-ruler-rules.yaml"
-# PER-RUN, NOT FIXED. Both used to be constants: NAME="${LOKI_TEST_NAME:-loki-rule-test}" and port
-# 33100. Two concurrent runs then fought over one container, and the loser was
-# not told. The second run's `docker rm -f` DESTROYED the first run's Loki, the
-# first run carried on querying the second run's replacement, and its fixture
-# check reported a count that was the sum of both:
-#
-#     FAIL  fixture_ingestion: pushed 81 lines, only 162 are queryable
-#
-# 162 = 2 x 81. Neither run's results were trustworthy and neither said so: one
-# reported a mismatch it could not explain, the other could pass on doubled data.
-# Observed on this machine, where several sessions share one checkout.
-#
-# $$ is unique per process, so runs coexist instead of clobbering. LOKI_TEST_PORT
-# still overrides for a run that needs a predictable port.
-PORT="${LOKI_TEST_PORT:-$((33100 + ($$ % 500)))}"
-NAME="loki-rule-test-$$"
+# Let Docker reserve a free loopback port atomically. A PID-derived port can
+# collide with another process; separate PID namespaces can also reuse a name.
+PORT="${LOKI_TEST_PORT:-0}"
 WORK="$(mktemp -d)"
+NAME="${LOKI_TEST_NAME:-loki-rule-test-${WORK##*/}}"
+CREATED_ID=""
 
 _G=$'\033[32m'; _R=$'\033[31m'; _Y=$'\033[33m'; _B=$'\033[1m'; _O=$'\033[0m'
 PASS=0; FAIL=0; FAILED=()
@@ -69,7 +58,9 @@ SKIP=0
 skip() { SKIP=$((SKIP+1)); printf '  %sSKIP%s  %-38s %s\n' "$_Y" "$_O" "$1" "$2"; }
 
 cleanup() {
-    [ "${LOKI_KEEP:-0}" = "1" ] || docker rm -f "$NAME" >/dev/null 2>&1
+    if [ "${LOKI_KEEP:-0}" != "1" ] && [ -n "$CREATED_ID" ]; then
+        docker rm -f "$CREATED_ID" >/dev/null 2>&1
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -134,17 +125,23 @@ ingester:
   max_chunk_age: 720h
 EOF
 
-# NO BLANKET `docker rm -f` HERE. It used to remove "$NAME" unconditionally,
-# which under the fixed name above meant removing SOMEONE ELSE'S run. The name
-# is unique per process now, so there is nothing of ours to clear first, and a
-# collision means a genuine leftover worth failing on rather than deleting.
-if docker inspect "$NAME" >/dev/null 2>&1; then
-    echo "container $NAME already exists; refusing to clobber it" >&2; exit 2
-fi
-docker run -d --name "$NAME" -p "${PORT}:3100" \
+# Track only the container we created, including if start fails. A conflicting
+# explicit name is refused by Docker and must never be removed by our trap.
+if ! CREATED_ID="$(docker create --name "$NAME" -p "127.0.0.1:${PORT}:3100" \
     -v "$WORK/loki.yaml:/etc/loki/local-config.yaml:ro" \
-    "$IMAGE" -config.file=/etc/loki/local-config.yaml >/dev/null 2>&1 || {
-    echo "could not start $IMAGE" >&2; exit 2; }
+    "$IMAGE" -config.file=/etc/loki/local-config.yaml 2>"$WORK/start.log")"; then
+    CREATED_ID=""
+    echo "could not create $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+fi
+docker start "$CREATED_ID" >"$WORK/start.log" 2>&1 || {
+    echo "could not start $IMAGE" >&2
+    cat "$WORK/start.log" >&2
+    exit 2
+}
+PORT="$(docker port "$CREATED_ID" 3100/tcp | awk -F: 'NR == 1 {print $NF}')"
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "could not discover Loki test port" >&2; exit 2; }
 
 for _ in $(seq 1 60); do
     curl -sf "http://localhost:${PORT}/ready" >/dev/null 2>&1 && break
@@ -297,9 +294,11 @@ cat <<EOF
 30	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 90	{"namespace":"xnat-ingest","component":"unknown","cluster":"rec-t1-unlabelled"}	{"component":"s3-reclaimer","event":"reclaim_unavailable","session":"","reason":"xnat_probe_failed"}
 3600	{"namespace":"xnat-ingest","component":"s3-reclaimer","cluster":"stage-t1-lost"}	{"component":"s3-reclaimer","event":"reclaim_kept","session":"proj.T1.SESS","reason":"incomplete_in_xnat"}
-2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-group-error","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-group-error","level":"ERROR"}	{"message":"Collating from Orthanc completed with 1 errors"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group-fs","cluster":"stage-fs-critical","level":"CRITICAL"}	{"message":"Cannot open input directory"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-assign-error","level":"ERROR"}	{"message":"Error assigning session example: Permission denied"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"package","cluster":"stage-package-error","level":"ERROR"}	{"message":"Error packaging session 'example': Invalid compression type"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"package","cluster":"stage-package-info","level":"INFO"}	{"message":"Packaging completed successfully"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-traceback","level":"unknown"}	{"message":"Traceback (most recent call last):\\n  File \\"assign.py\\", line 1"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-no-level-traceback"}	{"message":"Traceback (most recent call last):"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-info-word","level":"INFO"}	{"message":"Processing filename ERROR_exception.dcm with no errors"}
@@ -311,9 +310,14 @@ cat <<EOF
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-message","level":"ERROR"}	{}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-missing-severity"}	{"message":"ERROR appears only in this message"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-malformed","level":"unknown"}	{malformed JSON
-2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-id","level":"ERROR"}	{"message":"Could not resolve project/subject/session IDs for 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/__invalid__/example' for manual review instead"}
-2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-summary","level":"ERROR"}	{"message":"Assign completed with 1 errors"}
-11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-old","level":"ERROR"}	{"message":"Grouping from Orthanc completed with 1 errors"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"invalid-info","level":"INFO"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"invalid-wrong-component","level":"ERROR"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"other","component":"assign","cluster":"invalid-wrong-app","level":"ERROR"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-other","app":"xnat-ingest","component":"assign","cluster":"invalid-wrong-namespace","level":"ERROR"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"invalid-old","level":"ERROR"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/assigned/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-id","level":"ERROR"}	{"message":"Could not resolve the labels of 'example', due to missing metadata fields ['AccessionNumber']. Saved to '/data/__invalid__/example' for manual review instead"}
+2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"assign","cluster":"stage-invalid-summary","level":"ERROR"}	{"message":"Label completed with 1 errors"}
+11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"group","cluster":"stage-old","level":"ERROR"}	{"message":"Collating from Orthanc completed with 1 errors"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-structured","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
 2	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-critical","level":"CRITICAL"}	{"message":"Cannot open recipe directory"}
 11	{"namespace":"xnat-ingest","app":"xnat-ingest","component":"deidentify","cluster":"deid-old","level":"ERROR"}	{"message":"Deidentification completed with 1 errors"}
@@ -380,6 +384,8 @@ reporter_other_events	DataPolicyReporterSilent	reporter-other	fire	logging, but 
 stage-group-error	IngestStageError	stage-group-error	fire	stage severity or traceback contract
 stage-fs-critical	IngestStageError	stage-fs-critical	fire	stage severity or traceback contract
 stage-assign-error	IngestStageError	stage-assign-error	fire	stage severity or traceback contract
+stage-package-error	IngestStageError	stage-package-error	fire	the package stage is a grouped-session stage like assign
+stage-package-info	IngestStageError	stage-package-info	nofire	an INFO line of the package stage is not an error
 stage-traceback	IngestStageError	stage-traceback	fire	stage severity or traceback contract
 stage-no-level-traceback	IngestStageError	stage-no-level-traceback	fire	stage severity or traceback contract
 stage-info-word	IngestStageError	stage-info-word	nofire	stage severity or traceback contract
@@ -391,6 +397,16 @@ stage-wrong-namespace	IngestStageError	stage-wrong-namespace	nofire	stage severi
 stage-missing-message	IngestStageError	stage-missing-message	fire	stage severity or traceback contract
 stage-missing-severity	IngestStageError	stage-missing-severity	nofire	stage severity or traceback contract
 stage-malformed	IngestStageError	stage-malformed	nofire	stage severity or traceback contract
+invalid-single	InvalidSessionAssigned	stage-invalid-id	fire	one missing-ID error is sufficient
+invalid-summary-only	InvalidSessionAssigned	stage-invalid-summary	nofire	a pass summary is not a session error
+invalid-empty	InvalidSessionAssigned	no-invalid-events	nofire	no event gives no alert
+invalid-single-holds	InvalidSessionAssigned	stage-invalid-id	fire	one event survives the one-minute hold	120
+invalid-single-expires	InvalidSessionAssigned	stage-invalid-id	nofire	one event leaves the ten-minute window	540
+invalid-info	InvalidSessionAssigned	invalid-info	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-component	InvalidSessionAssigned	invalid-wrong-component	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-app	InvalidSessionAssigned	invalid-wrong-app	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-wrong-namespace	InvalidSessionAssigned	invalid-wrong-namespace	nofire	only a recent assign ERROR in the ingest namespace matches
+invalid-old	InvalidSessionAssigned	invalid-old	nofire	only a recent assign ERROR in the ingest namespace matches
 stage-invalid-id	IngestStageError	stage-invalid-id	nofire	stage severity or traceback contract
 stage-invalid-summary	IngestStageError	stage-invalid-summary	nofire	stage severity or traceback contract
 stage-old	IngestStageError	stage-old	nofire	stage severity or traceback contract

@@ -31,8 +31,11 @@
 #   scripts/site-secrets.sh encrypt <site>      encrypt a site's secrets
 #   scripts/site-secrets.sh apply <site>        decrypt straight into the cluster
 #
-# REPLACE THE PLACEHOLDER BELOW before committing anything real. A file
-# encrypted to a placeholder recipient cannot be decrypted by anyone.
+# VERIFY THE RECIPIENTS before encrypting a real site. The public keys below
+# are configured recipients, not placeholders to replace blindly. Confirm
+# that an intended operator holds a matching private key. To add an operator,
+# use add-recipient, then sops updatekeys sites/<site>/secrets.enc.yaml for
+# each existing file. encrypt is a no-op for an already encrypted file.
 # =============================================================================
 
 creation_rules:

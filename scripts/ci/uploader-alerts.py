@@ -34,7 +34,7 @@ for path in sorted(Path(sys.argv[1]).glob('*.yaml')):
         continue
     deployments = [d for d in docs if d.get('kind') == 'Deployment']
     uploaders = [d for d in deployments
-                 if any(c.get('name') == 'upload' and c.get('command') == ['xnat-ingest', 'upload']
+                 if any(c.get('name') == 'upload' and c.get('command') == ['accessionflow', 'store', 'xnat']
                         for c in d.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []))]
     ours = [r for r in rules if r.get('alert', '').startswith('XNATUploader')]
     records = [r for r in rules if r.get('record', '').startswith(prefix)]

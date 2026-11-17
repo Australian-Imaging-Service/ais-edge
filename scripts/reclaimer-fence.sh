@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # reclaimer-fence.sh: stop the staged-reclaimer around an upgrade or a rollback.
 # =============================================================================
@@ -19,7 +20,7 @@
 #         is terminating. Else the CronJob stays suspended.
 #
 # CAUTION: any kubectl error is a failure. It is never read as "nothing runs".
-# GUIDING: docs/components/xnat-ingest.md, "Upgrade or roll back while the
+# GUIDING: docs/components/accessionflow.md, "Upgrade or roll back while the
 # cleanup can delete", says when to use it.
 set -uo pipefail
 CMD="${1:-}"; REL="${2:-}"; NS=xnat-ingest
@@ -94,6 +95,7 @@ print(e.get("WRITER_LOCK", ""), e.get("WRITER_ALIVE", ""))' "$TMP/cj") || die "c
     case "$(basename "$lock")" in
         assigned.lock)     writer=assign ;;
         deidentified.lock) writer=deidentify ;;
+        packaged.lock)     writer=package ;;
         *) die "unknown writer lock $lock. $CJ stays suspended." ;;
     esac
     k rollout status "deploy/$REL-$writer" --timeout=300s >/dev/null \

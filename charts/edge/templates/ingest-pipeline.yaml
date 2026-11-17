@@ -1,3 +1,4 @@
+{{/* The pipeline tool is accessionflow (called xnat-ingest before 0.18.0). */}}
 {{- /*
 The ingest pipeline: group -> assign.
 
@@ -6,6 +7,9 @@ The ingest pipeline: group -> assign.
     group (fs)      optional second source: a watched directory
     assign          derive project/subject/session and collate into
                     /data/assigned, ready for upload
+    deidentify      deid.engine=ingest only: /data/assigned -> /data/deidentified
+    package         deid.engine=ingest only: /data/deidentified ->
+                    /data/packaged (zipped series + DICOM sample per scan)
 
 Every stage mounts the SAME pipeline PVC at /data. That is required, not
 tidiness: the stages hardlink between orthanc-storage/, grouped/ and
@@ -78,18 +82,21 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          command: ["xnat-ingest", "group-orthanc"]
+          # Serialize producers across overlapping old and replacement pods.
+          command:
+            {{- include "edge.serialisedStage" (list . "group-orthanc" .Values.ingest.orthancGroup.interval) | nindent 12 }}
           args:
             - "http://{{ include "edge.fullname" . }}-orthanc.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.orthanc.httpPort }}"
             - "/data/orthanc-storage"
             - "/data/grouped"
             - "$(ORTHANC_USER)"
             - "$(ORTHANC_PASSWORD)"
-            {{- /* The de-id/backup hook and the optional non-deid stable hook
-                   both apply this label. Validation rejects orphaned filters. */}}
-            {{- with .Values.ingest.orthancGroup.toProcessLabel }}
-            # Only stable, labelled studies are pulled. At non-deid sites this
-            # is a readiness gate, not evidence of de-identification.
+            {{- /* Upstream derives this filter from the engine: only the
+                   deprecated orthanc engine emits it. TBPET (deid.engine=none)
+                   also emits it when orthanc.applyStableLabel loads the
+                   standalone stable-label hook, which is its 24h readiness
+                   gate. A label alone does not validate any policy. */}}
+            {{- with (or (eq (include "edge.deidEngine" $) "orthanc") .Values.orthanc.applyStableLabel) | ternary .Values.ingest.orthancGroup.toProcessLabel "" }}
             - "--to-process-label"
             - {{ . | quote }}
             {{- end }}
@@ -99,8 +106,6 @@ spec:
             - {{ .Values.ingest.orthancGroup.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.orthancGroup.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.orthancGroup.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.orthanc.auth.enabled }}
@@ -227,7 +232,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          command: ["xnat-ingest", "group"]
+          command:
+            {{- include "edge.serialisedStage" (list . "group" .Values.ingest.fileDrop.interval) | nindent 12 }}
           args:
             - {{ .Values.ingest.fileDrop.inputGlob | quote }}
             - "/data/grouped"
@@ -260,7 +266,7 @@ spec:
             # of the loop and this stage stops. Passing it restores 0.13.1 behaviour.
             #
             # ON THIS STAGE ONLY. `group-orthanc` has no such option and would die with
-            # "no such option", and NOT via XINGEST_ON_RESOURCE_CLASH: that variable is
+            # "no such option", and NOT via ACFLOW_ON_RESOURCE_CLASH: that variable is
             # still a plain click.Choice on `associate` and `deidentify`, where the pair
             # form "avoid all" is not a valid choice.
             - "--on-resource-clash"
@@ -270,8 +276,6 @@ spec:
             - {{ .Values.ingest.fileDrop.copyMode | quote }}
             - "--wait-period"
             - {{ .Values.ingest.fileDrop.waitPeriod | quote }}
-            - "--loop"
-            - {{ .Values.ingest.fileDrop.interval | quote }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if ne .Values.dataPolicy.originals.fileDrop.reclaim "never" }}
@@ -279,7 +283,7 @@ spec:
             # copy and no facility backup, so the watched directory is the
             # only copy — which is why dataPolicy defaults this to never and
             # the chart refuses the combination while dataPolicy is enforced.
-            - name: XINGEST_UNLINK_SOURCE
+            - name: ACFLOW_UNLINK_SOURCE
               value: "all"
             {{- end }}
           volumeMounts:
@@ -298,6 +302,22 @@ spec:
 ---
 {{- end }}
 {{- if or .Values.ingest.orthancGroup.enabled .Values.ingest.fileDrop.enabled }}
+# THE REQUEUE TOOL for sessions in /data/assigned/__invalid__, in the label pod
+# (docs/recovering-invalid-sessions.md). It ships
+# with the chart so that an operator needs only kubectl, not this repository:
+#   kubectl -n <ns> exec deploy/<release>-assign -c assign -- \
+#     python3 /opt/ais-edge/requeue-invalid.py list | show <folder> | requeue ...
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "edge.fullname" . }}-requeue-tool
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+data:
+  requeue-invalid.py: |-
+{{ .Files.Get "files/requeue-invalid.py" | indent 4 }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -350,20 +370,29 @@ spec:
           command:
             {{- include "edge.lockedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
           {{- else }}
-          command: ["xnat-ingest", "assign"]
+          # Assign still needs its own producer lock when it does not write
+          # the upload tree. A replacement pod can overlap a busy old pod.
+          command:
+            {{- include "edge.serialisedStage" (list . "assign" .Values.ingest.assign.interval) | nindent 12 }}
           {{- end }}
           args:
             - "/data/grouped"
             - "/data/assigned"
-            # project/subject/session come from the DICOM tags the de-id hook
-            # writes. routing.json's AETMap is the single source of truth for
-            # project — there is no hardcoded project ID anywhere.
+            # Read the tags selected by ingest.assign.tagMapping. Under
+            # ingest these are source values, copied into labels before the
+            # recipe runs. constantProjectId can replace the project source;
+            # an AET map does not route ingest input.
             - "--project"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "project" | quote }}
             - "--subject"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "subject" | quote }}
             - "--session"
             - {{ get (include "edge.assignTagMapping" . | fromYaml) "session" | quote }}
+            {{- with .Values.ingest.assign.constantProjectId }}
+            # Overrides --project: every session goes to this XNAT project.
+            - "--constant-project-id"
+            - {{ . | quote }}
+            {{- end }}
             {{- with get (include "edge.assignTagMapping" . | fromYaml) "scan" }}
             - "--scan"
             - {{ . | quote }}
@@ -386,18 +415,22 @@ spec:
             - "--unlink-source"
             - "all"
             {{- end }}
-            {{- if ne (include "edge.uploadTreeKey" .) "assigned" }}
-            - "--loop"
-            - {{ .Values.ingest.assign.interval | quote }}
-            {{- end }}
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
             {{- include "edge.exportVolumeMount" . | nindent 12 }}
+            # The requeue tool, read-only. A directory mount (no subPath), so a
+            # new chart version updates the file without restarting the stage.
+            - name: requeue-tool
+              mountPath: /opt/ais-edge
+              readOnly: true
       volumes:
         {{- include "edge.pipelineVolume" . | nindent 8 }}
         {{- include "edge.exportVolume" . | nindent 8 }}
+        - name: requeue-tool
+          configMap:
+            name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
 ---
@@ -405,7 +438,7 @@ spec:
   The de-identification recipes, from the site file.
 
   A ConfigMap key must match [-._a-zA-Z0-9], so the '/' and '@' that
-  xnat-ingest needs in the path cannot be stored as a key. Each path is
+  accessionflow needs in the path cannot be stored as a key. Each path is
   sanitised into a legal key here and mapped back to the real path with
   items[].path on the volume below, so the operator writes real paths and never
   sees the restriction.
@@ -470,8 +503,17 @@ spec:
           {{- end }}
           # This stage writes the upload tree: one pass at a time, inside the
           # writer lock. See edge.lockedStage.
+          {{- if eq (include "edge.uploadTreeKey" .) "deidentified" }}
           command:
             {{- include "edge.lockedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
+          {{- else }}
+          # The package stage writes the upload tree and holds the lock per
+          # pass. This stage writes the intermediate tree the package stage
+          # reads and retires: one pass per turn of the SAME lock, so a
+          # deidentify pass never runs while a package pass reads a session.
+          command:
+            {{- include "edge.serialisedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
+          {{- end }}
           args:
             - "/data/assigned"
             - "/data/deidentified"
@@ -485,14 +527,22 @@ spec:
             - "/data/reid"
             - "--copy-mode"
             - {{ .Values.ingest.deidentify.copyMode | quote }}
+            # Keep SOPClassUID in the metadata sidecars of the output.
+            # accessionflow 0.18.0 (#247) keeps only __uid__ by default. The
+            # reclaimer (reclaim-files.py) reads SOPClassUID from the sidecar
+            # to find the XNAT resource label, and it KEEPS every series
+            # without it: no error, the disk fills. SOPClassUID is not PHI.
+            # CI: tests/reclaimer/deid-sidecar.sh.
+            - "--metadata-allowlist"
+            - "__uid__,SOPClassUID"
             {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #
             # Drop each assigned session once this stage has produced a
-            # COMPLETE de-identified copy of it. xnat-ingest counts the data
-            # files on both sides and refuses the unlink when they disagree, so
-            # a run that produced a short output leaves its input in place to be
-            # retried.
+            # de-identified output. With --unlink-source all, 0.18.0+ removes
+            # the input snapshot after success, including unprocessed files.
+            # Do not add files to staging session folders by hand. The stage
+            # does not check the separate facility backup before unlinking.
             #
             # Without this, /data/assigned is never emptied by anything: the
             # data-policy engine's `onUploaded` condition looks for a marker the
@@ -513,7 +563,11 @@ spec:
           env:
             {{- include "edge.logEnv" . | nindent 12 }}
             {{- if .Values.ingest.deidentify.reidEncryptKeySecret }}
-            - name: XINGEST_REID_ENCRYPT_KEY
+            # The tool reads ACFLOW_REID_ENCRYPT_KEY (accessionflow 0.18.0 and
+            # later). The key INSIDE the Secret keeps its old name, so a site's
+            # existing Secret works unchanged. CAUTION: a wrong variable name
+            # here is silent: the maps are then written in plain text.
+            - name: ACFLOW_REID_ENCRYPT_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.ingest.deidentify.reidEncryptKeySecret }}
@@ -545,6 +599,89 @@ spec:
               {{- end }}
             {{- end }}
             {{- end }}
+{{- end }}
+{{- if eq (include "edge.packageEnabled" .) "true" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-package
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: package
+spec:
+  replicas: 1
+  # Two packagers over one tree would race each other's build directories.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: package
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: package
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      {{- $pkgImage := printf "%s:%s" .Values.ingest.image.repository .Values.ingest.image.tag }}
+      # The package stage can start before deidentify creates its output
+      # directory, and `accessionflow package` refuses an input that is not there.
+      initContainers:
+        - name: init-deidentified-dir
+          image: {{ $pkgImage }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "--", "/data/deidentified"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+        {{- with .Values.ingest.extraPipPackages }}
+        {{- include "edge.extraPip.initContainer" (dict "root" $ "image" $pkgImage) | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: package
+          image: {{ $pkgImage }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          # This stage writes the upload tree: one pass at a time inside the
+          # writer lock, no --loop. See edge.lockedStage.
+          command:
+            {{- include "edge.lockedStage" (list . "package" .Values.ingest.package.interval "deidentify") | nindent 12 }}
+          args:
+            - "/data/deidentified"
+            - {{ include "edge.uploadSourceDir" . | quote }}
+            - {{ .Values.ingest.package.sourceDatatype | quote }}
+            {{- range .Values.ingest.package.outputResources }}
+            - "--output-resource"
+            - {{ .label | quote }}
+            - {{ .spec | quote }}
+            {{- end }}
+            - "--copy-mode"
+            - {{ .Values.ingest.package.copyMode | quote }}
+            {{- if eq (include "edge.deidentifiedReclaim" $) "onPackaged" }}
+            # dataPolicy.derived.deidentified.reclaim = onPackaged.
+            #
+            # Drop each de-identified session once the packaged copy has been
+            # written. Without this nothing empties /data/deidentified: the
+            # uploader reads /data/packaged, so its markers never describe this
+            # tree, and `package --loop` would re-package every session each
+            # pass. A session that fails to package is left in place to retry.
+            - "--unlink-source"
+            - "all"
+            {{- end }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+            {{- include "edge.extraPip.env" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+            {{- include "edge.extraPip.volumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+        {{- include "edge.extraPip.volume" . | nindent 8 }}
 {{- end }}
 {{- if .Values.ingest.associate.enabled }}
 ---
@@ -578,7 +715,7 @@ spec:
         - name: associate
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          command: ["xnat-ingest", "associate"]
+          command: ["accessionflow", "attach"]
           args:
             - "/data/assigned"
             {{- range splitList ";" .Values.ingest.associate.datatypes }}

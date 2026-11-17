@@ -15,8 +15,10 @@ open merge will require an operator-authorized commit.
   is not recreated. The separate `usyd-data-export` NFS PVC is mounted read-only
   at `/data/usyd-export` in every reader of its symlinks. Originals on NFS are
   never deleted by the pipeline.
-* xnat-ingest **0.16.2** is inherited from Tier-1; resource labels for all
-  nine datatypes are unchanged from 0.15.6. Version 0.15.0
+* **accessionflow 0.20.4** (formerly xnat-ingest) is inherited from Tier-1.
+  Commands are now `collate orthanc`, `collate folder` and `label xnat`; the
+  TBPET file-drop walker uses those names, and collate's session/scan options
+  are now `--accession` / `--acquisition`. Version 0.15.0
   narrowed default group session/scan scopes to DICOM only. Explicit
   `StudyInstanceUID` / `SeriesNumber` mappings over `generic/file-set` preserve
   grouping for all nine configured DICOM / Siemens raw datatypes. Resource
@@ -53,9 +55,14 @@ snapshot does not prove that every later raw/DICOM arrival has finished.
 
 Verify the external NFS PVC and egress CA/credentials/Discord secrets exist and
 that the site can pull the ingest and AWS CLI images. Confirm representative
-raw/DICOM data and the AWS/proxy/TLS path in a controlled test. Orthanc HTTP
-remains unauthenticated on NodePort 30842 as before; restrict it to trusted
-networks.
+raw/DICOM data and the AWS/proxy/TLS path in a controlled test.
+
+Orthanc HTTP is now **ClusterIP only** (NodePort 30842 is removed): Tier-1
+refuses an unauthenticated REST API on a node port. Use
+`kubectl -n ais-edge port-forward svc/edge-orthanc 8042:8042`. DICOM stays on
+NodePort **31014** but moves to the new Service `edge-orthanc-dicom`; if the
+upgrade reports the port as already allocated, re-run it once the old
+`edge-orthanc` Service has become ClusterIP.
 
 For this existing MicroK8s installation, use the Helm chart directly with
 release `edge`, namespace `ais-edge`, and `-f sites/tbpet/values.yaml`.
@@ -65,7 +72,7 @@ storage or change live services as part of this development merge.
 
 Regression: `make tbpet` renders the full existing matrix, checks this actual
 site's mounts/configuration, exercises the walker on synthetic data, and parses
-its actual arguments against the released 0.16.2 Docker image. It does not call
+its actual arguments against the released accessionflow 0.20.4 Docker image. It does not call
 Orthanc, AWS, Discord or Kubernetes.
 
 The runtime fixtures require Bash, GNU findutils/coreutils, Python with PyYAML,

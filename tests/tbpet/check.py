@@ -86,15 +86,18 @@ assert 'local readyLabel = "xnat-ingest-ready"' in configs["edge-orthanc-scripts
 assert orthanc["StorageDirectory"] == orthanc["IndexDirectory"] == "/data/orthanc-storage"
 services = [d for d in yaml.safe_load_all((work / "render/edge-tbpet.yaml").read_text())
             if d and d["kind"] == "Service"]
-assert {p["nodePort"] for d in services for p in d["spec"]["ports"]} == {31014, 30842}
+# Only DICOM is on a node port; Tier-1 refuses the unauthenticated REST API there.
+assert {p.get("nodePort") for d in services for p in d["spec"]["ports"]} - {None} == {31014}
 for name in ("group-orthanc", "group-fs", "assign"):
-    assert container(name)["image"].endswith(":0.16.2")
+    assert container(name)["image"] == "ghcr.io/australian-imaging-service/accessionflow:0.20.4"
 group = container("group-orthanc")["args"]
 for flag, value in (("--to-process-label", "xnat-ingest-ready"),
                     ("--processed-label", "xnat-sorted"),
-                    ("--wait-period", "86400"), ("--copy-mode", "hardlink_or_copy"),
-                    ("--loop", "300")):
+                    ("--wait-period", "86400"), ("--copy-mode", "hardlink_or_copy")):
     option(group, flag, value)
+glock = container("group-orthanc")["command"]
+assert glock[3:] == ["accessionflow", "collate", "orthanc"], glock
+assert "sleep 300" in glock[2], glock
 assign = container("assign")["args"]
 for flag, value in (("--project", "PatientComments"), ("--subject", "PatientID"),
                     ("--session", "AccessionNumber"), ("--scan", "SeriesDescription"),
@@ -102,7 +105,7 @@ for flag, value in (("--project", "PatientComments"), ("--subject", "PatientID")
     option(assign, flag, value)
 assert "--loop" not in assign
 lock = container("assign")["command"]
-assert lock[:2] == ["/bin/sh", "-c"] and lock[3:] == ["xnat-ingest", "assign"], lock
+assert lock[:2] == ["/bin/sh", "-c"] and lock[3:] == ["accessionflow", "label", "xnat"], lock
 assert "flock /data/.locks/assigned.lock" in lock[2] and "sleep 300" in lock[2], lock
 fsenv = env("group-fs")
 assert fsenv["INPUT_GLOB"] == "/data/usyd-export/TMP/RAW-DATA-EXPORT/**/*"
@@ -174,7 +177,7 @@ runtime = work / "tbpet-runtime"
 if runtime.exists():
     shutil.rmtree(runtime)
 runtime.mkdir(exist_ok=True)
-stub = runtime / "xnat-ingest"
+stub = runtime / "accessionflow"
 stub.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
@@ -184,7 +187,7 @@ with (base / "calls.jsonl").open("a") as f:
 grouped = pathlib.Path(os.environ["GROUPED_DIR"])
 assigned = pathlib.Path(os.environ["ASSIGNED_DIR"])
 mode = os.environ["TEST_MODE"]
-if args[0] == "group":
+if args[:2] == ["collate", "folder"]:
     d = grouped / "session"
     d.mkdir(exist_ok=True)
     if mode != "empty":
@@ -240,7 +243,7 @@ for mode in ("empty", "failure", "success"):
         captured.extend(args)
     else:
         assert not (case / "done").read_text(), text
-        assert [a[0] for a in args] == ["group"], text
+        assert [a[:2] for a in args] == [["collate", "folder"]], text
 assert (source / "raw").read_text() == "synthetic"
 print("PASS walker manifest guard, failed-group retry, symlink flattening, NFS originals retained")
 
@@ -344,40 +347,43 @@ for mode in ("success", "copy-failed", "event-failed", "state-failed", "dry-run"
             assert not list(events.iterdir())
 print("PASS upload failures/dry-run preserve data; events survive reclaim and retry Discord; __* excluded")
 
-assert shutil.which("docker"), "Docker required to verify the released 0.16.2 CLI"
+assert shutil.which("docker"), "Docker required to verify the released accessionflow 0.20.4 CLI"
 image = container("group-fs")["image"]
-# Locked stages run `sh -c <script> xnat-ingest <cmd>`: take what follows the binary.
+# Locked stages run `sh -c <script> accessionflow <cmd...>`: take what follows the binary.
 def cli_argv(n):
     cmd = container(n)["command"]
-    return cmd[cmd.index("xnat-ingest") + 1:] + container(n)["args"]
+    return cmd[cmd.index("accessionflow") + 1:] + container(n)["args"]
 
 
-assert all("--recursive" in args for args in captured if args[0] == "group"), captured
+assert all("--recursive" in args for args in captured if args[:2] == ["collate", "folder"]), captured
 cases = captured + [cli_argv(n) for n in ("group-orthanc", "assign")]
 probe = """
 import importlib.metadata, json, os, sys, click
-from xnat_ingest.cli import cli
+from accessionflow.cli import cli
 from fileformats.core import from_mime
 data = json.load(sys.stdin)
-assert importlib.metadata.version("xnat-ingest") == "0.16.2"
-root = click.Context(cli)
+assert importlib.metadata.version("accessionflow") == "0.20.4"
 for args in data["cases"]:
     # click only checks directories for some positional args. All synthetic.
     for arg in args:
         if arg.startswith("/") and "*" not in arg:
             os.makedirs(arg, exist_ok=True)
-    cmd = cli.get_command(root, args[0])
-    with cmd.make_context(args[0], args[1:], parent=root) as ctx:
-        if args[0] == "group":
-            for field, expected in (("session", "StudyInstanceUID"), ("scan", "SeriesNumber")):
+    parent, cmd, rest = click.Context(cli), cli, list(args)
+    while isinstance(cmd, click.Group):
+        name, rest = rest[0], rest[1:]
+        cmd = cmd.get_command(parent, name)
+        parent = click.Context(cmd, info_name=name, parent=parent)
+    with cmd.make_context(parent.info_name, rest, parent=parent.parent) as ctx:
+        if args[:2] == ["collate", "folder"]:
+            for field, expected in (("accession_uid", "StudyInstanceUID"), ("acquisition_id", "SeriesNumber")):
                 spec, = ctx.params[field]
                 assert spec.specifier == expected
                 for datatype in data["datatypes"]:
                     assert issubclass(from_mime(datatype), spec.datatype), (field, datatype)
             assert ctx.params["on_resource_clash"]
-print("PASS 0.16.2 actual walker and rendered argv; session/scan mappings cover all nine datatypes")
+print("PASS accessionflow 0.20.4 actual walker and rendered argv; accession/acquisition mappings cover all nine datatypes")
 """
-subprocess.run(["docker", "run", "--rm", "-i", "--entrypoint", "python3", image, "-c", probe],
+subprocess.run(["docker", "run", "--rm", "-i", "--platform", "linux/amd64", "--entrypoint", "python3", image, "-c", probe],
                input=json.dumps({"cases": cases, "datatypes": fsenv["DATATYPES"].split(";")}),
                text=True, check=True, timeout=180)
 shutil.rmtree(runtime)
