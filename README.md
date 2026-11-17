@@ -212,7 +212,9 @@ sudo apt-get install -y ./sops_3.13.3_amd64.deb
 #    cluster) lives on the `tier-1-solution` branch and is not interchangeable.
 git clone <repo-url> && cd ais-edge
 
-# 2. Create your age key and register it as a SOPS recipient
+# 2. Create your age key and register it as a SOPS recipient. The repo ships
+#    no key: yours replaces the placeholder in .sops.yaml, so only it can read
+#    the files you encrypt.
 scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient <your age1... public key>
 
