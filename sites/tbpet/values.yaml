@@ -84,6 +84,8 @@ orthanc:
 
 ingest:
   orthancGroup:
+    resources:
+      requests: {cpu: 10m}
     enabled: true
     interval: 300
     toProcessLabel: xnat-ingest-ready
@@ -105,6 +107,8 @@ ingest:
     groupScanField: SeriesNumber
     datatypes: "medimage/dicom-series;medimage/vnd.siemens.syngo-mi.vr20b.count-rate;medimage/vnd.siemens.syngo-mi.vr20b.list-mode;medimage/vnd.siemens.syngo-mi.vr20b.normalisation;medimage/vnd.siemens.syngo-mi.vr20b.sinogram;medimage/vnd.siemens.syngo-mi.vr20b.dynamic-sinogram-series;medimage/vnd.siemens.syngo-mi.vr20b.parameterisation;medimage/vnd.siemens.syngo-mi.vr20b.ct-spl;medimage/vnd.siemens.syngo-mi.vr20b.physio"
   assign:
+    resources:
+      requests: {cpu: 10m}
     interval: 300
     copyMode: hardlink_or_copy
     tagMapping:
