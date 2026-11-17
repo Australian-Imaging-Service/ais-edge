@@ -8,6 +8,9 @@
 #
 # install.sh is NOT run here. It refuses a file that has a placeholder, and
 # this test asserts that no placeholder stays.
+#
+# It also checks the shipped .sops.yaml: each rule has the placeholder
+# recipient, and no rule has a real key (shipped_recipients below).
 # =============================================================================
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -138,6 +141,29 @@ case_sealed_same_edge_again_refused() {
     add_edge my-edge
     want_rc fail; want_phrase "already defines my-edge-s3 with a real key pair"; want_same "$C/before"; want_no_site my-edge
 }
+
+# --- the shipped .sops.yaml: the placeholder, never a real key ----------------------
+# CAUTION: a real key in the shared repository goes into every copy of it. Each
+# site that is set up from a copy is then encrypted to that key too, and the
+# holder of that key can read the secrets of each such site. The repository
+# shipped a real key from 2026-08-06 to 2026-11-17.
+# The first add-recipient of an operator puts their key in place of the
+# placeholder, in their own copy. encrypt refuses while the placeholder is there.
+shipped_recipients() {
+    local cfg="$REPO/.sops.yaml" real holders rules why=""
+    real=$(grep -vE '^[[:space:]]*#' "$cfg" | grep -cE 'age1[a-z0-9]{20,}' || true)
+    holders=$(grep -vE '^[[:space:]]*#' "$cfg" | grep -c 'REPLACE_WITH_TEAM_AGE_PUBLIC_KEY' || true)
+    rules=$(grep -cE '^[[:space:]]*-[[:space:]]*path_regex:' "$cfg" || true)
+    [ "$real" -eq 0 ] || why+=" [.sops.yaml lists $real real age key(s); ship REPLACE_WITH_TEAM_AGE_PUBLIC_KEY]"
+    [ "$rules" -gt 0 ] && [ "$holders" -eq "$rules" ] || why+=" [$rules rule(s), $holders placeholder recipient(s); each rule needs one]"
+    if [ -z "$why" ]; then
+        printf '  %sPASS%s  %-34s %s\n' "$_G" "$_O" shipped_recipients "placeholder in $rules rule(s), no real key"; PASS=$((PASS+1))
+    else
+        printf '  %sFAIL%s  %-34s%s\n' "$_R" "$_O" shipped_recipients "$why"; FAIL=$((FAIL+1)); FAILED+=(shipped_recipients)
+    fi
+}
+printf '\n%s== site-secrets: the shipped .sops.yaml ==%s\n' "$_B" "$_O"
+shipped_recipients
 
 printf '\n%s== site-secrets add-edge: the first edge ==%s\n' "$_B" "$_O"
 run_case first_edge_other_name

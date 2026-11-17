@@ -341,8 +341,11 @@ management age that is not longer than the edge's. The example sites set 36h.
 
 Secrets live in git, encrypted. You hold an age keypair; the private half stays
 at `~/.config/sops/age/keys.txt` and is never committed, the public half goes in
-`.sops.yaml`. Any key listed there can decrypt a file that was encrypted, or
-re-keyed, after the key was added. Adding a colleague is two commands (see
+`.sops.yaml`. The repository ships `.sops.yaml` with a placeholder, not a key:
+your first `add-recipient` puts your key in its place, and `encrypt` refuses
+until it has. So a new site's file is readable by your key only, not by any key
+of the people who wrote this repository. Any key listed there can decrypt a
+file that was encrypted, or re-keyed, after the key was added. Adding a colleague is two commands (see
 "Adding or removing a colleague"). Only the **values** are encrypted, so
 `git diff` still shows *which* secret changed without showing what it changed
 to.
