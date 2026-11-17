@@ -441,12 +441,18 @@ worth recognising by shape.
 
 ```bash
 scripts/site-secrets.sh init-key
+scripts/site-secrets.sh add-recipient age1...   # the public key that init-key printed
 ```
 
-This creates your age key at `~/.config/sops/age/keys.txt` and prints your
+`init-key` creates your age key at `~/.config/sops/age/keys.txt` and prints your
 **public** key. Its private key can decrypt files encrypted to that recipient. Other configured
 recipients can also decrypt their copies. It is not automatically a recipient
 of every existing site file.
+
+`add-recipient` puts your public key in `.sops.yaml`. The repository ships that
+file with a placeholder, not a key, and your first `add-recipient` replaces it.
+So a new site's file is readable by your key only, not by any key of the people
+who wrote this repository. `encrypt` refuses while the placeholder is there.
 
 > **If all usable recipient keys are lost, the encrypted file cannot be
 > recovered through SOPS.** Another retained recipient key can still decrypt it. Back

@@ -62,16 +62,24 @@ else
     fi
 fi
 
-# --- 2. the recipient must be real -------------------------------------------
-# A file encrypted to the shipped placeholder recipient is unreadable by
-# everyone, including the person who encrypted it, and the failure only shows up
-# when somebody needs the secret back.
-if grep -q 'REPLACE_WITH_TEAM_AGE_PUBLIC_KEY' "$REPO/.sops.yaml" 2>/dev/null; then
-    ci_fail ".sops.yaml still lists the placeholder recipient — encrypting to it produces a file NOBODY can decrypt"
-elif grep -qE '^\s*age1[a-z0-9]{20,}' "$REPO/.sops.yaml" 2>/dev/null; then
-    ci_pass ".sops.yaml lists $(grep -cE '^\s*age1[a-z0-9]{20,}' "$REPO/.sops.yaml") real age recipient(s)"
+# --- 2. the shipped recipients: the placeholder, never a real key ------------
+# CAUTION: a real key in the shared repository goes into every copy of it. Each
+# site that is set up from a copy is then encrypted to that key too, and the
+# holder of that key can read the secrets of each such site. The repository
+# shipped a real key from 2026-08-06 to 2026-11-17.
+# The first add-recipient of an operator puts their key in place of the
+# placeholder, in their own copy. The placeholder cannot make a file that nobody
+# can read: encrypt refuses while it is there, and sops refuses it as a
+# recipient.
+real=$(grep -vE '^[[:space:]]*#' "$REPO/.sops.yaml" 2>/dev/null | grep -cE 'age1[a-z0-9]{20,}' || true)
+holders=$(grep -vE '^[[:space:]]*#' "$REPO/.sops.yaml" 2>/dev/null | grep -c 'REPLACE_WITH_TEAM_AGE_PUBLIC_KEY' || true)
+rules=$(grep -cE '^[[:space:]]*-[[:space:]]*path_regex:' "$REPO/.sops.yaml" 2>/dev/null || true)
+if [ "${real:-0}" -gt 0 ]; then
+    ci_fail ".sops.yaml lists $real real age key(s). Ship REPLACE_WITH_TEAM_AGE_PUBLIC_KEY: a real key here can read the secrets of each site that is set up from this repository"
+elif [ "${rules:-0}" -eq 0 ] || [ "${holders:-0}" -ne "$rules" ]; then
+    ci_fail ".sops.yaml has ${rules:-0} rule(s) and ${holders:-0} placeholder recipient(s); each rule needs the placeholder"
 else
-    ci_fail ".sops.yaml lists no age recipient at all"
+    ci_pass ".sops.yaml ships the placeholder recipient in each of its $rules rule(s), and no real key"
 fi
 
 # --- 3. no plaintext working form may be tracked ------------------------------

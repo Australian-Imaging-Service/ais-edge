@@ -102,7 +102,9 @@ sudo apt-get install -y ./sops_3.13.3_amd64.deb
 #    `tier-1-solution`, and the two are not interchangeable.
 git clone --branch tier-1-solution <repo-url> && cd ais-edge
 
-# 2. One age key per operator, then make it a recipient in .sops.yaml
+# 2. One age key per operator, then make it a recipient in .sops.yaml. The repo
+#    ships no key: yours replaces the placeholder, so only it can read the files
+#    you encrypt.
 scripts/site-secrets.sh init-key
 scripts/site-secrets.sh add-recipient age1...        # the public key it printed
 
