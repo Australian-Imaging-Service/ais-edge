@@ -112,11 +112,15 @@ easy to get wrong, both of which fail silently:
 can use the same label and namespace. See
 [`docs/alerting-diy.md`](../alerting-diy.md).
 
-### Grafana does not get a Loki datasource automatically
+### Grafana's Loki datasource
 
 `kube-prometheus-stack` provisions only Prometheus and Alertmanager
-(ConfigMap `ais-kps-grafana-datasource`). To query logs in Explore, add Loki —
-either in the Grafana UI, or in `sites/<site>/values.yaml`:
+(ConfigMap `ais-kps-grafana-datasource`). The chart adds Loki, uid `loki`, in
+`kube-prometheus-stack.grafana.additionalDataSources` of
+`charts/edge/values.yaml`, so Explore and the pipeline dashboards can query
+logs on a new install. Releases up to tier-1-solution `8ebb700` did not add it.
+On such a release, add it in `sites/<site>/values.yaml`. A site file that sets
+this list replaces the chart's whole list, so keep the Loki entry in it:
 
 ```yaml
 kube-prometheus-stack:

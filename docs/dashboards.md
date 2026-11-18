@@ -27,12 +27,15 @@ One leftover to know about: `install.sh` still reads
 the URL it echoes at the end of a run. Move the Service off 30030 in the subchart
 block and Grafana moves; the install banner will keep saying 30030.
 
-Two things that Grafana does **not** arrive with, each of which silently
-empties every panel below:
+Two things that silently empty every panel below:
 
-* **A Loki datasource.** The subchart provisions Prometheus and Alertmanager
-  only (ConfigMap `ais-kps-grafana-datasource`). Every query in this document is
-  LogQL, so add Loki at `http://ais-loki.<namespace>.svc.cluster.local:3100`.
+* **No Loki datasource.** Every query in this document is LogQL against the
+  datasource uid `loki`. The chart provisions it, beside the subchart's
+  Prometheus and Alertmanager (ConfigMap `ais-kps-grafana-datasource`), at
+  `http://ais-loki.<namespace>.svc.cluster.local:3100`. Releases up to
+  tier-1-solution `8ebb700` did not, and every panel was empty there; a site
+  file that overrides `kube-prometheus-stack.grafana.additionalDataSources`
+  must keep that entry (see [`components/grafana.md`](components/grafana.md)).
   `ais-loki` is pinned by `loki.fullnameOverride` in `charts/edge/values.yaml`
   and is the same address Vector pushes to, so successful Vector delivery verifies its own path. Grafana connection and query checks are still needed to verify the datasource path and permissions.
 * **Logs, if only half the observability switch is on.**
