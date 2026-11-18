@@ -33,30 +33,43 @@ down — alerting keeps working, you just cannot see it.
 
 ## What arrives provisioned, and what does not
 
-The subchart provisions **two** datasources, in ConfigMap
-`ais-kps-grafana-datasource` (label `grafana_datasource: "1"`):
+Grafana arrives with **three** datasources, in ConfigMap
+`ais-kps-grafana-datasource` (label `grafana_datasource: "1"`). The subchart
+provisions Prometheus and Alertmanager. The chart adds Loki through
+`kube-prometheus-stack.grafana.additionalDataSources` in
+`charts/edge/values.yaml`:
 
 | Datasource | URL |
 |---|---|
 | `Prometheus` (default, uid `prometheus`) | `http://ais-kps-prometheus.<namespace>:9090/` |
 | `Alertmanager` (uid `alertmanager`) | `http://ais-kps-alertmanager.<namespace>:9093/` |
+| `Loki` (uid `loki`) | `http://ais-loki.<namespace>.svc.cluster.local:3100` |
 
-**Loki is still not provisioned as a datasource by this chart.** However,
-`templates/observability.yaml` now ships three pipeline dashboard ConfigMaps:
-`pipeline-overview`, `session-timeline` and `edge-drilldown`. They reference
-the datasource UID `loki`. Add a Loki datasource with that exact UID, through
-managed provisioning or the UI, at the address below. Merely creating a
-datasource named Loki with another UID does not satisfy those references.
+`templates/observability.yaml` ships three pipeline dashboard ConfigMaps:
+`pipeline-overview`, `session-timeline` and `edge-drilldown`. Every panel in
+them queries the datasource UID `loki`. Grafana shows a panel whose UID it does
+not know as empty, with no error on the dashboard, so the UID must stay exactly
+`loki`. A datasource named Loki with another UID does not satisfy those panels.
+CI checks this: the `runtime-templates` stage ("each dashboard data source is
+provisioned") fails when a rendered dashboard names a datasource that the render
+does not provision.
 
-```
-http://ais-loki.<namespace>.svc.cluster.local:3100
-```
+**Releases up to tier-1-solution `8ebb700` did not provision Loki.** On those,
+every pipeline panel was empty while Loki held the logs, and the panel query
+answered `Data source not found`. Found on a site on 2026-11-18 and reproduced
+on a fresh install. An operator on such a release had to add the datasource by
+hand. A hand-made `Loki` row with a generated UID would block the provisioned
+one of the same name, so the chart also lists `Loki` under `deleteDatasources`:
+Grafana removes that row at startup and then provisions the one above. It is a
+no-op on a new database. After `helm upgrade`, Grafana's datasource sidecar
+loads the new datasource without a Grafana restart (measured 2026-11-18).
 
 `ais-loki` is pinned by `loki.fullnameOverride` in `charts/edge/values.yaml`,
-and it is the same address Vector pushes to — so a Vector that is shipping logs
-has proved its own write path. Grafana still needs a configured datasource,
-query access and working resolution from its Pod; Vector success alone does
-not prove that separate read path.
+and it is the same address Vector pushes to, so a Vector that is shipping logs
+has proved its own write path. Grafana still needs query access and working
+resolution from its Pod; Vector success alone does not prove that separate read
+path. To check the read path, run any pipeline panel or, in Explore, the query
+`{namespace="xnat-ingest"}` against the `Loki` datasource.
 
 What Grafana *does* arrive with is the kube-prometheus-stack's own Kubernetes
 dashboards (`ais-kps-*` ConfigMaps): cluster/node/pod resources, kubelet,
@@ -67,7 +80,7 @@ useless for "did that session reach XNAT".
 
 - **Prometheus** and **Alertmanager** — read-only datasources at the in-cluster
   Service URLs above
-- **Loki** — read-only, once you add it
+- **Loki**: read-only, at the in-cluster Service URL above
 - **Cluster API** via its ServiceAccount and ClusterRole
   `<release>-grafana-clusterrole`: `get`/`watch`/`list` on **configmaps and
   secrets, in every namespace**. That is the sidecar pattern's cost — the
@@ -190,7 +203,7 @@ kubectl -n xnat-ingest rollout restart deployment/<release>-grafana
 | Admin password changed after first boot | The Secret seeds initial database state; an existing database can retain the old login | Use Grafana's supported admin-password reset workflow and reconcile the Secret used by the reload sidecars. Back up the database. Deleting the PVC discards dashboard and user state and is not routine password rotation |
 | Sidecar reads Secrets cluster-wide | A Grafana compromise reads every Secret on the node, including `xnat-credentials` and `orthanc-deid-salt` | Inherent to `NAMESPACE=ALL`; the same trust boundary as the node itself, which is single-tenant. Treat Grafana access as node access. |
 | Dashboard ConfigMap collision | Any ConfigMap anywhere labelled `grafana_dashboard=1` is loaded | Single-tenant node; nothing else labels ConfigMaps that way |
-| No Loki datasource on a fresh install | Shipped LogQL panels cannot query their expected `loki` UID and can show a datasource error or no data | Provision that UID at the Loki URL above. Check a query from Grafana as well as Vector delivery; a missing datasource is not evidence of no logs |
+| No Loki datasource (releases up to `8ebb700`, or a site override without it) | Shipped LogQL panels cannot query their expected `loki` UID: each panel is empty, and the query answers `Data source not found` | Upgrade the chart. A site file that sets `kube-prometheus-stack.grafana.additionalDataSources` replaces the chart's whole list (Helm replaces lists), so that list must contain the Loki entry with uid `loki`. CI checks the chart's own render, not a site override. Check a query from Grafana as well as Vector delivery; a missing datasource is not evidence of no logs |
 | Datasource credential leak | Logs, metrics and alert state may be exposed. Alertmanager access can also permit silences, depending on the configured endpoint and permissions | Review actual endpoint permissions and network reachability. Grafana Pod compromise additionally exposes its cluster-wide Secret-read grant |
 | Grafana PV lost | User preferences and locally saved dashboards can be lost. Provisioned dashboards reload from ConfigMaps; Alertmanager silences use its own PV | Back up each application's state separately if those customisations or silences matter |
 
@@ -207,8 +220,9 @@ kubectl -n xnat-ingest rollout restart deployment/<release>-grafana
 ## Future enhancements
 
 - Pipeline dashboard provisioning is implemented in `templates/observability.yaml`
-  as of this 2026-11-10 review. A chart-provisioned Loki datasource remains
-  a gap; configure UID `loki` manually until that integration is added.
+  as of the 2026-11-10 review. The chart-provisioned Loki datasource (uid
+  `loki`) followed on 2026-11-18, with a CI check that each dashboard's
+  datasource is provisioned.
 - Drive the Service's NodePort from one key instead of two
 - Site identity-provider integration is a future option. Check the deployed
   Grafana edition and its supported authentication features before choosing

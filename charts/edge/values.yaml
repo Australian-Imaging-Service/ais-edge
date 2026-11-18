@@ -1287,6 +1287,28 @@ kube-prometheus-stack:
       existingSecret: grafana-admin-credentials
       userKey: admin-user
       passwordKey: admin-password
+    # THE DASHBOARDS' DATA SOURCE. All three dashboards in files/dashboards/
+    # query {"type":"loki","uid":"loki"}. The subchart provisions only
+    # Prometheus and Alertmanager. Without this entry each panel is empty and
+    # shows no error, while Loki holds the logs (found on a site 2026-11-18).
+    # Same entry as charts/mgmt on the main branch.
+    # CAUTION: keep uid loki. CI (runtime-templates) fails when a dashboard
+    # names a data source that the render does not provision.
+    deleteDatasources:
+      # A Loki row with a generated uid (added by hand, or left by an older
+      # install on the Grafana PVC) blocks the provisioned one of that name.
+      # No-op on a new database.
+      - name: Loki
+        orgId: 1
+    additionalDataSources:
+      - name: Loki
+        uid: loki
+        type: loki
+        access: proxy
+        # [tpl] loki.fullnameOverride pins the Service name to ais-loki.
+        url: http://ais-loki.{{ .Release.Namespace }}.svc.cluster.local:3100
+        isDefault: false
+        jsonData: {maxLines: 5000}
     # initChownData runs as root and fails under a restricted PSS namespace;
     # the local-path PVC is already writable by the Grafana UID.
     initChownData: {enabled: false}

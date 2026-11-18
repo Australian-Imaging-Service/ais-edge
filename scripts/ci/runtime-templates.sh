@@ -1191,4 +1191,45 @@ raise SystemExit("no deidentify container in the render")
 PY_REID
 )"; then ci_pass "$out"; else ci_fail "reid key: $out"; fi
 
+# EACH DATA SOURCE THAT A DASHBOARD NAMES IS PROVISIONED. A panel names its data
+# source by uid. Grafana shows a panel whose uid is unknown as empty, and the
+# dashboard shows no error. The tier-1 stack provisioned Prometheus and
+# Alertmanager only, and all three dashboards query uid loki: each panel was
+# empty while Loki held the logs (found on a site, 2026-11-18). The check reads
+# the dashboards and the data sources that the render gives Grafana.
+ci_heading "each dashboard data source is provisioned"
+if out="$(python3 - "$CI_RENDER_DIR/edge-obsstack-on.yaml" 2>&1 <<'PY_DS'
+import json, sys, yaml
+# Grafana's own data sources: always present, never provisioned. A template
+# variable ($datasource) resolves at view time.
+BUILTIN = {"-- Mixed --", "-- Grafana --", "-- Dashboard --", "grafana"}
+provisioned, wanted = set(), {}
+def walk(node, where):
+    if isinstance(node, dict):
+        ds = node.get("datasource")
+        if isinstance(ds, dict) and ds.get("uid") and ds["uid"] not in BUILTIN and not str(ds["uid"]).startswith("$"):
+            wanted.setdefault(ds["uid"], set()).add(where)
+        for value in node.values():
+            walk(value, where)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value, where)
+for doc in yaml.safe_load_all(open(sys.argv[1])):
+    if not doc or doc.get("kind") != "ConfigMap":
+        continue
+    labels = (doc.get("metadata") or {}).get("labels") or {}
+    for name, body in (doc.get("data") or {}).items():
+        if "grafana_datasource" in labels:
+            provisioned.update(d.get("uid") for d in (yaml.safe_load(body) or {}).get("datasources", []))
+        elif "grafana_dashboard" in labels and name.endswith(".json"):
+            walk(json.loads(body), name)
+if not wanted:
+    raise SystemExit("no rendered dashboard names a data source by uid, so this check has nothing to check")
+missing = {uid: sorted(where) for uid, where in wanted.items() if uid not in provisioned}
+if missing:
+    raise SystemExit(f"dashboards name data sources that Grafana does not get: {missing}; provisioned: {sorted(u for u in provisioned if u)}")
+print(f"each data source that the dashboards name is provisioned: {sorted(wanted)}")
+PY_DS
+)"; then ci_pass "$out"; else ci_fail "$out"; fi
+
 ci_summary "runtime-templates"

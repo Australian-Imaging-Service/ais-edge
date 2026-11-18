@@ -31,7 +31,7 @@ Five questions, each with a fast answer:
 | Question | Answer |
 |---|---|
 | Where do I find metrics I could alert on? | Prometheus UI → Graph tab; Grafana → Explore → `Prometheus` data source |
-| Where do I find log streams I could alert on? | Query Loki directly on `svc/ais-loki:3100`, or add the Loki data source to Grafana (§2b) |
+| Where do I find log streams I could alert on? | Grafana → Explore → `Loki` data source, or query Loki directly on `svc/ais-loki:3100` (§2b) |
 | Where does the new rule file go? | A `PrometheusRule` object (Prometheus) OR a ConfigMap labelled `loki_rule` (Loki) — both in `xnat-ingest` |
 | How do I apply? | `kubectl apply -f` for either. Values changes: `./install.sh <site>` |
 | How do I send to a different inbox? | Set `observability.stack.alerting.*` in your site file; re-run `./install.sh <site>`. For a different *route or receiver*, edit `charts/edge/files/alertmanager-config.yaml` — **not** `kube-prometheus-stack.alertmanager.config`, which renders a Secret nothing mounts (§3) |
@@ -118,9 +118,11 @@ Loki is a log store here, not a scrape target.
 
 ### 2b. Find Loki streams + content
 
-There is **no Loki data source in Grafana by default**: the stack only
-provisions Prometheus and Alertmanager. Add it in your site file if you want to
-use Explore, then re-run `./install.sh <site>`:
+Grafana has a **Loki data source**, uid `loki`, from the chart: use Grafana →
+Explore → `Loki`. Releases up to tier-1-solution `8ebb700` provisioned only
+Prometheus and Alertmanager. On such a release, add it in your site file, then
+re-run `./install.sh <site>`. A site file that sets this list replaces the
+chart's whole list, so keep the Loki entry in it:
 
 ```yaml
 kube-prometheus-stack:
