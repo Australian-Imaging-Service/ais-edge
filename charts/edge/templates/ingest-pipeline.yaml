@@ -347,6 +347,7 @@ spec:
           configMap:
             name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
+# Optional metadata extraction into XNAT session custom fields.
 {{- if .Values.ingest.annotate.enabled }}
 ---
 apiVersion: apps/v1
@@ -386,6 +387,11 @@ spec:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
         - name: annotate
+          # `extract` maps destination field names to metadata specifiers.
+          # Unresolved specifiers are skipped; verify source keys in the
+          # accession metadata before configuring site-specific mappings.
+          # This stage runs before deidentify, which carries extracted fields
+          # through unchanged. Only extract values approved for sharing.
           image: {{ $img }}
           command: {{- include "edge.serialisedStage" (list . "annotate" .Values.ingest.annotate.interval) | nindent 12 }}
           args:
