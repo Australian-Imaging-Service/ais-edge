@@ -413,6 +413,25 @@ dataPolicy:
       # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
+    # Output of annotate; input to deidentify when the ingest engine is enabled.
+    annotated:
+      location: /data/annotated
+      # never | onUploaded | onDeidentified
+      #
+      # onUploaded      the staged-reclaimer verifies this tree against XNAT
+      #                 before removing it. Use when annotation is the final
+      #                 stage before upload.
+      # onDeidentified  the deidentify stage removes each annotated session
+      #                 after successfully writing its deidentified output.
+      #                 Only meaningful with deid.engine=ingest.
+      #
+      # auto selects onDeidentified for the ingest engine, otherwise
+      # onUploaded when annotation is enabled.
+      reclaim: auto
+      # Recovery window after upload; applies when reclaim resolves to
+      # onUploaded. Set to 0 when deidentify removes the input at handoff.
+      minAge: 0
+
 
     # With --unlink-source all, label and deidentify in 0.18.0+ retire every
     # path in the input snapshot after success, including unprocessed files.

@@ -348,7 +348,7 @@ spec:
             name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
 # Optional metadata extraction into XNAT session custom fields.
-{{- if .Values.ingest.annotate.enabled }}
+{{- if eq (include "edge.annotateEnabled" .) "true" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -467,7 +467,7 @@ spec:
         - name: init-assigned-dir
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
-          {{- if .Values.ingest.annotate.enabled }}
+          {{- if eq (include "edge.annotateEnabled" .) "true" }}
           command: ["mkdir", "-p", "--", "/data/annotated"]
           {{- else }}
           command: ["mkdir", "-p", "--", "/data/assigned"]
@@ -496,7 +496,7 @@ spec:
             {{- include "edge.serialisedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
           {{- end }}
           args:
-            {{- if .Values.ingest.annotate.enabled }}
+            {{- if eq (include "edge.annotateEnabled" .) "true" }}
             - "/data/annotated"
             {{- else }}
             - "/data/assigned"
@@ -520,7 +520,15 @@ spec:
             # CI: tests/reclaimer/deid-sidecar.sh.
             - "--metadata-allowlist"
             - "__uid__,SOPClassUID"
-            {{- if eq (include "edge.assignedReclaim" $) "onDeidentified" }}
+            {{- if and (eq (include "edge.annotateEnabled" .) "true")
+              (eq (include "edge.annotatedReclaim" $) "onDeidentified") }}
+              - "--unlink-source"
+              - "all"
+            {{- else if and (not .Values.ingest.annotate.enabled)
+               (eq (include "edge.assignedReclaim" $) "onDeidentified") }}
+              - "--unlink-source"
+              - "all"
+            {{- end }}
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #
             # Drop each assigned session once this stage has produced a
