@@ -347,6 +347,68 @@ spec:
           configMap:
             name: {{ include "edge.fullname" . }}-requeue-tool
 {{- end }}
+# Optional metadata extraction into XNAT session custom fields.
+{{- if .Values.ingest.annotate.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "edge.fullname" . }}-annotate
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "edge.labels" . | nindent 4 }}
+    app: xnat-ingest
+    component: annotate
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xnat-ingest
+      component: annotate
+  template:
+    metadata:
+      labels:
+        {{- include "edge.labels" . | nindent 8 }}
+        app: xnat-ingest
+        component: annotate
+    spec:
+      {{- include "edge.hostAliases" . | nindent 6 }}
+      {{- include "edge.schedulingRules" . | nindent 6 }}
+      automountServiceAccountToken: {{ .Values.serviceAccounts.automountToken }}
+      # Annotate can start before assign creates its output directory.
+      initContainers:
+        - name: init-assigned-dir
+          image: {{ $img }}
+          imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          command: ["mkdir", "-p", "--", "/data/assigned"]
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+      containers:
+        - name: annotate
+          # `extract` maps destination field names to metadata specifiers.
+          # Unresolved specifiers are skipped; verify source keys in the
+          # accession metadata before configuring site-specific mappings.
+          # This stage runs before deidentify, which carries extracted fields
+          # through unchanged. Only extract values approved for sharing.
+          image: {{ $img }}
+          command: {{- include "edge.serialisedStage" (list . "annotate" .Values.ingest.annotate.interval) | nindent 12 }}
+          args:
+            - "/data/assigned"
+            - "/data/annotated"
+            {{- range $field, $specifier := .Values.ingest.annotate.extract }}
+            - "--extract"
+            - {{ $field | quote }}
+            - {{ $specifier | quote }}
+            {{- end }}
+          env:
+            {{- include "edge.logEnv" . | nindent 12 }}
+          volumeMounts:
+            {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
+      volumes:
+        {{- include "edge.pipelineVolume" . | nindent 8 }}
+{{- end }}
 {{- if and (eq (include "edge.deidEngine" .) "ingest") .Values.ingest.deidentify.specs }}
 ---
 {{/*
@@ -405,7 +467,11 @@ spec:
         - name: init-assigned-dir
           image: {{ $img }}
           imagePullPolicy: {{ .Values.ingest.image.pullPolicy }}
+          {{- if .Values.ingest.annotate.enabled }}
+          command: ["mkdir", "-p", "--", "/data/annotated"]
+          {{- else }}
           command: ["mkdir", "-p", "--", "/data/assigned"]
+          {{- end }}
           volumeMounts:
             {{- include "edge.pipelineVolumeMount" . | nindent 12 }}
       containers:
@@ -430,7 +496,11 @@ spec:
             {{- include "edge.serialisedStage" (list . "deidentify" .Values.ingest.deidentify.interval) | nindent 12 }}
           {{- end }}
           args:
+            {{- if .Values.ingest.annotate.enabled }}
+            - "/data/annotated"
+            {{- else }}
             - "/data/assigned"
+            {{- end }}
             - "/data/deidentified"
             - "/etc/xnat-ingest/deid-specs"
             # --reid-dir, NOT a fourth positional. xnat-ingest 0.15.0 made reid_dir an

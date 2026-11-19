@@ -90,6 +90,8 @@ STUCK_AFTER_S="${STUCK_AFTER_S:-0}"
 UPLOAD_STATE_DIR="${UPLOAD_STATE_DIR:-/data/LOGS/s3-uploader-state}"
 # Where assign writes. Used only to answer `onAssigned` for the grouped stage.
 ASSIGNED_DIR="${ASSIGNED_DIR:-/data/assigned}"
+# Where annotate writes. Used only to answer `onAnnotated` for the assigned stage.
+ANNOTATED_DIR="${ANNOTATED_DIR:-/data/annotated}"
 # The tree the UPLOADER read, so the tree its markers fingerprint. Rendered from
 # edge.uploadSourceDir, the helper that also tells the s3-uploader where to read,
 # so the two cannot disagree. NOT the same as ASSIGNED_DIR under the ingest
@@ -307,6 +309,13 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
                 return 1
             fi
             [ -d "${ASSIGNED_DIR}/$2" ] || [ -f "${UPLOAD_STATE_DIR}/$2" ] ;;
+        onAnnotated)
+            if [ "$3" != "derived.assigned" ]; then
+                jlog reclaim_unknown_condition "$3" "reclaim word 'onAnnotated' belongs to derived.assigned only" \
+                    ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"onAnnotated\""
+                return 1
+            fi
+            [ -d "${ANNOTATED_DIR}/$2" ] ;;
         onDeidentified)
             # NEVER TRUE HERE, BY DESIGN, and listed so that it is documented
             # rather than silently unknown. This condition is satisfied by the
@@ -330,7 +339,7 @@ condition_met() {   # condition_met <reclaim-word> <session-name> <stage-name> <
             # true: nothing reclaimed, for ever, logged as normal operation. The
             # reclaim words are validated nowhere else; the enum in values.yaml
             # is a comment with no schema behind it.
-            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned, onDeidentified or onPackaged" \
+            jlog reclaim_unknown_condition "$3" "reclaim word '$1' is not one this engine implements, so no session in this stage can ever be reclaimed. Expected never, onUploaded, onAssigned, onAnnotated, onDeidentified or onPackaged" \
                  ",\"session\":\"$(jsan "$2")\",\"reclaim\":\"$(jsan "$1")\""
             return 1 ;;
     esac
