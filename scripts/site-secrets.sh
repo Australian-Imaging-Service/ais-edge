@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # Site secret management with SOPS + age.
 # =============================================================================
@@ -13,7 +14,9 @@
 #
 # The charts never contain credentials — they reference Secrets by name. So
 # `apply` is the whole integration: create the Secrets, then `helm upgrade`.
-# No helm-secrets plugin, no decrypt-to-tempfile, no plaintext on disk.
+# No helm-secrets plugin. `apply` decrypts into a pipe: no plaintext file.
+# One exception: when add-edge appends an s3 key pair to an ENCRYPTED file, it
+# decrypts to a temporary file under `mktemp -d`, re-encrypts, then shreds it.
 # =============================================================================
 set -euo pipefail
 
@@ -114,10 +117,11 @@ new)
     else
         ROLE_USAGE="usage: $0 new <name> single
 
-  single   this machine — Orthanc, de-identification, the AE-title to
-           XNAT-project map, and the uploader that PUTs straight to XNAT.
+  single   selects sites/example-single: Orthanc receive, accessionflow label xnat
+           and deidentify, then direct upload to XNAT. Use ingest for new sites.
            Tier-1 is one box, so this is the only role and one file is the
-           whole configuration.
+           whole configuration. Use a lowercase site name with letters,
+           digits and hyphens, starting with a letter. No underscores.
 
   'mgmt' and 'edge' are TIER-2 roles and are refused here. sites/example-edge
   is kept for reference only: it sets upload.mode: s3, which needs a SeaweedFS
@@ -167,15 +171,19 @@ ${ROLE_USAGE}" ;;
     if [ "$ROLE" = "single" ]; then
         echo "  4. ./install.sh ${SITE}"
         echo
-        echo "  Two things nothing generates for you, both in the secrets file:"
-        echo "    * AIS_DEID_HMAC_SALT — openssl rand -hex 32, then keep it forever."
-        echo "      Rotating it re-pseudonymises every patient and silently breaks"
-        echo "      linkage to everything already in XNAT."
+        echo "  Three things nothing generates for you, all in the secrets file:"
+        echo "    * AIS_DEID_HMAC_SALT: set once with openssl rand -hex 32."
+        echo "    * the Orthanc login: one password from openssl rand -base64 24,"
+        echo "      in place of REPLACE_ORTHANC_PASSWORD (twice, orthanc-credentials)."
+        echo "      Required by the backup script at startup. Its value is unused"
+        echo "      for ingest labels and recipes; rotation does not change them."
         echo "    * the XNAT account. Tier-1 uploads to XNAT from this machine, so"
-        echo "      scope that account to the projects in this site's aetMap only."
+        echo "      limit access to projects selected by tagMapping or the project constant."
         echo
         echo "  And one in values.yaml: deid.policyReviewed must be set to"
-        echo "  true, deliberately, once you have read the profile and the AET map."
+        echo "  true after reviewing the ingest recipe, source labels and reid maps."
+        echo "  Set ingest.deidentify.reidEncryptKeySecret for production input."
+        echo "  Without that reference the reid maps are plain JSON on the pipeline disk."
     fi
     ;;
 
@@ -361,7 +369,9 @@ EOF2
   2. Fill in sites/${EDGE}/secrets.enc.yaml — orthanc-deid-salt still needs
      'openssl rand -hex 32' (deliberately NOT auto-generated: this salt must
      survive reinstalls, and a command that silently regenerates it on a
-     second run would quietly re-pseudonymise every existing patient).
+     second run would quietly re-pseudonymise every existing patient), and
+     orthanc-credentials needs one password from 'openssl rand -base64 24'
+     in place of REPLACE_ORTHANC_PASSWORD (twice): the Orthanc login.
   3. Paste this into sites/${MGMT}/values.yaml, under 'edges:':
 
        - name: ${EDGE}

@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Stub kubectl for tests/reclaimer-fence. A case is a folder ($FENCE_CASE) of
+# files: fixtures it prints, and *.fail files that make a call fail. It records
+# every call and the last suspend value it was given. Anything else exits 3.
+C="${FENCE_CASE:?FENCE_CASE required}"
+echo "$*" >> "$C/calls.log"
+args=("$@"); [ "${args[0]}" = "-n" ] && args=("${args[@]:2}")
+case "${args[0]} ${args[1]:-}" in
+    "patch cronjob")
+        [ -e "$C/patch.fail" ] && exit 1
+        printf '%s' "${args[*]}" | grep -o '"suspend":[a-z]*' | cut -d: -f2 > "$C/suspend"; exit 0 ;;
+    "get cronjob")
+        [ -e "$C/cronjob.fail" ] && exit 1
+        case "${args[*]}" in
+            *jsonpath*) if [ -e "$C/readback.wrong" ]; then printf 'false'; else tr -d '\n' < "$C/suspend" 2>/dev/null; fi ;;
+            *"-o json"*) cat "$C/cronjob.json" ;;
+        esac
+        exit 0 ;;
+    "get jobs")
+        [ -e "$C/jobs.fail" ] && exit 1
+        n=$(( $(cat "$C/jobs.calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$C/jobs.calls"
+        if [ -e "$C/jobs.$n.json" ]; then cat "$C/jobs.$n.json"; else cat "$C/jobs.json"; fi; exit 0 ;;
+    "get pods")
+        [ -e "$C/pods.fail" ] && exit 1
+        case "${args[*]}" in
+            *component=*) cat "$C/writers.json" ;;
+            *) n=$(( $(cat "$C/pods.calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$C/pods.calls"
+               if [ -e "$C/pods.$n.json" ]; then cat "$C/pods.$n.json"; else cat "$C/pods.json"; fi ;;
+        esac
+        exit 0 ;;
+    "rollout status")
+        [ -e "$C/rollout.fail" ] && exit 1; exit 0 ;;
+esac
+echo "stub kubectl: unexpected call: $*" >&2
+exit 3

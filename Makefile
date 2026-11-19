@@ -42,7 +42,7 @@ export CI_TOOL_DIR ?= $(HOME)/.cache/ais-edge-ci/bin
 # The stages that need no cluster and no docker. THE ORDER IS LOAD-BEARING:
 # `render` is first because the three stages that read $(CI_RENDER_DIR) are
 # after it.
-FAST_STAGES := render negative promtool shell-syntax lua-syntax fingerprint-contract pvc-retention runtime-templates duplicate-names reclaimer secret-contract secrets-encrypted values-consumers
+FAST_STAGES := render verify-live-checks negative promtool shell-syntax lua-syntax pvc-retention runtime-templates duplicate-names reclaimer reclaimer-fence secret-contract secrets-encrypted values-consumers notes orthanc-exposure log-phrases cli-contract requeue-invalid install-secrets
 ALL_STAGES  := $(FAST_STAGES) loki-rules data-policy greenfield
 
 # Prerequisite that makes `make promtool` on its own render first. run-stages
@@ -119,8 +119,26 @@ pvc-retention: $(RENDER_DEP)
 # looking SKIP for the ONE component on this tier that permanently removes
 # patient imaging, so a regression that kept everything, or deleted a session
 # XNAT had not confirmed, would have passed CI in silence.
-reclaimer:
+# deid-sidecar.sh reads the rendered deidentify argv ($(CI_RENDER_DIR)).
+reclaimer: $(RENDER_DEP)
 	@tests/reclaimer/run-tests.sh
+	@tests/reclaimer/deid-sidecar.sh
+
+# scripts/reclaimer-fence.sh against a stub kubectl: it must never read an API
+# error as "no cleanup Job runs", and never resume without a wrapped writer.
+# charts/edge/files/requeue-invalid.py on fixture trees, then the pinned image loads the
+# requeued folder (docker; CI_REQUIRE_REQUEUE_IMAGE=1 makes a missing image fail).
+requeue-invalid:
+	@tests/requeue-invalid/run-tests.sh
+
+# install.sh with no secrets.enc.yaml, against a stub kubectl: installMode
+# existing goes on only when the cluster has every Secret the chart needs,
+# and an API error is never read as "present".
+install-secrets:
+	@tests/install-secrets/run-tests.sh
+
+reclaimer-fence:
+	@tests/reclaimer-fence/run-tests.sh
 
 # Needs docker: runs the PINNED Loki version and evaluates the real rule
 # expressions against fixture logs. promtool covers only the Prometheus rules,
@@ -128,6 +146,18 @@ reclaimer:
 # docker; CI_REQUIRE_LOKI_TESTS=1 turns that skip into a failure.
 loki-rules:
 	@tests/loki-rules/run-tests.sh
+
+# Needs docker: reads the tool's source out of the PINNED image and checks that
+# every literal log phrase in the Loki rules still exists in the code that
+# writes it. Fixture tests cannot see a reworded message; this can.
+log-phrases:
+	@scripts/ci/log-phrases.sh
+
+# Needs docker and the render: parses every rendered argv in the PINNED image
+# (click make_context, never the command itself), and checks that every
+# ACFLOW_* variable the charts set is one that the image declares.
+cli-contract: $(RENDER_DEP)
+	@scripts/ci/cli-contract.sh
 
 # Needs docker: runs the REAL engine under the REAL busybox image the chart
 # deploys, over real directory trees, and asserts on WHAT SURVIVED rather than
@@ -141,6 +171,15 @@ duplicate-names: $(RENDER_DEP)
 runtime-templates: $(RENDER_DEP)
 	@scripts/ci/runtime-templates.sh
 
+# NOTES.txt renders only at install, so no other stage reads it.
+notes:
+	@scripts/ci/notes.sh
+
+# Every orthanc.expose setting, rendered: the REST API gets a node port only
+# with orthanc.expose.http: nodePort, and each NodePort Service has one port.
+orthanc-exposure:
+	@scripts/ci/orthanc-exposure.sh
+
 # The only stage that needs no render.
 shell-syntax:
 	@scripts/ci/shell-syntax.sh
@@ -148,8 +187,6 @@ shell-syntax:
 lua-syntax:
 	@bash scripts/ci/lua-syntax.sh
 
-fingerprint-contract:
-	@bash scripts/ci/fingerprint-contract.sh
 
 # The one check standing between an operator and a committed XNAT password.
 # It existed as scripts/site-secrets.sh check and nothing ever ran it.
@@ -202,6 +239,10 @@ help:
 	@echo 'useful env:'
 	@echo '  CI_REQUIRE_GREENFIELD=1  a skipped kind stage is a failure'
 	@echo '  CI_REQUIRE_LOKI_TESTS=1  a skipped Loki-rule stage is a failure'
+	@echo '  CI_REQUIRE_LOG_PHRASES=1  a skipped log-phrase stage is a failure'
 	@echo '  CI_REQUIRE_DATAPOLICY_TESTS=1  a skipped data-policy stage is a failure'
 	@echo '  CI_REQUIRE_RULE_TESTS=1  a rule file with no promtool test is a failure'
 	@echo '  CI_KIND_KEEP=1           leave the kind cluster up for inspection'
+
+verify-live-checks:
+	@python3 tests/verify-live/test_checks.py

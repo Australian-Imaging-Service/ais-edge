@@ -3,7 +3,7 @@
 This page is the "I want a new alert tomorrow" recipe. It assumes the
 observability stack is installed — `observability.stack.enabled: true` in
 `sites/<site>/values.yaml`, which is what turns on the `kube-prometheus-stack`
-and `loki` subcharts of `charts/edge`. For the *why* of the two-tier split
+and `loki` subcharts of `charts/edge`. For the *why* of the two-engine split
 between Prometheus and Loki, see
 [`alerting-architecture.md`](alerting-architecture.md).
 
@@ -24,12 +24,14 @@ site:
 
 ## TL;DR
 
+Scope of this guide: object names and namespaces below describe the default deployment. Resolve overrides from rendered manifests before applying commands. Local rendering and rule checks verify configuration shape; they do not establish that a metric exists live or that an external receiver delivered a notification. Synthetic drills should use a distinct test identity and a receiver the operator controls.
+
 Five questions, each with a fast answer:
 
 | Question | Answer |
 |---|---|
 | Where do I find metrics I could alert on? | Prometheus UI → Graph tab; Grafana → Explore → `Prometheus` data source |
-| Where do I find log streams I could alert on? | Query Loki directly on `svc/ais-loki:3100`, or add the Loki data source to Grafana (§2b) |
+| Where do I find log streams I could alert on? | Grafana → Explore → `Loki` data source, or query Loki directly on `svc/ais-loki:3100` (§2b) |
 | Where does the new rule file go? | A `PrometheusRule` object (Prometheus) OR a ConfigMap labelled `loki_rule` (Loki) — both in `xnat-ingest` |
 | How do I apply? | `kubectl apply -f` for either. Values changes: `./install.sh <site>` |
 | How do I send to a different inbox? | Set `observability.stack.alerting.*` in your site file; re-run `./install.sh <site>`. For a different *route or receiver*, edit `charts/edge/files/alertmanager-config.yaml` — **not** `kube-prometheus-stack.alertmanager.config`, which renders a Secret nothing mounts (§3) |
@@ -47,7 +49,7 @@ Is the thing you want to alert on …
   │  kubelet_volume_stats_*, container_memory_*, up, …)
   │     → Prometheus rule. See "Prometheus rules" below.
   │
-  ├─ a JSON log line emitted by group-orthanc / assign / upload /
+  ├─ a JSON log line emitted by accessionflow collate orthanc / label xnat / store xnat /
   │  Orthanc's de-id hook / data-policy?
   │     → Loki ruler rule. See "Loki ruler rules" below.
   │
@@ -116,9 +118,11 @@ Loki is a log store here, not a scrape target.
 
 ### 2b. Find Loki streams + content
 
-There is **no Loki data source in Grafana by default**: the stack only
-provisions Prometheus and Alertmanager. Add it in your site file if you want to
-use Explore, then re-run `./install.sh <site>`:
+Grafana has a **Loki data source**, uid `loki`, from the chart: use Grafana →
+Explore → `Loki`. Releases up to tier-1-solution `8ebb700` provisioned only
+Prometheus and Alertmanager. On such a release, add it in your site file, then
+re-run `./install.sh <site>`. A site file that sets this list replaces the
+chart's whole list, so keep the Loki entry in it:
 
 ```yaml
 kube-prometheus-stack:
@@ -188,8 +192,11 @@ Example LogQL queries:
 # Free disk on each declared data-policy stage:
 {component="data-policy"} | json | event="stage_report"
 
-# De-identified instances, with project and calling AET:
-{app="orthanc"} | json | event="instance_deidentified"
+# Default ingest recipe-stage logs. Inspect results and errors, not just count.
+{namespace="xnat-ingest",component="deidentify"} | json
+
+# Receiver Lua deid events belong to the deprecated engine. They are not an
+# ingest success signal; use the component reference for legacy log analysis.
 
 # Anything containing "401" anywhere in the pipeline:
 {namespace="xnat-ingest"} |~ "(?i)\\b401\\b"
@@ -269,8 +276,8 @@ ship with the chart:
   no `metadata`; `templates/observability.yaml` supplies those, including the
   namespace — into `charts/edge/files/prometheus-rules/<severity>.yaml`. The
   template globs that directory and renders one `PrometheusRule` per file,
-  named `ais-edge-<severity>`. The three that ship (`critical`, `warning`,
-  `info`) carry the header comment describing the fragment shape; copy it.
+  named `ais-edge-<severity>`. The four files that ship (`critical`, `warning`,
+  `info`, `uploader`) carry the header comment describing the fragment shape; copy it.
 - **Loki.** Add the group to `charts/edge/files/loki-ruler-rules.yaml`, which
   renders as the ConfigMap `<release>-loki-rules` labelled `loki_rule`. Leave
   the `__DP_MIN_FREE_DISK_PCT__` / `__DP_QUARANTINE_ALERT_AFTER_S__` sentinels
@@ -321,16 +328,17 @@ the sidecar's folder, which the `loki` container mounts at the same path.
 > read-only in the image, Loki mkdir's the ruler directory at startup, and the
 > result was `mkdir /etc/loki/rules: read-only file system` /
 > `error initialising module: ruler-storage` and a CrashLoop — no log storage
-> and no pipeline alerts. `helm template` cannot catch that class of mistake,
-> because the path is wrong only relative to where the *subchart* mounts things.
+> and no pipeline alerts. A plain `helm template` run does not exercise startup. A targeted manifest check can compare writable mounts and the read-only root filesystem; a runtime test remains useful.
 
 `charts/edge` already ships a ConfigMap of this shape —
 `<release>-loki-rules`, rendered from `charts/edge/files/loki-ruler-rules.yaml`
-with 11 alerts in four groups. Yours is an **additional** ConfigMap carrying the
+with 21 alerts in four groups. Yours is an **additional** ConfigMap carrying the
 same label, not an edit to that one: the sidecar selects on the label, so any
 number of them load side by side.
 
 The rule itself is an ordinary Loki rule group:
+
+This is a **deprecated Orthanc-engine example**: `instance_deidentified` is not emitted by the default ingest engine, where Orthanc only receives DICOM. Its name also does not imply a once-per-day trigger; the expression remains active while any matching line is in the last hour. For a current pipeline rule, use the stage-specific stream and captured 0.20.0 message. The heartbeat example later uses periodic `stage_report` events: upload success is not a heartbeat because an idle or already-complete session is quiet.
 
 ```yaml
 apiVersion: v1
@@ -376,8 +384,8 @@ LogQL primer:
 | Operator | Meaning |
 |---|---|
 | `{namespace="x"}` | Stream selector. Matches all logs with this label. |
-| `|= "literal"` | Contains substring (case-sensitive) |
-| `|~ "regex"` | Matches PCRE regex (case-insensitive with `(?i)` prefix) |
+| `\|= "literal"` | Contains substring (case-sensitive) |
+| `\|~ "regex"` | Matches RE2 regular expressions (case-insensitive with `(?i)` prefix) |
 | `\| json` | Parses each log line as JSON; subsequent stages can match on extracted fields |
 | `\| field="value"` | After `\| json`, filter by extracted field value |
 | `count_over_time(<selector> [Nm])` | Count matching lines in last N minutes |
@@ -430,8 +438,7 @@ and re-run `./install.sh <site>`. Two rules about that file, both load-bearing:
 - **It is never rendered with `tpl`.** It is full of Alertmanager's own `{{ }}`
   notification templates (`{{ .CommonLabels.session }}` and friends). Running
   `tpl` over it would evaluate those against the *chart* context, where they do
-  not exist, and they would render as empty strings — every alert arriving with
-  a blank body and nothing erroring. The installer's values are spliced in as
+  not exist, and they could produce incorrect values or fail with a template evaluation error. The installer's values are spliced in as
   `__SENTINEL__` tokens by a plain `replace` instead. If a new value has to come
   from the site file, add a new sentinel; do not reach for `tpl`.
 - **`configSecret` and `alertmanagerSpec.secrets: [alertmanager-smtp]` are
@@ -456,9 +463,9 @@ route:
     # first match unless the route sets `continue: true`.
     #
     # kube-prometheus-stack's own meta-alerts go FIRST, so they can never
-    # fall through to the tree below. Both fire permanently by design and
-    # say nothing about this site; they mailed the operator forever until
-    # this route was added.
+    # fall through to the tree below. Watchdog fires continuously; InfoInhibitor is conditional
+    # on informational alerts without higher severity in the same namespace.
+    # This route deliberately discards their notifications; it is not a drill.
     - matchers: ['alertname =~ "Watchdog|InfoInhibitor"']
       receiver: "null-meta"
     - matchers: ['alertname = "DICOMRejectedUnmappedAET"']
@@ -498,7 +505,7 @@ kubectl apply -f my-loki-rules-configmap.yaml # Loki ConfigMap
 ```
 
 `install.sh` is idempotent and step-wise — it re-runs `helm upgrade --install`
-with `sites/<site>/values.yaml`, so re-running with no changes is a no-op.
+with `sites/<site>/values.yaml`. Re-running can still re-execute hooks or reconciliation; it is not guaranteed to make no changes.
 Neither rule path needs a restart: the prometheus-operator reloads Prometheus
 when a `PrometheusRule` changes, and the sidecar rewrites the rule file within
 seconds of the ConfigMap changing, which the ruler picks up on its next
@@ -522,10 +529,10 @@ kubectl -n xnat-ingest port-forward svc/ais-kps-alertmanager 9093:9093
 ```
 
 An empty `/loki/api/v1/rules` with a sidecar log that says it wrote the file is
-a *placement* problem, not a bad rule — check that the file landed under
+consistent with a placement problem or a parse/load failure. Check logs and that the file landed under
 `/rules/fake` and not at the top of `/rules` (the tenant sub-directory from Step
 3). The other shape worth knowing: if the rules API is missing your group **and**
-the 11 that ship, the file did not parse. Loki rejects the whole file on the
+the 21 that ship, the file did not parse. Loki rejects the whole file on the
 first malformed group, so one rule indented out of its `rules:` list takes every
 other rule in that file with it — `scripts/ci/promtool.sh` catches exactly this
 before install.
@@ -536,11 +543,13 @@ before install.
 
 Easiest end-to-end test path:
 
-1. **Cause the condition.** For pipeline alerts, run a drop test
-   (POST a DICOM to Orthanc via REST — `kubectl -n xnat-ingest port-forward
-   svc/<release>-orthanc 8042:8042`, then `curl -X POST
-   http://localhost:8042/instances --data-binary @file.dcm`). For metric
-   alerts, drive the metric (delete a pod to flip its readiness, fill a disk).
+1. **Exercise the condition in an isolated test environment.** Use synthetic
+   studies and a C-STORE sender when testing the DICOM-network callback path.
+   A REST POST tests a different origin: it requires receiver authentication
+   when enabled and does not exercise the DicomProtocol-only facility-backup
+   callback. Use controlled metric fixtures for failure rules instead of filling
+   a production disk or deleting production pods merely to generate a mail.
+
 2. **Watch Alertmanager fire.**
    ```
    kubectl -n xnat-ingest port-forward svc/ais-kps-alertmanager 9093:9093
@@ -576,6 +585,8 @@ amtool silence add --alertmanager.url=http://localhost:9093 \
 
 ## Step 6 — Common patterns cheat sheet
 
+Validation notes (2026-11-10): examples need live emitter/label checks before deployment. The data-policy heartbeat requires its reporter enabled and a window longer than its configured interval. `unless on (cluster)` below handles absent success series while retaining site identity. PVC alerts measure PVCs, not every hostPath pipeline directory. The Alertmanager retention default is 120h, shorter than 720h route repeats; month-long suppression is not guaranteed by those route values alone.
+
 ### "Alert when X happens"
 ```yaml
 expr: |
@@ -589,8 +600,8 @@ for: 0s
 # will reject the rule at load time, which shows up as the rule simply not
 # being in /loki/api/v1/rules.
 expr: |
-  absent_over_time({app="xnat-ingest", component="upload"}
-    |= "Successfully uploaded" [10m])
+  absent_over_time({component="data-policy"}
+    | json | event="stage_report" | __error__="" [30m])
 for: 5m
 ```
 
@@ -607,8 +618,8 @@ for: 5m
 ```yaml
 expr: |
   (sum by (cluster) (count_over_time({namespace="xnat-ingest"} |= "fail" [15m])) > 0)
-  and ignoring (cluster)
-  (sum by (cluster) (count_over_time({namespace="xnat-ingest"} |= "success" [15m])) == 0)
+  unless on (cluster)
+  (sum by (cluster) (count_over_time({namespace="xnat-ingest"} |= "success" [15m])) > 0)
 for: 15m
 ```
 
@@ -631,8 +642,7 @@ for: 10m
 Stage names come from `dataPolicy` in the site file: `originals.facilityBackup`,
 `originals.quarantine`, `derived.orthancStorage`, `derived.grouped`,
 `derived.assigned`. The facility backup is the one that matters most — it is
-the only copy of the identifiable originals, and nothing else on this node will
-notice it filling up.
+an important retained original copy for successful DICOM-network backup callbacks. REST uploads and file drops do not automatically enter that archive. Other copies depend on source retention and prior processing; disk metrics for measurable PVCs can also warn of exhaustion.
 
 ### "Alert when a PVC is filling up"
 ```yaml
@@ -655,12 +665,12 @@ for: 5m
 
 | File | What's in it |
 |---|---|
-| `sites/<site>/values.yaml` | `observability.stack.enabled` (the on/off switch for the whole stack — it gates both subcharts via `condition:` in `charts/edge/Chart.yaml`) and `observability.stack.alerting.*` (inbox, sender, SMTP host/port/user, `requireTLS`, `existingSecret`). Those are the only `observability.stack` keys any template reads — plus any `kube-prometheus-stack:` / `loki:` subchart overrides you add. Grafana's port is `kube-prometheus-stack.grafana.service.nodePort`; log retention is `loki.loki.limits_config.retention_period`; metric retention is `kube-prometheus-stack.prometheus.prometheusSpec.retention`. The friendly parent keys `observability.stack.grafana.nodePort` and `observability.stack.retentionDays` were **deleted** (see the comment block in `charts/edge/values.yaml`) because Helm cannot push a parent value into a subchart — they were read, trusted and silently ignored. `install.sh` still reads the first one to build the Grafana URL it prints, so setting it without also setting the subchart key just prints a link to a closed port |
+| `sites/<site>/values.yaml` | `observability.stack.enabled` (the on/off switch for the whole stack ; it gates both subcharts via `condition:` in `charts/edge/Chart.yaml`) and `observability.stack.alerting.*` (inbox, sender, SMTP host/port/user, `requireTLS`, `existingSecret`). Those are the only `observability.stack` keys any template reads ; plus any `kube-prometheus-stack:` / `loki:` subchart overrides you add. Grafana's port is `kube-prometheus-stack.grafana.service.nodePort`; log retention is `loki.loki.limits_config.retention_period`; metric retention is `kube-prometheus-stack.prometheus.prometheusSpec.retention`. The friendly parent keys `observability.stack.grafana.nodePort` and `observability.stack.retentionDays` were **deleted** (see the comment block in `charts/edge/values.yaml`) because Helm cannot push a parent value into a subchart ; they were read, trusted and silently ignored. `install.sh` (`GRAFANA_PORT`) now uses `kube-prometheus-stack.grafana.service.nodePort` for its printed URL, taking the site override or the chart default of 30030. The removed parent key has no effect on the Service or the displayed address |
 | `charts/edge/files/prometheus-rules/{critical,warning,info}.yaml` | The chart's own Prometheus alerts, as bare `groups:` fragments. Rendered one `PrometheusRule` per file, named `ais-edge-<severity>` |
-| `charts/edge/files/loki-ruler-rules.yaml` | The chart's own 11 LogQL alerts, in four groups. Rendered as ConfigMap `<release>-loki-rules` labelled `loki_rule`, with the `__DP_*__` thresholds substituted from `dataPolicy.originals` |
+| `charts/edge/files/loki-ruler-rules.yaml` | The chart's own 21 LogQL alerts, in four groups. Rendered as ConfigMap `<release>-loki-rules` labelled `loki_rule`, with the `__DP_*__` thresholds substituted from `dataPolicy.originals` |
 | `charts/edge/files/alertmanager-config.yaml` | Routes, receivers and inhibit rules. Rendered into Secret `alertmanager-aisedge-config` with `__SENTINEL__` tokens replaced from `observability.stack.alerting.*` — this is the config Alertmanager actually runs |
 | `sites/<site>/secrets.enc.yaml` | SOPS-encrypted. Secret `alertmanager-smtp` (`username`, `password`) and `grafana-admin-credentials` (`admin-user`, `admin-password`), both in `xnat-ingest` |
-| `charts/edge/values.yaml` → `kube-prometheus-stack:` | `fullnameOverride: ais-kps`, Prometheus retention + storage, Alertmanager storage, and the exporters disabled because they do not exist on one k0s node |
+| `charts/edge/values.yaml` → `kube-prometheus-stack:` | `fullnameOverride: ais-kps`, Prometheus retention + storage, Alertmanager storage, and exporters disabled because their scrape endpoints are not configured for this installation |
 | `charts/edge/values.yaml` → `loki:` | `fullnameOverride: ais-loki`, SingleBinary, filesystem storage on a PVC, retention, and `rulerConfig` including `alertmanager_url` |
 | `charts/edge/Chart.yaml` | The two subchart pins and `condition: observability.stack.enabled` |
 | `charts/edge/charts/*.tgz` | The vendored charts themselves — kube-prometheus-stack 87.19.2, loki 7.1.0. Nothing is fetched at install time |

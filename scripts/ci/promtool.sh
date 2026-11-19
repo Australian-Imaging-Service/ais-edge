@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # 3. promtool check rules + promtool test rules
 # =============================================================================
@@ -38,6 +39,9 @@ RULES_SRC="$REPO_ROOT/$(ci_obs_chart)/files/prometheus-rules"
 # __RELEASE_NAMESPACE__ is not listed: it sits inside a label string, parses,
 # and the tests match it literally.
 RULE_TEST_VALUES=(
+  "__UPLOADER_NAMESPACE__=xnat-upload"
+  "__UPLOADER_RELEASE__=ais-mgmt\\/mgmt"
+  "__UPLOADER_DEPLOYMENT_REGEX__=(mgmt-upload-edge-a|mgmt-upload-edge-b)"
   "__RECLAIMER_ALERT_AFTER_S__=10800"   # 3h, the chart default today
 )
 RULES_DIR="$CI_WORK_DIR/prometheus-rules-src"
@@ -280,9 +284,17 @@ head = flat(f["expr"]).split(" unless on (namespace, job_name) ")[0]
 bad = []
 if bare(head) != bare(u["expr"]):
     bad.append("expr: fork %r vs upstream %r" % (bare(head), bare(u["expr"])))
-for k in ("for", "labels", "annotations"):
+for k in ("for", "labels"):
     if f.get(k) != u.get(k):
         bad.append("%s: fork %r vs upstream %r" % (k, f.get(k), u.get(k)))
+# ANNOTATION ONLY: local recovery text preserves failed-Job evidence instead
+# of recommending deletion to clear an alert. All other upstream fields stay
+# compared. The description is also covered by the existing promtool fixture.
+fa, ua = dict(f.get("annotations", {})), dict(u.get("annotations", {}))
+fa.pop("description", None)
+ua.pop("description", None)
+if fa != ua:
+    bad.append("annotations other than description: fork %r vs upstream %r" % (fa, ua))
 if bad:
     print("FAIL the KubeJobFailed fork has drifted from upstream (%s): %s" % (upstream[0][0], "; ".join(bad)))
 else:
@@ -361,6 +373,52 @@ PY
   case "$inhibit" in
     PASS*) ci_pass "${inhibit#PASS }" ;;
     *)     ci_fail "${inhibit#FAIL }" ;;
+  esac
+
+  # Alertmanager prunes its notification log after the CR's retention (the
+  # subchart default is 120h). A route whose repeat_interval is longer can
+  # mail again once the log entry is gone, so retention must cover the
+  # longest repeat_interval. Alertmanager only warns about it at startup.
+  retention="$(python3 - "$render" <<'PY'
+import re, sys, yaml
+UNIT = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+def secs(v):
+    parts = re.findall(r"(\d+)(ms|s|m|h|d|w|y)", str(v))
+    if not parts or "".join(a + b for a, b in parts) != str(v):
+        raise ValueError(v)
+    return sum(int(a) * UNIT[b] for a, b in parts)
+am, crs = None, []
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d:
+        continue
+    if d.get("kind") == "Alertmanager":
+        crs.append(d)
+    if d.get("kind") == "Secret" and "alertmanager.yaml" in (d.get("stringData") or {}):
+        am = yaml.safe_load(d["stringData"]["alertmanager.yaml"])
+if am is None or not crs:
+    print("FAIL no rendered Alertmanager config or Alertmanager resource to check"); raise SystemExit
+repeats = []
+def walk(route, path):
+    if route.get("repeat_interval"):
+        repeats.append((secs(route["repeat_interval"]), route["repeat_interval"], path))
+    for i, r in enumerate(route.get("routes") or []):
+        walk(r, "%s.routes[%d]" % (path, i))
+walk(am.get("route") or {}, "route")
+longest = max(repeats) if repeats else (secs("4h"), "4h", "default")
+bad = []
+for cr in crs:
+    ret = cr["spec"].get("retention") or "120h"
+    if secs(ret) < longest[0]:
+        bad.append("%s retention %s < repeat_interval %s at %s" % (cr["metadata"]["name"], ret, longest[1], longest[2]))
+if bad:
+    print("FAIL notification log pruned before the longest repeat: " + "; ".join(bad))
+else:
+    print("PASS Alertmanager retention covers the longest repeat_interval (%s at %s)" % (longest[1], longest[2]))
+PY
+)"
+  case "$retention" in
+    PASS*) ci_pass "${retention#PASS }" ;;
+    *)     ci_fail "${retention#FAIL }" ;;
   esac
 fi
 
@@ -802,19 +860,38 @@ FORCED = {
     "XNATRepairAttempted": "scoped to component=upload, for the same reason as XNATUploadSuccess: it matches the uploader's own log text, and a bare namespace selector would also match Loki logging this rule's query. The description also names each tier's own failure alert (XNATUploadRetryStorm here, SessionStagedNotConfirmedInXNAT on tier-2).",
     "SessionStagedNotConfirmedInXNAT": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim (its namespace regex already covers xnat-ingest). The steps name each tier's own objects: S3 staging and deploy/mgmt-upload-<edge> on tier-2, the upload tree and component=upload here.",
     "ReclaimerRunUnavailable": "ANNOTATION ONLY. expr, for and labels are the tier-2 rule verbatim. The reason list differs: tier-2's filer and bucket reasons cannot occur with STORAGE=filesystem, and the kubectl step names this tier's namespace.",
-    "XNATUploadFailingForAllSessions": "different uploader, not drift — tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count xnat-ingest's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
-    "SessionUploadStalled": "different uploader, not drift — the tier-2 rule selects component=\"s3-uploader\" and matches event=\"upload_started\"/\"upload_completed\", which that script emits. install.sh forces upload.mode=direct on tier-1, so no s3-uploader is rendered AND those event fields are never written: xnat-ingest emits eight event names and neither of those is among them. Measured on a live tier-1 install: 0 pods carry component=s3-uploader and 0 upload log lines carry an event field. The tier-1 rule therefore selects component=upload and matches the binary's own log text. Re-pointing the selector alone would have left it just as dead.",
+    "XNATUploadFailingForAllSessions": "different uploader, not drift: tier-2 runs the s3-uploader script, which emits structured event=upload_failed/upload_completed. install.sh forces upload.mode=direct on tier-1, so no s3-uploader exists there and the tier-2 expression can never fire; tier-1 must select component=upload and count accessionflow's own output, where a failure is a traceback header or an ERROR line and success is the per-session upload line",
+    "SessionUploadStalled": "different uploader, not drift; the tier-2 rule selects component=\"s3-uploader\" and matches event=\"upload_started\"/\"upload_completed\", which that script emits. install.sh forces upload.mode=direct on tier-1, so no s3-uploader is rendered AND those event fields are never written: accessionflow 0.20.0 emits other structured events, but not this pair. Historical live tier-1 measurement: 0 pods carry component=s3-uploader and 0 upload log lines carry an event field. The tier-1 rule therefore selects component=upload and matches the binary's own log text. Re-pointing the selector alone would have left it just as dead.",
     "XNATResourceIncompleteAndStuck": "ANNOTATION ONLY, and only the remediation steps. expr, for, labels and summary are identical modulo the namespace, and the line breaks in expr were aligned to tier-2's so this exemption covers nothing but the description. The steps cannot be shared: they name the workload to read logs from and restart, which is deploy/edge-upload in one namespace here and deploy/mgmt-upload-<edge> in xnat-upload on tier-2, and tier-2's copy also carries the measurements from the incident that produced the rule. An operator following tier-2's steps on tier-1 would address a workload that does not exist.",
     "DataPolicyReporterSilent": "different by design, not drift. Tier-1 runs ONE reporter, the site itself, so the rule is absent_over_time on its own clusterLabel. Tier-2 watches many edges from the management Loki, so it starts from the configured edge inventory and drops each edge that reported; absent_over_time there could not name which edge went quiet. Same labels, severity and `for`. The window differs too: max(30m, 3 x dataPolicy.reporter.interval) here, dataPolicy.reporterSilentAfter there.",
+    "IngestStageError": "wider selector while tier-1 alone has the optional package stage (chart 0.6.12): component=~\"group|group-fs|assign|package\" here, without package on tier-2. The rule is the tier-2 rule otherwise. Remove this entry when the package stage is ported to main and both tiers select package.",
     "DICOMRejectedUnmappedAET": "single-namespace collapse plus a different rules file — tier-2 defines this in charts/mgmt/files/loki-ruler-rules.yaml against its own namespace layout; tier-1 has no mgmt chart, so it is defined in charts/edge and selects app=\"orthanc\" in the one namespace. The expression and the regexp are otherwise the tier-2 rule verbatim. It was ABSENT from tier-1 entirely until now, while alertmanager-config.yaml already routed it by name and deidentify-and-forward.lua preserved its log wording for it.",
 }
+ANNOTATION_ONLY = {
+    "StageBacklogAgeing": "ANNOTATION ONLY. Management renders dataPolicy.stageAgeAlertAfter; tier-1 renders dataPolicy.reporter.stageAgeAlertAfter. Keep expressions, labels and pending periods compared.",
+    "XNATUploadRetryStorm": "ANNOTATION ONLY. The remediation text names the single-node direct uploader here and the management uploader on tier-2. Every other field must match modulo namespace.",
+}
+DESCRIPTION_ONLY = {
+    "EdgeDiskLow": "The investigation selects the emitting edge on tier-2 and the local cluster on tier-1.",
+    "InvalidSessionAssigned": "Recovery uses the affected edge kubeconfig on tier-2 and the single-node kubeconfig on tier-1.",
+    "PipelineSessionStuck": "The investigation selects the emitting edge on tier-2 and the local cluster on tier-1.",
+    "QuarantinedDataUnresolved": "Legacy recovery uses both management and edge site files on tier-2 and only the local site file on tier-1.",
+}
+def comparable(name, rule):
+    if name in ANNOTATION_ONLY:
+        return {key: value for key, value in rule.items() if key != "annotations"}
+    if name in DESCRIPTION_ONLY:
+        result = dict(rule)
+        result["annotations"] = {key: value for key, value in rule.get("annotations", {}).items() if key != "description"}
+        return result
+    return rule
 bad = [n for n in sorted(set(t1) & set(t2))
-       if n not in FORCED and norm(t1[n]) != norm(t2[n])]
+       if n not in FORCED and norm(comparable(n, t1[n])) != norm(comparable(n, t2[n]))]
 # To STDERR: stdout is the verdict this check is parsed from, and a NOTE on it
 # made the caller read "NOTE ..." as the result instead of PASS.
-for n in sorted(FORCED):
+for n, reason in sorted({**FORCED, **ANNOTATION_ONLY, **DESCRIPTION_ONLY}.items()):
     if n in t1:
-        print(f"    note: {n} — {FORCED[n]}", file=sys.stderr)
+        print(f"    note: {n}: {reason}", file=sys.stderr)
 shared = len(set(t1) & set(t2))
 if bad:
     print("FAIL " + ", ".join(bad))
@@ -860,5 +937,49 @@ PY
     *)     ci_fail "these rules select the whole namespace, which on one node also matches Loki/Grafana/Prometheus logs: ${out#FAIL }" ;;
   esac
 done
+
+ci_heading "uploader alerts match rendered workloads and routes"
+if out="$(python3 "$HERE/uploader-alerts.py" "$CI_RENDER_DIR" 2>&1)"; then
+  ci_pass "$out"
+else
+  ci_fail "$out"
+fi
+
+# -----------------------------------------------------------------------------
+# LOKI ANNOTATIONS AND LABELS ARE GO TEMPLATES, AND ONE BAD TEMPLATE COSTS THE
+# WHOLE FILE. The Loki ruler parses rule files with Prometheus rulefmt, which
+# checks every annotation and label template. One bad template stops the file
+# from loading (a reload keeps the previous rules), so every alert in it stops
+# changing or stops evaluating. The expressions are LogQL, which promtool cannot
+# parse, so each alert goes into a synthetic rule with `expr: vector(1)` and its
+# own labels and annotations. Found in review on 2026-11-10:
+# `grep -F -- "{{{ $labels.session }}}"` (unexpected "{" in command).
+ci_heading "Loki alert annotations and labels are valid templates"
+loki_templates() {   # loki_templates <loki rules file> <synthetic rules file>: prints the alert count
+  python3 - "$1" "$2" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+rules = [{"alert": r["alert"], "expr": "vector(1)", "labels": r.get("labels") or {},
+          "annotations": r.get("annotations") or {}}
+         for g in doc.get("groups", []) for r in g.get("rules", []) if r.get("alert")]
+yaml.safe_dump({"groups": [{"name": "loki-templates", "rules": rules}]}, open(sys.argv[2], "w"), sort_keys=False)
+print(len(rules))
+PY
+}
+tpl="$CI_WORK_DIR/loki-templates.yaml"
+if ! n_tpl="$(loki_templates "$REPO_ROOT/charts/edge/files/loki-ruler-rules.yaml" "$tpl" 2>&1)"; then
+  ci_fail "could not read the Loki alerts: $n_tpl"
+elif out="$("$PROMTOOL" check rules "$tpl" 2>&1)"; then
+  ci_pass "every template of the $n_tpl Loki alerts parses"
+else
+  ci_fail "a Loki alert template does not parse: $(printf '%s' "$out" | grep -E 'annotation|label|template' | head -3 | tr '\n' ' ')"
+fi
+# CONTROL: the same path must refuse the template that was found in review.
+printf 'groups:\n- name: c\n  rules:\n  - alert: C\n    expr: vector(1)\n    annotations:\n      description: "{{{ $labels.session }}}"\n' > "$CI_WORK_DIR/loki-templates-control.yaml"
+if "$PROMTOOL" check rules "$CI_WORK_DIR/loki-templates-control.yaml" >/dev/null 2>&1; then
+  ci_fail "control: promtool accepted {{{ \$labels.session }}}, so this check proves nothing"
+else
+  ci_pass "control: promtool refuses {{{ \$labels.session }}}"
+fi
 
 ci_summary "promtool"

@@ -1,3 +1,4 @@
+# The pipeline tool is accessionflow (called xnat-ingest before 0.18.0).
 # =============================================================================
 # CI
 # =============================================================================
@@ -104,6 +105,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: make shell-syntax
 
+      - name: Verification probe regressions
+        if: ${{ !cancelled() }}
+        run: make verify-live-checks
+
       - name: PVC retention (nothing holding data may be auto-deleted)
         if: ${{ !cancelled() }}
         run: make pvc-retention RENDER_DEP=
@@ -133,6 +138,10 @@ jobs:
       # invoked here, so they had never run on a push. duplicate-names catches two
       # objects rendering to the same (kind, namespace, name); secrets-encrypted
       # is the guard that no plaintext secret is ever committed.
+      - name: NOTES.txt claims (helm template never renders it)
+        if: ${{ !cancelled() }}
+        run: make notes
+
       - name: Duplicate rendered object names
         if: ${{ !cancelled() }}
         run: make duplicate-names
@@ -150,6 +159,44 @@ jobs:
         env:
           CI_REQUIRE_LOKI_TESTS: "1"
         run: make loki-rules
+
+      # A Loki rule matches log TEXT that the pinned image writes. Fixture logs
+      # keep the old wording, so the test above cannot see a reworded message.
+      # This reads the image's source and fails when a rule's phrase is gone.
+      - name: Alert log phrases exist in the code that logs them
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_LOG_PHRASES: "1"
+        run: make log-phrases
+
+      # The image is pinned by tag, so upstream can change the CLI under us:
+      # renamed commands and variables, moved options. This parses every
+      # rendered argv inside the pinned image and checks every ACFLOW_* name.
+      - name: Chart argv and env parse against the pinned image
+        if: ${{ !cancelled() }}
+        run: make cli-contract RENDER_DEP=
+
+      # The staged-reclaimer deletes the upload tree. Its tests ran only in
+      # `make ci`, never here. They copy the uploader's label rule out of the
+      # pinned accessionflow image (docker); without docker they would skip, so
+      # CI_REQUIRE_RECLAIMER_IMAGE=1 makes that a failure.
+      - name: Reclaimer tests (what survived, against a fake XNAT over HTTP)
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_RECLAIMER_IMAGE: "1"
+        run: make reclaimer RENDER_DEP=
+
+      # Requeue of an __invalid__ session: refusals, the lock, the audit line,
+      # and the pinned image reading the new labels from the folder name.
+      - name: Requeue helper for __invalid__ sessions
+        if: ${{ !cancelled() }}
+        env:
+          CI_REQUIRE_REQUEUE_IMAGE: "1"
+        run: make requeue-invalid
+
+      - name: Reclaimer fence (drain and resume fail closed)
+        if: ${{ !cancelled() }}
+        run: make reclaimer-fence
 
       # The engine that deletes patient-derived data on the edge. Asserts on
       # what SURVIVED a real run over real trees, not on what was logged.

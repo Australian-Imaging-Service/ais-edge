@@ -23,16 +23,18 @@ Vector".
 
 On tier-1 the pipeline pods expose **no `/metrics` endpoint at all** — Orthanc,
 group-orthanc, assign, upload and data-policy report through the JSON event
-stream Vector ships to Loki. So KSM is the *only* thing that tells Prometheus
-anything about the pipeline: it sees the pipeline purely as Kubernetes object
+stream Vector ships to Loki. So KSM supplies Kubernetes object state about the pipeline. Kubelet and
+cAdvisor also supply container and volume metrics. KSM itself it sees the pipeline purely as Kubernetes object
 state (Deployment replicas, container restart reasons, PVC phase), and
 everything semantic — a session that failed to upload, a backlog, a disk
 running low — is a LogQL rule in the Loki ruler instead. See
 [`alerting-architecture.md`](../alerting-architecture.md) for the split.
 
-**`charts/edge` ships no `PrometheusRule` of its own.** The alerts that consume
-KSM are the ones kube-prometheus-stack itself ships, in `ais-kps-*`
-PrometheusRule objects:
+**`charts/edge` now ships its own PrometheusRules** through
+`templates/observability.yaml`, in addition to the upstream `ais-kps-*` rules.
+The historical claim that none were shipped no longer applies (reviewed
+2026-11-10). Custom rules include `NodeNotReady`, `IngestPodCrashLoop`,
+`ReclaimerNotSucceeding` and uploader rules. Upstream rules still include:
 
 - `KubeNodeNotReady` — `kube_node_status_condition{condition="Ready",status="true"} == 0`
 - `KubePodCrashLooping` — `kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}`
@@ -43,10 +45,12 @@ PrometheusRule objects:
 - `KubePersistentVolumeFillingUp` — `kubelet_volume_stats_*` from the kubelet,
   cross-referenced with `kube_persistentvolumeclaim_*` from KSM
 
-Every one of those rules matches on `job="kube-state-metrics"`. The label comes
-from `jobLabel: app.kubernetes.io/name` on the auto-generated ServiceMonitor, so
-it holds regardless of the release name — but rename the workload by hand and
-the whole family goes quiet without erroring.
+Most listed Kubernetes-state expressions select `job="kube-state-metrics"`.
+The volume rule also selects kubelet metrics and joins PVC metadata. The job
+label comes from `jobLabel: app.kubernetes.io/name` on the ServiceMonitor.
+Changing the Deployment name alone need not change it; changing the Service
+label or scrape configuration can. Check the rendered selectors and live
+`up` labels after an observability change.
 
 ## What kube-state-metrics has access to
 
@@ -84,7 +88,9 @@ the whole family goes quiet without erroring.
   path to `prometheus-community.github.io` in order to reinstall
 - Scraped by `ais-kps-prometheus` via the ServiceMonitor the subchart generates
 
-**KSM is the one piece of the stack that is *not* named `ais-kps-*`.**
+**KSM uses the release name rather than the `ais-kps-*` prefix.**
+Grafana also uses the release name; Loki uses `ais-loki`. These are separate
+subchart naming rules, not evidence of multiple installations.
 `kube-prometheus-stack.fullnameOverride: ais-kps` renames the stack's own
 objects, but `kube-state-metrics` is a subchart of a subchart with its own
 fullname template, so it falls back to `<release>-kube-state-metrics`. Grafana
@@ -104,7 +110,7 @@ values file):
 ```yaml
 kube-prometheus-stack:
   kubeStateMetrics:
-    enabled: true            # false removes KSM, and with it every kube_* alert
+    enabled: true            # false removes KSM and its object-state inputs
   kube-state-metrics:        # the subchart's own values
     resources:
       requests: {cpu: 10m, memory: 32Mi}
@@ -114,10 +120,10 @@ kube-prometheus-stack:
 ```
 
 `resources` renders as `{}` by default — KSM runs **unbounded** on this node.
-That is the upstream chart's deliberate choice (it keeps the chart installable
-on tiny clusters) rather than a decision made here; on a single-node appliance
-holding one release the object count is small enough that it has not been worth
-overriding, but it means a cardinality problem has nothing to stop it.
+The rendered container has no chart request or limit, unless a site or
+namespace policy supplies one. The reason for the upstream default and its
+adequacy for a particular node are not verified (2026-11-10). Measure object
+count and resource use before deciding whether to add explicit limits.
 
 The exported object kinds are a fixed list rendered into `--resources=` from the
 subchart's `collectors` key. **CRDs are not in it** — `ServiceMonitor`,
@@ -152,14 +158,15 @@ kubectl auth can-i list pods \
 - **Cheap** — a single deployment, no per-node agent, no host access
 - **Standard naming** — the kube-prometheus-stack rules and the community
   dashboards expect exactly these metric names, so they work unmodified
-- **Read-only** — it cannot mutate the cluster, which is what makes it safe to
-  grant cluster-wide `list`/`watch`
+- **Read-only verbs** limit direct Kubernetes mutation, but do not make the
+  grant safe by themselves. Its list/watch access to Secrets can disclose
+  credentials if compromised. Review that access within the node trust model.
 
 ## Risks and failure modes
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| KSM down | Every `kube_*` alert stops firing, and *nothing says so* — `selfMonitor` is off, so the `KubeStateMetricsListErrors` / `WatchErrors` / `Sharding*` rules that ship in `ais-kps-kube-state-metrics` have no series behind them and can never fire. The pipeline alerts are unaffected: they run in the Loki ruler | The Deployment restarts itself, and KSM rebuilds state from informers within seconds. To make the gap visible, set `kube-state-metrics.selfMonitor.enabled: true`, which adds the `:8081` telemetry port to the Service and a second ServiceMonitor endpoint |
+| KSM down | KSM-dependent rules lose object-state inputs. Upstream `TargetDown` can detect failed existing scrape targets, but not every disappearance. Loki rules have a separate input path | `selfMonitor` is off by default, so internal KSM telemetry rules lack their `:8081` inputs. Enabling it adds telemetry, not a guarantee against total absence. Verify the scrape target, rule inputs and recovery after a controlled test; rebuild time is not verified (2026-11-10) |
 | Someone renames the workload or drops `jobLabel` | The `job` label stops being `kube-state-metrics`, and every default rule that matches on it silently never fires while KSM itself looks perfectly healthy | Leave the subchart to name it. Check `up{job="kube-state-metrics"}` after any change to the `kube-prometheus-stack:` block |
 | `kubeStateMetrics.enabled: false` | Loses the only Kubernetes-state signal on the node. Prometheus keeps scraping the kubelet and apiserver, so the dashboards still render and the loss is easy to miss | Do not disable it. If the goal is fewer series, use `metricDenylist` / `collectors` instead |
 | Cardinality growth | RAM climbs with object count; `resources: {}` means nothing caps it | Trim `collectors`, or set `metricAllowlist`/`metricDenylist`. Avoid `metricLabelsAllowlist` with `*` — one wildcard on pods multiplies the series set |
@@ -173,9 +180,10 @@ kubectl auth can-i list pods \
   release — one fewer thing to keep in step with the Prometheus that scrapes it
 - **OpenCost / Kubecost** — adds cost-allocation metrics on top of KSM-style
   data; only useful in cloud, and there is no cloud here
-- **Node-level metrics** are a different gap, not a KSM one: `nodeExporter` is
-  disabled on this node (see [`prometheus.md`](prometheus.md)), so CPU, memory
-  and node disk have no metric at all. KSM will never fill that in
+- **Node-exporter host metrics** are a separate gap: `nodeExporter` is
+  disabled (see [`prometheus.md`](prometheus.md)). Kubelet and cAdvisor still
+  supply container and some volume metrics. The data-policy reporter emits
+  pipeline-disk observations as logs; KSM does not measure disk bytes.
 
 ## Future enhancements
 

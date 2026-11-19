@@ -1,0 +1,512 @@
+# Uploader restart events and sustained RSS growth, including negative controls.
+rule_files:
+- ../uploader.yaml
+evaluation_interval: 30s
+tests:
+- name: Recovered OOM fires once per container and clears despite retained reason
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",instance="ksm-a",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",instance="ksm-b",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_last_terminated_reason{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",reason="OOMKilled",job="kube-state-metrics"}
+    values: 1+0x35
+  - series: kube_pod_container_status_ready{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 1+0x35
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+        reason: OOMKilled
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 restarted
+        description: "Kubernetes observed an uploader restart within the last 15 minutes.\nLast reported termination\
+          \ reason: OOMKilled.\nOOMKilled means the container exceeded its memory limit or the node ran out of memory.\n\
+          Check the previous container logs and its termination details:\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --previous\n  kubectl -n xnat-upload describe pod mgmt-upload-edge-a-abc123-xyz12\nThis is\
+          \ a restart event, even if the uploader is ready again. A rollout\ncreates a new pod and does not increase\
+          \ this counter.\n"
+  - eval_time: 21m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+- name: Non-OOM restart names its cause and does not conflate a second uploader
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_last_terminated_reason{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",reason="Error",job="kube-state-metrics"}
+    values: 1+0x35
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",job="kube-state-metrics"}
+    values: 0+0x35
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+        reason: Error
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 restarted
+        description: "Kubernetes observed an uploader restart within the last 15 minutes.\nLast reported termination\
+          \ reason: Error.\nOOMKilled means the container exceeded its memory limit or the node ran out of memory.\n\
+          Check the previous container logs and its termination details:\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --previous\n  kubectl -n xnat-upload describe pod mgmt-upload-edge-a-abc123-xyz12\nThis is\
+          \ a restart event, even if the uploader is ready again. A rollout\ncreates a new pod and does not increase\
+          \ this counter.\n"
+- name: Restart still fires when the last reason metric is absent
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 restarted
+        description: "Kubernetes observed an uploader restart within the last 15 minutes.\nLast reported termination\
+          \ reason: unknown.\nOOMKilled means the container exceeded its memory limit or the node ran out of memory.\n\
+          Check the previous container logs and its termination details:\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --previous\n  kubectl -n xnat-upload describe pod mgmt-upload-edge-a-abc123-xyz12\nThis is\
+          \ a restart event, even if the uploader is ready again. A rollout\ncreates a new pod and does not increase\
+          \ this counter.\n"
+- name: Disagreeing KSM reasons do not break the join or lose the restart
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_last_terminated_reason{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",reason="OOMKilled",instance="ksm-a",job="kube-state-metrics"}
+    values: 1+0x35
+  - series: kube_pod_container_status_last_terminated_reason{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",reason="Error",instance="ksm-b",job="kube-state-metrics"}
+    values: 1+0x35
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 restarted
+        description: "Kubernetes observed an uploader restart within the last 15 minutes.\nLast reported termination\
+          \ reason: unknown.\nOOMKilled means the container exceeded its memory limit or the node ran out of memory.\n\
+          Check the previous container logs and its termination details:\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --previous\n  kubectl -n xnat-upload describe pod mgmt-upload-edge-a-abc123-xyz12\nThis is\
+          \ a restart event, even if the uploader is ready again. A rollout\ncreates a new pod and does not increase\
+          \ this counter.\n"
+- name: Counter reset and stale OOM reason alone do not count as a restart
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 10+0x4 0+0x30
+  - series: kube_pod_container_status_last_terminated_reason{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",reason="OOMKilled",job="kube-state-metrics"}
+    values: 1+0x35
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+  - eval_time: 21m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+- name: Other namespaces releases and containers are excluded
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="other",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="other-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="deidentify",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+- name: Truncated or adopted pod names follow Deployment ownership
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="different-replicaset"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="different-replicaset",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+      exp_annotations:
+        summary: XNAT uploader aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde restarted
+        description: "Kubernetes observed an uploader restart within the last 15 minutes.\nLast reported termination\
+          \ reason: unknown.\nOOMKilled means the container exceeded its memory limit or the node ran out of memory.\n\
+          Check the previous container logs and its termination details:\n  kubectl -n xnat-upload logs aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde\
+          \ -c upload --previous\n  kubectl -n xnat-upload describe pod aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabcde\n\
+          This is a restart event, even if the uploader is ready again. A rollout\ncreates a new pod and does not\
+          \ increase this counter.\n"
+- name: A similarly named pod owned by another Deployment stays out
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-fake1-fake2",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="unrelated-deployment-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="unrelated-deployment-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="unrelated-deployment"}
+    values: 1+0x600
+  - series: kube_pod_container_status_restarts_total{namespace="xnat-upload",pod="mgmt-upload-edge-a-fake1-fake2",container="upload",job="kube-state-metrics"}
+    values: 0+0x4 1+0x30
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+- name: Foreign recording series cannot enter this release alerts
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: ais_edge:xnat_uploader_restarts_15m{namespace="other",pod="other",container="upload",uploader_release="other/release"}
+    values: 1+0x35
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: XNATUploaderRestarted
+    exp_alerts: []
+- name: Six-hour RSS growth warns after its hold and isolates uploaders
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+0x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 6h30m
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+  - eval_time: 7h1m
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 memory keeps growing
+        description: "Resident memory is growing faster than 32 MiB per six hours, in both\nthe six-hour and fifteen-minute\
+          \ trends, and is above 25% of the memory limit.\nThis has held for one hour after at least six hours of\
+          \ container uptime.\nCompare memory with upload activity and inspect the uploader logs.\nSustained growth\
+          \ can exhaust memory, but this alert alone does not prove a leak.\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --since=1h\n"
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts:
+    - exp_labels:
+        namespace: xnat-upload
+        pod: mgmt-upload-edge-a-abc123-xyz12
+        container: upload
+        severity: warning
+        uploader_release: ais-mgmt/mgmt
+      exp_annotations:
+        summary: XNAT uploader mgmt-upload-edge-a-abc123-xyz12 memory keeps growing
+        description: "Resident memory is growing faster than 32 MiB per six hours, in both\nthe six-hour and fifteen-minute\
+          \ trends, and is above 25% of the memory limit.\nThis has held for one hour after at least six hours of\
+          \ container uptime.\nCompare memory with upload activity and inspect the uploader logs.\nSustained growth\
+          \ can exhaust memory, but this alert alone does not prove a leak.\n  kubectl -n xnat-upload logs mgmt-upload-edge-a-abc123-xyz12\
+          \ -c upload --since=1h\n"
+- name: High flat RSS and filesystem-cache growth are not RSS growth
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 1992294400+0x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  - series: container_memory_cache{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 104857600+349525.3333333333x600
+  alert_rule_test:
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: One upload peak then a plateau does not sustain a one-hour trend
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+0x359 943718400+0x240
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 6h30m
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+  - eval_time: 7h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: A newly started Prometheus needs six hours of observations
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: -86400+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 3h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: A thirty-minute upload ramp stops before the sustained hold
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+0x359 734003200+17476266.666666668x30 1258291200+0x210
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 7h20m
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+  - eval_time: 7h25m
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: Growth during container startup is ignored
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 18000+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: Missing or zero limits do not divide by zero or invent pressure
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 0+0x600
+  alert_rule_test:
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: Growth below a quarter of the limit does not warn
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 52428800+139810.13333333333x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []
+- name: Growth below 32 MiB per six hours stays quiet
+  interval: 1m
+  input_series:
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-a-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-a-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-a"}
+    values: 1+0x600
+  - series: kube_pod_owner{job="kube-state-metrics",namespace="xnat-upload",pod="mgmt-upload-edge-b-def456-uvw34",owner_kind="ReplicaSet",owner_is_controller="true",owner_name="mgmt-upload-edge-b-abc123"}
+    values: 1+0x600
+  - series: kube_replicaset_owner{job="kube-state-metrics",namespace="xnat-upload",replicaset="mgmt-upload-edge-b-abc123",owner_kind="Deployment",owner_is_controller="true",owner_name="mgmt-upload-edge-b"}
+    values: 1+0x600
+  - series: container_memory_rss{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kubelet",metrics_path="/metrics/cadvisor"}
+    values: 734003200+69905.06666666667x600
+  - series: kube_pod_container_state_started{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",job="kube-state-metrics"}
+    values: 0+0x600
+  - series: kube_pod_container_resource_limits{namespace="xnat-upload",pod="mgmt-upload-edge-a-abc123-xyz12",container="upload",resource="memory",unit="byte",job="kube-state-metrics"}
+    values: 2147483648+0x600
+  alert_rule_test:
+  - eval_time: 8h
+    alertname: XNATUploaderMemoryGrowing
+    exp_alerts: []

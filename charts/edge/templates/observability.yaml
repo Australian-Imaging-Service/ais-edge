@@ -177,7 +177,9 @@ data:
 {{- if le $reclaimerAlertAfterS $reclaimerFloorS }}
   {{- fail (printf "dataPolicy.derived.stagedReclaimer.alertAfter must be longer than %ds, got %q. That is 2 x the period of schedule %q plus deadlineSeconds (%ds), or deadlineSeconds alone when the period cannot be read from the schedule: one failed run followed by a slow success already goes that long without a success, so ReclaimerNotSucceeding would mail for a single failure. forever/never/empty are refused as well; to stop the alert, silence it in Alertmanager." $reclaimerFloorS (toString .Values.dataPolicy.derived.stagedReclaimer.alertAfter) $sched $reclaimerDeadlineS) }}
 {{- end }}
+{{- $uploaderDeploymentRegex := printf "%s-upload" (regexQuoteMeta (include "edge.fullname" .)) | replace "\\" "\\\\" }}
 {{- range $path, $_ := .Files.Glob "files/prometheus-rules/*.yaml" }}
+{{- if or (ne (base $path) "uploader.yaml") (eq $.Values.upload.mode "direct") }}
 {{- $sev := base $path | trimSuffix ".yaml" }}
 ---
 apiVersion: monitoring.coreos.com/v1
@@ -192,7 +194,7 @@ spec:
        ReclaimerNotSucceeding) to this release's own staged-reclaimer. A plain
        replace, never tpl: the files carry Prometheus's own {{ $labels }}
        templates. */}}
-{{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) }}
+{{- $promRules := $.Files.Get $path | replace "__RELEASE_NAMESPACE__" $ns | replace "__RECLAIMER_ALERT_AFTER_S__" (printf "%d" $reclaimerAlertAfterS) | replace "__UPLOADER_NAMESPACE__" $ns | replace "__UPLOADER_DEPLOYMENT_REGEX__" $uploaderDeploymentRegex | replace "__UPLOADER_RELEASE__" (printf "%s/%s" $.Release.Namespace $.Release.Name) }}
 {{- /* A SURVIVING SENTINEL IS SILENT HERE, unlike in the Loki file: PromQL
        reads a bare __NAME__ as a metric name, so the rule loads, reports
        healthy and compares against a series that never exists. */ -}}
@@ -200,6 +202,7 @@ spec:
   {{- fail (printf "a __*__ sentinel survived substitution in %s. Prometheus would read it as a metric name that never exists, so the rule would load, look healthy and never fire. Add the matching replace above." $path) }}
 {{- end }}
 {{ $promRules | indent 2 }}
+{{- end }}
 {{- end }}
 
 ---

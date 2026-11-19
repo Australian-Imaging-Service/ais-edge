@@ -206,7 +206,7 @@ else
   # includes upload.mode=s3 fixtures, so `s3-uploader` appeared "deployed" and
   # the exact bug this check exists for went undetected on a green run.
   SITE_VALUES=""
-  for cand in "$REPO_ROOT/sites/example-single/values.yaml" "$REPO_ROOT/sites/example-edge/values.yaml"; do
+  for cand in "$REPO_ROOT/sites/example-single/values.yaml"; do
     [ -f "$cand" ] && { SITE_VALUES="$cand"; break; }
   done
   deployed=""
