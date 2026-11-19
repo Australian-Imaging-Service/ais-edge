@@ -133,6 +133,8 @@ spec:
               value: {{ include "edge.uploaderStateDir" . | quote }}
             - name: ASSIGNED_DIR
               value: {{ .Values.dataPolicy.derived.assigned.location | quote }}
+            - name: ANNOTATED_DIR
+              value: {{ .Values.dataPolicy.derived.annotated.location | quote }}
             # The same helper upload.yaml gives the s3-uploader, so onUploaded
             # fingerprints exactly the tree the uploader fingerprinted.
             - name: UPLOAD_SOURCE_DIR
