@@ -505,7 +505,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
          tree the uploader reads. The engine now keeps in both cases, which
          would leave the stage growing while the policy read as if it were
          being cleaned; refusing here makes the mistake an install error. */ -}}
-  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded" "onPackaged") "packaged" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
+  {{- $reclaimWords := dict "grouped" (list "never" "onAssigned") "assigned" (list "auto" "never" "onUploaded" "onDeidentified") "annotated" (list "auto" "never" "onUploaded" "onDeidentified") "deidentified" (list "auto" "never" "onUploaded" "onPackaged") "packaged" (list "auto" "never" "onUploaded") "orthancStorage" (list "never" "onGrouped") }}
   {{- range $stage, $allowed := $reclaimWords }}
     {{- $w := index $.Values.dataPolicy.derived $stage "reclaim" | toString }}
     {{- if not (has $w $allowed) }}
@@ -803,6 +803,14 @@ keep a tree it would otherwise retire.
 {{- define "edge.assignedReclaim" -}}
 {{- $v := .Values.dataPolicy.derived.assigned.reclaim -}}
 {{- if ne $v "auto" }}{{ $v }}
+{{- else if eq (include "edge.annotateEnabled" .) "true" }}never
+{{- else if eq (include "edge.deidEngine" .) "ingest" }}onDeidentified
+{{- else }}onUploaded{{ end }}
+{{- end }}
+
+{{- define "edge.annotatedReclaim" -}}
+{{- $v := .Values.dataPolicy.derived.annotated.reclaim -}}
+{{- if ne $v "auto" }}{{ $v }}
 {{- else if eq (include "edge.deidEngine" .) "ingest" }}onDeidentified
 {{- else }}onUploaded{{ end }}
 {{- end }}
@@ -862,6 +870,9 @@ originals.fileDrop	original	{{ .Values.dataPolicy.originals.fileDrop.location }}
 derived.orthancStorage	derived	{{ .Values.dataPolicy.derived.orthancStorage.location }}	-	-	{{ .Values.dataPolicy.derived.orthancStorage.reclaim }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.orthancStorage.minAge }}	{{ .Values.dataPolicy.derived.orthancStorage.backend }}
 derived.grouped	derived	{{ .Values.dataPolicy.derived.grouped.location }}	-	-	{{ .Values.dataPolicy.derived.grouped.reclaim }}	0	filesystem
 derived.assigned	derived	{{ .Values.dataPolicy.derived.assigned.location }}	-	-	{{ include "edge.assignedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.assigned.minAge }}	filesystem
+{{- if (eq (include "edge.annotateEnabled" .) "true") }}
+derived.annotated	derived	{{ .Values.dataPolicy.derived.annotated.location }}	-	-	{{ include "edge.annotatedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.annotated.minAge }}	filesystem
+{{- end }}
 {{- if (eq (include "edge.deidEngine" .) "ingest") }}
 derived.deidentified	derived	/data/deidentified	-	-	{{ include "edge.deidentifiedReclaim" . }}	{{ include "edge.durationSeconds" .Values.dataPolicy.derived.deidentified.minAge }}	filesystem
 {{- end }}
@@ -935,6 +946,10 @@ with a message rather than silently selecting neither engine.
 {{- toYaml (merge (deepCopy $explicit) $derived) -}}
 {{- end }}
 
+{{- define "edge.annotateEnabled" -}}
+{{- .Values.ingest.annotate.enabled -}}
+{{- end }}
+
 {{- define "edge.orthancDeidEnabled" -}}
 {{- eq (include "edge.deidEngine" .) "orthanc" -}}
 {{- end }}
@@ -953,7 +968,9 @@ with a message rather than silently selecting neither engine.
 
 {{- define "edge.uploadSourceDir" -}}
 {{- if eq (include "edge.packageEnabled" .) "true" }}/data/packaged
-{{- else if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified{{- else }}/data/assigned{{- end }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}/data/deidentified
+{{- else if (eq (include "edge.annotateEnabled" .) "true") }}/data/annotated
+{{- else }}/data/assigned{{- end }}
 {{- end }}
 
 {{- /*
@@ -976,7 +993,9 @@ before.
 */}}
 {{- define "edge.uploadReclaim" -}}
 {{- if eq (include "edge.packageEnabled" .) "true" }}{{ include "edge.packagedReclaim" . }}
-{{- else if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}{{ include "edge.deidentifiedReclaim" . }}
+{{- else if (eq (include "edge.annotateEnabled" .) "true") }}{{ include "edge.annotatedReclaim" . }}
+{{- else }}{{ include "edge.assignedReclaim" . }}{{- end }}
 {{- end }}
 
 {{- /*
@@ -1037,7 +1056,9 @@ installs for the running Python, so the pod passes its own image in.
      different trees. */}}
 {{- define "edge.uploadTreeKey" -}}
 {{- if eq (include "edge.packageEnabled" .) "true" }}packaged
-{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified{{- else }}assigned{{- end }}
+{{- else if (eq (include "edge.deidEngine" .) "ingest") }}deidentified
+{{- else if (eq (include "edge.annotateEnabled" .) "true") }}annotated
+{{- else }}assigned{{- end }}
 {{- end }}
 
 {{- /* THE UPLOAD-TREE WRITER LOCK. One file on the pipeline volume, out of every
@@ -1112,7 +1133,7 @@ installs for the running Python, so the pod passes its own image in.
      under its own name, and CI cli-contract fails when the image has no such
      command (a values file cannot reach this, so it is no render guard). */}}
 {{- define "edge.stageCommand" -}}
-{{- $argv := dict "group" (list "collate" "folder") "group-orthanc" (list "collate" "orthanc") "assign" (list "label" "xnat") "deidentify" (list "deidentify") "package" (list "package") }}
+{{- $argv := dict "group" (list "collate" "folder") "group-orthanc" (list "collate" "orthanc") "assign" (list "label" "xnat") "annotate" (list "annotate") "deidentify" (list "deidentify") "package" (list "package") }}
 - accessionflow
 {{- range (index $argv . | default (list .)) }}
 - {{ . | quote }}
@@ -1120,7 +1141,7 @@ installs for the running Python, so the pod passes its own image in.
 {{- end }}
 
 {{- define "edge.serialisedStage" -}}
-{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "annotate" "annotated" "deidentify" "deidentified" "package" "packaged" }}
 - /bin/sh
 - -c
 - {{ printf "trap exit TERM INT; mkdir -p /data/.locks && while :; do flock /data/.locks/%s.lock \"$0\" \"$@\" || exit; sleep %v & wait $!; done" (index $tree (index . 1)) (index . 2) | quote }}
@@ -1136,7 +1157,7 @@ installs for the running Python, so the pod passes its own image in.
      deidentified.lock, so the nested order cannot deadlock. */}}
 {{- define "edge.lockedStage" -}}
 {{- $root := index . 0 }}{{- $stage := index . 1 }}{{- $interval := index . 2 }}
-{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "deidentify" "deidentified" "package" "packaged" }}
+{{- $tree := dict "group" "grouped" "group-orthanc" "grouped" "assign" "assigned" "annotate" "annotated" "deidentify" "deidentified" "package" "packaged" }}
 {{- $outer := "" }}
 {{- if gt (len .) 3 }}
 {{- $outer = printf "flock /data/.locks/%s.lock " (index $tree (index . 3)) }}

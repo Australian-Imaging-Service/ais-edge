@@ -648,9 +648,9 @@ import re, sys, yaml
 path, locked, plain, serialised = sys.argv[1:5]
 # The same map as edge.stageCommand in _helpers.tpl.
 ARGV = {"group": ["collate", "folder"], "group-orthanc": ["collate", "orthanc"], "assign": ["label", "xnat"],
-        "deidentify": ["deidentify"], "package": ["package"]}
+        "annotate": ["annotate"], "deidentify": ["deidentify"], "package": ["package"]}
 tool = lambda stage: ["accessionflow"] + ARGV[stage]
-tree = {"assign": "assigned", "deidentify": "deidentified", "package": "packaged"}
+tree = {"assign": "assigned", "annotate": "annotated", "deidentify": "deidentified", "package": "packaged"}
 # A stop (TERM or INT) ends the loop: at once in the sleep, after the pass in a
 # pass. The next check, "the stage wrappers stop on SIGTERM", runs it.
 STOPS = re.compile(r"trap exit TERM INT; .*; sleep [0-9]+ & wait \$!; done")

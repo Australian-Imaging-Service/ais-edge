@@ -413,6 +413,25 @@ dataPolicy:
       # it (the longer of this and its own minAge); data-policy hands it over.
       minAge: 0
 
+    # Output of annotate; input to deidentify when the ingest engine is enabled.
+    annotated:
+      location: /data/annotated
+      # never | onUploaded | onDeidentified
+      #
+      # onUploaded      the staged-reclaimer verifies this tree against XNAT
+      #                 before removing it. Use when annotation is the final
+      #                 stage before upload.
+      # onDeidentified  the deidentify stage removes each annotated session
+      #                 after successfully writing its deidentified output.
+      #                 Only meaningful with deid.engine=ingest.
+      #
+      # auto selects onDeidentified for the ingest engine, otherwise
+      # onUploaded when annotation is enabled.
+      reclaim: auto
+      # Recovery window after upload; applies when reclaim resolves to
+      # onUploaded. Set to 0 when deidentify removes the input at handoff.
+      minAge: 0
+
 
     # With --unlink-source all, label and deidentify in 0.18.0+ retire every
     # path in the input snapshot after success, including unprocessed files.
@@ -838,6 +857,22 @@ ingest:
     # reference rather than as a setup procedure for new sites.
 
     tagMapping: {}
+
+  # Annotate accessions with fields extracted from their metadata as XNAT session fields.
+  # `extract` maps each destination field name to a metadata key or specifier;
+  # check the source metadata before configuring site-specific mappings.
+  # Fields that cannot be resolved are skipped.
+  # Annotate carries these values downstream unchanged; it does not de-identify
+  # them. Review the values against the site's data-sharing policy.
+  annotate:
+    enabled: false
+    interval: 60
+    # Each extract entry pairs a destination field name with a metadata key
+    # or format string. For example, acemid_id could use SubjectID.
+    # Confirm the source keys in accession-level __METADATA__.json; an
+    # unresolved specifier is skipped. XNAT stores the resulting fields as
+    # session custom variables.
+    extract: { }
 
   # DEFAULT DE-IDENTIFICATION: accessionflow, between assign and upload.
   # Recipes are in specs below or an external ConfigMap with specFiles.
