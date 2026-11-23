@@ -531,10 +531,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
       {{- fail (printf "dataPolicy.derived.assigned.minAge=%v is set alongside reclaim=onDeidentified. A recovery window measured on this tree can never elapse under that condition: the deidentify stage deletes each session the moment it has written a complete copy, so there is nothing left for the window to protect. Set minAge to 0, or use onUploaded if you want a window." .Values.dataPolicy.derived.assigned.minAge) }}
     {{- end }}
   {{- end }}
-  {{- if and (eq (include "edge.assignedReclaim" .) "onAnnotated")
-             (not eq (include "edge.annotateEnabled" .) "true") }}
-    {{- fail "dataPolicy.derived.assigned.reclaim=onAnnotated requires ingest.annotate.enabled=true." }}
-  {{- end }}
 
   {{- /* TIER-1 REACHES GRAFANA BY NodePort — there is no ingress here, so this
          number is the only way in. Kubernetes only accepts one from the
@@ -807,7 +803,7 @@ keep a tree it would otherwise retire.
 {{- define "edge.assignedReclaim" -}}
 {{- $v := .Values.dataPolicy.derived.assigned.reclaim -}}
 {{- if ne $v "auto" }}{{ $v }}
-{{- else if eq (include "edge.annotateEnabled" .) "true" }}onAnnotated
+{{- else if eq (include "edge.annotateEnabled" .) "true" }}never
 {{- else if eq (include "edge.deidEngine" .) "ingest" }}onDeidentified
 {{- else }}onUploaded{{ end }}
 {{- end }}

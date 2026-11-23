@@ -522,13 +522,10 @@ spec:
             - "__uid__,SOPClassUID"
             {{- if and (eq (include "edge.annotateEnabled" .) "true")
               (eq (include "edge.annotatedReclaim" $) "onDeidentified") }}
-              - "--unlink-source"
-              - "all"
+            - "--unlink-source"
+            - "all"
             {{- else if and (not .Values.ingest.annotate.enabled)
                (eq (include "edge.assignedReclaim" $) "onDeidentified") }}
-              - "--unlink-source"
-              - "all"
-            {{- end }}
             # dataPolicy.derived.assigned.reclaim = onDeidentified.
             #
             # Drop each assigned session once this stage has produced a
