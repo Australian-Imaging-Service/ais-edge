@@ -995,7 +995,7 @@ details.more .frag-note { margin-bottom: 8px; }
         <div class="field">
           <label class="f-name" for="vXnat">XNAT address</label>
           <input id="vXnat" type="text" value="xnat.example.org" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="vXnatHelp vXnatMsg">
-          <span class="f-help" id="vXnatHelp">The host name from the XNAT admin. The management machine uploads to it.</span>
+          <span class="f-help" id="vXnatHelp">The address from the XNAT admin. The management machine uploads to it. An XNAT under a path also works, such as <code class="inl">https://xnat.example.org/xnat</code>.</span>
           <span class="f-msg" id="vXnatMsg" aria-live="polite"></span>
         </div>
         <div class="field">
@@ -1163,7 +1163,7 @@ details.more .frag-note { margin-bottom: 8px; }
           <div class="field">
             <label class="f-name" for="polEdge">Keep the clean copy on the edge for at least</label>
             <span class="unit"><input id="polEdge" type="number" min="1" max="24" step="1" data-cfg="edgeHours" aria-describedby="polEdgeMsg"> hours</span>
-            <span class="f-help">Shipped: 24. After that, the edge removes a file as soon as the staging store proves it has the same file. The staged copy always waits 36 hours, so the edge finishes first.</span>
+            <span class="f-help">Shipped: 24. After that, the edge removes a file as soon as the staging store proves it has the same file. The staged copy waits 36 hours, so the edge has time to finish first.</span>
             <span class="f-msg" id="polEdgeMsg" data-msg="edgeHours" aria-live="polite"></span>
           </div>
           <div class="field">
@@ -1577,7 +1577,7 @@ kubectl -n ais-mgmt logs job/cert-sync-now --tail=30</code></pre></div>
         <h3>An edge went offline</h3>
         <dl>
           <div><dt>Cause</dt><dd>The edge machine is off, or it cannot reach port 443 of the management machine.</dd></div>
-          <div><dt>Fix</dt><dd>Check the machine and the network path. Studies that arrive meanwhile wait on the edge and go out when the path is back. Nothing has to be re-sent. <code class="inl">kubectl --kubeconfig kubeconfig-<span class="v" data-v="edge">demo-edge</span> get nodes</code> shows when it is Ready again.</dd></div>
+          <div><dt>Fix</dt><dd>Check the machine and the network path. <code class="inl">kubectl --kubeconfig kubeconfig-<span class="v" data-v="edge">demo-edge</span> get nodes</code> shows when it is Ready again.<br><br>If only the path to the management machine is down, the edge still receives studies. They wait on the edge and go out when the path is back. Nothing has to be re-sent.<br><br>If the edge machine itself is off, nothing receives studies while it is off. A scanner or PACS that sent in that time could not connect. Some retry by themselves. Ask the facility to check, and to send again any study that did not arrive. Studies that the edge received before it went off wait on its disk and go out by themselves.</dd></div>
           <div><dt>Alert</dt><dd><span class="chip">EdgeWorkerDisconnected</span></dd></div>
         </dl>
       </article>
@@ -2041,10 +2041,12 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
 
     function genMgmtSecrets(st) {
       var v = st.v, a = st.a, L = [];
+      L.push('# For the first install only: it works on the plain file, before encrypt.');
       L.push('S=sites/' + v.msite + '/secrets.enc.yaml');
       L.push('# 1. Not secret, so the page fills them in: the XNAT address and the mail user.');
       L.push('sed -i ' + shq('s|server: https://xnat.example.org|server: https://' + sedRep(v.xnat) + '|') + ' "$S"');
-      L.push('sed -i ' + shq('s|REPLACE_SMTP_USERNAME|' + sedRep(a.mailUser || a.mailTo) + '|') + ' "$S"');
+      // YAML-quoted, so that a user name such as 12345678 or no stays a string.
+      L.push('sed -i ' + shq('s|REPLACE_SMTP_USERNAME|' + sedRep(q(a.mailUser || a.mailTo)) + '|') + ' "$S"');
       L.push('# 2. Keys that only the programs use. They are made here, on this machine.');
       L.push('#    The upload key is in the file twice, and both get the same value.');
       L.push('sed -i "s|REPLACE_S3_ADMIN_ACCESS_KEY|$(openssl rand -hex 10)|; s|REPLACE_S3_ADMIN_SECRET_KEY|$(openssl rand -hex 20)|" "$S"');
@@ -2057,6 +2059,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
 
     function genEdgeSecrets(st) {
       var v = st.v, a = st.a, L = [];
+      L.push('# For the first install only: it works on the plain file, before encrypt.');
       L.push('S=sites/' + v.edge + '/secrets.enc.yaml');
       L.push('# Random values that nobody has to remember. They are made here, on this machine.');
       L.push('sed -i "s|REPLACE_64_HEX_CHARS|$(openssl rand -hex 32)|" "$S"');
@@ -2330,7 +2333,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
         what: [
           'Every hour, on the management machine.',
           'It asks XNAT about each file: present, with the same size.',
-          'It waits 36 hours, longer than the edge, so the edge always finishes first.'
+          'It waits 36 hours, longer than the edge, so the edge has time to finish first. If the edge clean-up stops for longer, watch ReclaimerNotSucceeding and RecopyLoop.'
         ],
         where: 's3://ingest-{edge}/staged/',
         watch: 'kubectl -n xnat-upload get cronjob mgmt-reclaim-{edge}',
@@ -2346,7 +2349,8 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
       siteKey: 'msite',
       fields: [
         { k: 'msite', id: 'vMsite', type: 'site' }, { k: 'mip', id: 'vMip', type: 'ip' }, { k: 'domain', id: 'vDomain', type: 'domain' },
-        { k: 'xnat', id: 'vXnat', type: 'xnat' }, { k: 'mdata', id: 'vMdata', type: 'path' }, { k: 'edge', id: 'vEdge', type: 'site' },
+        { k: 'xnat', id: 'vXnat', type: 'xnat' }, { k: 'mdata', id: 'vMdata', type: 'path' }, { k: 'edge', id: 'vEdge', type: 'site', max: 37,
+          maxWhy: 'The management install names a job after the edge, and it refuses a longer name.' },
         { k: 'eip', id: 'vEip', type: 'ip' }, { k: 'sshuser', id: 'vSshuser', type: 'user' }, { k: 'aet', id: 'vAet', type: 'aet' },
         { k: 'pipe', id: 'vPipe', type: 'path' }, { k: 'backup', id: 'vBackup', type: 'path' }
       ],
@@ -2907,7 +2911,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
   function suggestSite(s) {
     return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^[^a-z]+/, '').replace(/-+$/, '').replace(/--+/g, '-');
   }
-  function checkSite(s) {
+  function checkSite(s, cf) {
     var fix = suggestSite(s);
     var tryIt = fix && fix !== s ? ' Try ' + fix + '.' : '';
     if (!s) { return ['bad', 'Type a site name.']; }
@@ -2916,7 +2920,8 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     if (!/^[a-z]/.test(s)) { return ['bad', 'Start with a letter.' + tryIt]; }
     if (!/^[a-z0-9-]+$/.test(s)) { return ['bad', 'Use only lowercase letters, digits and hyphens.' + tryIt]; }
     if (/-$/.test(s)) { return ['bad', 'Do not end with a hyphen.' + tryIt]; }
-    if (s.length > 30) { return ['warn', 'This works, but every pod name starts with it. A short name is easier.']; }
+    if (cf && cf.max && s.length > cf.max) { return ['bad', 'Use ' + cf.max + ' characters at most. ' + cf.maxWhy]; }
+    if (cf && cf.long && s.length > 30) { return ['warn', cf.long]; }
     return ['ok', ''];
   }
   function checkIp(s) {
@@ -2926,13 +2931,17 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     if (m[1] === '127') { return ['bad', 'This is the loopback address. The scanners cannot reach it.']; }
     return ['ok', ''];
   }
-  function normXnat(s) { return s.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[\/?#].*$/, ''); }
-  function checkXnat(raw, host) {
+  function normXnat(s) { return s.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[?#].*$/, '').replace(/\/+$/, ''); }
+  function xnatHostOf(s) { return String(s).split('/')[0]; }
+  function checkXnat(raw, val) {
+    var host = xnatHostOf(val);
+    var path = val.slice(host.length);
     if (!host) { return ['bad', 'Type the XNAT host name.']; }
     if (/^http:\/\//i.test(raw.trim())) { return ['bad', 'XNAT must use https. verify-live fails on http.']; }
     if (/:\d+$/.test(host)) { return ['warn', 'This page assumes port 443. Use the host name without a port.']; }
     if (!/^[A-Za-z0-9.-]+$/.test(host)) { return ['warn', 'This does not look like a host name. Check it.']; }
-    if (raw.trim() !== host) { return ['ok', 'Using the host name ' + host + '.']; }
+    if (path && !/^(\/[A-Za-z0-9._~-]+)+$/.test(path)) { return ['warn', 'The part after the host name looks unusual. Check it.']; }
+    if (raw.trim() !== val) { return ['ok', 'Using https://' + val + '.']; }
     return ['ok', ''];
   }
   function checkAet(s) {
@@ -2971,7 +2980,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     return {
       k: f.k, type: f.type, input: $(f.id), msg: $(f.id + 'Msg'),
       read: f.type === 'xnat' ? normXnat : function (raw) { return raw.trim(); },
-      check: f.type === 'xnat' ? checkXnat : function (raw, v) { return CHECKS[f.type](v); }
+      check: f.type === 'xnat' ? checkXnat : function (raw, v) { return CHECKS[f.type](v, f); }
     };
   });
   var fieldState = {};
@@ -2980,6 +2989,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     var v = f.read(raw);
     var r = f.check(raw, v);
     vals[f.k] = v || DEFAULT_VALS[f.k];
+    if (f.type === 'xnat') { vals[f.k + 'Host'] = xnatHostOf(vals[f.k]); }
     f.input.setAttribute('aria-invalid', r[0] === 'bad' ? 'true' : 'false');
     f.msg.textContent = r[1];
     f.msg.className = 'f-msg ' + r[0];
