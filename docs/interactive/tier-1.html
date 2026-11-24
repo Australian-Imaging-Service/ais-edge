@@ -963,7 +963,7 @@ details.more .frag-note { margin-bottom: 8px; }
         <div class="field">
           <label class="f-name" for="vXnat">XNAT address</label>
           <input id="vXnat" type="text" value="xnat.example.org" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="vXnatHelp vXnatMsg">
-          <span class="f-help" id="vXnatHelp">The host name from the XNAT admin. A full address such as <code class="inl">https://xnat.example.org/</code> also works.</span>
+          <span class="f-help" id="vXnatHelp">The address from the XNAT admin. A full address such as <code class="inl">https://xnat.example.org/</code> also works, and so does an XNAT under a path, such as <code class="inl">https://xnat.example.org/xnat</code>.</span>
           <span class="f-msg" id="vXnatMsg" aria-live="polite"></span>
         </div>
         <div class="field">
@@ -1430,7 +1430,72 @@ kubectl -n xnat-ingest logs -l component=s3-reclaimer --tail=500 | grep "would h
         <h3>A pod shows CreateContainerConfigError</h3>
         <dl>
           <div><dt>Cause</dt><dd>A Secret is missing, or its name does not match the site file.</dd></div>
-          <div><dt>Fix</dt><dd>Run <code class="inl">scripts/site-secrets.sh apply <span class="v" data-v="site">demo-site</span></code>. If you turned off the map encryption in chapter 4 after step 5, or the other way round, do steps 4 and 5 again so that the two files agree.</dd></div>
+          <div><dt>Fix</dt><dd>First: did you switch on the map encryption in chapter 4 after the install?
+            <ul>
+              <li><b>No</b>: the Secret is missing from the cluster, or its name is wrong. Run <code class="inl">scripts/site-secrets.sh apply <span class="v" data-v="site">demo-site</span></code>.</li>
+              <li><b>Yes</b>: do not apply yet, and do not run step 5 again: its block only works on the plain file before <code class="inl">encrypt</code>, and it breaks an encrypted file. Do the steps below. They tell you when to apply.</li>
+            </ul>
+            Check the key. This prints one line:
+            <div class="code"><pre><code>{ scripts/site-secrets.sh view <span class="v" data-v="site">demo-site</span> ||
+    echo VIEW-FAILED; } |
+python3 -c '
+import base64, sys, yaml
+raw = sys.stdin.read()
+def say(line):
+    print(line)
+    sys.exit()
+if raw.rstrip().endswith("VIEW-FAILED"):
+    say("STOP: the file does not decrypt here")
+try:
+    docs = [d for d in yaml.safe_load_all(raw) if d]
+except yaml.YAMLError:
+    say("STOP: the file is not valid YAML")
+def is_key(d):
+    md = d.get("metadata") if isinstance(d, dict) else None
+    return (isinstance(md, dict) and d.get("kind") == "Secret"
+            and md.get("name") == "reid-key")
+keys = [d for d in docs if is_key(d)]
+if not keys:
+    say("NO KEY")
+if len(keys) &gt; 1:
+    say("STOP: " + str(len(keys)) + " keys in the file")
+if keys[0]["metadata"].get("namespace") != "xnat-ingest":
+    say("STOP: the key is not in xnat-ingest")
+sd = keys[0].get("stringData")
+if not isinstance(sd, dict):
+    sd = {}
+v = sd.get("XINGEST_REID_ENCRYPT_KEY")
+try:
+    ok = len(base64.urlsafe_b64decode(v.strip())) == 32
+except (AttributeError, ValueError):
+    ok = False
+if not ok:
+    say("STOP: the key is empty or not a valid key")
+say("KEY FOUND")
+'</code></pre></div>
+            <ul>
+              <li><code class="inl">KEY FOUND</code>: there is one key, and it has the form of a key. Keep it and make no new one, for example after an earlier time with the encryption on. Go straight to the last block below.</li>
+              <li><code class="inl">NO KEY</code>: if the map encryption was never on at this site, make the key with the next two blocks, then run the check again. It must print <code class="inl">KEY FOUND</code>. If the encryption was on before, the key is lost. Do not make a new one: a new key cannot read the maps written so far. Put back the earlier copy of the secrets file, for example from git, and ask for help.</li>
+              <li><code class="inl">STOP</code> and a reason: do not make a key, and do not apply. If the file does not decrypt, check that this machine has the age key (rule 1). If it has, or for any other reason, put back the earlier copy of the secrets file and ask for help.</li>
+            </ul>
+            To make the key: this prints a block with a new random key. Copy the printed lines, from <code class="inl">---</code> to the key:
+            <div class="code"><pre><code>cat &lt;&lt;EOF
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: reid-key
+  namespace: xnat-ingest
+type: Opaque
+stringData:
+  XINGEST_REID_ENCRYPT_KEY: $(openssl rand -base64 32 | tr '+/' '-_')
+EOF</code></pre></div>
+            This opens the secrets file in plain text. Go to the very end, paste the lines, save with Ctrl+O and Enter, and close with Ctrl+X. The file is encrypted again when nano closes:
+            <div class="code"><pre><code>EDITOR=nano scripts/site-secrets.sh edit <span class="v" data-v="site">demo-site</span></code></pre></div>
+            When the check prints <code class="inl">KEY FOUND</code>, send the Secret to the cluster and run the install. Answer <code class="inl">s</code> to part 1:
+            <div class="code"><pre><code>scripts/site-secrets.sh apply <span class="v" data-v="site">demo-site</span>
+./install.sh <span class="v" data-v="site">demo-site</span></code></pre></div>
+            If you switched the map encryption off, there is nothing to add. Keep the key in the file: the maps written so far can only be read with it.</dd></div>
         </dl>
       </article>
       <article class="sym" data-title="A study waits in assigned/__invalid__">
@@ -1475,7 +1540,7 @@ kubectl -n xnat-ingest rollout restart deploy/<span class="v" data-v="site">demo
         <h3>Store restarts with SSLCertVerificationError</h3>
         <dl>
           <div><dt>Cause</dt><dd>XNAT shows a certificate that this machine does not trust.</dd></div>
-          <div><dt>Fix</dt><dd>Confirm with <code class="inl">openssl s_client -connect <span class="v" data-v="xnat">xnat.example.org</span>:443 -servername <span class="v" data-v="xnat">xnat.example.org</span></code>. Ask the XNAT admin for a certificate from a trusted authority, and keep <code class="inl">verifySsl: true</code>. Setting it to <code class="inl">false</code> accepts any certificate. Use that only for a test XNAT with a self-signed certificate.</dd></div>
+          <div><dt>Fix</dt><dd>Confirm with <code class="inl">openssl s_client -connect <span class="v" data-v="xnatHost">xnat.example.org</span>:443 -servername <span class="v" data-v="xnatHost">xnat.example.org</span></code>. Ask the XNAT admin for a certificate from a trusted authority, and keep <code class="inl">verifySsl: true</code>. Setting it to <code class="inl">false</code> accepts any certificate. Use that only for a test XNAT with a self-signed certificate.</dd></div>
         </dl>
       </article>
       <article class="sym" data-title="XNAT has a session with different files">
@@ -1801,10 +1866,12 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
       var v = st.v, a = st.a;
       var S = 'sites/' + v.site + '/secrets.enc.yaml';
       var L = [];
+      L.push('# For the first install only: it works on the plain file, before encrypt.');
       L.push('S=' + S);
       L.push('# 1. Not secret, so the page fills them in: the XNAT address and the mail user.');
       L.push('sed -i ' + shq('s|server: https://xnat.example.org|server: https://' + sedRep(v.xnat) + '|') + ' "$S"');
-      L.push('sed -i ' + shq('s|REPLACE_SMTP_USERNAME|' + sedRep(a.mailUser || a.mailTo) + '|') + ' "$S"');
+      // YAML-quoted, so that a user name such as 12345678 or no stays a string.
+      L.push('sed -i ' + shq('s|REPLACE_SMTP_USERNAME|' + sedRep(q(a.mailUser || a.mailTo)) + '|') + ' "$S"');
       L.push('# 2. Random values that nobody has to remember. They are made here, on this machine.');
       L.push('sed -i "s|REPLACE_64_HEX_CHARS|$(openssl rand -hex 32)|" "$S"');
       L.push('sed -i "s|REPLACE_ORTHANC_PASSWORD|$(openssl rand -hex 24)|g" "$S"');
@@ -2036,7 +2103,9 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
       vals: { site: 'demo-site', ip: '10.0.0.1', xnat: 'xnat.example.org', aet: 'AISEDGE', pipe: '/data/xnat-ingest', backup: '/data/facility-backup' },
       siteKey: 'site',
       fields: [
-        { k: 'site', id: 'vSite', type: 'site' }, { k: 'ip', id: 'vIp', type: 'ip' }, { k: 'xnat', id: 'vXnat', type: 'xnat' },
+        { k: 'site', id: 'vSite', type: 'site', max: 35,
+          maxWhy: 'The install names a cleanup job after the site, and Kubernetes refuses a longer name for it.',
+          long: 'This works, but every pod name starts with it. A short name is easier.' }, { k: 'ip', id: 'vIp', type: 'ip' }, { k: 'xnat', id: 'vXnat', type: 'xnat' },
         { k: 'aet', id: 'vAet', type: 'aet' }, { k: 'pipe', id: 'vPipe', type: 'path' }, { k: 'backup', id: 'vBackup', type: 'path' }
       ],
       stages: stages,
@@ -2591,7 +2660,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
   function suggestSite(s) {
     return s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^[^a-z]+/, '').replace(/-+$/, '').replace(/--+/g, '-');
   }
-  function checkSite(s) {
+  function checkSite(s, cf) {
     var fix = suggestSite(s);
     var tryIt = fix && fix !== s ? ' Try ' + fix + '.' : '';
     if (!s) { return ['bad', 'Type a site name.']; }
@@ -2600,7 +2669,8 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     if (!/^[a-z]/.test(s)) { return ['bad', 'Start with a letter.' + tryIt]; }
     if (!/^[a-z0-9-]+$/.test(s)) { return ['bad', 'Use only lowercase letters, digits and hyphens.' + tryIt]; }
     if (/-$/.test(s)) { return ['bad', 'Do not end with a hyphen.' + tryIt]; }
-    if (s.length > 30) { return ['warn', 'This works, but every pod name starts with it. A short name is easier.']; }
+    if (cf && cf.max && s.length > cf.max) { return ['bad', 'Use ' + cf.max + ' characters at most. ' + cf.maxWhy]; }
+    if (cf && cf.long && s.length > 30) { return ['warn', cf.long]; }
     return ['ok', ''];
   }
   function checkIp(s) {
@@ -2610,13 +2680,17 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     if (m[1] === '127') { return ['bad', 'This is the loopback address. The scanners cannot reach it.']; }
     return ['ok', ''];
   }
-  function normXnat(s) { return s.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[\/?#].*$/, ''); }
-  function checkXnat(raw, host) {
+  function normXnat(s) { return s.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/[?#].*$/, '').replace(/\/+$/, ''); }
+  function xnatHostOf(s) { return String(s).split('/')[0]; }
+  function checkXnat(raw, val) {
+    var host = xnatHostOf(val);
+    var path = val.slice(host.length);
     if (!host) { return ['bad', 'Type the XNAT host name.']; }
     if (/^http:\/\//i.test(raw.trim())) { return ['bad', 'XNAT must use https. verify-live fails on http.']; }
     if (/:\d+$/.test(host)) { return ['warn', 'This page assumes port 443. Use the host name without a port.']; }
     if (!/^[A-Za-z0-9.-]+$/.test(host)) { return ['warn', 'This does not look like a host name. Check it.']; }
-    if (raw.trim() !== host) { return ['ok', 'Using the host name ' + host + '.']; }
+    if (path && !/^(\/[A-Za-z0-9._~-]+)+$/.test(path)) { return ['warn', 'The part after the host name looks unusual. Check it.']; }
+    if (raw.trim() !== val) { return ['ok', 'Using https://' + val + '.']; }
     return ['ok', ''];
   }
   function checkAet(s) {
@@ -2655,7 +2729,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     return {
       k: f.k, type: f.type, input: $(f.id), msg: $(f.id + 'Msg'),
       read: f.type === 'xnat' ? normXnat : function (raw) { return raw.trim(); },
-      check: f.type === 'xnat' ? checkXnat : function (raw, v) { return CHECKS[f.type](v); }
+      check: f.type === 'xnat' ? checkXnat : function (raw, v) { return CHECKS[f.type](v, f); }
     };
   });
   var fieldState = {};
@@ -2664,6 +2738,7 @@ storescu -aec <span class="v" data-v="aet">AISEDGE</span> -aet TEST_MOD <span cl
     var v = f.read(raw);
     var r = f.check(raw, v);
     vals[f.k] = v || DEFAULT_VALS[f.k];
+    if (f.type === 'xnat') { vals[f.k + 'Host'] = xnatHostOf(vals[f.k]); }
     f.input.setAttribute('aria-invalid', r[0] === 'bad' ? 'true' : 'false');
     f.msg.textContent = r[1];
     f.msg.className = 'f-msg ' + r[0];

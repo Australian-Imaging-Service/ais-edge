@@ -79,5 +79,5 @@ file, and its text is not minified.
 
 | Page | Follows | Checked against |
 |---|---|---|
-| `tier-1.html` | `tier-1-solution` | commit `8ebb700`, accessionflow 0.20.4 |
-| `tier-2.html` | `main` | commit `960cf0d`, accessionflow 0.20.4 |
+| `tier-1.html` | `tier-1-solution` | commit `3bf00e3`, accessionflow 0.20.4 |
+| `tier-2.html` | `main` | commit `6b21857`, accessionflow 0.20.4 |
